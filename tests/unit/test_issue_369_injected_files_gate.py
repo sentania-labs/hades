@@ -17,6 +17,7 @@ import pytest
 
 from crucible.adapters.execution import scripts
 from crucible.adapters.execution.collected import read_outputs, read_path_changes
+from crucible.adapters.execution.injected_collection import classify_collected
 from crucible.application.evidence import record_collection_evidence
 from crucible.domain.entities import Attempt, EvidenceRecord, Task
 from crucible.domain.gates import (
@@ -36,6 +37,7 @@ from crucible.ports.execution import (
     CollectedOutputs,
     LaunchSpec,
 )
+from tests.collector_tools import collector_env
 from tests.fixtures import contract_document
 
 ZERO = "0" * 40
@@ -187,7 +189,13 @@ def _evidence(tmp_path: Path, repo: Path, *, expected_exit: int = 0) -> tuple[Ev
     generated = generated.replace(scripts.REPO_MOUNT, str(repo))
     generated = generated.replace(OUTPUT_MOUNT, str(output))
     generated = generated.replace(REPORT_MOUNT, str(report))
-    result = subprocess.run(["sh", "-c", generated], capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        ["sh", "-c", generated],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=collector_env(tmp_path),
+    )
     assert result.returncode == expected_exit, result.stderr
     spec = LaunchSpec(
         attempt_id="01ATTEMPT",
@@ -430,7 +438,7 @@ def test_a_worker_set_log_diff_merges_does_not_change_the_verdict(tmp_path: Path
 
 def test_an_inflated_listing_with_a_shim_past_the_read_limit_fails(tmp_path: Path) -> None:
     """40,000 long-named files make changed.txt and commit-paths.txt larger than what is
-    read of them, sorted so zzz/CLAUDE.md falls past the cut. The raw records name only
+    read of them, sorted so zzz/CLAUDE.md falls past the cut. The classified records keep only
     injected-name paths and still carry the shim, and the gate fails on the cut lists."""
     repo = _repo(tmp_path)
     empty = _git(repo, "hash-object", "-w", "--stdin").strip()
@@ -754,3 +762,54 @@ def test_issue_400_unknown_classification_fails_closed(tmp_path: Path) -> None:
     changes = read_path_changes(raw)
     assert changes is not None
     assert "unknown content classification" in changes[0].classification
+
+
+@pytest.mark.parametrize("edit", [False, True])
+def test_clean_and_ordinary_branches_preserve_collector_outputs(tmp_path: Path, edit: bool) -> None:
+    repo = _repo(tmp_path)
+    if edit:
+        _write(repo, "ordinary.txt", "ordinary edit\n")
+        (repo / "binary.dat").write_bytes(b"\xff\x00ordinary binary")
+        _commit(repo, "ordinary work")
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "isolation.tsv").write_text("database\trefused\n")
+    evidence = _evidence(tmp_path, repo)
+    gi = GateInput(
+        contract=contract_document(),
+        policy={},
+        head_sha=_git(repo, "rev-parse", "HEAD").strip(),
+        evidence=evidence,
+    )
+    assert evaluate_gate(GateName.NO_INJECTED_FILES, gi).result is GateResult.PASS
+    output = tmp_path / "output"
+    assert (output / "collector.ok").is_file()
+    assert _git(output / "tree", "rev-parse", "HEAD") == _git(repo, "rev-parse", "HEAD")
+    assert (output / "report/isolation.tsv").read_text() == "database\trefused\n"
+    bundle = gi.one("bundle_head")
+    assert bundle is not None
+    assert bundle.payload["commits"] == int(edit)
+    assert not list((output / "injected-blobs").iterdir())
+    if edit:
+        assert evaluate_gate(GateName.COMMITS_PRESENT, gi).result is GateResult.PASS
+        assert evaluate_gate(GateName.COMMIT_POLICY, gi).result is GateResult.PASS
+        _git(repo, "bundle", "verify", str(output / "work_branch.bundle"))
+        assert (output / "tree/ordinary.txt").read_text() == "ordinary edit\n"
+        assert bundle.payload["commit_messages"] == ["ordinary work"]
+
+
+@pytest.mark.parametrize(
+    "record",
+    [b":000000 100644 " + ZERO.encode() + b" " + OTHER.encode() + b" A\0", b"unterminated"],
+)
+def test_truncated_collector_record_fails_without_stop_iteration(
+    tmp_path: Path, record: bytes
+) -> None:
+    (tmp_path / "diff-raw.txt").write_bytes(record)
+    (tmp_path / "commit-raw.txt").write_bytes(b"")
+    (tmp_path / "base-injected.txt").write_bytes(b"")
+    diff, history = classify_collected(tmp_path)
+    assert not history
+    assert len(diff) == 1
+    assert diff[0].classification.startswith("error:")
+    assert "record" in diff[0].classification

@@ -159,8 +159,13 @@ files already present on the base are exempt. Ownership uses the original Git pa
 so a newly added spelling variant cannot borrow the exemption. Replacing such a file
 with a symlink still fails. Shim content is compared after normalizing line endings,
 trailing whitespace and final newlines, including every historical blob on the branch.
-The collector classifies all raw names before filtering records; a Git pathspec cannot
-perform this normalization. Undecodable names, unreadable or undecodable instruction
+The shell collector exports NUL-delimited raw records and bounded blobs by object id
+using Git and the base image tools, without requiring Python in the worker image.
+The service streams and classifies all raw names before filtering records; a Git
+pathspec cannot perform this normalization. Empty lists are valid, and ordinary
+paths do not require instruction blob classification. A truncated record fails
+with a reason, without exhausting an iterator or suppressing commit records,
+report artifacts or the verifier tree. Undecodable names, unreadable or undecodable instruction
 blobs, malformed records and incomplete lists fail closed with a reason. Instruction
 blobs above the 8 MiB classification limit also fail closed. Older evidence without
 content classifications retains its conservative path/status and exact-blob checks.

@@ -513,7 +513,9 @@ def no_injected_files(gi: GateInput) -> GateOutcome:
     fail. The diff and every commit are checked. Existing repository instruction
     files may be edited or deleted (#369), unless their content normalizes to the
     shim after removing trailing whitespace and normalizing line endings/newlines.
-    Unclassifiable names, blobs or records fail closed with the collected reason.
+    Unclassifiable names, instruction blobs or records fail closed with the collected
+    reason. Empty lists and ordinary paths pass; the service classifies the shell
+    collector's exported records without a Python dependency in worker images.
 
     Known limit: a base ancestor older than the merge base that once had an injected-name
     file excuses a history-only add of that path that is not the shim's content (a merge

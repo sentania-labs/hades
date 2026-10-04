@@ -21,6 +21,7 @@ from typing import Any
 import yaml
 
 from crucible.adapters.execution import scripts
+from crucible.adapters.execution.injected_collection import classify_collected
 from crucible.contracts.evidence import REVIEW_DIFF_NAME, REVIEW_DIFF_TYPE
 from crucible.ports.execution import (
     BranchBundle,
@@ -115,8 +116,13 @@ def read_outputs(
     changed = read_path_list(output / "changed.txt")
     diff_text = text(output / "diff.patch") if (output / "diff.patch").is_file() else None
     commit_paths = read_path_list(output / "commit-paths.txt")
-    diff_changes = read_path_changes(output / "diff-raw.txt")
-    commit_changes = read_path_changes(output / "commit-raw.txt")
+    diff_changes: tuple[PathChange, ...] | None
+    commit_changes: tuple[PathChange, ...] | None
+    if (output / "injected-blobs").is_dir():
+        diff_changes, commit_changes = classify_collected(output)
+    else:
+        diff_changes = read_path_changes(output / "diff-raw.txt")
+        commit_changes = read_path_changes(output / "commit-raw.txt")
     base_paths = read_base_paths(output / "base-injected.txt")
     over_limit = lists_over_limit(output)
     commit_policy = read_commit_policy(output / "commit-policy")
@@ -213,8 +219,8 @@ def read_outputs(
 _RAW_META = re.compile(r":[0-7]{6} [0-7]{6} ([0-9a-f]{40,64}) ([0-9a-f]{40,64}) ([A-Z])[0-9]*")
 # Larger than this and the records are not read at all: `git log` prints the oldest
 # records last, and a cut tail would hide the add that says the base lacked a path. The
-# collector writes only injected-name records, and lists_over_limit makes the gate fail
-# on a list this large.
+# legacy collector writes only injected-name records; lists_over_limit makes the gate
+# fail on a list this large. Modern raw records are streamed by classify_collected.
 _RAW_LIMIT = 8 * 1024 * 1024
 
 
@@ -282,6 +288,9 @@ def lists_over_limit(output: Path) -> tuple[str, ...]:
     or they are not read at all, so the gate cannot see every path and fails closed."""
     over: list[str] = []
     for name, limit in _PATH_LISTS:
+        if name in ("diff-raw.txt", "commit-raw.txt") and (output / "injected-blobs").is_dir():
+            # Modern raw records are streamed in full by classify_collected.
+            continue
         try:
             if (output / name).stat().st_size > limit:
                 over.append(name)

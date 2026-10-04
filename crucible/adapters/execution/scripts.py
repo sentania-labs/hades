@@ -17,13 +17,9 @@ validation is what stops it being an option.
 
 from __future__ import annotations
 
-import inspect
-import shlex
 from collections.abc import Mapping
 from typing import Any
 
-from crucible.adapters.execution.injected_collection import collect_injected
-from crucible.domain import injected
 from crucible.domain.gates import injected_shim_text
 from crucible.ports.execution import (
     OUTPUT_MOUNT,
@@ -283,7 +279,8 @@ _ATTR_DIFF_PATHSPEC = "-- . ':(exclude,attr:!diff)' ':(exclude,attr:diff)'"
 # nothing an earlier collection of the same attempt left is read as this one's.
 _COLLECTOR_OUTPUTS = (
     "base.txt head.txt branch.txt diffstat.txt diff.patch changed.txt log.txt "
-    "diff-raw.txt commit-raw.txt base-injected.txt "
+    "diff-raw.txt commit-raw.txt base-injected.txt injected-blobs "
+    "injected-blob-ids.txt injected-blob-ids.sorted injected-error.txt "
     "commit-paths.txt work_branch.bundle bundle.log commits.txt commit-policy tree "
     "clone.log report copy-rejections.tsv collection-failed.txt checkpoint-refusal.txt "
     "leftover-committed.txt leftover-refusal.txt collector.ok attr-text.patch "
@@ -556,16 +553,44 @@ _LEFTOVER_EXCLUDED_PATHS = " ".join(f"':(glob){pattern}'" for pattern in _LEFTOV
 
 
 def _injected_collection_script() -> str:
-    """Embed trusted code and matching rules; Python never imports the worker tree."""
-    return (
-        'python3 -I - "$REPO" "$OUT" "$BASE" "$MB" <<\'INJECTED_PY\'\n'
-        + inspect.getsource(injected)
-        + "\n"
-        + inspect.getsource(collect_injected)
-        + "\nimport sys\n"
-        + f"collect_injected(*sys.argv[1:], git={shlex.split(GIT)!r}, "
-        + f"shim={injected_shim_text()!r})\nINJECTED_PY"
-    )
+    """Export raw records and bounded blobs using only the worker image's tools.
+
+    Unicode and content classification runs in read_outputs on the service. Worker
+    images, including script-harness, need no Python interpreter.
+    """
+    return rf'''mkdir -p "$OUT/injected-blobs"
+  {GIT} -C "$REPO" diff {_DIFF_FLAGS} --raw -z --no-renames --no-abbrev "$MB" HEAD \
+    > "$OUT/diff-raw.txt" || echo diff > "$OUT/injected-error.txt"
+  {GIT} -C "$REPO" log {_DIFF_FLAGS} --root --full-history --diff-merges=separate \
+    --topo-order --raw -z --no-renames --no-abbrev --format='' "$BASE..HEAD" \
+    > "$OUT/commit-raw.txt" || echo history > "$OUT/injected-error.txt"
+  {GIT} -C "$REPO" ls-tree -r --name-only -z "$MB" \
+    > "$OUT/base-injected.txt" || echo base > "$OUT/injected-error.txt"
+  # This is only a broad transport filter, never the gate's classifier. Export
+  # every non-ASCII/control name (normalization may change it), plus ASCII names
+  # containing any instruction/harness stem. Ordinary source blobs stay out.
+  # Alternate headers and paths so a header-shaped path remains data.
+  LC_ALL=C awk 'BEGIN {{ RS="\0" }}
+    skip {{
+      if (blob != "" && tolower($0) ~ /agents|claude|gemini|codex|hermes|crucible|[^ -~]/)
+        print blob
+      skip=0; next
+    }}
+    {{ sub(/^\n+/, "") }}
+    /^:/ {{
+      skip=1; blob=""
+      if ($4 ~ /^[0-9a-f]+$/ && (length($4)==40 || length($4)==64) && $4 !~ /^0+$/)
+        blob=$4
+    }}' "$OUT/diff-raw.txt" "$OUT/commit-raw.txt" > "$OUT/injected-blob-ids.txt" \
+    || echo blobs > "$OUT/injected-error.txt"
+  sort -u "$OUT/injected-blob-ids.txt" > "$OUT/injected-blob-ids.sorted"
+  while IFS= read -r blob; do
+    size=$({GIT} -C "$REPO" cat-file -s "$blob" 2>/dev/null) || continue
+    if [ "$size" -le 8388608 ]; then
+      {GIT} -C "$REPO" cat-file blob "$blob" > "$OUT/injected-blobs/$blob" 2>/dev/null \
+        || rm -f "$OUT/injected-blobs/$blob"
+    fi
+  done < "$OUT/injected-blob-ids.sorted"'''
 
 
 def collector_script(

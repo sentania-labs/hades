@@ -1,108 +1,91 @@
-"""Trusted collector code embedded by scripts, never imported from the worker tree."""
+"""Classify the shell collector's data in the service, never in the worker image."""
 
+import hashlib
+import re
+from collections.abc import Iterator
+from pathlib import Path
+
+from crucible.domain.gates import injected_shim_text
 from crucible.domain.injected import injected_name, instruction_name_error, normalized_shim_content
+from crucible.ports.execution import PathChange
+
+LIMIT = 8 * 1024 * 1024
+_META = re.compile(rb":[0-7]{6} [0-7]{6} [0-9a-f]{40,64} ([0-9a-f]{40,64}) ([A-Z])")
 
 
-def collect_injected(
-    repo: str,
-    output: str,
-    base: str,
-    merge_base: str,
-    git: list[str],
-    shim: str,
-) -> None:
-    # Imports inside the function keep its source independently executable under -I.
-    import json  # noqa: PLC0415
-    import re  # noqa: PLC0415
-    import subprocess  # noqa: PLC0415
-    from pathlib import Path  # noqa: PLC0415
+def _fields(path: Path) -> Iterator[bytes]:
+    """Stream complete NUL fields, bounding individual records rather than the tree."""
+    with path.open("rb") as handle:
+        pending = b""
+        while chunk := handle.read(65536):
+            fields = (pending + chunk).split(b"\0")
+            pending = fields.pop()
+            yield from fields
+            if len(pending) > LIMIT:
+                raise ValueError("path record exceeds 8 MiB")
+        if pending:
+            raise ValueError("unterminated path record")
 
-    def run(*args: str) -> bytes:
-        result = subprocess.run([*git, "-C", repo, *args], capture_output=True, check=False)
-        if result.returncode:
-            raise ValueError(f"git {args[0]} failed (exit {result.returncode})")
-        return result.stdout
 
+def classify_collected(output: Path) -> tuple[tuple[PathChange, ...], tuple[PathChange, ...]]:
+    """Read diff and history independently; malformed/truncated records fail closed."""
     cache: dict[str, str] = {}
 
     def classify(blob: str) -> str:
         if blob not in cache:
             try:
-                if int(run("cat-file", "-s", blob)) > 8 * 1024 * 1024:
+                with (output / "injected-blobs" / blob).open("rb") as handle:
+                    content = handle.read(LIMIT + 1)
+                if len(content) > LIMIT:
                     raise ValueError("blob exceeds 8 MiB classification limit")
-                body = run("cat-file", "blob", blob).decode("utf-8")
+                digest = hashlib.sha1 if len(blob) == 40 else hashlib.sha256
+                if digest(b"blob %d\0" % len(content) + content).hexdigest() != blob:
+                    raise ValueError("blob content does not match object id")
+                body = content.decode("utf-8")
                 cache[blob] = (
                     "shim"
-                    if normalized_shim_content(body) == normalized_shim_content(shim)
+                    if normalized_shim_content(body)
+                    == normalized_shim_content(injected_shim_text())
                     else "plain"
                 )
-            except (ValueError, UnicodeError) as exc:
+            except (OSError, ValueError) as exc:
                 cache[blob] = f"error: unreadable blob {blob}: {exc}"
         return cache[blob]
 
-    meta = re.compile(rb":[0-7]{6} [0-7]{6} [0-9a-f]{40,64} ([0-9a-f]{40,64}) ([A-Z])")
-    commands = {
-        "diff-raw.txt": ["diff", "--raw", "-z", "--no-renames", "--no-abbrev", merge_base, "HEAD"],
-        "commit-raw.txt": [
-            "log",
-            "--root",
-            "--full-history",
-            "--diff-merges=separate",
-            "--topo-order",
-            "--raw",
-            "-z",
-            "--no-renames",
-            "--no-abbrev",
-            "--format=",
-            f"{base}..HEAD",
-        ],
-    }
-    for filename, args in commands.items():
-        changes: list[dict[str, str]] = []
+    def changes(filename: str) -> tuple[PathChange, ...]:
+        kept: list[PathChange] = []
         try:
-            fields = run(*args).split(b"\0")
-            at = 0
-            while at < len(fields):
-                header = fields[at].lstrip(b"\n")
-                at += 1
+            fields = iter(_fields(output / filename))
+            for raw_header in fields:
+                header = raw_header.lstrip(b"\n")
                 if not header:
                     continue
-                match = meta.fullmatch(header)
-                if match is None or at >= len(fields) or not fields[at]:
-                    raise ValueError("malformed raw path record")
-                path = fields[at].decode("utf-8", "surrogateescape")
-                at += 1
+                match = _META.fullmatch(header)
+                raw_path = next(fields, None)
+                if match is None or not raw_path:
+                    raise ValueError("malformed raw path record (missing header or path)")
+                path = raw_path.decode("utf-8", "surrogateescape")
                 if not injected_name(path):
                     continue
-                blob, status = (p.decode("ascii") for p in match.groups())
+                blob, status = (part.decode("ascii") for part in match.groups())
                 error = instruction_name_error(path)
                 classification = (
                     f"error: {error}" if error else "deleted" if status == "D" else classify(blob)
                 )
-                # Escape undecodable bytes before JSON enters evidence storage.
-                if error:
-                    path = ascii(path)
-                changes.append(
-                    dict(path=path, status=status, blob=blob, classification=classification)
+                kept.append(
+                    PathChange(ascii(path) if error else path, status, blob, classification)
                 )
         except (OSError, ValueError) as exc:
-            changes.append(dict(path="", status="", blob="", classification=f"error: {exc}"))
-        Path(output, filename).write_text(json.dumps({"version": 1, "changes": changes}))
+            kept.append(PathChange("", "", "", f"error: {filename}: {exc}"))
+        return tuple(kept)
+
+    diff = changes("diff-raw.txt")
+    history = changes("commit-raw.txt")
     try:
-        paths = run("ls-tree", "-r", "--name-only", "-z", merge_base).split(b"\0")
-        kept = []
-        for raw in paths:
-            if not raw:
-                continue
-            path = raw.decode("utf-8")
-            if injected_name(path):
-                kept.append(raw)
-        Path(output, "base-injected.txt").write_bytes(b"\0".join(kept) + b"\0")
+        for raw in _fields(output / "base-injected.txt"):
+            raw.decode("utf-8")
+        if (output / "injected-error.txt").exists():
+            raise ValueError("Git could not export instruction records")
     except (OSError, ValueError) as exc:
-        # Record base-list failures in the same error channel as path/blob failures.
-        target = Path(output, "diff-raw.txt")
-        payload = json.loads(target.read_text())
-        payload["changes"].append(
-            dict(path="", status="", blob="", classification=f"error: base names: {exc}")
-        )
-        target.write_text(json.dumps(payload))
+        diff += (PathChange("", "", "", f"error: base names or collection: {exc}"),)
+    return diff, history

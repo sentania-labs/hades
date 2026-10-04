@@ -1,4 +1,4 @@
-"""Pure instruction-path and shim matching, also embedded in the collector (#400)."""
+"""Pure instruction-path and shim matching for collected evidence (#400)."""
 
 import posixpath
 import unicodedata
