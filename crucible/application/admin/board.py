@@ -123,10 +123,13 @@ def _latest_by(items: Iterable[Any], key: Any, time: Any) -> dict[str, Any]:
     return result
 
 
-def _event_maps(events: list[Any]) -> tuple[dict[str, int], dict[str, list[str]], dict[str, Any]]:
+def _event_maps(
+    events: list[Any],
+) -> tuple[dict[str, int], dict[str, list[str]], dict[str, Any], dict[str, Any]]:
     corrections: Counter[str] = Counter()
     failed: dict[str, list[str]] = defaultdict(list)
     latest_ci: dict[str, Any] = {}
+    latest_ci_decision: dict[str, Any] = {}
     for event in events:
         if not event.task_id:
             continue
@@ -141,7 +144,12 @@ def _event_maps(events: list[Any]) -> tuple[dict[str, int], dict[str, list[str]]
             previous = latest_ci.get(event.task_id)
             if previous is None or event.ts > previous.ts:
                 latest_ci[event.task_id] = event
-    return dict(corrections), failed, latest_ci
+        if event.kind == "ci_decision_recorded":
+            # hades #356: the operator's diagnosis, shown beside the task's CI state.
+            previous_decision = latest_ci_decision.get(event.task_id)
+            if previous_decision is None or event.ts > previous_decision.ts:
+                latest_ci_decision[event.task_id] = event
+    return dict(corrections), failed, latest_ci, latest_ci_decision
 
 
 def _contract_fields(
@@ -279,7 +287,7 @@ def board_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
     )
     contracts = _contract_fields(contract_documents, active)
     events = _events(uow)
-    corrections, failed_gates, latest_ci = _event_maps(events)
+    corrections, failed_gates, latest_ci, latest_ci_decision = _event_maps(events)
     metrics = list(uow.attempt_metrics.list_since(since=None, model=None, task_ids=None))
     metric_by_attempt = {row.attempt_id: row for row in metrics}
     open_escalations = {row.task_id for row in uow.escalations.list_open()}
@@ -301,6 +309,8 @@ def board_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
         pr = pr_by_task.get(task.id)
         ci_event = latest_ci.get(task.id)
         ci_state = ci_event.payload.get("state") if ci_event else None
+        ci_decision_event = latest_ci_decision.get(task.id)
+        ci_cause = ci_decision_event.payload.get("cause") if ci_decision_event else None
         fields = contracts[task.id]
         row = {
             "id": task.id,
@@ -320,6 +330,7 @@ def board_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
                     "number": pr.number,
                     "url": pr.url,
                     "ci": ci_summary(ci_state),
+                    "cause": ci_cause,
                     "merge_queue_position": None,
                 }
                 if pr

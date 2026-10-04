@@ -585,14 +585,30 @@ class CertificationStateValue(StrEnum):
 
 
 class CICause(StrEnum):
+    """23: the diagnosis Foundry records for a CI certification failure.
+
+    `IMPLEMENTATION_DEFECT` and `MISSING_WORKER_TOOLING` (hades #356) distinguish a
+    worker's own mistake from the image or harness lacking something the worker needed;
+    `CI_INFRASTRUCTURE` is the third of the operator's three categories, and the rest
+    are finer causes. `ci_decision.action` only allows `correct` for a cause other than
+    `CI_INFRASTRUCTURE` and `FLAKY_TEST`, and only allows `rerun` for one of those two.
+    """
+
     FALSE_PRE_PR_EVIDENCE = "false_pre_pr_evidence"
     WRONG_SHA_CHECKED = "wrong_sha_checked"
     CORRECTION_WITHOUT_CHECKS = "correction_without_checks"
     ENVIRONMENT_DRIFT = "environment_drift"
     FLAKY_TEST = "flaky_test"
     CRUCIBLE_VERIFICATION_DEFECT = "crucible_verification_defect"
+    IMPLEMENTATION_DEFECT = "implementation_defect"
+    MISSING_WORKER_TOOLING = "missing_worker_tooling"
     CI_INFRASTRUCTURE = "ci_infrastructure"
     OTHER = "other"
+
+
+# A `correct` action needs a cause other than ci_infrastructure and flaky_test; a
+# `rerun` needs one of those two (hades #356).
+CI_RERUN_CAUSES = frozenset({CICause.CI_INFRASTRUCTURE, CICause.FLAKY_TEST})
 
 
 class CIAction(StrEnum):

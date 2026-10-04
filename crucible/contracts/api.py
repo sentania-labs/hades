@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from crucible.contracts.common import SCHEMA_VERSION, Rfc3339, StrictModel
 from crucible.contracts.task_contract import HarnessName, ProviderName
 from crucible.domain.entities import (
+    CI_RERUN_CAUSES,
     AcceptanceVerdict,
     CIAction,
     CICause,
@@ -425,6 +426,19 @@ class CIDecisionRequest(StrictModel):
     cause: CICause
     action: CIAction
     reasoning: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _cause_matches_action(self) -> CIDecisionRequest:
+        """hades #356: `correct` needs a cause other than ci_infrastructure and
+        flaky_test; `rerun` needs one of those two. `reject` and `cancel` are
+        unconstrained."""
+        is_rerun_cause = self.cause in CI_RERUN_CAUSES
+        rerun_causes = ", ".join(c.value for c in CI_RERUN_CAUSES)
+        if self.action is CIAction.CORRECT and is_rerun_cause:
+            raise ValueError(f"a correct action needs a cause other than {rerun_causes}")
+        if self.action is CIAction.RERUN and not is_rerun_cause:
+            raise ValueError(f"a rerun action needs one of: {rerun_causes}")
+        return self
 
 
 class HeadDecisionRequest(StrictModel):

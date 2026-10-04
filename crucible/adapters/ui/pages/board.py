@@ -31,17 +31,20 @@ def _in_flight_sections(document: dict[str, Any]) -> list[dict[str, Any]]:
                 pr = item["pull_request"]
                 pr_cell: Any = "none"
                 if pr:
-                    pr_cell = {
-                        "kind": "note",
-                        "value": f"#{pr['number']} · CI {pr['ci']['label']}",
-                        "hint": (
-                            f"Merge queue position {pr['merge_queue_position']}"
-                            if pr["merge_queue_position"] is not None
-                            else "Merge queue position not recorded"
-                        ),
-                    }
+                    label = f"#{pr['number']} · CI {pr['ci']['label']}"
+                    # hades #356: the operator's diagnosis for a CI failure, beside the
+                    # red/green state, in the label so it shows whether or not the pull
+                    # request has a URL yet.
+                    if pr["cause"]:
+                        label = f"{label} · cause: {pr['cause'].replace('_', ' ')}"
+                    hint = (
+                        f"Merge queue position {pr['merge_queue_position']}"
+                        if pr["merge_queue_position"] is not None
+                        else "Merge queue position not recorded"
+                    )
+                    pr_cell = {"kind": "note", "value": label, "hint": hint}
                     if pr["url"]:
-                        pr_cell = _link(pr["url"], f"#{pr['number']} · CI {pr['ci']['label']}")
+                        pr_cell = _link(pr["url"], label)
                 rows.append(
                     [
                         parent["parent_external_id"],
