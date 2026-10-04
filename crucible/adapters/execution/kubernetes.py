@@ -3703,19 +3703,26 @@ class KubernetesProvider:
                     }
                 ]
             }
-            # Add the template entries from the identity ConfigMap.
-            cm_source: dict[str, Any] = {
-                "configMap": {
-                    "name": k8sspec.object_name("identity", spec.attempt_id),
-                    "defaultMode": 0o444,
-                    "items": [
-                        {"key": k, "path": v.removeprefix(f"{k8sspec.TEMPLATE_PREFIX}/")}
-                        for k, v in sorted(identity_paths.items())
-                        if v.startswith(f"{k8sspec.TEMPLATE_PREFIX}/")
-                    ],
-                }
-            }
-            projection["sources"].append(cm_source)
+            # Add the template entries from the identity ConfigMap, but only when
+            # there is at least one: `ConfigMapProjection` has no `defaultMode`
+            # field (the API silently drops it), and Kubernetes treats an empty
+            # or absent `items` as "project every key", so a template-free
+            # harness would otherwise get every key of the identity ConfigMap
+            # (IDENTITY.md and the rest) projected into its credential directory.
+            template_items = [
+                {"key": k, "path": v.removeprefix(f"{k8sspec.TEMPLATE_PREFIX}/"), "mode": 0o444}
+                for k, v in sorted(identity_paths.items())
+                if v.startswith(f"{k8sspec.TEMPLATE_PREFIX}/")
+            ]
+            if template_items:
+                projection["sources"].append(
+                    {
+                        "configMap": {
+                            "name": k8sspec.object_name("identity", spec.attempt_id),
+                            "items": template_items,
+                        }
+                    }
+                )
             volumes.append({"name": "cred", "projected": projection})
             mounts.append(Mount("cred", target, read_only=True))
         else:
