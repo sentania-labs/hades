@@ -188,18 +188,35 @@ Rules:
   `images/` updates the tag and harness lines (`images/check-manifest.sh`
   names the tag `make lint` expects) and leaves the digest lines as they are.
   When the `images` job on a branch builds every tag and harness version the
-  manifest declares but a different digest, it writes the built digests
-  into the manifest, commits them to the branch as `github-actions[bot]`
-  (one commit that touches only those lines, its message naming the images
-  and carrying the trailer `Crucible-Images-Digest: ci`), pushes it, passes,
-  and dispatches CI on the new head (a push made with the workflow token
-  starts no run by itself). A tag or harness version that differs is a
-  build-input mismatch and still fails the job. The job never commits on
-  main, which fails as before; CI does not run on tags, and the release's
-  `make images-check` never writes back. When the head is the bot's own
-  digest commit the job does not commit again, so a digest that does not
-  reproduce twice fails instead of looping. `tools/images/digest_commit.py`
-  holds these rules; `make images-check DIGEST_WRITEBACK=1` is the write-back.
+  manifest declares but a different digest, CI commits the built digests to
+  the branch as `github-actions[bot]` (one commit that touches only those
+  lines, its message naming the images and carrying the trailer
+  `Crucible-Images-Digest: ci`), pushes it, and dispatches CI on the new head
+  (a push made with the workflow token starts no run by itself). A tag or
+  harness version that differs is a build-input mismatch and still fails the
+  job. The job never writes back on main, which fails as before; CI does not
+  run on tags, and the release's `make images-check` never writes back. When
+  the head is the bot's own digest commit nothing writes back again, so a
+  digest that does not reproduce twice fails instead of looping.
+- **No branch code holds the write token** (the Codex finding on PR 420).
+  The commit is split across two workflows. The `images` job in `ci.yml`
+  runs the branch's own Makefile, `images.sh` and
+  `tools/images/digest_commit.py`, so it keeps the workflow's read-only
+  token: with `make images-check DIGEST_WRITEBACK=1` a digest-only
+  difference passes, and the job uploads the built `*_DIGEST` lines as the
+  `images-digests` artifact (one `digests.env`, retained a day). The
+  privileged half is `.github/workflows/images-digest.yml`, started by
+  `workflow_run` when a CI run completes; GitHub always runs that file from
+  the default branch, so a branch cannot change it. It holds
+  `contents: write` and `actions: write`, and the only code it executes is
+  the default branch's `tools/images/digest_commit.py`, checked out by ref:
+  `may-commit` repeats the main, tag, event and loop checks on the
+  triggering run, and `commit-artifact` treats the artifact as untrusted,
+  requires exactly the manifest's digest keys with `sha256:` values, applies
+  them to the branch's manifest as read from the commit CI built, and
+  refuses unless the result differs in digest values alone. The branch
+  checkout is data, never imported or run. The push is not forced and is
+  skipped when the branch has moved past the commit CI built.
 - The release publishes both to `ghcr.io/sentania-labs/crucible-worker`
   with `docker push`, the way the service image and every ScarGuard service
   are pushed (the operator's decision, 2026-09-23; 24): it builds from

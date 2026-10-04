@@ -152,8 +152,9 @@ images: ## FDY-0072: build both images from a staged copy the daemon's user can 
 
 # DIGEST_WRITEBACK=1 (the CI images job on a branch only, FDY-0310) passes a build whose
 # only difference is the *_DIGEST lines and writes those into images/manifest.env for the
-# job to commit; a tag or harness version that differs still fails. Unset, as on main and
-# in the release, any difference fails.
+# job to upload (.github/workflows/images-digest.yml commits them); a tag or harness
+# version that differs still fails. Unset, as on main and in the release, any difference
+# fails.
 DIGEST_WRITEBACK ?=
 images-check: ## build both images and fail if any tag, harness version or OCI digest differs from images/manifest.env
 	DOCKER="$(DOCKER)" CACHE_DIR="$(CACHE_DIR)" NO_CACHE="$(NO_CACHE)" DIGEST_WRITEBACK="$(DIGEST_WRITEBACK)" tools/images/images.sh check

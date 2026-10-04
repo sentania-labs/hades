@@ -115,9 +115,9 @@ jobs:
   # Hermes, and the script-harness image, built from the pinned inputs with the same
   # script as `make images`. The job fails when any tag, harness version or OCI digest
   # differs from images/manifest.env (on a branch, a difference in digests alone is
-  # committed instead; see below): reproducibility is the contract, and this is where
-  # it is proved on a machine the author does not control. GitHub-hosted, because it
-  # needs a Docker daemon and buildx (github-ci skill).
+  # handed to a separate workflow to commit; see below): reproducibility is the
+  # contract, and this is where it is proved on a machine the author does not
+  # control. GitHub-hosted, because it needs a Docker daemon and buildx (github-ci skill).
   #
   # Branch pushes import the BuildKit layer cache the last push to main exported, so
   # the job takes minutes. The digest is always computed from what the
@@ -132,25 +132,25 @@ jobs:
   #
   # CI owns the *_DIGEST lines (FDY-0310, the operator's decision 2026-10-04). On a
   # branch, a build that reproduces every tag and harness version but not a digest
-  # writes the built digests into images/manifest.env, commits them as
-  # github-actions[bot] (one commit touching only those lines, its message naming the
-  # images), pushes it, and passes. A push made with GITHUB_TOKEN starts no workflow, so
-  # the job then dispatches this workflow on the branch, which runs every job on the new
-  # head and cancels the rest of this run through the concurrency group. A tag or
-  # harness version that differs still fails. Main never commits (it fails as before),
-  # this workflow never runs on a tag, the release's images-check never writes back, and
-  # a head that is the bot's own digest commit never commits again, so a digest that
-  # does not reproduce twice fails instead of looping.
+  # passes, and uploads the built digest lines as the images-digests artifact. This job
+  # keeps the read-only token: it runs the branch's own Makefile, images.sh and
+  # digest_commit.py, so a write token here could be read by branch code (the Codex
+  # finding on PR 420). The commit is made by .github/workflows/images-digest.yml, which
+  # workflow_run starts from the default branch once this run completes: it runs only
+  # the default branch's digest_commit.py, re-validates the artifact against the
+  # branch's manifest, commits the digest lines as github-actions[bot], pushes, and
+  # dispatches this workflow on the new head. A tag or harness version that differs
+  # still fails here. Main never writes back (it fails as before), this workflow never
+  # runs on a tag, the release's images-check never writes back, and a head that is the
+  # bot's own digest commit never writes back again, so a digest that does not
+  # reproduce twice fails instead of looping.
   images:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    permissions:
-      contents: write # the digest commit, on a branch only
-      actions: write # dispatch CI on the digest commit
+    # The workflow's read-only token and nothing more: every step runs branch code.
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          # The build runs the branch's scripts; only the commit step gets the token.
           persist-credentials: false
       - name: decide whether this run builds from scratch
         id: no_cache
@@ -195,26 +195,29 @@ jobs:
         run: >-
           make images-check CACHE_DIR="$RUNNER_TEMP/buildkit-cache" NO_CACHE="$NO_CACHE"
           DIGEST_WRITEBACK="$DIGEST_WRITEBACK"
-      - name: commit the corrected digests to the branch
-        id: digest_commit
+      # The handoff to images-digest.yml: only the digest lines, as data. That workflow
+      # trusts nothing in it and checks it against the branch's manifest again.
+      - name: hand the built digests to the digest commit
+        id: digests
         if: steps.writeback.outputs.value == '1'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          BRANCH: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           if git diff --quiet -- images/manifest.env; then
-            echo "committed=false" >> "$GITHUB_OUTPUT"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Refuses any change but the manifest's digest lines.
-          python3 tools/images/digest_commit.py commit
-          git show --stat HEAD
-          # Not forced: a branch that moved meanwhile rejects the push and fails the job.
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPOSITORY}.git" \
-            "HEAD:refs/heads/${BRANCH}"
-          echo "committed=true" >> "$GITHUB_OUTPUT"
+          python3 tools/images/digest_commit.py extract images/manifest.env \
+            "$RUNNER_TEMP/images-digests/digests.env"
+          cat "$RUNNER_TEMP/images-digests/digests.env"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+      - name: upload the built digests
+        if: steps.digests.outputs.changed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: images-digests
+          path: ${{ runner.temp }}/images-digests/digests.env
+          if-no-files-found: error
+          retention-days: 1
       - name: keep the layer cache for branches
         if: github.ref == 'refs/heads/main'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -224,14 +227,10 @@ jobs:
       # hades #181, #184: the image just built must carry the program each shipped
       # policy's required check starts with (make, for default-software's make lint,
       # test, scan) and every program a shipped policy declares in required_programs.
-      # After a digest commit this head is superseded: the dispatched run repeats these
-      # on the new head, which builds the same image.
       - uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c # v7.0.0
-        if: steps.digest_commit.outputs.committed != 'true'
         with:
           enable-cache: true
       - name: the worker image carries the programs the shipped policies' checks need
-        if: steps.digest_commit.outputs.committed != 'true'
         run: make images-policy-check
       # hades #184, FDY-0134: the unit tier as the lab's verification runs it, in the
       # image just built: uid 1000, read-only root, no Docker socket, no network for
@@ -239,15 +238,7 @@ jobs:
       # workspace. Here rather than its own job because the image exists only in this
       # job's daemon; moving 1.4 GB to another job costs more than the tier's minute.
       - name: unit tier inside the worker image
-        if: steps.digest_commit.outputs.committed != 'true'
         run: make test-unit-in-image
-      - name: run CI on the digest commit
-        if: steps.digest_commit.outputs.committed == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          BRANCH: ${{ github.ref_name }}
-        run: gh workflow run ci.yml --repo "$REPOSITORY" --ref "$BRANCH"
 
   # A real API server, kubelet, enforcing CNI and PVC on the runner's Docker daemon.
   # This belongs beside the Docker tier on GitHub-hosted infrastructure: it needs a

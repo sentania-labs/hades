@@ -6,10 +6,10 @@
 #                                    or OCI digest differs from images/manifest.env
 #
 # With DIGEST_WRITEBACK=1, `check` passes when only *_DIGEST lines differ and writes the
-# built digests into images/manifest.env for the CI images job to commit (FDY-0310: CI
-# owns the digest lines). A tag, harness list or entry that differs still fails. The
-# job sets it only on a branch, never on main, a tag or its own digest commit; the
-# release never sets it.
+# built digests into images/manifest.env for the CI images job to hand, as an artifact,
+# to the images-digest workflow that commits them (FDY-0310: CI owns the digest lines).
+# A tag, harness list or entry that differs still fails. The job sets it only on a
+# branch, never on main, a tag or its own digest commit; the release never sets it.
 #
 # Either way the images end up loaded in the daemon under their manifest tags, which is
 # where the release pushes them from (tools/release/push_worker_images.sh).

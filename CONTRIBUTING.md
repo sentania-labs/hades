@@ -29,9 +29,16 @@ Worker image changes: anything under `images/` changes the worker image, so
 the tag and harness lines of `images/manifest.env` must match it
 (`make lint` names the tag it expects; `make images` on a machine with Docker
 rewrites the whole file). The `*_DIGEST` lines are CI's: never edit them by
-hand or in a worker pass. On a branch, the CI images job commits the digest
-it built when every tag and harness version reproduced, then runs CI again on
-that commit (docs/spec/13-local-operation.md).
+hand or in a worker pass. On a branch, when every tag and harness version
+reproduced, CI commits the digest it built and runs CI again on that commit.
+That is two workflows, so that no branch code ever holds a write token: the
+`images` job in `ci.yml` runs the branch's scripts with the read-only token
+and only uploads the built digest lines as the `images-digests` artifact;
+`images-digest.yml`, which `workflow_run` starts from `main`, runs only
+`main`'s `tools/images/digest_commit.py`, re-checks the artifact against the
+branch's manifest, then commits, pushes and dispatches CI. A change to
+`digest_commit.py` therefore takes effect for the commit half only once it is
+on `main` (docs/spec/13-local-operation.md).
 
 ## Releases
 
