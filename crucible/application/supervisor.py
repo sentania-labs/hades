@@ -1651,32 +1651,66 @@ class Supervisor:
                 prior.exit_class in {ExitClass.INFRASTRUCTURE, ExitClass.QUOTA_EXHAUSTED}
                 for prior in route_uow.attempts.list_for_execution(execution.id)
             )
-            # Corrections and interrupted workers resume a verified, sealed workspace.
-            if (
-                (execution.role is ExecutionRole.CORRECT or interruption_retry)
-                and not attempt.resume_from_remote
-                and (
-                    interruption_retry
-                    or route_uow.events.latest_for_task_kind(
-                        task.id, EventKind.PUBLISH_COMPLETED.value
-                    )
-                    is None
+            can_resume_bundle = (
+                execution.role is ExecutionRole.CORRECT or interruption_retry
+            ) and not attempt.resume_from_remote
+            published = (
+                route_uow.events.latest_for_task_kind(task.id, EventKind.PUBLISH_COMPLETED.value)
+                if can_resume_bundle
+                else None
+            )
+            gate_failure = (
+                route_uow.events.latest_for_task_kind(
+                    task.id, EventKind.TASK_PRE_PR_GATES_FAILED.value
                 )
+                if can_resume_bundle
+                else None
+            )
+            correction = contract.get("correction") or {}
+            last_attempt = (
+                correction.get(
+                    "resume_from",
+                    (
+                        "last_attempt"
+                        if correction.get("reason") == "pre_pr_gates"
+                        else "remote_branch"
+                    ),
+                )
+                == "last_attempt"
+            )
+            # Corrections and interrupted workers resume a verified, sealed workspace.
+            if can_resume_bundle and (
+                interruption_retry
+                or published is None
+                or (last_attempt and gate_failure is not None)
             ):
+                preceding = [
+                    candidate
+                    for candidate_execution in route_uow.executions.list_for_task(task.id)
+                    if candidate_execution.role is not ExecutionRole.REVIEW
+                    for candidate in route_uow.attempts.list_for_execution(candidate_execution.id)
+                    if candidate.id < attempt.id
+                ]
+                newest = max(preceding, key=lambda candidate: candidate.id, default=None)
                 previous_attempt = max(
                     (
                         candidate
-                        for candidate_execution in route_uow.executions.list_for_task(task.id)
-                        if candidate_execution.role is not ExecutionRole.REVIEW
-                        for candidate in route_uow.attempts.list_for_execution(
-                            candidate_execution.id
+                        for candidate in preceding
+                        if candidate.workspace_path
+                        and (
+                            published is None
+                            or interruption_retry
+                            or (
+                                candidate is newest
+                                and gate_failure is not None
+                                and candidate.id == gate_failure.attempt_id
+                            )
                         )
-                        if candidate.id < attempt.id
-                        and candidate.workspace_path
                         and any(
                             row.kind == EvidenceKind.BUNDLE_HEAD.value
                             and row.verified
                             and row.payload.get("bundle_verified")
+                            and row.payload.get("bundle_sha256")
                             for row in route_uow.evidence.list_for_attempt(candidate.id)
                         )
                     ),
@@ -1746,6 +1780,9 @@ class Supervisor:
             resume_bundle_attempt_id=resume_bundle.get("attempt_id"),
             resume_bundle_head=resume_bundle.get("head"),
             resume_bundle_sha256=resume_bundle.get("sha256"),
+            resume_bundle_ancestor=(
+                str(published.payload["head_sha"]) if published and resume_bundle else None
+            ),
         )
         adapter = self._harnesses.get(selected_harness) if self._harnesses else None
         if adapter is None:

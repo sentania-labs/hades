@@ -351,6 +351,7 @@ def preparer_script(
     resume_bundle: str | None = None,
     resume_bundle_head: str | None = None,
     resume_bundle_sha256: str | None = None,
+    resume_bundle_ancestor: str | None = None,
     refresh_cache: bool = True,
     checkout_token: str | None = None,
     credential_host: str = "github.com",
@@ -402,6 +403,16 @@ if [ "$ACTUAL_HEAD" != {_quote(resume_bundle_head or "")} ]; then
   printf 'previous attempt bundle head does not match its record\\n' >&2
   exit 4
 fi
+# Verify both the recorded published head and the branch observed in this clone.
+for ANCESTOR in {_quote(resume_bundle_ancestor or "")} "refs/remotes/origin/$WORK_BRANCH"; do
+  if [ -z "$ANCESTOR" ]; then continue; fi
+  if [ "$ANCESTOR" = "refs/remotes/origin/$WORK_BRANCH" ] \
+    && ! {GIT} rev-parse --verify --quiet "$ANCESTOR" >/dev/null; then continue; fi
+  if ! {GIT} merge-base --is-ancestor "$ANCESTOR" "$ACTUAL_HEAD"; then
+    printf 'previous attempt bundle does not descend from task head %s\\n' "$ANCESTOR" >&2
+    exit 4
+  fi
+done
 {GIT} checkout -B "$WORK_BRANCH" refs/crucible/resume --
 STARTED="$ACTUAL_HEAD"
 """

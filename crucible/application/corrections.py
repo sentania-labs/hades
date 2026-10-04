@@ -70,10 +70,13 @@ PREVIOUS_BUNDLE_OTHER_PROVIDER = "previous_attempt_bundle_other_provider"
 
 
 def _unpublished_bundle_problem(
-    uow: UnitOfWork, task: Task, provider: str
+    uow: UnitOfWork, task: Task, provider: str, *, last_attempt: bool = False
 ) -> dict[str, str] | None:
     """Name why an unpublished correction cannot resume, or return None when it can."""
-    if uow.events.latest_for_task_kind(task.id, EventKind.PUBLISH_COMPLETED.value) is not None:
+    if (
+        not last_attempt
+        and uow.events.latest_for_task_kind(task.id, EventKind.PUBLISH_COMPLETED.value) is not None
+    ):
         return None
     work = latest_work_attempt(uow, task)
     if work is None:
@@ -220,7 +223,12 @@ def attach_correction(
     )
     problems.extend(unwired_provider_problems(contract, wired_providers))
     problems.extend(correction_narrows(previous, contract))
-    bundle_problem = _unpublished_bundle_problem(uow, task, contract.execution_request.provider)
+    bundle_problem = _unpublished_bundle_problem(
+        uow,
+        task,
+        contract.execution_request.provider,
+        last_attempt=contract.correction.resume_from == "last_attempt",
+    )
     if bundle_problem is not None:
         problems.append(bundle_problem)
     if (

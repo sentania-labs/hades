@@ -597,6 +597,7 @@ class DockerProvider:
                 resume_bundle=resume_bundle,
                 resume_bundle_head=spec.resume_bundle_head,
                 resume_bundle_sha256=spec.resume_bundle_sha256,
+                resume_bundle_ancestor=spec.resume_bundle_ancestor,
                 checkout_token="stdin" if private else None,
                 credential_host=self.config.credential_host,
             ),

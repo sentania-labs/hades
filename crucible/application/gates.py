@@ -242,8 +242,10 @@ def evaluate_and_advance(
             clock,
             principal_id=task.principal_id,
             reason=WakeReason.PRE_PR_GATES_FAILED,
-            summary=f"pre-PR gates failed on {task.head_sha}: {', '.join(failing)}."
-            + reviewer_note(summary["for_reviewer"]),
+            summary=f"pre-PR gates failed on {task.head_sha}: {', '.join(failing)}. "
+            f"The next pre_pr_gates correction defaults to last_attempt at {task.head_sha}, "
+            "subject to bundle seal and ancestry verification; "
+            "remote_branch is an explicit alternative." + reviewer_note(summary["for_reviewer"]),
             task=task,
             attempt_id=attempt.id,
             extra_links={"gates": f"/v1/attempts/{attempt.id}/gates"},
