@@ -240,8 +240,18 @@ class Correction(StrictModel):
     ]
     addresses: list[CorrectionAddress]
     instructions: str = Field(min_length=1)
-    resume_from: Literal["remote_branch"]
+    resume_from: Literal["remote_branch", "last_attempt"] = "remote_branch"
     request_internal_review: bool
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resume_default(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "resume_from" not in value:
+            value = dict(value)
+            value["resume_from"] = (
+                "last_attempt" if value.get("reason") == "pre_pr_gates" else "remote_branch"
+            )
+        return value
 
 
 class TaskContractV1(StrictModel):

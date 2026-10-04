@@ -49,6 +49,19 @@ def scan_text(text: str) -> str | None:
     return None
 
 
+def secret_pattern_expressions() -> tuple[str, ...]:
+    """Return the canonical patterns for trusted checkout scanners.
+
+    The preparer uses Git's PCRE matcher over a restored tree. Keep that defence in
+    depth on the same patterns as the evidence scanner instead of maintaining a second
+    list that can drift.
+    """
+    return tuple(
+        f"(?i){pattern.pattern}" if pattern.flags & re.IGNORECASE else pattern.pattern
+        for _name, pattern in _PATTERNS
+    )
+
+
 def _walk(value: object, path: str) -> Iterator[SecretMatch]:
     if isinstance(value, str):
         hit = scan_text(value)

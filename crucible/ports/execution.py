@@ -119,6 +119,7 @@ class LaunchSpec:
     resume_bundle_attempt_id: str | None = None
     resume_bundle_head: str | None = None
     resume_bundle_sha256: str | None = None
+    resume_bundle_ancestor: str | None = None
 
     def __post_init__(self) -> None:
         validate_endpoint(self.endpoint, self.endpoint_url)
