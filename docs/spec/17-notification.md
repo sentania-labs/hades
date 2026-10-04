@@ -43,7 +43,8 @@ Progress is not a wake. Foundry polls or tails logs when it wants progress.
 Codex inline findings are the exception: on the first completed round with findings,
 Crucible builds one correction from the task contract and launches it under the task's
 policy. Foundry still receives one informational wake and may attach its own correction
-or cancel. A later round never starts another automatic correction.
+or cancel. A later round never starts another automatic correction. This scheduling
+requires `external_review.provider: codex`; other providers still wake and wait.
 
 ## WakeV1
 

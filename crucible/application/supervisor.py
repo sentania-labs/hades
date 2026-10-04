@@ -4693,6 +4693,8 @@ class Supervisor:
                     payload={"errors": unparsed_errors},
                 )
             completed: CompletedClaim | None = None
+            claim = None
+            expected_findings: set[str] = set()
             if outputs.report is not None and not cancelled:
                 # hades #215: Crucible's own facts in place of the worker's, then parse.
                 completed = complete_claim(outputs.report, claim_facts(task, outputs))
@@ -4704,18 +4706,29 @@ class Supervisor:
                     for address in correction.get("addresses", [])
                     if isinstance(address, dict) and address.get("kind") == "review_comment"
                 }
-                reported_findings = (
-                    {item.review_comment_id for item in claim.finding_dispositions}
+                finding_counts = (
+                    Counter(item.review_comment_id for item in claim.finding_dispositions)
                     if claim is not None
-                    else set()
+                    else Counter()
                 )
-                if expected_findings and reported_findings != expected_findings:
+                duplicate_ids = sorted(
+                    finding_id for finding_id, count in finding_counts.items() if count > 1
+                )
+                if expected_findings and (
+                    set(finding_counts) != expected_findings or duplicate_ids
+                ):
                     errors.append(
                         {
                             "loc": ["finding_dispositions"],
                             "msg": (
                                 "the correction report must disposition exactly its review "
-                                "findings; expected " + ", ".join(sorted(expected_findings))
+                                "findings; expected "
+                                + ", ".join(sorted(expected_findings))
+                                + (
+                                    "; duplicate ids: " + ", ".join(duplicate_ids)
+                                    if duplicate_ids
+                                    else ""
+                                )
                             ),
                             "type": "value_error",
                         }
@@ -4755,51 +4768,6 @@ class Supervisor:
                         "differences": [dict(d) for d in completed.differences],
                     },
                 )
-                if claim_ok and claim is not None and expected_findings:
-                    for finding in claim.finding_dispositions:
-                        comment = uow.review_comments.get(finding.review_comment_id)
-                        if (
-                            comment is None
-                            or uow.dispositions.get_by_comment(comment.id, comment.body_sha256)
-                            is not None
-                        ):
-                            continue
-                        kind = (
-                            DispositionKind.FIX
-                            if finding.disposition == "fixed"
-                            else DispositionKind.DECLINE
-                        )
-                        reasoning = (
-                            f"Fixed in commit {finding.commit}"
-                            if finding.disposition == "fixed"
-                            else str(finding.reason)
-                        )
-                        disposition = ReviewDisposition(
-                            id=new_id(),
-                            review_comment_id=comment.id,
-                            comment_body_sha256=comment.body_sha256,
-                            principal_id=task.principal_id,
-                            disposition=kind,
-                            reasoning=reasoning,
-                            created_at=self._clock.now(),
-                        )
-                        uow.dispositions.add(disposition)
-                        record_event(
-                            uow,
-                            self._clock,
-                            EventKind.DISPOSITION_RECORDED,
-                            principal=PRINCIPAL_CRUCIBLE,
-                            task_id=task.id,
-                            attempt_id=attempt.id,
-                            payload={
-                                "disposition_id": disposition.id,
-                                "review_comment_id": comment.id,
-                                "disposition": kind.value,
-                                "from_worker_report": True,
-                                "reply_pending": kind is DispositionKind.DECLINE,
-                                "reasoning": reasoning,
-                            },
-                        )
             blocked_text: str | None = None
             if outputs.blocked_md is not None:
                 blocked_text = (
@@ -4889,6 +4857,58 @@ class Supervisor:
                 turn_cap_reached=parsed is not None and parsed.limit_reached is not None,
                 has_commits=outputs.bundle is not None and outputs.bundle.commits > 0,
             )
+            # A valid report from a failed or locally capped attempt is evidence,
+            # but its dispositions must not settle findings or queue public replies.
+            if (
+                attempt.state is AttemptState.SUCCEEDED
+                and claim_ok
+                and claim is not None
+                and expected_findings
+            ):
+                for finding in claim.finding_dispositions:
+                    comment = uow.review_comments.get(finding.review_comment_id)
+                    if (
+                        comment is None
+                        or uow.dispositions.get_by_comment(comment.id, comment.body_sha256)
+                        is not None
+                    ):
+                        continue
+                    kind = (
+                        DispositionKind.FIX
+                        if finding.disposition == "fixed"
+                        else DispositionKind.DECLINE
+                    )
+                    reasoning = (
+                        f"Fixed in commit {finding.commit}"
+                        if finding.disposition == "fixed"
+                        else str(finding.reason)
+                    )
+                    disposition = ReviewDisposition(
+                        id=new_id(),
+                        review_comment_id=comment.id,
+                        comment_body_sha256=comment.body_sha256,
+                        principal_id=task.principal_id,
+                        disposition=kind,
+                        reasoning=reasoning,
+                        created_at=self._clock.now(),
+                    )
+                    uow.dispositions.add(disposition)
+                    record_event(
+                        uow,
+                        self._clock,
+                        EventKind.DISPOSITION_RECORDED,
+                        principal=PRINCIPAL_CRUCIBLE,
+                        task_id=task.id,
+                        attempt_id=attempt.id,
+                        payload={
+                            "disposition_id": disposition.id,
+                            "review_comment_id": comment.id,
+                            "disposition": kind.value,
+                            "from_worker_report": True,
+                            "reply_pending": kind is DispositionKind.DECLINE,
+                            "reasoning": reasoning,
+                        },
+                    )
             uow.commit()
 
     def _record_credential_sync(

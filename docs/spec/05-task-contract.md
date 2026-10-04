@@ -130,7 +130,9 @@ of the previous version's. `required_verification` may not shrink.
 For the single automatic Codex findings correction (23), Crucible derives this section
 itself. `addresses` names every inline finding, `instructions` contains each finding's
 path, line and body verbatim plus the standing fix-or-decline and report rules, and the
-rest of the document is copied from the current task contract.
+rest of the document is copied from the current task contract. The report must name
+each addressed finding exactly once. Dispositions and declined-finding replies are
+recorded only after the correction attempt succeeds.
 
 ## Validation rules (deterministic, on submit)
 

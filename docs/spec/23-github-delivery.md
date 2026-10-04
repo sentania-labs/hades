@@ -394,11 +394,14 @@ cycle opens on that head.
   The instruction is to fix each finding or decline it in the report with the reason.
   Foundry receives one informational wake and may still attach a correction or cancel.
   Findings from a later round on the corrected head wake Foundry but cannot start a
-  second automatic loop.
+  second automatic loop. Automatic scheduling requires `external_review.provider: codex`;
+  other providers retain the wake-and-wait path.
 - The correcting worker's report records one disposition per finding: fixed with its
-  commit, or declined with reasoning. Crucible stores these as `ReviewDisposition`
-  rows and replies to each declined inline finding with the reported reason. Summary
-  and security-summary comments without inline findings are recorded as noted and need
+  commit, or declined with reasoning. Duplicate IDs invalidate the report and the
+  validation error names them. Only after the attempt succeeds does Crucible store
+  these as `ReviewDisposition` rows and reply to each declined inline finding with
+  the reported reason. Summary and security-summary comments without inline findings
+  are recorded as noted and need
   no disposition.
 - If any disposition is `fix`, Foundry attaches a correction contract (05)
   and the task re-enters supervision against the existing branch. The

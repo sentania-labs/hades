@@ -1708,7 +1708,11 @@ def advance_delivery(
             # always leaves the task stepped back for a later reconciliation.
         if feedback_needs_wake:
             automatically_corrected = False
-            if result.new_comments and feedback_from is TaskState.AWAITING_EXTERNAL_REVIEW:
+            if (
+                result.new_comments
+                and feedback_from is TaskState.AWAITING_EXTERNAL_REVIEW
+                and policy.get("external_review", {}).get("provider") == "codex"
+            ):
                 automatically_corrected = _schedule_findings_correction(
                     uow, clock, task=task, pull_request=pull_request, policy=policy
                 )
