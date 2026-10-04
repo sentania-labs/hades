@@ -34,14 +34,22 @@ from crucible.adapters.execution.k8sapi import KubernetesApiError
 from crucible.adapters.execution.k8sspec import EgressPlan, Limits, Mount, SpecError
 from crucible.adapters.execution.publisher import (
     MAX_PUBLISHER_SECONDS,
+    MERGE_OUTCOME_FILES,
     OUTCOME_FILES,
+    merge_outcome_from_files,
     outcome_from_files,
     request_spec,
 )
 from crucible.domain.secrets import redact
 from crucible.ports.execution import WORK_MOUNT, LaunchSpec, ProviderError
 from crucible.ports.github import InstallationToken
-from crucible.ports.publish import Publisher, PublishOutcome, PublishRequest
+from crucible.ports.publish import (
+    MergeMainOutcome,
+    MergeMainRequest,
+    Publisher,
+    PublishOutcome,
+    PublishRequest,
+)
 
 log = logging.getLogger("crucible.publisher")
 
@@ -163,68 +171,26 @@ class KubernetesPublisher:
             token_source="file",
             bundle_sha256=request.bundle_sha256,
         )
-        secret = token_secret_name(request.attempt_id)
-        exit_code = k8s.JOB_API_ERROR
-        try:
-            # A Secret of this name can only be left by an earlier push of this attempt,
-            # holding a token already expired or revoked; the create must not keep it.
-            if not await provider._delete_token_secret(secret, what="publisher"):
-                return _refused(
-                    "container",
-                    f"the token Secret {secret!r} left by an earlier push could not be removed",
-                )
-            await provider._call(
-                provider.client.create,
-                "secrets",
-                k8sspec.secret(
-                    name=secret,
-                    namespace=provider.config.namespace,
-                    object_labels=provider._labels(spec, k8sspec.ROLE_PUBLISHER),
-                    data={TOKEN_KEY: token.reveal().encode("utf-8")},
+        exit_code, failed = await self._run_with_token(
+            spec,
+            request,
+            token,
+            script=script,
+            mounts=[
+                Mount(
+                    "ws",
+                    f"{scripts.BUNDLE_MOUNT}/work_branch.bundle",
+                    read_only=True,
+                    sub_path=leaf,
                 ),
-            )
-            exit_code = await provider._run_role_job(
-                spec,
-                role=k8sspec.ROLE_PUBLISHER,
-                image=request.image,
-                script=script,
-                mounts=[
-                    Mount(
-                        "ws",
-                        f"{scripts.BUNDLE_MOUNT}/work_branch.bundle",
-                        read_only=True,
-                        sub_path=leaf,
-                    ),
-                    Mount("ws", scripts.PUBLISH_MOUNT, sub_path=PUBLISH_LEAF),
-                    Mount("publish-token", scripts.TOKEN_MOUNT, read_only=True),
-                ],
-                volumes=[provider._claim_volume(request.attempt_id), token_volume(secret)],
-                limits=limits,
-                timeout=timeout,
-                plan=self._plan(),
-                env={"HOME": "/home/worker", "CRUCIBLE_ATTEMPT_ID": request.attempt_id},
-                tolerate_lingering_pod=True,
-                # A full namespace is a wait for a slot, not a failed publication.
-                wait_for_quota=True,
-            )
-        except (KubernetesApiError, SpecError, ProviderError) as exc:
-            return _refused("container", f"the publisher Job could not run: {exc}")
-        finally:
-            # The Job's Pod has ended by now (a Pod slow to be removed is terminated,
-            # not running). Deleted on every path, a cancel included; a deletion that
-            # fails twice is logged, the next push of this attempt deletes it first,
-            # and the retention sweep removes it once the attempt is no longer live.
-            if not await provider._delete_token_secret(secret, what="publisher"):
-                log.warning(
-                    "the publisher token Secret outlived its push",
-                    extra={"attempt_id": request.attempt_id, "secret": secret},
-                )
-        if exit_code == k8s.JOB_API_ERROR:
-            return _refused(
-                "container",
-                "the publisher Job could not run: "
-                f"{redact(provider.last_error.get(k8sspec.ROLE_PUBLISHER, ''))}",
-            )
+                Mount("ws", scripts.PUBLISH_MOUNT, sub_path=PUBLISH_LEAF),
+                Mount("publish-token", scripts.TOKEN_MOUNT, read_only=True),
+            ],
+            limits=limits,
+            timeout=timeout,
+        )
+        if failed is not None:
+            return _refused("container", failed)
         if exit_code == k8s.JOB_TIMED_OUT:
             return PublishOutcome(
                 pushed=False,
@@ -268,8 +234,165 @@ class KubernetesPublisher:
             exit_code,
         )
 
+    async def _run_with_token(
+        self,
+        spec: LaunchSpec,
+        request: PublishRequest | MergeMainRequest,
+        token: InstallationToken,
+        *,
+        script: str,
+        mounts: list[Mount],
+        limits: Limits,
+        timeout: int,
+    ) -> tuple[int, str | None]:
+        """The token in a Secret of its own, one publisher Job that mounts it, and the
+        Secret deleted on every path. The Job's exit, or why it could not run."""
+        provider = self._provider
+        secret = token_secret_name(request.attempt_id)
+        exit_code = k8s.JOB_API_ERROR
+        try:
+            # A Secret of this name can only be left by an earlier push of this attempt,
+            # holding a token already expired or revoked; the create must not keep it.
+            if not await provider._delete_token_secret(secret, what="publisher"):
+                return exit_code, (
+                    f"the token Secret {secret!r} left by an earlier push could not be removed"
+                )
+            await provider._call(
+                provider.client.create,
+                "secrets",
+                k8sspec.secret(
+                    name=secret,
+                    namespace=provider.config.namespace,
+                    object_labels=provider._labels(spec, k8sspec.ROLE_PUBLISHER),
+                    data={TOKEN_KEY: token.reveal().encode("utf-8")},
+                ),
+            )
+            exit_code = await provider._run_role_job(
+                spec,
+                role=k8sspec.ROLE_PUBLISHER,
+                image=request.image,
+                script=script,
+                mounts=mounts,
+                volumes=[provider._claim_volume(request.attempt_id), token_volume(secret)],
+                limits=limits,
+                timeout=timeout,
+                plan=self._plan(),
+                env={"HOME": "/home/worker", "CRUCIBLE_ATTEMPT_ID": request.attempt_id},
+                tolerate_lingering_pod=True,
+                # A full namespace is a wait for a slot, not a failed publication.
+                wait_for_quota=True,
+            )
+        except (KubernetesApiError, SpecError, ProviderError) as exc:
+            return exit_code, f"the publisher Job could not run: {exc}"
+        finally:
+            # The Job's Pod has ended by now (a Pod slow to be removed is terminated,
+            # not running). Deleted on every path, a cancel included; a deletion that
+            # fails twice is logged, the next push of this attempt deletes it first,
+            # and the retention sweep removes it once the attempt is no longer live.
+            if not await provider._delete_token_secret(secret, what="publisher"):
+                log.warning(
+                    "the publisher token Secret outlived its push",
+                    extra={"attempt_id": request.attempt_id, "secret": secret},
+                )
+        if exit_code == k8s.JOB_API_ERROR:
+            return exit_code, (
+                "the publisher Job could not run: "
+                f"{redact(provider.last_error.get(k8sspec.ROLE_PUBLISHER, ''))}"
+            )
+        return exit_code, None
+
+    async def merge_main(
+        self, request: MergeMainRequest, token: InstallationToken
+    ) -> MergeMainOutcome:
+        """hades #411: merge the base into the remote work branch tip in a publisher Job.
+
+        The Job is the publisher's, with the same Secret, NetworkPolicy and outcome leaf
+        of the attempt's workspace claim, and no bundle mounted: the remote tip is what
+        is merged. A claim that is gone or not ready refuses the merge, which the
+        caller hands to a worker correction."""
+        provider = self._provider
+        spec = request_spec(request)
+        if not request.image:
+            return _merge_refused("create", "the merge-main request names no image")
+        claim = k8sspec.object_name("ws", request.attempt_id)
+        try:
+            await provider._call(provider.client.get, "persistentvolumeclaims", claim)
+        except KubernetesApiError as exc:
+            if exc.status == 404:
+                return _merge_refused(
+                    "claim", f"the workspace claim {claim!r} the merge would write to is gone"
+                )
+            return _merge_refused("container", f"the workspace claim could not be read: {exc}")
+        try:
+            probe = await provider.ensure_ready()
+        except Exception as exc:
+            return _merge_refused("namespace", f"the workers namespace could not be probed: {exc}")
+        if not probe.passed:
+            return _merge_refused(
+                "namespace", f"the workers namespace is not ready ({probe.detail})"
+            )
+        limits = provider._limits(spec)
+        refusal = await self._prepare_claim(spec, request, claim, limits)
+        if refusal is not None:
+            return _merge_refused(refusal.step, refusal.detail)
+        timeout = int(min(request.timeout_seconds, self.config.timeout_seconds))
+        script = scripts.merge_main_script(
+            clone_url=request.repository_url,
+            work_branch=request.work_branch,
+            base_ref=request.base_ref,
+            expected_head=request.expected_head,
+            author_name=request.author_name,
+            author_email=request.author_email,
+            credential_host=self.config.credential_host,
+            token_source="file",
+        )
+        exit_code, failed = await self._run_with_token(
+            spec,
+            request,
+            token,
+            script=script,
+            mounts=[
+                Mount("ws", scripts.PUBLISH_MOUNT, sub_path=PUBLISH_LEAF),
+                Mount("publish-token", scripts.TOKEN_MOUNT, read_only=True),
+            ],
+            limits=limits,
+            timeout=timeout,
+        )
+        if failed is not None:
+            return _merge_refused("container", failed)
+        if exit_code == k8s.JOB_TIMED_OUT:
+            return MergeMainOutcome(
+                merged=False,
+                step="timeout",
+                detail=f"the merge-main Job did not finish within {timeout}s",
+                exit_code=-2,
+            )
+        try:
+            files = await provider._read_files(
+                spec,
+                [f"{PUBLISH_LEAF}/{name}" for name in MERGE_OUTCOME_FILES],
+                limits,
+                limit=OUTCOME_READ_LIMIT,
+            )
+        except (ProviderError, KubernetesApiError) as exc:
+            # Unlike a publication, a merge whose new head cannot be read back is not
+            # recorded: the next poll sees the pushed head as Crucible's own push only
+            # through its outcome, so this is reported as not merged.
+            return _merge_refused(
+                "outcome",
+                f"the merge-main Job exited {exit_code}; its outcome is unreadable: {exc}",
+            )
+        return merge_outcome_from_files(
+            {name: _text(files.get(f"{PUBLISH_LEAF}/{name}")) for name in MERGE_OUTCOME_FILES},
+            exit_code,
+        )
+
     async def _prepare_claim(
-        self, spec: LaunchSpec, request: PublishRequest, claim: str, limits: Limits
+        self,
+        spec: LaunchSpec,
+        request: PublishRequest | MergeMainRequest,
+        claim: str,
+        limits: Limits,
     ) -> PublishOutcome | None:
         """Check the bundle and create the `publish` leaf before any Pod mounts either.
 
@@ -378,6 +501,11 @@ def _refused(step: str, detail: str) -> PublishOutcome:
     return PublishOutcome(pushed=False, head_sha="", step=step, detail=redact(detail), exit_code=-1)
 
 
+def _merge_refused(step: str, detail: str) -> MergeMainOutcome:
+    """Nothing was merged or pushed."""
+    return MergeMainOutcome(merged=False, step=step, detail=redact(detail), exit_code=-1)
+
+
 class ByWorkspacePublisher:
     """A deployment with both providers: each attempt's bundle is published by the
     provider whose workspace holds it, which the bundle path names."""
@@ -391,6 +519,13 @@ class ByWorkspacePublisher:
 
     async def push(self, request: PublishRequest, token: InstallationToken) -> PublishOutcome:
         return await self._for(request.bundle_path).push(request, token)
+
+    async def merge_main(
+        self, request: MergeMainRequest, token: InstallationToken
+    ) -> MergeMainOutcome:
+        """hades #411: the merge writes to the workspace of the attempt it continues, so
+        the provider that holds that workspace runs it, as for that attempt's push."""
+        return await self._for(request.workspace_path).merge_main(request, token)
 
     async def cleanup(self, attempt_ids: Sequence[str]) -> int:
         return await self._docker.cleanup(attempt_ids) + await self._kubernetes.cleanup(attempt_ids)

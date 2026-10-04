@@ -63,6 +63,13 @@ ci_certification_failed --ci-decision correct, correction attached--> scheduled
 ci_certification_failed --ci-decision reject--> rejected
 ready_for_merge --correction attached--> scheduled
 
+{awaiting_external_review, external_feedback_received, awaiting_ci_certification,
+ ci_certification_failed, ready_for_merge}
+    --PR conflicting, head Crucible's, merge of main clean--> (head replaced; ready_for_merge
+      and ci_certification_failed go to awaiting_ci_certification) --wake pull_request_conflicting-->
+    --PR conflicting, head Crucible's, merge of main stopped on conflicts--> scheduled
+      (a merge-main `correct` execution from the remote branch tip) --wake pull_request_conflicting-->
+
 {awaiting_external_review, external_feedback_received, awaiting_ci_certification, ready_for_merge}
     --PR head changed out of band--> head_diverged --wake-->
 head_diverged --head-decision adopt (legacy name: recollect)--> scheduled    (a `correct` execution recollected from the remote work branch tip; the new head gets its own claim, then all gates, review, acceptance start over)
@@ -262,7 +269,8 @@ terminated with exit_class `timeout`, reason `stall`) | `exited`.
 `opening` -> `open` -> `merged` | `closed`. Head history is a list of
 (SHA, pushed_by: crucible | other, observed_at). A head Crucible did not
 push is recorded with `pushed_by: other`, moves the task to
-`head_diverged`, and wakes Foundry; Crucible never force-pushes over it.
+`head_diverged`, and wakes Foundry; Crucible never force-pushes over it. A
+merge of main pushed by Crucible (23) is recorded `pushed_by: crucible`.
 
 ## Release (24)
 

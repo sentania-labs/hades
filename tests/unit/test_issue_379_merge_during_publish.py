@@ -32,7 +32,12 @@ from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
 from crucible.domain.exit_class import ExitClass
 from crucible.domain.lifecycle import TaskState
 from crucible.ports.github import GitHubClient, InstallationToken, Observation, PullRequestRef
-from crucible.ports.publish import PublishOutcome, PublishRequest
+from crucible.ports.publish import (
+    MergeMainOutcome,
+    MergeMainRequest,
+    PublishOutcome,
+    PublishRequest,
+)
 from tests.fixtures import REPOSITORY_URL, FakeClock
 from tests.unit.test_issue_360_ready_for_merge_correction import (
     MERGE_SHA,
@@ -152,6 +157,11 @@ class _Publisher:
         self.pushes: list[str] = []
         self.outcome: PublishOutcome | None = None
         self.during_push: Callable[[], Awaitable[object] | None] | None = None
+
+    async def merge_main(
+        self, request: MergeMainRequest, token: InstallationToken
+    ) -> MergeMainOutcome:
+        raise AssertionError("no pull request here conflicts with its base")
 
     async def push(self, request: PublishRequest, token: InstallationToken) -> PublishOutcome:
         self.pushes.append(request.expected_head)

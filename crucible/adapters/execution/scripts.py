@@ -1180,6 +1180,132 @@ exit 0
 """
 
 
+# The line that names a merge-main run, so a reader of a publisher Job (or the fake
+# cluster) can tell it from a push of a bundle, which runs in the same role.
+MERGE_MAIN_MARKER = "# crucible: merge the base into the remote work branch"
+# Its exit codes beside the publisher's: the remote branch moved off the known tip (4),
+# and git stopped on conflicts (6). Neither pushed anything.
+MERGE_MAIN_HEAD_MOVED = 4
+MERGE_MAIN_CONFLICT = 6
+
+
+def merge_main_script(
+    *,
+    clone_url: str,
+    work_branch: str,
+    base_ref: str,
+    expected_head: str,
+    author_name: str,
+    author_email: str,
+    credential_host: str = "github.com",
+    token_source: str = "stdin",
+    token_dir: str = TOKEN_MOUNT,
+    out_dir: str = PUBLISH_MOUNT,
+    work_root: str = "/home/worker",
+) -> str:
+    """Merge `base_ref` into the remote work branch tip and push it, or report conflicts.
+
+    hades #411: the one push Crucible makes with a lease rather than a fast-forward. The
+    work branch is fetched from the remote, not from any bundle, and must still be at
+    `expected_head`, the head Crucible pushed or adopted; anything else stops here (exit
+    4). The merge resolves nothing: a conflict writes the conflicting paths to
+    `conflicts.txt` and exits 6 with the remote untouched. A clean merge is committed as
+    `author_name` and pushed with `--force-with-lease` against `expected_head`, so a push
+    that raced it is never overwritten. An up-to-date branch pushes nothing and exits 0
+    without `push.txt`.
+
+    The token handling is the publisher's (`publisher_script`): stdin to a tmpfs for the
+    Docker provider, a Secret volume for Kubernetes, read only through the helper."""
+    if token_source not in ("stdin", "file"):
+        raise ValueError(f"unknown token source {token_source!r}")
+    receive = 'cat > "$TOKDIR/token"\n' if token_source == "stdin" else ""
+    secure = 'chmod 0600 "$TOKDIR/token"\n' if token_source == "stdin" else ""
+    drop = 'rm -f "$TOKDIR/token"' if token_source == "stdin" else ":"
+    return f"""set -eu
+{MERGE_MAIN_MARKER}
+umask 077
+TOKDIR={_quote(token_dir)}
+OUT={_quote(out_dir)}
+WORK_ROOT={_quote(work_root)}
+WORK_BRANCH={_quote(work_branch)}
+BASE_REF={_quote(base_ref)}
+EXPECTED={_quote(expected_head)}
+CLONE_URL={_quote(clone_url)}
+drop_token() {{ {drop}; }}
+mkdir -p "$OUT"
+find "$OUT" -mindepth 1 -maxdepth 1 -exec rm -rf {{}} + 2>/dev/null || true
+{receive}if [ ! -s "$TOKDIR/token" ]; then
+  echo "no token arrived for this merge" > "$OUT/error.txt"; echo no-token > "$OUT/step.txt"; exit 3
+fi
+{secure}umask 022
+unset GIT_TRACE GIT_TRACE_CURL GIT_CURL_VERBOSE GIT_TRACE_PACKET GIT_TRACE2 || true
+export GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
+export HOME="$WORK_ROOT" LC_ALL=C
+export CRUCIBLE_TOKEN_FILE="$TOKDIR/token"
+export CRUCIBLE_CREDENTIAL_HOST={_quote(credential_host)}
+export CRUCIBLE_AUTHOR_NAME={_quote(author_name)}
+export CRUCIBLE_AUTHOR_EMAIL={_quote(author_email)}
+{_CRED_HELPER}
+echo credential > "$OUT/step.txt"
+if ! printf 'protocol=https\\nhost=%s\\n\\n' "$CRUCIBLE_CREDENTIAL_HOST" \\
+    | git credential fill 2>> "$OUT/publisher.log" | grep -q '^password=.'; then
+  echo "the credential helper could not read the token" > "$OUT/error.txt"; drop_token; exit 3
+fi
+cd "$WORK_ROOT"
+rm -rf merge-main && mkdir merge-main && cd merge-main
+echo init > "$OUT/step.txt"
+git init --quiet >> "$OUT/publisher.log" 2>&1
+git remote add origin "$CLONE_URL"
+echo fetch > "$OUT/step.txt"
+if ! git fetch --quiet origin \\
+    "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF" \\
+    "+refs/heads/$WORK_BRANCH:refs/remotes/origin/$WORK_BRANCH" \\
+    >> "$OUT/publisher.log" 2>&1; then
+  echo "the base or the work branch could not be fetched" > "$OUT/error.txt"
+  drop_token; exit {MERGE_MAIN_HEAD_MOVED}
+fi
+REMOTE=$(git rev-parse "refs/remotes/origin/$WORK_BRANCH")
+printf '%s\\n' "$REMOTE" > "$OUT/remote-head-before.txt"
+if [ "$REMOTE" != "$EXPECTED" ]; then
+  echo "the remote work branch is at $REMOTE, not the known tip $EXPECTED" > "$OUT/error.txt"
+  echo head-moved > "$OUT/step.txt"; drop_token; exit {MERGE_MAIN_HEAD_MOVED}
+fi
+git checkout --quiet -B crucible-merge-main "$REMOTE" >> "$OUT/publisher.log" 2>&1
+if git merge-base --is-ancestor "refs/remotes/origin/$BASE_REF" HEAD; then
+  echo "the work branch already contains $BASE_REF" > "$OUT/error.txt"
+  echo up-to-date > "$OUT/step.txt"; drop_token
+  chmod 0644 "$OUT"/* 2>/dev/null || true
+  exit 0
+fi
+echo merge > "$OUT/step.txt"
+if ! git merge --no-ff --no-edit -m "Merge origin/$BASE_REF into $WORK_BRANCH" \\
+    "refs/remotes/origin/$BASE_REF" >> "$OUT/publisher.log" 2>&1; then
+  git diff --name-only --diff-filter=U > "$OUT/conflicts.txt" 2>> "$OUT/publisher.log" || true
+  git merge --abort >> "$OUT/publisher.log" 2>&1 || true
+  echo "merging origin/$BASE_REF into the work branch stopped on conflicts" > "$OUT/error.txt"
+  echo conflict > "$OUT/step.txt"; drop_token
+  chmod 0644 "$OUT"/* 2>/dev/null || true
+  exit {MERGE_MAIN_CONFLICT}
+fi
+git rev-parse HEAD > "$OUT/merge-head.txt"
+echo push > "$OUT/step.txt"
+if git push --quiet --force-with-lease="refs/heads/$WORK_BRANCH:$EXPECTED" origin \\
+    "HEAD:refs/heads/$WORK_BRANCH" 2> "$OUT/push.err"; then
+  echo ok > "$OUT/push.txt"
+else
+  echo failed > "$OUT/push.txt"
+  cp "$OUT/push.err" "$OUT/error.txt" 2>/dev/null || true
+  drop_token
+  chmod 0644 "$OUT"/* 2>/dev/null || true
+  exit 5
+fi
+echo done > "$OUT/step.txt"
+drop_token
+chmod 0644 "$OUT"/* 2>/dev/null || true
+exit 0
+"""
+
+
 def gate_probe_checkout_script(
     url: str,
     base_ref: str,

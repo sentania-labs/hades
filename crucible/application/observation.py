@@ -214,7 +214,7 @@ def replaced_heads(uow: UnitOfWork, task: Task, pull_request: PullRequest) -> Re
     if (
         since is None
         and head_decision is not None
-        and head_decision.payload.get("action") == "recollect"
+        and head_decision.payload.get("action") in ("recollect", "adopt")
         and head_decision.payload.get("observed_head") == head
     ):
         since = min(

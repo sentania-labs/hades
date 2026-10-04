@@ -19,7 +19,7 @@ Only when judgment is required or work has stopped needing it:
 | `ci_certification_overdue` | repeat, no state change |
 | `ci_rerun_needed` | after a `ci-decision rerun`: Crucible records the intent, the operator re-runs it on GitHub (the App holds no Actions write) |
 | `head_diverged` | `head_diverged` (decision required) |
-| conflicting pull request | `pull_request_conflicting` (Crucible tries merge-main, then launches a remote-tip correction when git reports conflicts) |
+| conflicting pull request, head Crucible pushed or adopted | `pull_request_conflicting`, once per head; the summary names the next action: Crucible merges main itself, and when git reports conflicts launches a merge-main correction from the remote branch tip. A dirty head pushed out of band raises `head_diverged` instead |
 | `ready_for_merge` | `ready_for_merge` |
 | `merged` | `merged` (informational), from any delivery state; the summary names the state when it was not `ready_for_merge` |
 | `pull_request_closed` | `rejected`: the pull request was closed without merge, from any delivery state |

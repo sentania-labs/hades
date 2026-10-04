@@ -37,7 +37,12 @@ from crucible.adapters.execution.kubernetes import KubernetesConfig, KubernetesP
 from crucible.adapters.execution.publisher import BUNDLE_SEAL_REFUSED
 from crucible.ports.execution import WORK_MOUNT, ProviderError
 from crucible.ports.github import InstallationToken
-from crucible.ports.publish import PublishOutcome, PublishRequest
+from crucible.ports.publish import (
+    MergeMainOutcome,
+    MergeMainRequest,
+    PublishOutcome,
+    PublishRequest,
+)
 from tests.integration.fake_github import installation_token_value
 from tests.unit.kubernetes_fixtures import ATTEMPT, IMAGE, TASK, build
 
@@ -91,6 +96,23 @@ def _request(**overrides: Any) -> PublishRequest:
     }
     base.update(overrides)
     return PublishRequest(**base)
+
+
+def _merge_request(**overrides: Any) -> MergeMainRequest:
+    base: dict[str, Any] = {
+        "attempt_id": ATTEMPT,
+        "task_id": TASK,
+        "owner": "EX-0001",
+        "repository_url": "https://github.com/example-org/example-service.git",
+        "work_branch": "crucible/EX-0001",
+        "base_ref": "main",
+        "expected_head": HEAD,
+        "image": DIGEST_IMAGE,
+        "policy": {"resources": {"cpus": 1, "memory": "512MiB"}},
+        "workspace_path": f"k8s://crucible-workers/ws-{ATTEMPT.lower()}",
+    }
+    base.update(overrides)
+    return MergeMainRequest(**base)
 
 
 def _token(value: str) -> InstallationToken:
@@ -346,6 +368,12 @@ class _Recording:
         self.paths.append(request.bundle_path)
         return PublishOutcome(pushed=True, head_sha=request.expected_head, step="done")
 
+    async def merge_main(
+        self, request: MergeMainRequest, token: InstallationToken
+    ) -> MergeMainOutcome:
+        self.paths.append(request.workspace_path)
+        return MergeMainOutcome(merged=False, step="up-to-date")
+
     async def cleanup(self, attempt_ids: Any) -> int:
         return len(attempt_ids)
 
@@ -359,6 +387,11 @@ async def test_with_both_providers_the_bundle_path_picks_the_publisher() -> None
     assert kubernetes.paths == [_request().bundle_path]
     assert docker.paths == ["/var/lib/crucible/x/output/work_branch.bundle"]
     assert await both.cleanup(["a"]) == 2
+    # hades #411: a merge of main runs where the attempt's workspace is, too.
+    await both.merge_main(_merge_request(), token)
+    await both.merge_main(_merge_request(workspace_path="/var/lib/crucible/x"), token)
+    assert kubernetes.paths[-1] == _merge_request().workspace_path
+    assert docker.paths[-1] == "/var/lib/crucible/x"
 
 
 def test_a_credential_host_other_than_github_is_the_only_extra_destination() -> None:
@@ -598,3 +631,60 @@ async def test_a_missing_bundle_is_refused_before_a_subpath_is_mounted() -> None
     assert k8sspec.ROLE_PUBLISHER not in [
         body["metadata"]["labels"][k8sspec.LABEL_ROLE] for body in _created(api, "jobs")
     ]
+
+
+# ----- hades #411: merge-main in a publisher Job -----------------------------------
+
+
+async def test_a_clean_merge_main_is_one_publisher_job_that_pushes_with_a_lease() -> None:
+    value = installation_token_value()
+    api, _provider, publisher = _setup()
+
+    outcome = await publisher.merge_main(_merge_request(), _token(value))
+
+    assert outcome.merged, outcome
+    assert (outcome.head_sha, outcome.conflicting_files) == (api.merge_main_head, ())
+    assert [(m["branch"], m["base"], m["lease"], m["token"]) for m in api.merges] == [
+        ("crucible/EX-0001", "main", HEAD, value)
+    ]
+    assert [(p["branch"], p["head"]) for p in api.pushes] == [
+        ("crucible/EX-0001", api.merge_main_head)
+    ]
+    job = _publisher_job(api)
+    container = job["spec"]["template"]["spec"]["containers"][0]
+    script = container["command"][-1]
+    assert scripts.MERGE_MAIN_MARKER in script
+    assert '--force-with-lease="refs/heads/$WORK_BRANCH:$EXPECTED"' in script
+    # No bundle: the remote tip is what is merged. The token arrives as for a push.
+    mounts = {m["mountPath"]: m for m in container["volumeMounts"]}
+    assert f"{scripts.BUNDLE_MOUNT}/work_branch.bundle" not in mounts
+    assert mounts[scripts.TOKEN_MOUNT]["name"] == "publish-token"
+    for row in api.created:
+        if row["kind"] != "secrets":
+            assert value not in json.dumps(row["body"]), row["kind"]
+    assert ("secrets", token_secret_name(ATTEMPT)) in api.deleted
+
+
+async def test_a_conflicting_merge_main_reports_the_files_and_pushes_nothing() -> None:
+    api, _provider, publisher = _setup()
+    api.merge_main_conflicts = ["crucible/application/delivery_tick.py", "docs/spec/23.md"]
+
+    outcome = await publisher.merge_main(_merge_request(), _token(installation_token_value()))
+
+    assert not outcome.merged
+    assert outcome.conflicting_files == (
+        "crucible/application/delivery_tick.py",
+        "docs/spec/23.md",
+    )
+    assert outcome.step == "conflict"
+    assert outcome.exit_code == scripts.MERGE_MAIN_CONFLICT
+    assert api.pushes == []
+
+
+async def test_a_merge_main_without_its_workspace_claim_is_refused_before_a_token() -> None:
+    api, _provider, publisher = _setup(claim=False)
+
+    outcome = await publisher.merge_main(_merge_request(), _token(installation_token_value()))
+
+    assert (outcome.merged, outcome.step) == (False, "claim")
+    assert _created(api, "secrets") == []

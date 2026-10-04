@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,8 @@ import pytest
 from crucible.adapters.execution import scripts
 from crucible.adapters.execution.docker import DockerConfig, DockerProvider
 from crucible.adapters.execution.publisher import DockerPublisher, PublisherConfig
-from crucible.ports.publish import PublishRequest
+from crucible.ports.github import InstallationToken
+from crucible.ports.publish import MergeMainRequest, PublishRequest
 from tests.integration.fake_github import installation_token_value
 
 HEAD = "a" * 40
@@ -165,3 +167,107 @@ def test_the_publisher_runs_on_its_own_egress_network_by_default() -> None:
     credential should be able to reach."""
     assert PublisherConfig().network == "crucible-publish"
     assert PublisherConfig().network != "crucible-workers"
+
+
+# ----- hades #411: merge-main ------------------------------------------------------
+
+
+class _Daemon:
+    """The daemon calls a merge-main run makes. The container 'runs' when it is waited
+    on, by writing the outcome files the script would have left."""
+
+    def __init__(self, out: Path, files: dict[str, str], exit_code: int) -> None:
+        self.out = out
+        self.files = files
+        self.exit_code = exit_code
+        self.bodies: list[dict[str, Any]] = []
+        self.stdin: list[bytes] = []
+        self.removed: list[str] = []
+
+    def create_container(self, name: str, body: dict[str, Any]) -> str:
+        self.bodies.append(body)
+        return "c1"
+
+    def start_container(self, container_id: str) -> None:
+        return None
+
+    def write_stdin(self, container_id: str, data: bytes) -> None:
+        self.stdin.append(data)
+
+    def wait_container(self, container_id: str, *, timeout: float) -> int:
+        for name, text in self.files.items():
+            (self.out / name).write_text(text, encoding="utf-8")
+        return self.exit_code
+
+    def remove_container(self, container_id: str, *, force: bool = False) -> None:
+        self.removed.append(container_id)
+
+
+def _merge_publisher(
+    tmp_path: Path, files: dict[str, str], exit_code: int
+) -> tuple[DockerPublisher, _Daemon]:
+    out = tmp_path / "publish" / "01ATTEMPT" / "merge-main" / "out"
+    daemon = _Daemon(out, files, exit_code)
+    provider = DockerProvider(
+        DockerConfig(endpoint="tcp://127.0.0.1:1", artifact_root=str(tmp_path)),
+        client=daemon,  # type: ignore[arg-type]
+    )
+    return DockerPublisher(provider, PublisherConfig(network="none")), daemon
+
+
+def _merge_request(**kw: Any) -> MergeMainRequest:
+    base: dict[str, Any] = {
+        "attempt_id": "01ATTEMPT",
+        "task_id": "01TASK",
+        "owner": "FDY-0042",
+        "repository_url": "https://github.com/owner/repo.git",
+        "work_branch": "crucible/FDY-0042",
+        "base_ref": "main",
+        "expected_head": HEAD,
+        "image": "crucible-worker:script-harness-1.0.0",
+        "policy": {"resources": {"cpus": 1, "memory": "512m", "pids": 128}},
+    }
+    base.update(kw)
+    return MergeMainRequest(**base)
+
+
+async def test_a_docker_merge_main_pushes_with_a_lease_and_no_bundle(tmp_path: Path) -> None:
+    value = installation_token_value()
+    publisher, daemon = _merge_publisher(
+        tmp_path,
+        {"step.txt": "done", "push.txt": "ok", "merge-head.txt": "e" * 40},
+        0,
+    )
+
+    outcome = await publisher.merge_main(_merge_request(), _token(value))
+
+    assert (outcome.merged, outcome.head_sha) == (True, "e" * 40)
+    assert daemon.stdin == [value.encode("utf-8")]
+    body = daemon.bodies[0]
+    assert value not in json.dumps(body)
+    script = body["Cmd"][-1]
+    assert scripts.MERGE_MAIN_MARKER in script
+    assert '--force-with-lease="refs/heads/$WORK_BRANCH:$EXPECTED"' in script
+    targets = [m["Target"] for m in body["HostConfig"]["Mounts"]]
+    assert targets == [scripts.PUBLISH_MOUNT]
+    assert daemon.removed == ["c1"]
+
+
+async def test_a_docker_merge_main_conflict_names_the_files(tmp_path: Path) -> None:
+    publisher, _daemon = _merge_publisher(
+        tmp_path,
+        {"step.txt": "conflict", "conflicts.txt": "a.txt\nb/c.py\n", "error.txt": "conflicts"},
+        scripts.MERGE_MAIN_CONFLICT,
+    )
+
+    outcome = await publisher.merge_main(_merge_request(), _token(installation_token_value()))
+
+    assert not outcome.merged
+    assert outcome.conflicting_files == ("a.txt", "b/c.py")
+    assert outcome.head_sha == ""
+
+
+def _token(value: str) -> InstallationToken:
+    return InstallationToken(
+        value, expires_at=datetime.now(UTC) + timedelta(hours=1), repository="r"
+    )
