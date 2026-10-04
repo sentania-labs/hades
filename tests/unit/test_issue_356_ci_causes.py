@@ -168,6 +168,44 @@ def test_board_view_pull_request_cause_is_none_without_a_decision() -> None:
     assert item["pull_request"]["cause"] is None
 
 
+def test_board_view_shows_no_cause_when_decision_predates_a_rerun_certification() -> None:
+    """Codex finding on PR 415: the board selected the prior CI decision by task alone,
+    so a fresh (second) certification that fails before a new decision exists was still
+    labelled with the first certification's stale cause. A cause may only be shown when
+    its certification_id matches the certification the row is currently displaying."""
+    uow = fake_uow()
+    uow.events.rows.append(
+        row(
+            seq=4,
+            task_id="t1",
+            kind="ci_certification_recorded",
+            payload={"state": "failed", "certification_id": "cert-1"},
+            ts=NOW - timedelta(minutes=10),
+        )
+    )
+    uow.events.rows.append(
+        row(
+            seq=5,
+            task_id="t1",
+            kind="ci_decision_recorded",
+            payload={"cause": "flaky_test", "certification_id": "cert-1"},
+            ts=NOW - timedelta(minutes=9),
+        )
+    )
+    uow.events.rows.append(
+        row(
+            seq=6,
+            task_id="t1",
+            kind="ci_certification_recorded",
+            payload={"state": "failed", "certification_id": "cert-2"},
+            ts=NOW - timedelta(minutes=1),
+        )
+    )
+    document = board_view(uow, NOW)
+    item = document["in_flight"][6]["parents"][0]["tasks"][0]
+    assert item["pull_request"]["cause"] is None
+
+
 def test_board_page_renders_the_cause_beside_the_pull_request() -> None:
     document = {
         "in_flight": [

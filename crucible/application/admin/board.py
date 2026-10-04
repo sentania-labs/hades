@@ -310,7 +310,16 @@ def board_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
         ci_event = latest_ci.get(task.id)
         ci_state = ci_event.payload.get("state") if ci_event else None
         ci_decision_event = latest_ci_decision.get(task.id)
-        ci_cause = ci_decision_event.payload.get("cause") if ci_decision_event else None
+        ci_cause = None
+        if (
+            ci_decision_event is not None
+            and ci_event is not None
+            and ci_decision_event.payload.get("certification_id")
+            == ci_event.payload.get("certification_id")
+        ):
+            # hades #356 correction: a decision from a prior certification must never
+            # label the current (possibly re-run) certification's row.
+            ci_cause = ci_decision_event.payload.get("cause")
         fields = contracts[task.id]
         row = {
             "id": task.id,
