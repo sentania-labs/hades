@@ -964,6 +964,18 @@ class Supervisor:
                     retry_on=[str(x) for x in lifecycle["retry_on"]],
                     timeout_seconds=int(req["timeout_seconds"]),
                     created_at=now,
+                    # A head adoption and an automatic merge-main correction start at
+                    # the remote branch tip. The previous attempt's sealed bundle is
+                    # deliberately not an input: the remote head is the fact being
+                    # adopted or repaired.
+                    resume_from_remote=bool(
+                        (
+                            scheduled := uow.events.latest_for_task_kind(
+                                task.id, EventKind.TASK_SCHEDULED.value
+                            )
+                        )
+                        and scheduled.payload.get("resume_from_work_branch") is True
+                    ),
                 )
                 uow.executions.add(execution)
                 record_event(

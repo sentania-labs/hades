@@ -56,9 +56,53 @@ class PublishOutcome:
     log_tail: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class MergeMainRequest:
+    """A publisher-side attempt to merge the current base into the remote work tip.
+
+    hades #411: the work branch is fetched from the remote, never from a bundle, and it
+    must still be at `expected_head`, the head Crucible pushed or adopted. `base_ref` is
+    merged with no conflict resolution. A clean merge is committed as Crucible and pushed
+    with `--force-with-lease` against `expected_head`; a conflict pushes nothing."""
+
+    task_id: str
+    attempt_id: str
+    owner: str
+    repository_url: str
+    work_branch: str
+    base_ref: str
+    expected_head: str
+    image: str = ""
+    policy: Mapping[str, object] = field(default_factory=dict)
+    # The workspace of the attempt the merge continues (`k8s://...` on Kubernetes), which
+    # names the provider whose publisher runs it.
+    workspace_path: str = ""
+    author_name: str = "Crucible"
+    author_email: str = "crucible-worker@users.noreply.github.com"
+    timeout_seconds: int = 600
+
+
+@dataclass(frozen=True, slots=True)
+class MergeMainOutcome:
+    """What a merge-main run did. `merged` means the merge commit was pushed and
+    `head_sha` is the new remote head. `conflicting_files` is set when git stopped on
+    conflicts, and then the remote branch was left untouched."""
+
+    merged: bool
+    head_sha: str = ""
+    conflicting_files: tuple[str, ...] = ()
+    detail: str = ""
+    step: str = ""
+    exit_code: int = 0
+
+
 class Publisher(Protocol):
     """Push one verified head to one repository and report what happened."""
 
     async def push(self, request: PublishRequest, token: InstallationToken) -> PublishOutcome: ...
+
+    async def merge_main(
+        self, request: MergeMainRequest, token: InstallationToken
+    ) -> MergeMainOutcome: ...
 
     async def cleanup(self, attempt_ids: Sequence[str]) -> int: ...

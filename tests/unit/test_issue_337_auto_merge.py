@@ -121,6 +121,7 @@ def setup() -> tuple[DeliveryCoordinator, FakeGitHub, MagicMock, Any, MergePlan]
         observed_head_sha=HEAD,
         observed_base_ref="main",
         mergeable_state="clean",
+        mergeable=True,
         merge_refusal_cause=None,
         merge_refusal_head_sha=None,
         merge_refusal_base_ref=None,

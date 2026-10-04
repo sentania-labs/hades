@@ -164,7 +164,7 @@ def record_head_decision(
     task_id: str,
     request: HeadDecisionRequest,
 ) -> Task:
-    """09: `recollect`, `reject`, or `cancel` for a head Crucible did not push."""
+    """09: adopt/recollect, reject, or cancel a head Crucible did not push."""
     _orchestrator(principal, "a head decision")
     task = uow.tasks.get(task_id, for_update=True)
     if task is None:
@@ -212,7 +212,8 @@ def record_head_decision(
             payload=payload,
         )
         return task
-    # `recollect`: everything about the old head is superseded and the task re-enters
+    # `adopt` (formerly named `recollect`): everything about the old head is superseded
+    # and the task re-enters
     # supervision against the remote work branch, which is where the new head is. The
     # new head then goes through the whole pre-PR path, internal review as the policy
     # and Foundry decide, acceptance, and `publishing`, which finds the remote already
@@ -222,7 +223,7 @@ def record_head_decision(
         uow,
         clock,
         task=task,
-        reason="recollect",
+        reason=request.action.value,
         new_head=pull_request.head_sha if pull_request else "",
         principal=principal.name,
     )
@@ -240,7 +241,7 @@ def record_head_decision(
         principal=principal.name,
         payload={
             "role": "correct",
-            "reason": "recollect",
+            "reason": request.action.value,
             "contract_version": task.contract_version,
             "tier": execution_request["tier"],
             "provider": execution_request["provider"],

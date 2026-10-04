@@ -77,6 +77,7 @@ class PullRequests:
             observed_head_sha=row.observed_head_sha,
             observed_base_ref=row.observed_base_ref,
             mergeable_state=row.mergeable_state,
+            mergeable=row.mergeable,
             merge_refusal_cause=row.merge_refusal_cause,
             merge_refusal_head_sha=row.merge_refusal_head_sha,
             merge_refusal_base_ref=row.merge_refusal_base_ref,
@@ -112,6 +113,7 @@ class PullRequests:
                 observed_head_sha=pull_request.observed_head_sha,
                 observed_base_ref=pull_request.observed_base_ref,
                 mergeable_state=pull_request.mergeable_state,
+                mergeable=pull_request.mergeable,
                 merge_refusal_cause=pull_request.merge_refusal_cause,
                 merge_refusal_head_sha=pull_request.merge_refusal_head_sha,
                 merge_refusal_base_ref=pull_request.merge_refusal_base_ref,
@@ -159,6 +161,7 @@ class PullRequests:
         row.observed_head_sha = pull_request.observed_head_sha
         row.observed_base_ref = pull_request.observed_base_ref
         row.mergeable_state = pull_request.mergeable_state
+        row.mergeable = pull_request.mergeable
         row.merge_refusal_cause = pull_request.merge_refusal_cause
         row.merge_refusal_head_sha = pull_request.merge_refusal_head_sha
         row.merge_refusal_base_ref = pull_request.merge_refusal_base_ref

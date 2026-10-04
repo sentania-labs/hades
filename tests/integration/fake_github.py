@@ -54,6 +54,8 @@ class PullRequestState:
     closed_at: str | None = None
     draft: bool = False
     mergeable_state: str = "clean"
+    # hades #411: GitHub's nullable mergeable flag, false on a conflicting pull request.
+    mergeable: bool | None = True
     reviews: list[dict[str, Any]] = field(default_factory=list)
     review_comments: list[dict[str, Any]] = field(default_factory=list)
     issue_comments: list[dict[str, Any]] = field(default_factory=list)
@@ -669,6 +671,7 @@ class _Handler(BaseHTTPRequestHandler):
             "merged_by": {"login": pull.merged_by} if pull.merged_by else None,
             "closed_at": pull.closed_at,
             "mergeable_state": pull.mergeable_state,
+            "mergeable": pull.mergeable,
             "head": {"sha": pull.head_sha, "ref": pull.head_branch},
             "base": {"ref": pull.base_ref},
         }

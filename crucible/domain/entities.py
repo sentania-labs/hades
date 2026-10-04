@@ -619,6 +619,7 @@ class CIAction(StrEnum):
 
 
 class HeadAction(StrEnum):
+    ADOPT = "adopt"
     RECOLLECT = "recollect"
     REJECT = "reject"
     CANCEL = "cancel"
@@ -650,6 +651,7 @@ class PullRequest:
     observed_head_sha: str = ""
     observed_base_ref: str = ""
     mergeable_state: str = ""
+    mergeable: bool | None = None
     merge_refusal_cause: str | None = None
     merge_refusal_head_sha: str | None = None
     merge_refusal_base_ref: str | None = None

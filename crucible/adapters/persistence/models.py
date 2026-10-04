@@ -527,6 +527,7 @@ class PullRequestRow(Base):
     observed_head_sha: Mapped[str] = mapped_column(String(64), default="")
     observed_base_ref: Mapped[str] = mapped_column(String(255), default="")
     mergeable_state: Mapped[str] = mapped_column(String(32), default="")
+    mergeable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     merge_refusal_cause: Mapped[str | None] = mapped_column(Text, nullable=True)
     merge_refusal_head_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     merge_refusal_base_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)

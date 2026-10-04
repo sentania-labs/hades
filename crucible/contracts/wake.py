@@ -37,6 +37,7 @@ class WakeReason(StrEnum):
     CI_CERTIFICATION_OVERDUE = "ci_certification_overdue"
     CI_RERUN_NEEDED = "ci_rerun_needed"
     HEAD_DIVERGED = "head_diverged"
+    PULL_REQUEST_CONFLICTING = "pull_request_conflicting"
     READY_FOR_MERGE = "ready_for_merge"
     MERGED = "merged"
     # hades FDY-0139: a pull request closed without merge rejects the task, and Foundry

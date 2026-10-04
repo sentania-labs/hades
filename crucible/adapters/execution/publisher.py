@@ -44,7 +44,12 @@ from crucible.adapters.execution.dockerapi import DockerApiError
 from crucible.domain.secrets import redact
 from crucible.ports.execution import LaunchSpec
 from crucible.ports.github import InstallationToken
-from crucible.ports.publish import PublishOutcome, PublishRequest
+from crucible.ports.publish import (
+    MergeMainOutcome,
+    MergeMainRequest,
+    PublishOutcome,
+    PublishRequest,
+)
 
 log = logging.getLogger("crucible.publisher")
 
@@ -190,6 +195,117 @@ class DockerPublisher:
                     await asyncio.to_thread(self._client.remove_container, container_id, force=True)
         return await asyncio.to_thread(self._read_outcome, root / "out", exit_code)
 
+    async def merge_main(
+        self, request: MergeMainRequest, token: InstallationToken
+    ) -> MergeMainOutcome:
+        """hades #411: one throwaway container that merges the base into the remote work
+        branch tip with no conflict resolution, and pushes a clean merge with a lease.
+
+        It is the publisher's container in every respect but its inputs: no bundle is
+        mounted, because the remote tip is the fact being merged, and only an output
+        directory of its own is."""
+        await self._ensure_network()
+        root = self._root(request.attempt_id) / MERGE_MAIN_LEAF
+        await asyncio.to_thread(shutil.rmtree, root, True)
+        await asyncio.to_thread(self._stage_output, root)
+        script = scripts.merge_main_script(
+            clone_url=request.repository_url,
+            work_branch=request.work_branch,
+            base_ref=request.base_ref,
+            expected_head=request.expected_head,
+            author_name=request.author_name,
+            author_email=request.author_email,
+            credential_host=self.config.credential_host,
+        )
+        env = {"HOME": "/home/worker", "CRUCIBLE_ATTEMPT_ID": request.attempt_id}
+        if self.config.egress_proxy:
+            env.update(
+                {
+                    "HTTPS_PROXY": self.config.egress_proxy,
+                    "https_proxy": self.config.egress_proxy,
+                    "NO_PROXY": self.config.no_proxy,
+                    "no_proxy": self.config.no_proxy,
+                }
+            )
+        body = self._body(
+            request,
+            script=script,
+            env=env,
+            mounts=[
+                self._provider._volume_mount(
+                    f"publish/{request.attempt_id}/{MERGE_MAIN_LEAF}/out",
+                    scripts.PUBLISH_MOUNT,
+                    read_only=False,
+                )
+            ],
+        )
+        name = f"crucible-merge-main-{request.attempt_id}"
+        container_id = ""
+        try:
+            try:
+                check_create(
+                    body,
+                    self._provider._create_policy(request_spec(request), resolved=request.image),
+                )
+            except CreateRequestRefusedError as exc:
+                return MergeMainOutcome(
+                    merged=False,
+                    step="create",
+                    detail=f"the create-request policy refused the merge-main container: {exc}",
+                    exit_code=-1,
+                )
+            container_id = await asyncio.to_thread(self._client.create_container, name, body)
+            await asyncio.to_thread(self._client.start_container, container_id)
+            await asyncio.to_thread(
+                self._client.write_stdin, container_id, token.reveal().encode("utf-8")
+            )
+            exit_code = int(
+                await asyncio.to_thread(
+                    self._client.wait_container,
+                    container_id,
+                    timeout=float(min(request.timeout_seconds, self.config.timeout_seconds)),
+                )
+            )
+        except DockerApiError as exc:
+            return MergeMainOutcome(
+                merged=False,
+                step="container",
+                detail=f"the merge-main container could not run: {exc}",
+                exit_code=-1,
+            )
+        except (TimeoutError, OSError, HTTPException) as exc:
+            if container_id:
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(self._client.kill_container, container_id)
+            return MergeMainOutcome(
+                merged=False,
+                step="timeout",
+                detail=(
+                    f"the merge-main container did not finish within "
+                    f"{self.config.timeout_seconds}s ({type(exc).__name__})"
+                ),
+                exit_code=-2,
+            )
+        finally:
+            if container_id:
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(self._client.remove_container, container_id, force=True)
+        return await asyncio.to_thread(
+            lambda: merge_outcome_from_files(
+                {
+                    name: _read(root / "out" / name, limit=limit)
+                    for name, limit in MERGE_OUTCOME_FILES.items()
+                },
+                exit_code,
+            )
+        )
+
+    def _stage_output(self, root: Path) -> None:
+        directory = root / "out"
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(self._provider.config.workspace_dir_mode)
+        root.chmod(self._provider.config.workspace_dir_mode)
+
     def _stage(self, root: Path, bundle_path: str, expected_sha256: str) -> None:
         """Copy the branch bundle into a directory of its own and make the output dir.
 
@@ -211,7 +327,14 @@ class DockerPublisher:
         target.chmod(0o644)
         root.chmod(self._provider.config.workspace_dir_mode)
 
-    def _body(self, request: PublishRequest, *, script: str, env: dict[str, str]) -> dict[str, Any]:
+    def _body(
+        self,
+        request: PublishRequest | MergeMainRequest,
+        *,
+        script: str,
+        env: dict[str, str],
+        mounts: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         spec = request_spec(request)
         host = self._provider._hardened(spec, network=self.config.network)
         host["Tmpfs"] = {
@@ -221,14 +344,18 @@ class DockerPublisher:
                 "mode=0700,uid=1000,gid=1000"
             ),
         }
-        host["Mounts"] = [
-            self._provider._volume_mount(
-                f"publish/{request.attempt_id}/bundle", scripts.BUNDLE_MOUNT, read_only=True
-            ),
-            self._provider._volume_mount(
-                f"publish/{request.attempt_id}/out", scripts.PUBLISH_MOUNT, read_only=False
-            ),
-        ]
+        host["Mounts"] = (
+            mounts
+            if mounts is not None
+            else [
+                self._provider._volume_mount(
+                    f"publish/{request.attempt_id}/bundle", scripts.BUNDLE_MOUNT, read_only=True
+                ),
+                self._provider._volume_mount(
+                    f"publish/{request.attempt_id}/out", scripts.PUBLISH_MOUNT, read_only=False
+                ),
+            ]
+        )
         return {
             "Image": request.image,
             "Cmd": ["sh", "-c", script],
@@ -266,7 +393,7 @@ class DockerPublisher:
         return removed
 
 
-def request_spec(request: PublishRequest) -> LaunchSpec:
+def request_spec(request: PublishRequest | MergeMainRequest) -> LaunchSpec:
     """A LaunchSpec-shaped view of the publish request.
 
     The create-request policy and the hardened body are written against a launch spec,
@@ -328,6 +455,39 @@ def outcome_from_files(files: Mapping[str, str], exit_code: int) -> PublishOutco
         # Crucible's own container output, redacted before it is recorded: git can be
         # made to print a header and a remote can answer with anything (12).
         log_tail=redact(text("publisher.log")[-8000:]),
+    )
+
+
+# What the merge-main script leaves in its output directory (hades #411).
+MERGE_OUTCOME_FILES: dict[str, int] = {
+    "step.txt": 4000,
+    "error.txt": 4000,
+    "push.txt": 4000,
+    "merge-head.txt": 4000,
+    "conflicts.txt": 64 * 1024,
+    "remote-head-before.txt": 4000,
+}
+# Where a merge-main run's output lands beside the publication's, so neither reads the
+# other's files back.
+MERGE_MAIN_LEAF = "merge-main"
+
+
+def merge_outcome_from_files(files: Mapping[str, str], exit_code: int) -> MergeMainOutcome:
+    """The outcome of one merge-main run, from the text of its output files. Both
+    providers read it with this function, as they read a publication's (23)."""
+
+    def text(name: str) -> str:
+        return (files.get(name) or "")[: MERGE_OUTCOME_FILES.get(name, 4000)].strip()
+
+    merged = text("push.txt") == "ok" and exit_code == 0
+    conflicts = tuple(line.strip() for line in text("conflicts.txt").splitlines() if line.strip())
+    return MergeMainOutcome(
+        merged=merged,
+        head_sha=text("merge-head.txt") if merged else "",
+        conflicting_files=conflicts if exit_code == scripts.MERGE_MAIN_CONFLICT else (),
+        detail=redact(text("error.txt")),
+        step=text("step.txt") or "unknown",
+        exit_code=exit_code,
     )
 
 

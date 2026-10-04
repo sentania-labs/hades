@@ -121,6 +121,7 @@ class PullRequestRef:
     # timeline when a pull request is observed closed and unmerged (23).
     closed_by: str | None = None
     mergeable_state: str = ""
+    mergeable: bool | None = None
     title: str = ""
     draft: bool = False
 
@@ -329,6 +330,10 @@ class GitHubClient(Protocol):
     def list_required_checks(
         self, token: InstallationToken, *, repository: str, branch: str
     ) -> Sequence[str]: ...
+
+    def checks_for_commit(
+        self, token: InstallationToken, *, repository: str, head_sha: str
+    ) -> Sequence[CheckRecord]: ...
 
 
 # ----- the App credential the service owns (ADR 0017) ----------------------------------

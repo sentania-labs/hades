@@ -66,6 +66,7 @@ from crucible.adapters.execution.k8sspec import (
 )
 from crucible.adapters.execution.scripts import (
     ACTIVITY_MARKER,
+    MERGE_MAIN_MARKER,
     PUBLISH_BUNDLE_LEAF,
     PUBLISH_LEAF,
     PUBLISH_LEAF_MARKER,
@@ -282,6 +283,12 @@ class FakeKubernetesApi:
     publish_leaf_unwritable: bool = False
     # Called with each push, so a test's stand-in remote can move its branch.
     on_push: Callable[[dict[str, str]], None] | None = None
+    # hades #411: each merge-main run the publisher acted out, and what the next one
+    # finds: conflicting paths (the run stops and pushes nothing) or a clean merge whose
+    # commit is `merge_main_head`.
+    merges: list[dict[str, str]] = field(default_factory=list)
+    merge_main_conflicts: list[str] = field(default_factory=list)
+    merge_main_head: str = "e" * 40
     # An API server that cannot answer: each entry is (call, kind, count), and the next
     # `count` calls of that name (`get`, `create`, `list_objects`, `pod_exec`, ...) on
     # that kind ("" for any kind) raise a 503, as a restarting API server does.
@@ -985,6 +992,27 @@ class FakeKubernetesApi:
         if not token:
             out.update({"step.txt": b"no-token\n", "error.txt": b"no token arrived\n"})
             return finish(3)
+        if MERGE_MAIN_MARKER in script:
+            merge = {
+                "remote": bound("CLONE_URL"),
+                "branch": bound("WORK_BRANCH"),
+                "base": bound("BASE_REF"),
+                "lease": bound("EXPECTED"),
+                "token": token.decode("utf-8"),
+            }
+            self.merges.append(merge)
+            out["remote-head-before.txt"] = f"{merge['lease']}\n".encode()
+            if self.merge_main_conflicts:
+                out["conflicts.txt"] = "".join(f"{p}\n" for p in self.merge_main_conflicts).encode()
+                out.update({"step.txt": b"conflict\n", "error.txt": b"conflicts\n"})
+                return finish(6)
+            out["merge-head.txt"] = f"{self.merge_main_head}\n".encode()
+            push = {**merge, "head": self.merge_main_head}
+            self.pushes.append(push)
+            if self.on_push is not None:
+                self.on_push(push)
+            out.update({"step.txt": b"done\n", "push.txt": b"ok\n"})
+            return finish(0)
         bundle = claim.get(bundle_leaf) if bundle_leaf else None
         out["step.txt"] = b"bundle-seal\n"
         if bundle is None:

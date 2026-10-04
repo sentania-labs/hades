@@ -160,8 +160,15 @@ TASK_TRANSITIONS: frozenset[tuple[TaskState, TaskState]] = frozenset(
         (_S.AWAITING_CI_CERTIFICATION, _S.HEAD_DIVERGED),
         (_S.READY_FOR_MERGE, _S.HEAD_DIVERGED),
         (_S.READY_FOR_MERGE, _S.CI_CERTIFICATION_FAILED),
+        # A clean publisher-side merge of current main creates a new branch head. Its
+        # checks certify that head; it does not need a test of the old head against main.
+        (_S.READY_FOR_MERGE, _S.AWAITING_CI_CERTIFICATION),
         (_S.READY_FOR_MERGE, _S.EXTERNAL_FEEDBACK_RECEIVED),
         (_S.READY_FOR_MERGE, _S.SCHEDULED),
+        # hades #411: a conflicting pull request whose merge of main stopped on conflicts
+        # gets a merge-main correction from any delivery state its head is trusted in.
+        (_S.AWAITING_EXTERNAL_REVIEW, _S.SCHEDULED),
+        (_S.AWAITING_CI_CERTIFICATION, _S.SCHEDULED),
         (_S.HEAD_DIVERGED, _S.REPORTED),
         # A `recollect` decision puts the task back into supervision against the remote
         # work branch, which is where the divergent head is. 09 draws this edge to
