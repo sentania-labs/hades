@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from crucible.domain.gates import INJECTED_NAMES, INJECTED_PREFIXES, injected_shim_text
+from crucible.domain.gates import injected_shim_text
 from crucible.ports.execution import (
     OUTPUT_MOUNT,
     PACKAGE_CACHE_LEAF,
@@ -279,7 +279,8 @@ _ATTR_DIFF_PATHSPEC = "-- . ':(exclude,attr:!diff)' ':(exclude,attr:diff)'"
 # nothing an earlier collection of the same attempt left is read as this one's.
 _COLLECTOR_OUTPUTS = (
     "base.txt head.txt branch.txt diffstat.txt diff.patch changed.txt log.txt "
-    "diff-raw.txt commit-raw.txt base-injected.txt "
+    "diff-raw.txt commit-raw.txt base-injected.txt injected-blobs "
+    "injected-blob-ids.txt injected-blob-ids.sorted injected-error.txt "
     "commit-paths.txt work_branch.bundle bundle.log commits.txt commit-policy tree "
     "clone.log report copy-rejections.tsv collection-failed.txt checkpoint-refusal.txt "
     "leftover-committed.txt leftover-refusal.txt collector.ok attr-text.patch "
@@ -551,16 +552,45 @@ _LEFTOVER_EXCLUDES = " ".join(f"':(exclude,glob){pattern}'" for pattern in _LEFT
 _LEFTOVER_EXCLUDED_PATHS = " ".join(f"':(glob){pattern}'" for pattern in _LEFTOVER_EXCLUDED)
 
 
-def _injected_pathspecs() -> str:
-    """A pathspec per injected name, at any depth (hades #369)."""
-    return " ".join(_quote(f":(glob)**/{name}") for name in sorted(INJECTED_NAMES))
+def _injected_collection_script() -> str:
+    """Export raw records and bounded blobs using only the worker image's tools.
 
-
-def _injected_path_pathspecs() -> str:
-    """Every path `no_injected_files` reads records for: an injected name at any depth or
-    anything under an injected prefix (hades #369)."""
-    prefixes = " ".join(_quote(f":(glob){prefix}**") for prefix in INJECTED_PREFIXES)
-    return f"{_injected_pathspecs()} {prefixes}"
+    Unicode and content classification runs in read_outputs on the service. Worker
+    images, including script-harness, need no Python interpreter.
+    """
+    return rf'''mkdir -p "$OUT/injected-blobs"
+  {GIT} -C "$REPO" diff {_DIFF_FLAGS} --raw -z --no-renames --no-abbrev "$MB" HEAD \
+    > "$OUT/diff-raw.txt" || echo diff > "$OUT/injected-error.txt"
+  {GIT} -C "$REPO" log {_DIFF_FLAGS} --root --full-history --diff-merges=separate \
+    --topo-order --raw -z --no-renames --no-abbrev --format='' "$BASE..HEAD" \
+    > "$OUT/commit-raw.txt" || echo history > "$OUT/injected-error.txt"
+  {GIT} -C "$REPO" ls-tree -r --name-only -z "$MB" \
+    > "$OUT/base-injected.txt" || echo base > "$OUT/injected-error.txt"
+  # This is only a broad transport filter, never the gate's classifier. Export
+  # every non-ASCII/control name (normalization may change it), plus ASCII names
+  # containing any instruction/harness stem. Ordinary source blobs stay out.
+  # Alternate headers and paths so a header-shaped path remains data.
+  LC_ALL=C awk 'BEGIN {{ RS="\0" }}
+    skip {{
+      if (blob != "" && tolower($0) ~ /agents|claude|gemini|codex|hermes|crucible|[^ -~]/)
+        print blob
+      skip=0; next
+    }}
+    {{ sub(/^\n+/, "") }}
+    /^:/ {{
+      skip=1; blob=""
+      if ($4 ~ /^[0-9a-f]+$/ && (length($4)==40 || length($4)==64) && $4 !~ /^0+$/)
+        blob=$4
+    }}' "$OUT/diff-raw.txt" "$OUT/commit-raw.txt" > "$OUT/injected-blob-ids.txt" \
+    || echo blobs > "$OUT/injected-error.txt"
+  sort -u "$OUT/injected-blob-ids.txt" > "$OUT/injected-blob-ids.sorted"
+  while IFS= read -r blob; do
+    size=$({GIT} -C "$REPO" cat-file -s "$blob" 2>/dev/null) || continue
+    if [ "$size" -le 8388608 ]; then
+      {GIT} -C "$REPO" cat-file blob "$blob" > "$OUT/injected-blobs/$blob" 2>/dev/null \
+        || rm -f "$OUT/injected-blobs/$blob"
+    fi
+  done < "$OUT/injected-blob-ids.sorted"'''
 
 
 def collector_script(
@@ -722,33 +752,14 @@ if [ -n "$BASE" ]; then
   {GIT} -C "$REPO" diff {_DIFF_FLAGS} --no-color "$MB" HEAD > "$OUT/diff.patch" \
     || REVIEW_DIFF_ERROR="git diff failed"
   {GIT} -C "$REPO" diff {_DIFF_FLAGS} --name-only -z "$MB" HEAD > "$OUT/changed.txt" || true
-  # hades #369: the status and new blob of each injected-name path, so a shim the branch
-  # adds is told from the repository's own CLAUDE.md or AGENTS.md it edits or deletes.
-  # Only those paths, so the records stay small however many other files the branch
-  # has. -z keeps a non-ASCII path as its bytes instead of git's quoted form.
-  {GIT} -C "$REPO" diff --raw -z --no-renames --no-abbrev "$MB" HEAD \
-    -- {_injected_path_pathspecs()} > "$OUT/diff-raw.txt" || true
-  # The injected-name paths the merge base has: a CLAUDE.md a merge of the base brings
-  # in shows as an add against the merge's first parent, and is still the repository's.
-  EMPTY_TREE=$({GIT} -C "$REPO" hash-object -t tree /dev/null)
-  {GIT} -C "$REPO" diff --name-only -z --no-renames "$EMPTY_TREE" "$MB" \
-    -- {_injected_pathspecs()} > "$OUT/base-injected.txt" || true
-
   {GIT} -C "$REPO" log --format='%H%x1f%s%x1f%an%x1e' "$BASE"..HEAD > "$OUT/log.txt" || true
   # --root (hades #369): a root commit's files are listed whatever log.showRoot the
   # worker-writable .git/config sets.
   {GIT} -C "$REPO" log --root --name-only -z --format='' "$BASE"..HEAD \
     | LC_ALL=C sort -zu > "$OUT/commit-paths.txt" || true
-  # --diff-merges=separate prints a merge's own changes, once per parent, which plain
-  # --raw leaves out. Not -m: that follows log.diffMerges from the worker-writable
-  # .git/config, and `combined` prints records read_path_changes does not parse;
-  # --topo-order prints every commit before its parents whatever its date, so the last
-  # record of a path is the oldest and says whether the base had it. --root prints an
-  # orphan root commit's adds, which log.showRoot=false would hide. --full-history keeps
-  # the pathspec from following only one parent of a merge and skipping the other side.
-  {GIT} -C "$REPO" log --root --full-history --diff-merges=separate --topo-order --raw -z \
-    --no-renames --no-abbrev --format='' "$BASE"..HEAD \
-    -- {_injected_path_pathspecs()} > "$OUT/commit-raw.txt" || true
+  # #400: classify every raw path before filtering; Git pathspecs cannot normalize
+  # Unicode. Read blobs by object id, including those in earlier commits.
+  {_injected_collection_script()}
   {GIT} -C "$REPO" bundle create "$OUT/work_branch.bundle" \
     "$BASE..$WORK_BRANCH" > "$OUT/bundle.log" 2>&1 || true
   {GIT} -C "$REPO" rev-list --count "$BASE"..HEAD > "$OUT/commits.txt" \

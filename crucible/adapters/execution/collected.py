@@ -12,6 +12,7 @@ Everything here treats what it reads as data: it is a tree a worker influenced.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ from typing import Any
 import yaml
 
 from crucible.adapters.execution import scripts
+from crucible.adapters.execution.injected_collection import classify_collected
 from crucible.contracts.evidence import REVIEW_DIFF_NAME, REVIEW_DIFF_TYPE
 from crucible.ports.execution import (
     BranchBundle,
@@ -114,8 +116,13 @@ def read_outputs(
     changed = read_path_list(output / "changed.txt")
     diff_text = text(output / "diff.patch") if (output / "diff.patch").is_file() else None
     commit_paths = read_path_list(output / "commit-paths.txt")
-    diff_changes = read_path_changes(output / "diff-raw.txt")
-    commit_changes = read_path_changes(output / "commit-raw.txt")
+    diff_changes: tuple[PathChange, ...] | None
+    commit_changes: tuple[PathChange, ...] | None
+    if (output / "injected-blobs").is_dir():
+        diff_changes, commit_changes = classify_collected(output)
+    else:
+        diff_changes = read_path_changes(output / "diff-raw.txt")
+        commit_changes = read_path_changes(output / "commit-raw.txt")
     base_paths = read_base_paths(output / "base-injected.txt")
     over_limit = lists_over_limit(output)
     commit_policy = read_commit_policy(output / "commit-policy")
@@ -212,25 +219,47 @@ def read_outputs(
 _RAW_META = re.compile(r":[0-7]{6} [0-7]{6} ([0-9a-f]{40,64}) ([0-9a-f]{40,64}) ([A-Z])[0-9]*")
 # Larger than this and the records are not read at all: `git log` prints the oldest
 # records last, and a cut tail would hide the add that says the base lacked a path. The
-# collector writes only injected-name records, and lists_over_limit makes the gate fail
-# on a list this large.
+# legacy collector writes only injected-name records; lists_over_limit makes the gate
+# fail on a list this large. Modern raw records are streamed by classify_collected.
 _RAW_LIMIT = 8 * 1024 * 1024
 
 
 def read_path_changes(path: Path) -> tuple[PathChange, ...] | None:
-    """`git diff --raw -z` or `git log --diff-merges=separate --raw -z` records as
-    PathChange records (hades #369), in the order git printed them, or None when the
-    collector wrote no such file (an older collector script) or wrote more than is read.
-    A record that does not parse is skipped; the gate then treats its path as before
-    #369. `-z` keeps each path as its bytes, so a non-ASCII directory is not hidden
-    behind git's quoting."""
+    """Read #400 JSON path/content classifications, preserving Git's history order.
+
+    Legacy #369 raw NUL-separated records remain readable. Missing/oversized files
+    return None; the gate checks missing statuses and list limits. Malformed modern
+    records carry an explicit classification error instead of granting an exemption.
+    """
     try:
         if not path.is_file() or path.stat().st_size > _RAW_LIMIT:
             return None
     except OSError:
         return None
+    content = text(path, _RAW_LIMIT)
+    if content.startswith("{"):
+        try:
+            payload = json.loads(content)
+            if payload["version"] != 1 or not isinstance(payload["changes"], list):
+                raise ValueError("unsupported classification records")
+            changes = []
+            for record in payload["changes"]:
+                if not isinstance(record, dict) or not all(
+                    isinstance(record.get(key), str)
+                    for key in ("path", "status", "blob", "classification")
+                ):
+                    raise ValueError("malformed classification record")
+                classification = record["classification"]
+                if classification not in ("plain", "shim", "deleted") and not (
+                    classification.startswith("error:")
+                ):
+                    raise ValueError("unknown content classification")
+                changes.append(PathChange(**record))
+            return tuple(changes)
+        except (ValueError, KeyError, TypeError) as exc:
+            return (PathChange("", "", "", f"error: unreadable classification records: {exc}"),)
     out: list[PathChange] = []
-    fields = text(path, _RAW_LIMIT).split("\0")
+    fields = content.split("\0")
     at = 0
     while at < len(fields) - 1:
         match = _RAW_META.fullmatch(fields[at].lstrip("\n"))
@@ -259,6 +288,9 @@ def lists_over_limit(output: Path) -> tuple[str, ...]:
     or they are not read at all, so the gate cannot see every path and fails closed."""
     over: list[str] = []
     for name, limit in _PATH_LISTS:
+        if name in ("diff-raw.txt", "commit-raw.txt") and (output / "injected-blobs").is_dir():
+            # Modern raw records are streamed in full by classify_collected.
+            continue
         try:
             if (output / name).stat().st_size > limit:
                 over.append(name)

@@ -20,7 +20,14 @@ from enum import StrEnum
 from functools import lru_cache
 from typing import Any
 
+from crucible.domain import injected
 from crucible.domain.exit_class import CLEAN_EXIT_CLASSES
+from crucible.domain.injected import (
+    injected_prefix as _injected_prefix,
+)
+from crucible.domain.injected import (
+    instruction_name_error,
+)
 from crucible.domain.secrets import redact
 
 
@@ -135,17 +142,8 @@ _EMAIL = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}")
 # Shims and identity paths a worker must never leave behind (11).
 # Where the identity bundle is mounted; the shim text names it (ports.execution).
 SHIM_IDENTITY_MOUNT = "/crucible/identity"
-INJECTED_PREFIXES: tuple[str, ...] = (".crucible/", "crucible/identity/", ".crucible-shims/")
-INJECTED_NAMES: frozenset[str] = frozenset(
-    {
-        ".crucible",
-        "crucible-identity.md",
-        "crucible-shim",
-        ".crucible-identity",
-        "AGENTS.md",
-        "CLAUDE.md",
-    }
-)
+INJECTED_NAMES = injected.INJECTED_NAMES
+INJECTED_PREFIXES = injected.INJECTED_PREFIXES
 CI_PATH_PREFIXES: tuple[str, ...] = (".github/workflows/", ".github/actions/", ".gitlab-ci")
 DEPENDENCY_FILES: frozenset[str] = frozenset(
     {
@@ -399,21 +397,12 @@ def scope_contained(gi: GateInput) -> GateOutcome:
     )
 
 
-def _injected(path: str) -> bool:
-    normalized = posixpath.normpath(path)
-    if normalized in INJECTED_NAMES or posixpath.basename(normalized) in INJECTED_NAMES:
-        return True
-    return any(normalized.startswith(prefix) for prefix in INJECTED_PREFIXES)
-
-
 def injected_name(path: str) -> bool:
-    """A path named like a shim (INJECTED_NAMES) or under an injected prefix."""
-    return _injected(path)
+    """Match normalized instruction names and harness directory entries (#400)."""
+    return injected.injected_name(path)
 
 
-def _injected_prefix(path: str) -> bool:
-    normalized = posixpath.normpath(path)
-    return any(normalized.startswith(prefix) for prefix in INJECTED_PREFIXES)
+_injected = injected_name
 
 
 def injected_shim_text(identity_mount: str = SHIM_IDENTITY_MOUNT) -> str:
@@ -433,12 +422,12 @@ def _shim_blob_ids() -> frozenset[str]:
     )
 
 
-def _changes(raw: Any) -> list[tuple[str, str, str]] | None:
-    """(path, status letter, new blob id) records, or None for evidence collected before
+def _changes(raw: Any) -> list[tuple[str, str, str, str]] | None:
+    """(path, status, blob, content classification) records, or None for evidence before
     hades #369, which carried no status."""
     if not isinstance(raw, list):
         return None
-    out: list[tuple[str, str, str]] = []
+    out: list[tuple[str, str, str, str]] = []
     for item in raw:
         if isinstance(item, dict):
             out.append(
@@ -446,6 +435,7 @@ def _changes(raw: Any) -> list[tuple[str, str, str]] | None:
                     str(item.get("path", "")),
                     str(item.get("status", ""))[:1].upper(),
                     str(item.get("blob", "")).lower(),
+                    str(item.get("classification", "")),
                 )
             )
     return out
@@ -459,9 +449,9 @@ def _base_paths(raw: Any) -> frozenset[str]:
 
 def _injected_hits(
     paths: Sequence[str],
-    diff_changes: list[tuple[str, str, str]] | None,
+    diff_changes: list[tuple[str, str, str, str]] | None,
     commit_paths: Sequence[str],
-    commit_changes: list[tuple[str, str, str]] | None,
+    commit_changes: list[tuple[str, str, str, str]] | None,
     base_paths: frozenset[str] = frozenset(),
 ) -> set[str]:
     """hades #369: an injected-name path fails when the branch adds it relative to the
@@ -472,19 +462,27 @@ def _injected_hits(
     no status for, as before #369."""
     shim = _shim_blob_ids()
     hits: set[str] = set()
+    for path in (*paths, *commit_paths):
+        if error := instruction_name_error(path):
+            hits.add(f"{path!a}: {error}")
+    for path, _, _, classification in (diff_changes or []) + (commit_changes or []):
+        if classification.startswith("error:"):
+            hits.add(f"{path!r}: {classification}")
     diff_status: dict[str, str] = {}
-    for path, status, blob in diff_changes or []:
+    for path, status, blob, classification in diff_changes or []:
         diff_status[path] = status
-        if _injected(path) and (status not in ("M", "D") or blob in shim):
+        if _injected(path) and (
+            status not in ("M", "D") or blob in shim or classification == "shim"
+        ):
             hits.add(path)
     # Commits in `git log --diff-merges=separate --topo-order` order, every commit before
     # its parents and a merge once per parent: the last record of a path is the oldest,
     # and says whether the base had it, since only a path the base lacks starts with an
     # add. The order is the graph's, never the commit dates, which the worker sets.
     oldest_status: dict[str, str] = {}
-    for path, status, blob in commit_changes or []:
+    for path, status, blob, classification in commit_changes or []:
         oldest_status[path] = status
-        if _injected(path) and (status == "T" or blob in shim):
+        if _injected(path) and (status == "T" or blob in shim or classification == "shim"):
             hits.add(path)
     for path, status in oldest_status.items():
         existed = diff_status.get(path) in ("M", "D") or status in ("M", "D") or path in base_paths
@@ -507,14 +505,23 @@ def _injected_hits(
 
 
 def no_injected_files(gi: GateInput) -> GateOutcome:
-    """Fail on a shim, .crucible or identity path the branch leaves, read from the diff
-    against the merge base and from every commit on the branch (11, hades #369).
+    """Fail on instruction additions, harness paths and normalized shim content (#400).
+
+    Names use casefold, NFC, removal of invisible format characters and common
+    Cyrillic/Greek lookalikes. AGENTS*.md, CLAUDE*.md and GEMINI*.md match at any
+    depth. Harness directory entries (including symlinks) and descendants always
+    fail. The diff and every commit are checked. Existing repository instruction
+    files may be edited or deleted (#369), unless their content normalizes to the
+    shim after removing trailing whitespace and normalizing line endings/newlines.
+    Unclassifiable names, instruction blobs or records fail closed with the collected
+    reason. Empty lists and ordinary paths pass; the service classifies the shell
+    collector's exported records without a Python dependency in worker images.
 
     Known limit: a base ancestor older than the merge base that once had an injected-name
     file excuses a history-only add of that path that is not the shim's content (a merge
     with that ancestor as its last parent, or a branch built from it), since the oldest
-    record is then an edit or deletion. The shim's content is still caught by its blob id,
-    and such a branch does not merge cleanly into the base."""
+    record is then an edit or deletion. Normalized shim content still fails, and such
+    a branch does not merge cleanly into the base."""
     diff = gi.one("diff_paths")
     bundle = gi.one("bundle_head")
     if diff is None:
@@ -541,7 +548,9 @@ def no_injected_files(gi: GateInput) -> GateOutcome:
     )
     if hits:
         return GateOutcome(GateResult.FAIL, f"injected paths in the branch: {hits[:10]}", ids)
-    return GateOutcome(GateResult.PASS, "no shim, .crucible, or identity path in the branch", ids)
+    return GateOutcome(
+        GateResult.PASS, "no injected instruction, harness, or identity path in the branch", ids
+    )
 
 
 def no_secrets(gi: GateInput) -> GateOutcome:

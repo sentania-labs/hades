@@ -19,6 +19,7 @@ import pytest
 from crucible.adapters.execution import scripts, workspace
 from crucible.adapters.execution.collected import read_outputs
 from crucible.ports.execution import IDENTITY_MOUNT, OUTPUT_MOUNT, REPORT_MOUNT, LaunchSpec
+from tests.collector_tools import collector_env
 from tests.fixtures import contract_document
 
 HOSTILE_REFS = [
@@ -409,7 +410,13 @@ def _collect(
     generated = generated.replace(scripts.REPO_MOUNT, str(repo))
     generated = generated.replace(OUTPUT_MOUNT, str(output))
     generated = generated.replace(REPORT_MOUNT, str(report))
-    return subprocess.run(["sh", "-c", generated], capture_output=True, text=True, check=False)
+    return subprocess.run(
+        ["sh", "-c", generated],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=collector_env(output.parent),
+    )
 
 
 def test_edits_left_uncommitted_are_committed_as_the_policy_author_with_the_trailer(

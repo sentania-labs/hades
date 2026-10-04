@@ -41,6 +41,7 @@ from crucible.domain.entities import (
 from crucible.domain.gates import GateInput, GateResult, run_evidence_present
 from crucible.domain.lifecycle import AttemptState, TaskState
 from crucible.ports.execution import CollectedArtifact, CollectedOutputs, LaunchSpec
+from tests.collector_tools import collector_env
 
 NOW = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
 GIT_USER = ["-c", "user.name=test", "-c", "user.email=test@example.invalid"]
@@ -88,7 +89,13 @@ def _collect(tmp_path: Path, repo: Path, *, cap: int = 1024 * 1024) -> Path:
         .replace("/crucible/repo", str(repo))
         .replace("/crucible/out", str(output))
     )
-    result = subprocess.run(["sh", "-c", script], text=True, capture_output=True, check=False)
+    result = subprocess.run(
+        ["sh", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=collector_env(tmp_path),
+    )
     assert result.returncode == 0, result.stderr
     assert (output / "collector.ok").is_file()
     return output

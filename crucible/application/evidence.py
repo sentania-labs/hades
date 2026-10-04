@@ -67,7 +67,15 @@ def _add(
 
 
 def _changes_payload(changes: tuple[PathChange, ...]) -> list[dict[str, str]]:
-    return [{"path": c.path, "status": c.status, "blob": c.blob} for c in changes]
+    return [
+        {
+            "path": c.path,
+            "status": c.status,
+            "blob": c.blob,
+            **({"classification": c.classification} if c.classification else {}),
+        }
+        for c in changes
+    ]
 
 
 def _commit_changes_payload(bundle: BranchBundle) -> dict[str, Any]:
@@ -77,7 +85,11 @@ def _commit_changes_payload(bundle: BranchBundle) -> dict[str, Any]:
     before #369."""
     if bundle.commit_changes is None:
         return {}
-    kept = tuple(c for c in bundle.commit_changes if injected_name(c.path))
+    kept = tuple(
+        c
+        for c in bundle.commit_changes
+        if injected_name(c.path) or c.classification.startswith("error:")
+    )
     return {"commit_changes": _changes_payload(kept)}
 
 
@@ -463,7 +475,11 @@ def record_collection_evidence(
         diff_payload: dict[str, Any] = {"paths": list(outputs.diff_paths)}
         if outputs.diff_changes is not None:
             # Only the injected-name records the gate reads, as for the commits (#369).
-            kept = tuple(c for c in outputs.diff_changes if injected_name(c.path))
+            kept = tuple(
+                c
+                for c in outputs.diff_changes
+                if injected_name(c.path) or c.classification.startswith("error:")
+            )
             diff_payload["changes"] = _changes_payload(kept)
         if outputs.base_paths is not None:
             diff_payload["base_paths"] = [p for p in outputs.base_paths if injected_name(p)]

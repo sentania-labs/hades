@@ -17,6 +17,7 @@ import pytest
 
 from crucible.adapters.execution import scripts
 from crucible.adapters.execution.collected import read_outputs, read_path_changes
+from crucible.adapters.execution.injected_collection import classify_collected
 from crucible.application.evidence import record_collection_evidence
 from crucible.domain.entities import Attempt, EvidenceRecord, Task
 from crucible.domain.gates import (
@@ -36,6 +37,7 @@ from crucible.ports.execution import (
     CollectedOutputs,
     LaunchSpec,
 )
+from tests.collector_tools import collector_env
 from tests.fixtures import contract_document
 
 ZERO = "0" * 40
@@ -187,7 +189,13 @@ def _evidence(tmp_path: Path, repo: Path, *, expected_exit: int = 0) -> tuple[Ev
     generated = generated.replace(scripts.REPO_MOUNT, str(repo))
     generated = generated.replace(OUTPUT_MOUNT, str(output))
     generated = generated.replace(REPORT_MOUNT, str(report))
-    result = subprocess.run(["sh", "-c", generated], capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        ["sh", "-c", generated],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=collector_env(tmp_path),
+    )
     assert result.returncode == expected_exit, result.stderr
     spec = LaunchSpec(
         attempt_id="01ATTEMPT",
@@ -430,7 +438,7 @@ def test_a_worker_set_log_diff_merges_does_not_change_the_verdict(tmp_path: Path
 
 def test_an_inflated_listing_with_a_shim_past_the_read_limit_fails(tmp_path: Path) -> None:
     """40,000 long-named files make changed.txt and commit-paths.txt larger than what is
-    read of them, sorted so zzz/CLAUDE.md falls past the cut. The raw records name only
+    read of them, sorted so zzz/CLAUDE.md falls past the cut. The classified records keep only
     injected-name paths and still carry the shim, and the gate fails on the cut lists."""
     repo = _repo(tmp_path)
     empty = _git(repo, "hash-object", "-w", "--stdin").strip()
@@ -605,3 +613,203 @@ def test_missing_or_invalid_prepared_base_fails_closed(tmp_path: Path, record: s
     assert not (tmp_path / "output/collector.ok").exists()
     for name in ("diff-raw.txt", "commit-raw.txt", "base-injected.txt"):
         assert not (tmp_path / "output" / name).exists()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Agents.md",
+        "AGENTS.MD",
+        "\u0410GENTS.md",
+        "AGENT\u0405.md",
+        "AGE\u039dTS.md",
+        "AGENTS\u0410.md",
+        "CLAUDE\u200b.md",
+        "AGENTS.override.md",
+        "CLAUDE.local.md",
+        "GEMINI.md",
+        ".claude/settings.json",
+        ".codex/config.toml",
+        ".hermes/SOUL.md",
+        ".gemini/settings.json",
+        ".CRUCIBLE/x",
+        "crucible/Identity/x",
+        "nested/Agents.md",
+        "nested/.ClAuDe/settings.json",
+        "nested/CLAUDE\u2060.local.MD",
+        "nested/GEMINI\ufe0f.md",
+        "AGENTS\n.local.md",
+        ".claude/.\u200b./settings.json",
+    ],
+)
+@pytest.mark.parametrize("history_only", [False, True])
+def test_issue_400_instruction_names_through_collector(
+    tmp_path: Path,
+    name: str,
+    history_only: bool,
+) -> None:
+    repo = _repo(tmp_path)
+    _write(repo, name, "# instructions\n")
+    _commit(repo, "add instruction")
+    if history_only:
+        _git(repo, "rm", "-q", name)
+        _commit(repo, "remove instruction")
+    assert _collected(tmp_path, repo)[0] is GateResult.FAIL
+
+
+@pytest.mark.parametrize("name", [".claude", "nested/.CoDeX", ".hermes", ".gemini", ".crucible"])
+def test_issue_400_directory_symlink_through_collector(tmp_path: Path, name: str) -> None:
+    repo = _repo(tmp_path)
+    target = repo / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.symlink_to("elsewhere", target_is_directory=True)
+    _commit(repo, "directory symlink")
+    assert _collected(tmp_path, repo)[0] is GateResult.FAIL
+
+
+@pytest.mark.parametrize("suffix", ["", "\r\n", " \t\n", "\t\r\n\r\n"])
+@pytest.mark.parametrize("history_only", [False, True])
+def test_issue_400_near_shim_edit_through_collector(
+    tmp_path: Path,
+    suffix: str,
+    history_only: bool,
+) -> None:
+    repo = _repo(tmp_path)
+    (repo / "CLAUDE.md").write_bytes((injected_shim_text() + suffix).encode())
+    _commit(repo, "near shim")
+    if history_only:
+        _write(repo, "CLAUDE.md", "# ordinary project instructions\n")
+        _commit(repo, "ordinary edit")
+    result, _, bundle = _collected(tmp_path, repo)
+    assert result is GateResult.FAIL
+    assert any(c["classification"] == "shim" for c in bundle["commit_changes"])
+
+
+def test_issue_400_plain_edit_through_collector(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _write(repo, "CLAUDE.md", "# Follow the project conventions.\n")
+    _commit(repo, "plain edit")
+    assert _collected(tmp_path, repo)[0] is GateResult.PASS
+
+
+@pytest.mark.parametrize("bad_name", [False, True])
+def test_issue_400_unclassifiable_input_fails_with_reason(tmp_path: Path, bad_name: bool) -> None:
+    repo = _repo(tmp_path)
+    if bad_name:
+        name = os.fsdecode(b"ordinary-\xff.txt")
+        (repo / name).write_bytes(b"ordinary file")
+        reason = "undecodable name"
+    else:
+        (repo / "CLAUDE.md").write_bytes(b"\xff invalid UTF-8")
+        reason = "unreadable blob"
+    _commit(repo, "unclassifiable input")
+    gi = GateInput(
+        contract=contract_document(),
+        policy={},
+        head_sha="a" * 40,
+        evidence=_evidence(tmp_path, repo),
+    )
+    outcome = evaluate_gate(GateName.NO_INJECTED_FILES, gi)
+    assert outcome.result is GateResult.FAIL
+    assert reason in outcome.detail
+
+
+def test_issue_400_missing_blob_fails_with_reason(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _write(repo, "CLAUDE.md", "# a new blob to remove\n")
+    _commit(repo, "edit")
+    blob = _git(repo, "rev-parse", "HEAD:CLAUDE.md").strip()
+    (repo / ".git/objects" / blob[:2] / blob[2:]).unlink()
+    gi = GateInput(
+        contract=contract_document(),
+        policy={},
+        head_sha="a" * 40,
+        evidence=_evidence(tmp_path, repo),
+    )
+    outcome = evaluate_gate(GateName.NO_INJECTED_FILES, gi)
+    assert outcome.result is GateResult.FAIL
+    assert "unreadable blob" in outcome.detail
+    assert blob in outcome.detail
+
+
+def test_issue_400_spelling_variant_cannot_borrow_base_exemption(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _git(repo, "mv", "CLAUDE.md", "claude.md")
+    _commit(repo, "rename")
+    assert _collected(tmp_path, repo)[0] is GateResult.FAIL
+
+
+@pytest.mark.parametrize("name", ["d\u00ef/CLAUDE.local.md", "di\u0308/CLAUDE.local.md"])
+def test_issue_400_existing_unicode_path_plain_edit_passes(tmp_path: Path, name: str) -> None:
+    repo = _repo(tmp_path)
+    _git(repo, "checkout", "-q", "main")
+    _write(repo, name, "# existing instructions\n")
+    _commit(repo, "base instructions")
+    (tmp_path / "output/prepared-base.txt").write_text(_git(repo, "rev-parse", "HEAD"))
+    _git(repo, "checkout", "-q", "crucible/test")
+    _git(repo, "merge", "-q", "main")
+    _write(repo, name, "# plain edit\n")
+    _commit(repo, "edit")
+    assert _collected(tmp_path, repo)[0] is GateResult.PASS
+
+
+def test_issue_400_unknown_classification_fails_closed(tmp_path: Path) -> None:
+    raw = tmp_path / "diff-raw.txt"
+    raw.write_text(
+        '{"version":1,"changes":[{"path":"CLAUDE.md","status":"M",'
+        '"blob":"abc","classification":"unknown"}]}'
+    )
+    changes = read_path_changes(raw)
+    assert changes is not None
+    assert "unknown content classification" in changes[0].classification
+
+
+@pytest.mark.parametrize("edit", [False, True])
+def test_clean_and_ordinary_branches_preserve_collector_outputs(tmp_path: Path, edit: bool) -> None:
+    repo = _repo(tmp_path)
+    if edit:
+        _write(repo, "ordinary.txt", "ordinary edit\n")
+        (repo / "binary.dat").write_bytes(b"\xff\x00ordinary binary")
+        _commit(repo, "ordinary work")
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "isolation.tsv").write_text("database\trefused\n")
+    evidence = _evidence(tmp_path, repo)
+    gi = GateInput(
+        contract=contract_document(),
+        policy={},
+        head_sha=_git(repo, "rev-parse", "HEAD").strip(),
+        evidence=evidence,
+    )
+    assert evaluate_gate(GateName.NO_INJECTED_FILES, gi).result is GateResult.PASS
+    output = tmp_path / "output"
+    assert (output / "collector.ok").is_file()
+    assert _git(output / "tree", "rev-parse", "HEAD") == _git(repo, "rev-parse", "HEAD")
+    assert (output / "report/isolation.tsv").read_text() == "database\trefused\n"
+    bundle = gi.one("bundle_head")
+    assert bundle is not None
+    assert bundle.payload["commits"] == int(edit)
+    assert not list((output / "injected-blobs").iterdir())
+    if edit:
+        assert evaluate_gate(GateName.COMMITS_PRESENT, gi).result is GateResult.PASS
+        assert evaluate_gate(GateName.COMMIT_POLICY, gi).result is GateResult.PASS
+        _git(repo, "bundle", "verify", str(output / "work_branch.bundle"))
+        assert (output / "tree/ordinary.txt").read_text() == "ordinary edit\n"
+        assert bundle.payload["commit_messages"] == ["ordinary work"]
+
+
+@pytest.mark.parametrize(
+    "record",
+    [b":000000 100644 " + ZERO.encode() + b" " + OTHER.encode() + b" A\0", b"unterminated"],
+)
+def test_truncated_collector_record_fails_without_stop_iteration(
+    tmp_path: Path, record: bytes
+) -> None:
+    (tmp_path / "diff-raw.txt").write_bytes(record)
+    (tmp_path / "commit-raw.txt").write_bytes(b"")
+    (tmp_path / "base-injected.txt").write_bytes(b"")
+    diff, history = classify_collected(tmp_path)
+    assert not history
+    assert len(diff) == 1
+    assert diff[0].classification.startswith("error:")
+    assert "record" in diff[0].classification
