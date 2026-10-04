@@ -26,6 +26,11 @@
 schema_version: "1.0"
 task_external_id: "FDY-0042"       # fact: optional, Crucible fills it
 summary: "..."
+self_review:
+  documentation: ["docs/retries.md"]
+  acceptance_criteria:
+    - { id: "AC1", status: "met", evidence: "tests/ledger/test_import.py covers it" }
+  omissions: []
 changed_files: ["src/ledger/import.py", "tests/ledger/test_import.py"]   # fact
 refs:                              # fact
   branch: "crucible/FDY-0042"
@@ -51,7 +56,7 @@ follow_ups: ["..."]
 
 The worker writes judgement and Crucible derives facts (hades #215,
 2026-09-28). The judgement fields are required, and empty lists are explicit:
-`summary`, `acceptance_mapping`, `proposed_pull_request` (its `title` and
+`summary`, `self_review`, `acceptance_mapping`, `proposed_pull_request` (its `title` and
 `body`), `limitations`, `risks`, `blockers` and `follow_ups`. The fact fields
 are optional: at collection Crucible fills `task_external_id` from the task,
 `changed_files` from the collected diff, `refs` from the collected branch
@@ -68,6 +73,14 @@ completed document; the worker's own document is kept as the worker's claim.
 id (`AC1: {status: met, evidence: "..."}`); Crucible stores the list form.
 Unknown fields are still refused.
 
+`self_review` is required. It names where documentation was updated, maps every
+acceptance criterion with evidence, and lists anything knowingly left out and why. This
+worker self-review is the internal review. A missing section makes `report_present`
+fail and names `self_review`. Once every blocking gate passes, Hades records acceptance
+and publishes without an orchestrator review or acceptance call, on first attempts and
+corrections alike. The review-report endpoint remains available for operator
+out-of-band adversarial findings and is not a gate.
+
 The worker image carries `crucible-report check <report.yaml>`, a
 standard-library mirror of this schema that prints each problem in plain
 words and reads the contract from the identity bundle to check that every
@@ -83,7 +96,7 @@ stops the task.
 The claim has no `pushed`, `pull_request`, or `ci` fields: workers cannot
 push and never see CI. Those facts are Crucible's to observe.
 
-## ReviewReportV1 (the internal review)
+## ReviewReportV1 (operator out-of-band adversarial review)
 
 ```yaml
 schema_version: "1.0"

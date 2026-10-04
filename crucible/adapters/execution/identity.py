@@ -135,7 +135,10 @@ def render_identity_md(
         "## Report\n\n"
         f"Write `{REPORT_MOUNT}/report.yaml` (schema: `{IDENTITY_MOUNT}/report-schema.json`) "
         "with "
-        '`schema_version: "1.0"`, `summary`, `acceptance_mapping` (one entry per '
+        '`schema_version: "1.0"`, `summary`, `self_review` (`documentation` names where '
+        "documentation was updated, `acceptance_criteria` maps every criterion with "
+        "evidence, and `omissions` names anything knowingly left out and why), "
+        "`acceptance_mapping` (one entry per "
         f"criterion id: {ids}; `status` is `met`, `not_met`, `partial` or "
         "`not_exercised`, with `evidence`), `proposed_pull_request` (`title`, `body`), "
         "and `limitations`, `risks`, `blockers`, `follow_ups` (lists, `[]` if none). "

@@ -26,10 +26,10 @@ awaiting_quota --cancel--> cancelled
 blocked --decision--> scheduled
 
 reported --a blocking pre-PR gate fails--> pre_pr_gates_failed --wake-->
-reported --no blocking gate fails, internal review required for this head--> awaiting_internal_review --wake-->
-reported --no blocking gate fails, internal review not required for this head--> gates_passed
-awaiting_internal_review --ReviewReport recorded for this head--> gates_passed
-gates_passed --wake--> awaiting_acceptance
+reported --a blocking pre-PR gate fails, including a missing self_review--> pre_pr_gates_failed --wake-->
+reported --every blocking gate passes and the report carries self_review--> gates_passed
+gates_passed --Hades records acceptance, artifacts deliverable--> accepted
+gates_passed --Hades records acceptance, branch or pull_request deliverable--> publishing
 
 awaiting_acceptance --accept, deliverable is artifacts--> accepted
 awaiting_acceptance --accept, deliverable is branch or pull_request--> publishing
@@ -44,6 +44,14 @@ publishing --branch pushed and verified, PR opened or head updated, rounds satis
 publishing --push, verification, or PR call failed--> publish_failed --wake-->
 publish_failed --retry publish (decision)--> publishing
 publish_failed --cancel--> cancelled
+
+The worker's `self_review` is the internal review for first attempts and corrections. It
+names where documentation was updated, maps every acceptance criterion with evidence,
+and lists anything knowingly left out and why. Hades records acceptance and publishes
+without an orchestrator review or acceptance call. Publication sends one informational
+`published, PR #N` wake. The orchestrator may still cancel or attach a correction in a
+later state. Review reports are out-of-band operator adversarial findings and are not a
+gate.
 
 awaiting_external_review --review signal from allowlisted login--> external_feedback_received --wake-->
 awaiting_ci_certification --review signal from allowlisted login--> external_feedback_received --wake-->

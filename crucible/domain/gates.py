@@ -318,12 +318,16 @@ def report_present(gi: GateInput) -> GateOutcome:
     notes = _claim_notes(item.payload)
     if not item.payload.get("parsed_ok"):
         errors = [e for e in item.payload.get("parse_errors") or [] if isinstance(e, dict)]
+        self_review_missing = any(
+            list(error.get("loc") or [])[:1] == ["self_review"] for error in errors
+        )
         return GateOutcome(
             GateResult.FAIL,
             f"the report did not parse as CompletionClaimV1 ({len(errors)} problems)"
             + _parse_problems(errors)
             + notes,
             (item.id,),
+            always_blocks=self_review_missing,
         )
     return GateOutcome(GateResult.PASS, "CompletionClaimV1 parsed" + notes, (item.id,))
 

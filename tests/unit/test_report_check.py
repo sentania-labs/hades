@@ -78,6 +78,14 @@ def judgement_only() -> dict[str, Any]:
     document.update(
         {
             "summary": "Added greet.sh, its test and the Makefile targets.",
+            "self_review": {
+                "documentation": [],
+                "acceptance_criteria": [
+                    {"id": criterion, "status": "met", "evidence": "covered"}
+                    for criterion in CRITERIA
+                ],
+                "omissions": [],
+            },
             "limitations": [],
             "risks": [],
             "blockers": [],
@@ -95,6 +103,8 @@ def test_the_checker_names_each_problem_in_ht_0004s_report_in_plain_words() -> N
         "`head` is not a report field: remove it (Crucible reads the head from the "
         "collected branch).",
         "summary is missing: say in a few sentences what you changed and why.",
+        "self_review is missing: name the documentation updated, map every acceptance "
+        "criterion with evidence, and list anything knowingly left out and why.",
         "proposed_pull_request.base is not a field: remove it (Crucible sets the pull "
         "request's base and head itself).",
         "proposed_pull_request.head is not a field: remove it (Crucible sets the pull "
@@ -119,8 +129,9 @@ def test_ht_0004s_report_had_15_problems_and_now_has_only_the_worker_s_own() -> 
         "limitations",
         "proposed_pull_request.base",
         "proposed_pull_request.head",
-        "risks",
-        "summary",
+            "risks",
+            "self_review",
+            "summary",
     ]
     assert completed.filled == FACT_FIELDS
 
@@ -135,7 +146,7 @@ def test_the_checker_command_prints_the_problems_and_exits_1(tmp_path: Path) -> 
     )
     assert result.returncode == 1, result.stdout + result.stderr
     lines = result.stdout.splitlines()
-    assert lines[0] == f"{HT_0004}: 8 problems"
+    assert lines[0] == f"{HT_0004}: 9 problems"
     assert lines[1].startswith("- `head` is not a report field")
     assert any("Fix each one and run `crucible-report check" in line for line in lines)
 

@@ -32,6 +32,7 @@ FACT_FIELDS: tuple[str, ...] = (
 )
 JUDGEMENT_FIELDS: tuple[str, ...] = (
     "summary",
+    "self_review",
     "acceptance_mapping",
     "proposed_pull_request",
     "limitations",
@@ -65,6 +66,19 @@ class AcceptanceMapping(StrictModel):
     id: str = Field(min_length=1)
     status: Literal["met", "not_met", "not_exercised", "partial"]
     evidence: str
+
+
+class SelfReview(StrictModel):
+    """The worker's internal review of its own completed change (hades #402)."""
+
+    documentation: list[str]
+    acceptance_criteria: list[AcceptanceMapping]
+    omissions: list[str]
+
+    @field_validator("acceptance_criteria", mode="before")
+    @classmethod
+    def _mapping(cls, value: Any) -> Any:
+        return normalise_mapping(value)
 
 
 class ProposedPullRequest(StrictModel):
@@ -121,6 +135,7 @@ class CompletionClaimV1(StrictModel):
     )
     task_external_id: str | None = Field(default=None, min_length=1, description=_FILLED)
     summary: str = Field(min_length=1)
+    self_review: SelfReview
     changed_files: list[str] | None = Field(default=None, description=_FILLED)
     refs: ClaimRefs | None = Field(default=None, description=_FILLED)
     checks: list[ClaimCheck] | None = Field(default=None, description=_FILLED)

@@ -41,6 +41,10 @@ acceptance_criteria:               # each becomes a row the worker must map to
   - id: "AC2"
     text: "Existing import tests still pass."
 
+# The completion report must contain self_review. It names where documentation was
+# updated, maps every acceptance criterion with evidence, and lists anything knowingly
+# left out and why. That worker self-review is the internal review used for publication.
+
 required_verification:             # must include every check the repository policy requires
   - { id: "V1", command: "make lint", expect_exit: 0 }
   - { id: "V2", command: "make test", expect_exit: 0 }

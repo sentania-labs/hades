@@ -30,6 +30,7 @@ class WakeReason(StrEnum):
     NEEDS_MORE_WORK = "needs_more_work"
     # 23 and 17: the delivery half.
     PUBLISH_FAILED = "publish_failed"
+    PUBLISHED = "published"
     EXTERNAL_FEEDBACK_RECEIVED = "external_feedback_received"
     EXTERNAL_REVIEW_OVERDUE = "external_review_overdue"
     EXTERNAL_REVIEW_TRIGGER_NEEDED = "external_review_trigger_needed"

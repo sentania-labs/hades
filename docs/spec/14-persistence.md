@@ -51,6 +51,13 @@ Indexes: tasks (state), (principal_id, updated_at); events (task_id, seq);
 attempts (state); leases (expires_at); wakes (principal_id, acked_at) partial
 where acked_at is null.
 
+The completion claim's required `self_review` names where documentation was updated,
+maps every acceptance criterion with evidence, and lists anything knowingly left out
+and why. It is the internal review. After every blocking gate passes, the supervisor
+writes the acceptance result itself and publishes; no orchestrator review or acceptance
+row is required. `review_reports` remain operator out-of-band adversarial findings
+against the pull request and do not gate publication.
+
 Triggers: `events`, `task_contracts`, `release_contracts`, `review_dispositions`, and `ci_decisions` reject UPDATE and DELETE. No table ever holds a token, key, or secret; a CI check asserts no column name matches the secret-name pattern. Writes to
 `executions`, `attempts`, `workers`, `heartbeats`, `gate_results`,
 `completion_claims`, `attempt_metrics`, `evidence`, `log_chunks`, `retention_actions`, `supervisor_status`,

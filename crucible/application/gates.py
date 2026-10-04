@@ -13,6 +13,11 @@ import logging
 from typing import Any
 
 from crucible.application.transitions import move_task, record_event
+from crucible.application.acceptance import (
+    PUBLISHED_DELIVERABLES,
+    deliverable_kinds,
+    record_gate_acceptance,
+)
 from crucible.application.wakes import create_wake
 from crucible.contracts.wake import WakeReason
 from crucible.domain.entities import (
@@ -51,17 +56,8 @@ PHASE_PRE_PR = "pre_pr"
 def internal_review_required(
     policy: dict[str, Any], contract: dict[str, Any], role: ExecutionRole
 ) -> bool:
-    """09: a correction needs another internal review only when the correction contract
-    asks for one or the policy requires one for corrections."""
-    review = policy.get("internal_review", {})
-    if not review.get("required", True):
-        return False
-    if role is not ExecutionRole.CORRECT:
-        return True
-    if review.get("required_for_corrections", False):
-        return True
-    correction = contract.get("correction") or {}
-    return bool(correction.get("request_internal_review", False))
+    """The report self-review replaced the pre-publication orchestrator review (#402)."""
+    return False
 
 
 def evidence_items(uow: UnitOfWork, attempt_id: str, task_id: str) -> tuple[EvidenceItem, ...]:
@@ -311,30 +307,30 @@ def evaluate_and_advance(
         attempt_id=attempt.id,
         payload={"head_sha": task.head_sha, "results": summary["results"]},
     )
+    acceptance = record_gate_acceptance(uow, clock, task=task)
+    kinds = deliverable_kinds(uow, task)
+    destination = (
+        TaskState.PUBLISHING if PUBLISHED_DELIVERABLES & set(kinds) else TaskState.ACCEPTED
+    )
+    event = (
+        EventKind.TASK_PUBLISHING
+        if destination is TaskState.PUBLISHING
+        else EventKind.TASK_ACCEPTED
+    )
     move_task(
         uow,
         clock,
         task,
-        TaskState.AWAITING_ACCEPTANCE,
-        EventKind.TASK_AWAITING_ACCEPTANCE,
+        destination,
+        event,
         execution_id=execution.id,
         attempt_id=attempt.id,
-        payload={"head_sha": task.head_sha},
-    )
-    create_wake(
-        uow,
-        clock,
-        principal_id=task.principal_id,
-        reason=WakeReason.GATES_PASSED,
-        summary=(
-            f"every blocking pre-PR gate passed on {task.head_sha}; "
-            "Foundry's AcceptanceResult is what moves this forward."
-            + reviewer_note(summary["for_reviewer"])
-        ),
-        task=task,
-        attempt_id=attempt.id,
-        extra_links={"accept": f"/v1/tasks/{task.id}/accept"},
-        for_reviewer=summary["for_reviewer"],
+        payload={
+            "head_sha": task.head_sha,
+            "acceptance_id": acceptance.id,
+            "deliverables": kinds,
+            "automatic": True,
+        },
     )
     return outcomes
 
