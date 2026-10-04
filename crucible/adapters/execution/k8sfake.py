@@ -340,6 +340,7 @@ class FakeKubernetesApi:
                 "metadata": {
                     "name": name,
                     "namespace": self.namespace,
+                    "resourceVersion": str(self._next_rv()),
                     **({"labels": dict(labels)} if labels else {}),
                 },
                 "data": {k: base64.b64encode(v).decode("ascii") for k, v in data.items()},
@@ -503,6 +504,7 @@ class FakeKubernetesApi:
             if current_version is not None and current_version != body_version:
                 raise KubernetesApiError(409, "conflict: resource version mismatch")
         _merge(obj.body, dict(body))
+        obj.body.setdefault("metadata", {})["resourceVersion"] = str(self._next_rv())
         return obj.body
 
     def pod_log(

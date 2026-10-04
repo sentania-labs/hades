@@ -1,18 +1,4 @@
-"""Single-writer enforcement for the Codex credential renewer (339).
-
-Verifies the fix that prevents the API process from mutating the login while the
-supervisor is the only writer.  Three behaviours are tested:
-
-1. **AC1**: ``serve --api`` wiring constructs no grant-capable renewer.  The read-only
-   renewer returned by ``_build_readonly_renewer`` has a no-op ``grant`` so that
-   calling ``refresh`` does not mutate the store or record a refresh event.
-2. **AC2**: a refresh request recorded by the API is performed by the supervisor tick.
-   A ``CREDENTIAL_REFRESH_REQUESTED`` event is inserted into the event store,
-   ``refresh_on_request`` detects it, and the renewer calls the grant function.
-3. **AC3**: a stale ``resourceVersion`` makes the Secret patch fail closed (409) instead
-   of overwriting.  ``KubernetesCredentialStore.write`` passes the cached version to
-   the patch client, and the fake returns 409 when it differs.
-"""
+"""Single-writer request and concurrency regression coverage (339, 405)."""
 
 from __future__ import annotations
 
@@ -39,7 +25,6 @@ from crucible.application.credential_renewer import (
 )
 from crucible.application.errors import ConflictError
 from crucible.cli import wiring
-from crucible.cli.wiring import _build_readonly_renewer
 from crucible.domain.entities import Event, SupervisorStatus
 from crucible.domain.events import EventKind
 from crucible.settings import CredentialSettings, Settings
@@ -76,32 +61,20 @@ def _login_dict(clock: FakeClock) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def test_api_renewer_noop_grand_does_not_mutate(tmp_path: Path) -> None:
-    """The API process's renewer cannot call the grant function."""
+def test_api_status_cannot_mutate(tmp_path: Path) -> None:
     clock = FakeClock(datetime(2026, 9, 30, tzinfo=UTC))
     login_path = tmp_path / "auth.json"
     original_auth = json.dumps(_login_dict(clock))
     login_path.write_text(original_auth)
-
-    full_renewer = CodexCredentialRenewer(
-        login_path=login_path,
-        clock=clock,
-        grant=lambda _token: {"access_token": _jwt(clock.now() + timedelta(hours=2))},
-    )
-
-    ro = _build_readonly_renewer(full_renewer)
-
-    # The read-only renewer shares the same store so is_dead is accurate.
+    settings = Settings(credentials={"codex": CredentialSettings(path=str(tmp_path))})
+    ro = wiring._build_readonly_renewer(settings, {})
+    assert ro is not None
     assert ro.dead is False
-
-    # Calling refresh on the API renewer: the no-op grant returns {}, so no
-    # new tokens are set.  The existing tokens are copied back, but the
-    # access_token is still the original one (never refreshed).
-    ro.refresh("from-api", force=True)
-
-    # Verify the store still has the original access token.
-    stored = json.loads(login_path.read_text())
-    assert stored["tokens"]["access_token"] == _jwt(clock.now() + timedelta(hours=1))
+    assert ro.last_refresh == _login_dict(clock)["last_refresh"]
+    assert not hasattr(ro, "refresh")
+    assert not hasattr(ro, "write")
+    assert not hasattr(ro, "mark_dead")
+    assert login_path.read_text() == original_auth
 
 
 # ---------------------------------------------------------------------------
@@ -251,11 +224,12 @@ def test_k8s_store_rejects_stale_resource_version() -> None:
     cached_version = store._resource_version
     assert cached_version is not None
 
-    # Modify the secret through the fake API so the version changes.
-    other_body = client.get("secrets", "crucible-harness-codex")
-    other_body["data"]["other.json"] = base64.b64encode(b"data").decode()
-    other_body["metadata"]["resourceVersion"] = "9999"
-    client.objects[("secrets", "crucible-harness-codex")].body = other_body
+    # A separate real store installs a new login and bumps the fake's version.
+    other = KubernetesCredentialStore(client)
+    other_login = other.read()
+    other_login["tokens"]["refresh_token"] = "replacement-login"
+    other.write(other_login)
+    assert other._resource_version != cached_version
 
     # Now write() should fail because our cached version is stale.
     with pytest.raises(KubernetesApiError) as exc_info:
@@ -393,25 +367,6 @@ def _record_refresh_request(shared: dict[str, Any], clock: FakeClock) -> None:
             payload={"harness": "codex", "reason": "administrator requested refresh"},
         )
     )
-
-
-def test_api_wiring_constructs_no_grant_capable_renewer(tmp_path: Path) -> None:
-    """``serve --api`` wiring must never hold a renewer that can mutate the login:
-    mirrors the Wiring._build_api_context assembly at crucible/cli/wiring.py."""
-    clock = FakeClock(datetime(2026, 9, 30, tzinfo=UTC))
-    login_path = tmp_path / "auth.json"
-    login_path.write_text(json.dumps(_login_dict(clock)))
-    settings = Settings(credentials={"codex": CredentialSettings(path=str(tmp_path))})
-    shared = _shared_store()
-    admin: Any = SimpleNamespace(clock=clock)
-    factory: Any = lambda: _FakeCursorUow(shared)  # noqa: E731
-
-    renewer = wiring.build_credential_renewer(settings, {}, factory, admin)
-    assert renewer is not None
-
-    api_renewer = wiring._build_readonly_renewer(renewer)
-    assert api_renewer.grant("refresh-token") == {}
-    assert api_renewer._pending_request_checker is None
 
 
 def test_refresh_request_cursor_persists_across_supervisor_restart(tmp_path: Path) -> None:

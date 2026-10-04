@@ -490,3 +490,22 @@ principal's work and are the same for every caller. That is what an
 orchestrator needs to say which of its tasks is stuck and why. Nothing in the response is a
 credential, a token, a key, a path, or a file name, and the view is
 read-only.
+
+## Codex refresh requests
+
+In renewer mode, **Refresh now** records a `credential_refresh_requested` event with
+the administrator's reason. The API does not perform an OAuth grant. The supervisor
+handles requests on its next tick, coalescing those already queued into one refresh
+and acknowledging them with its persisted request cursor. A transient failure leaves
+the request pending for retry without failing the tick; a successful refresh or a
+dead login is terminal. The Credentials page shows **Pending**, **Handled**, or
+**None** in the Refresh request column, alongside the last refresh result. Handled
+means acknowledged, including a dead-login outcome; it does not promise success.
+
+Only the supervisor process owns a grant-capable renewer. API and local admin wiring
+expose only `dead` and `last_refresh` status reads. Interactive login still runs in
+the API or admin path under the login lock. Replacing its Secret and marking a login
+dead carry a `metadata.resourceVersion` precondition; a conflicting write is refused.
+A renewal that conflicts with an unrelated Secret edit re-reads and retries the same
+fresh tokens under the new version if the stored refresh token is unchanged. A new
+login takes precedence over a grant from the previous login (12).

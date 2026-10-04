@@ -669,7 +669,7 @@ def test_wiring_builds_a_kubernetes_publisher_when_kubernetes_and_github_are_on(
         kubernetes={"enabled": True, "kubeconfig": _kubeconfig(tmp_path)},
         github={"enabled": True},
     )
-    wiring = wire(settings)
+    wiring = wire(settings, role="supervisor")
     assert "kubernetes" in wiring.providers and "docker" not in wiring.providers
     assert wiring.github is not None
     assert isinstance(wiring.publisher, KubernetesPublisher)
@@ -695,11 +695,11 @@ def test_wiring_routes_by_workspace_when_both_providers_are_on(
         kubernetes={"enabled": True, "kubeconfig": _kubeconfig(tmp_path)},
         github={"enabled": True, "app": {"app_id": 1, "private_key_path": str(pem)}},
     )
-    wiring = wire(settings)
+    wiring = wire(settings, role="supervisor")
     assert isinstance(wiring.publisher, ByWorkspacePublisher)
     # And with no GitHub App at all there is no publisher, which the supervisor reports.
     bare = Settings(database={"url": migrated}, docker=settings.docker)
-    assert wire(bare).publisher is None
+    assert wire(bare, role="supervisor").publisher is None
 
 
 # ----- FDY-0140: a quiet worker that is working is not stalled ------------------------

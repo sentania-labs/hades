@@ -33,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 async def _serve(*, api: bool, supervisor: bool, reload: bool, config: str | None) -> int:
     settings = load_settings(config)
-    wiring = wire(settings)
+    wiring = wire(settings, role="supervisor" if supervisor else "api")
     ok, detail = is_current(wiring.ctx.engine, settings.database.url)
     if not ok:
         log.error("refusing to serve: migrations not current", extra={"detail": detail})
