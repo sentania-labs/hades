@@ -15,33 +15,57 @@ INJECTED_PREFIXES: tuple[str, ...] = (
 INJECTED_NAMES: frozenset[str] = frozenset(
     {".crucible", "crucible-identity.md", "crucible-shim", ".crucible-identity"}
 )
-# NFC and casefold do not fold lookalikes. Cover the Greek and Cyrillic letters
-# resembling the Latin letters in instruction names, including Cyrillic U+0410 (#400).
+# NFC and casefold do not fold lookalikes. Cover both cases of the Greek and
+# Cyrillic letters resembling the Latin letters in instruction names (#400).
 _LOOKALIKES = str.maketrans(
     {
+        "\u0410": "a",
         "\u0430": "a",
+        "\u0421": "c",
         "\u0441": "c",
+        "\u0415": "e",
         "\u0435": "e",
+        "\u0406": "i",
         "\u0456": "i",
+        "\u0408": "j",
         "\u0458": "j",
+        "\u041e": "o",
         "\u043e": "o",
+        "\u0420": "p",
         "\u0440": "p",
+        "\u0405": "s",
         "\u0455": "s",
+        "\u0425": "x",
         "\u0445": "x",
+        "\u0423": "y",
         "\u0443": "y",
+        "\u0500": "d",
         "\u0501": "d",
+        "\u050c": "g",
         "\u050d": "g",
+        "\u04c0": "l",
         "\u04cf": "l",
+        "\u041c": "m",
         "\u043c": "m",
+        "\u0422": "t",
         "\u0442": "t",
+        "\u051c": "w",
         "\u051d": "w",
+        "\u0391": "a",
         "\u03b1": "a",
+        "\u0395": "e",
         "\u03b5": "e",
+        "\u0399": "i",
         "\u03b9": "i",
+        "\u039a": "k",
         "\u03ba": "k",
-        "\u03bd": "v",
+        "\u039d": "n",
+        "\u03bd": "n",
+        "\u039f": "o",
         "\u03bf": "o",
+        "\u03a1": "p",
         "\u03c1": "p",
+        "\u03a4": "t",
         "\u03c4": "t",
     }
 )
@@ -57,7 +81,7 @@ def normalized_instruction_path(path: str) -> str:
         and not 0xFE00 <= ord(c) <= 0xFE0F
         and not 0xE0100 <= ord(c) <= 0xE01EF
     )
-    return unicodedata.normalize("NFC", stripped.casefold()).translate(_LOOKALIKES)
+    return unicodedata.normalize("NFC", stripped).translate(_LOOKALIKES).casefold()
 
 
 def instruction_name_error(path: str) -> str:

@@ -613,6 +613,8 @@ def test_missing_or_invalid_prepared_base_fails_closed(tmp_path: Path, record: s
         "Agents.md",
         "AGENTS.MD",
         "\u0410GENTS.md",
+        "AGENT\u0405.md",
+        "AGE\u039dTS.md",
         "AGENTS\u0410.md",
         "CLAUDE\u200b.md",
         "AGENTS.override.md",
