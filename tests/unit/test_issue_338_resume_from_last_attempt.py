@@ -15,6 +15,7 @@ from crucible.application.gates import evaluate_and_advance
 from crucible.contracts.task_contract import Correction
 from crucible.domain.entities import ExecutionRole
 from crucible.domain.events import EventKind
+from crucible.domain.gates import GateOutcome, GateResult
 from crucible.domain.lifecycle import TaskState
 from crucible.ports.execution import WORK_MOUNT
 from tests.unit.test_correction_resume import _git, _repository
@@ -42,10 +43,12 @@ def test_correction_resume_default_and_explicit_alternative() -> None:
 
 @pytest.mark.parametrize("resume", [None, "last_attempt", "remote_branch"])
 @pytest.mark.parametrize("newer_attempt", [False, True])
+@pytest.mark.parametrize("failed_gate", ["verification_ran", "no_secrets"])
 async def test_published_correction_selects_only_newest_gate_failed_bundle(
     monkeypatch: pytest.MonkeyPatch,
     resume: str | None,
     newer_attempt: bool,
+    failed_gate: str,
 ) -> None:
     supervisor, pending, uow = _routing_setup(monkeypatch, all_busy=False)
     pending.execution.role = ExecutionRole.CORRECT
@@ -62,6 +65,9 @@ async def test_published_correction_selects_only_newest_gate_failed_bundle(
             payload={"bundle_verified": True, "head_sha": "failed-head", "bundle_sha256": "seal"},
         )
     ]
+    uow.gate_results.list_for_attempt.return_value = [
+        SimpleNamespace(gate=failed_gate, result="fail")
+    ]
     events = {
         EventKind.PUBLISH_COMPLETED.value: SimpleNamespace(payload={"head_sha": "pushed-head"}),
         EventKind.TASK_PRE_PR_GATES_FAILED.value: SimpleNamespace(attempt_id=previous.id),
@@ -73,7 +79,7 @@ async def test_published_correction_selects_only_newest_gate_failed_bundle(
     launch = await supervisor._build_spec(
         pending.attempt, pending.execution, pending.task, pending.contract
     )
-    if resume == "remote_branch" or newer_attempt:
+    if resume == "remote_branch" or newer_attempt or failed_gate == "no_secrets":
         assert launch.resume_bundle_path is None
     else:
         assert launch.resume_bundle_path == "/workspace/failed/output/work_branch.bundle"
@@ -82,7 +88,7 @@ async def test_published_correction_selects_only_newest_gate_failed_bundle(
         assert launch.resume_bundle_ancestor == "pushed-head"
 
 
-@pytest.mark.parametrize("mode", ["descendant", "divergent", "tampered"])
+@pytest.mark.parametrize("mode", ["descendant", "divergent", "tampered", "secret"])
 def test_preparer_checks_seal_and_task_ancestry_before_using_bundle(
     tmp_path: Path, mode: str
 ) -> None:
@@ -91,6 +97,9 @@ def test_preparer_checks_seal_and_task_ancestry_before_using_bundle(
     if mode == "divergent":
         _git(seed, "reset", "--hard", "main")
     (seed / "file.txt").write_text("failed attempt's work\n")
+    if mode == "secret":
+        (seed / "credential.txt").write_text("ghs_" + "A" * 30 + "\n")
+        _git(seed, "add", "credential.txt")
     _git(seed, "commit", "-am", "gate-failed correction")
     failed = _git(seed, "rev-parse", "HEAD")
     _git(seed, "bundle", "create", str(bundle), "main..crucible/FDY-0150")
@@ -130,7 +139,11 @@ def test_preparer_checks_seal_and_task_ancestry_before_using_bundle(
     else:
         assert result.returncode == 4
         assert (
-            "does not descend from task head" if mode == "divergent" else "does not match its seal"
+            "does not descend from task head"
+            if mode == "divergent"
+            else "contains a secret pattern"
+            if mode == "secret"
+            else "does not match its seal"
         ) in result.stderr
         assert not (work / "output" / "prepared-head.txt").exists()
     # Preparing the next attempt never publishes the failed work.
@@ -145,6 +158,13 @@ def test_gate_failure_wake_names_next_starting_head(monkeypatch: pytest.MonkeyPa
     uow.contracts.get.return_value = SimpleNamespace(document=pending.contract)
     uow.evidence.list_for_attempt.return_value = []
     uow.gate_results.list_for_attempt.return_value = []
+    monkeypatch.setattr(
+        "crucible.application.gates.evaluate_pre_pr",
+        lambda _gates, _input: {
+            "verification_ran": GateOutcome(GateResult.FAIL, "verification failed"),
+            "no_secrets": GateOutcome(GateResult.PASS, "scanner found nothing"),
+        },
+    )
     evaluate_and_advance(
         uow,
         supervisor._clock,
@@ -156,3 +176,32 @@ def test_gate_failure_wake_names_next_starting_head(monkeypatch: pytest.MonkeyPa
     wake = uow.wakes.add.call_args.args[0]
     assert "defaults to last_attempt at failed-head" in wake.payload["summary"]
     assert "remote_branch is an explicit alternative" in wake.payload["summary"]
+
+
+def test_no_secrets_failure_wake_names_published_head(monkeypatch: pytest.MonkeyPatch) -> None:
+    supervisor, pending, uow = _routing_setup(monkeypatch, all_busy=False)
+    pending.task.state = TaskState.REPORTED
+    pending.task.head_sha = "unsafe-head"
+    pending.execution.policy_snapshot = {}
+    uow.contracts.get.return_value = SimpleNamespace(document=pending.contract)
+    uow.evidence.list_for_attempt.return_value = []
+    uow.gate_results.list_for_attempt.return_value = []
+    uow.events.latest_for_task_kind.return_value = SimpleNamespace(
+        payload={"head_sha": "published-head"}
+    )
+    monkeypatch.setattr(
+        "crucible.application.gates.evaluate_pre_pr",
+        lambda _gates, _input: {
+            "no_secrets": GateOutcome(GateResult.FAIL, "secret pattern matched")
+        },
+    )
+    evaluate_and_advance(
+        uow,
+        supervisor._clock,
+        task=pending.task,
+        attempt=pending.attempt,
+        execution=pending.execution,
+    )
+    wake = uow.wakes.add.call_args.args[0]
+    assert "failed bundle is unsafe because no_secrets failed" in wake.payload["summary"]
+    assert "published head published-head" in wake.payload["summary"]

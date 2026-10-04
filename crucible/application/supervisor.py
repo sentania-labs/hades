@@ -1692,6 +1692,13 @@ class Supervisor:
                     if candidate.id < attempt.id
                 ]
                 newest = max(preceding, key=lambda candidate: candidate.id, default=None)
+
+                def failed_secret_gate(candidate: Attempt) -> bool:
+                    return any(
+                        row.gate == "no_secrets" and row.result == "fail"
+                        for row in route_uow.gate_results.list_for_attempt(candidate.id)
+                    )
+
                 previous_attempt = max(
                     (
                         candidate
@@ -1704,6 +1711,7 @@ class Supervisor:
                                 candidate is newest
                                 and gate_failure is not None
                                 and candidate.id == gate_failure.attempt_id
+                                and not failed_secret_gate(candidate)
                             )
                         )
                         and any(

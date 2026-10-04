@@ -21,6 +21,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from crucible.domain.gates import injected_shim_text
+from crucible.domain.secrets import secret_pattern_expressions
 from crucible.ports.execution import (
     OUTPUT_MOUNT,
     PACKAGE_CACHE_LEAF,
@@ -386,6 +387,7 @@ fi
     resume = "1" if from_remote_branch else "0"
     bundle_resume = ""
     if resume_bundle is not None:
+        secret_patterns = " ".join(_quote(pattern) for pattern in secret_pattern_expressions())
         bundle_resume = f"""
 if [ ! -f {_quote(resume_bundle)} ] || [ -L {_quote(resume_bundle)} ]; then
   printf 'previous attempt bundle is gone\\n' >&2
@@ -414,6 +416,20 @@ for ANCESTOR in {_quote(resume_bundle_ancestor or "")} "refs/remotes/origin/$WOR
   fi
 done
 {GIT} checkout -B "$WORK_BRANCH" refs/crucible/resume --
+# A seal authenticates the failed tree but does not make its contents safe. Scan the
+# restored tracked tree before any worker or harness credential can reach it.
+for SECRET_PATTERN in {secret_patterns}; do
+  if {GIT} grep -P -q -e "$SECRET_PATTERN" HEAD --; then
+    printf 'previous attempt bundle contains a secret pattern; refusing restored tree\n' >&2
+    exit 4
+  else
+    SCAN_STATUS=$?
+    if [ "$SCAN_STATUS" -ne 1 ]; then
+      printf 'previous attempt bundle secret scan failed\n' >&2
+      exit 4
+    fi
+  fi
+done
 STARTED="$ACTUAL_HEAD"
 """
     credential = drop = ""
