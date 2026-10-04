@@ -5,6 +5,12 @@
 #   tools/images/images.sh check     build every image; fail when any tag, harness list
 #                                    or OCI digest differs from images/manifest.env
 #
+# With DIGEST_WRITEBACK=1, `check` passes when only *_DIGEST lines differ and writes the
+# built digests into images/manifest.env for the CI images job to commit (FDY-0310: CI
+# owns the digest lines). A tag, harness list or entry that differs still fails. The
+# job sets it only on a branch, never on main, a tag or its own digest commit; the
+# release never sets it.
+#
 # Either way the images end up loaded in the daemon under their manifest tags, which is
 # where the release pushes them from (tools/release/push_worker_images.sh).
 #
@@ -17,8 +23,8 @@
 # whose daemon can read anything, where the staging is merely harmless.
 #
 # Environment: DOCKER (the Docker CLI or the rootless wrapper), NO_CACHE and CACHE_DIR
-# (passed to build.sh), IMAGES_STAGE_ROOT (where the scratch directory goes, default
-# TMPDIR or /tmp).
+# (passed to build.sh), DIGEST_WRITEBACK (see above), IMAGES_STAGE_ROOT (where the
+# scratch directory goes, default TMPDIR or /tmp).
 set -euo pipefail
 
 mode=${1:-}
@@ -65,6 +71,12 @@ case "$mode" in
         # The whole file, not a subset: a tag, a harness version or a digest that the
         # build did not reproduce is drift, and so is an entry the build did not write.
         if ! diff -u "$source_dir/manifest.env" "$stage/manifest.env"; then
+            if [ "${DIGEST_WRITEBACK:-}" = 1 ] &&
+                python3 "$repo_root/tools/images/digest_commit.py" apply \
+                    "$source_dir/manifest.env" "$stage/manifest.env"; then
+                echo "images.sh: every tag and harness version reproduced; only digests differed, and CI commits them"
+                exit 0
+            fi
             echo "images.sh: the build from the pinned inputs does not reproduce images/manifest.env" >&2
             exit 1
         fi

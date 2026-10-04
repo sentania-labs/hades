@@ -26,8 +26,12 @@ The project is Hades (the package, CLIs and images still say `crucible`).
 A change under `deploy/` runs `make manifests`. When it touches the workers
 namespace or the provider, run `make deploy-kind` and the `e2e-kind` target.
 Worker image changes: anything under `images/` changes the worker image, so
-`images/manifest.env` must be regenerated with `make images` on a machine
-with Docker, or the CI images job will report the digest it built instead.
+the tag and harness lines of `images/manifest.env` must match it
+(`make lint` names the tag it expects; `make images` on a machine with Docker
+rewrites the whole file). The `*_DIGEST` lines are CI's: never edit them by
+hand or in a worker pass. On a branch, the CI images job commits the digest
+it built when every tag and harness version reproduced, then runs CI again on
+that commit (docs/spec/13-local-operation.md).
 
 ## Releases
 

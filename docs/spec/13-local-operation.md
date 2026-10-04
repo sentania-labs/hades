@@ -175,12 +175,31 @@ Rules:
   copy them.
 - CI's `images` job runs the same script as `make images-check`: it builds
   both images from the pinned inputs on a fresh runner and fails if any tag,
-  harness version or OCI digest differs from `images/manifest.env`. It then
+  harness version or OCI digest differs from `images/manifest.env`, with one
+  exception on a branch, below. It then
   runs `make images-policy-check`, which fails when the program a shipped
   policy's required check starts with (`make` for default-software), or a
   program a shipped policy declares in `repository.required_programs`, does
   not resolve in the worker image (hades #181, #184). Pull requests import a BuildKit
   layer cache; every push to main builds from scratch before exporting it.
+- **CI owns the digest lines** (`WORKER_DIGEST`, `SCRIPT_HARNESS_DIGEST`,
+  every `*_DIGEST` line of `images/manifest.env`; the operator's decision,
+  2026-10-04, FDY-0310). Humans and workers never edit them: a change under
+  `images/` updates the tag and harness lines (`images/check-manifest.sh`
+  names the tag `make lint` expects) and leaves the digest lines as they are.
+  When the `images` job on a branch builds every tag and harness version the
+  manifest declares but a different digest, it writes the built digests
+  into the manifest, commits them to the branch as `github-actions[bot]`
+  (one commit that touches only those lines, its message naming the images
+  and carrying the trailer `Crucible-Images-Digest: ci`), pushes it, passes,
+  and dispatches CI on the new head (a push made with the workflow token
+  starts no run by itself). A tag or harness version that differs is a
+  build-input mismatch and still fails the job. The job never commits on
+  main, which fails as before; CI does not run on tags, and the release's
+  `make images-check` never writes back. When the head is the bot's own
+  digest commit the job does not commit again, so a digest that does not
+  reproduce twice fails instead of looping. `tools/images/digest_commit.py`
+  holds these rules; `make images-check DIGEST_WRITEBACK=1` is the write-back.
 - The release publishes both to `ghcr.io/sentania-labs/crucible-worker`
   with `docker push`, the way the service image and every ScarGuard service
   are pushed (the operator's decision, 2026-09-23; 24): it builds from
