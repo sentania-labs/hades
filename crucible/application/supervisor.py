@@ -94,6 +94,7 @@ from crucible.domain.entities import (
     Attempt,
     AttemptMetrics,
     CompletionClaimRecord,
+    DispositionKind,
     EvidenceRecord,
     Execution,
     ExecutionRole,
@@ -103,6 +104,7 @@ from crucible.domain.entities import (
     PullRequestState,
     Repository,
     RetentionAction,
+    ReviewDisposition,
     Task,
 )
 from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
@@ -4495,6 +4497,10 @@ class Supervisor:
             killed = attempt.termination_reason == TERMINATION_CANCEL
             execution = uow.executions.get(attempt.execution_id)
             assert execution is not None
+            stored = uow.contracts.get(
+                task.id,
+                getattr(execution, "contract_version", getattr(task, "contract_version", 1)),
+            )
             # 07: a report file that is present but does not parse is a parse failure,
             # recorded as one; only a missing file is "without report".
             report_present = outputs.report_raw is not None or outputs.report is not None
@@ -4687,11 +4693,47 @@ class Supervisor:
                     payload={"errors": unparsed_errors},
                 )
             completed: CompletedClaim | None = None
+            claim = None
+            expected_findings: set[str] = set()
             if outputs.report is not None and not cancelled:
                 # hades #215: Crucible's own facts in place of the worker's, then parse.
                 completed = complete_claim(outputs.report, claim_facts(task, outputs))
                 claim, errors = parse_claim(completed.document)
                 claim_ok = claim is not None
+                correction = (stored.document.get("correction") if stored else None) or {}
+                expected_findings = {
+                    str(address.get("id"))
+                    for address in correction.get("addresses", [])
+                    if isinstance(address, dict) and address.get("kind") == "review_comment"
+                }
+                finding_counts = (
+                    Counter(item.review_comment_id for item in claim.finding_dispositions)
+                    if claim is not None
+                    else Counter()
+                )
+                duplicate_ids = sorted(
+                    finding_id for finding_id, count in finding_counts.items() if count > 1
+                )
+                if expected_findings and (
+                    set(finding_counts) != expected_findings or duplicate_ids
+                ):
+                    errors.append(
+                        {
+                            "loc": ["finding_dispositions"],
+                            "msg": (
+                                "the correction report must disposition exactly its review "
+                                "findings; expected "
+                                + ", ".join(sorted(expected_findings))
+                                + (
+                                    "; duplicate ids: " + ", ".join(duplicate_ids)
+                                    if duplicate_ids
+                                    else ""
+                                )
+                            ),
+                            "type": "value_error",
+                        }
+                    )
+                    claim_ok = False
                 # The worker's document and the completed one: Crucible's facts carry
                 # names the worker chose (changed paths, report file names).
                 secret_hits = find_secrets(outputs.report) + find_secrets(completed.document)
@@ -4815,6 +4857,58 @@ class Supervisor:
                 turn_cap_reached=parsed is not None and parsed.limit_reached is not None,
                 has_commits=outputs.bundle is not None and outputs.bundle.commits > 0,
             )
+            # A valid report from a failed or locally capped attempt is evidence,
+            # but its dispositions must not settle findings or queue public replies.
+            if (
+                attempt.state is AttemptState.SUCCEEDED
+                and claim_ok
+                and claim is not None
+                and expected_findings
+            ):
+                for finding in claim.finding_dispositions:
+                    comment = uow.review_comments.get(finding.review_comment_id)
+                    if (
+                        comment is None
+                        or uow.dispositions.get_by_comment(comment.id, comment.body_sha256)
+                        is not None
+                    ):
+                        continue
+                    kind = (
+                        DispositionKind.FIX
+                        if finding.disposition == "fixed"
+                        else DispositionKind.DECLINE
+                    )
+                    reasoning = (
+                        f"Fixed in commit {finding.commit}"
+                        if finding.disposition == "fixed"
+                        else str(finding.reason)
+                    )
+                    disposition = ReviewDisposition(
+                        id=new_id(),
+                        review_comment_id=comment.id,
+                        comment_body_sha256=comment.body_sha256,
+                        principal_id=task.principal_id,
+                        disposition=kind,
+                        reasoning=reasoning,
+                        created_at=self._clock.now(),
+                    )
+                    uow.dispositions.add(disposition)
+                    record_event(
+                        uow,
+                        self._clock,
+                        EventKind.DISPOSITION_RECORDED,
+                        principal=PRINCIPAL_CRUCIBLE,
+                        task_id=task.id,
+                        attempt_id=attempt.id,
+                        payload={
+                            "disposition_id": disposition.id,
+                            "review_comment_id": comment.id,
+                            "disposition": kind.value,
+                            "from_worker_report": True,
+                            "reply_pending": kind is DispositionKind.DECLINE,
+                            "reasoning": reasoning,
+                        },
+                    )
             uow.commit()
 
     def _record_credential_sync(

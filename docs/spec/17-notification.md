@@ -12,7 +12,7 @@ Only when judgment is required or work has stopped needing it:
 | `needs_more_work` | after a `needs_more_work` verdict, until a correction is attached |
 | `blocked` | `blocked` (escalation opened) |
 | `publish_failed` | `publish_failed` |
-| `external_feedback_received` | `external_feedback_received` |
+| `external_feedback_received` | informational once per completed review round; on the first Codex round with findings Crucible has already launched its bounded correction, while a later round remains a wake for Foundry |
 | `external_review_overdue` | repeat, no state change |
 | `external_review_trigger_needed` | `awaiting_external_review` on a head whose cycle needs the orchestrator's trigger under the operator's account (23) |
 | `ci_certification_failed` | `ci_certification_failed` |
@@ -40,8 +40,11 @@ delivery only makes that observation happen sooner; the ingress events it
 writes under the `github` principal wake nobody by themselves.
 
 Progress is not a wake. Foundry polls or tails logs when it wants progress.
-Review feedback is never sent to a worker; it is only ever carried to
-Foundry.
+Codex inline findings are the exception: on the first completed round with findings,
+Crucible builds one correction from the task contract and launches it under the task's
+policy. Foundry still receives one informational wake and may attach its own correction
+or cancel. A later round never starts another automatic correction. This scheduling
+requires `external_review.provider: codex`; other providers still wake and wait.
 
 ## WakeV1
 

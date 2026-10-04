@@ -483,6 +483,32 @@ class _Handler(BaseHTTPRequestHandler):
         if rest[:1] == ["pulls"] and rest[1:2] == ["comments"] and rest[3:] == ["reactions"]:
             self._send(200, [])
             return
+        if (
+            method == "POST"
+            and rest[:1] == ["pulls"]
+            and len(rest) == 5
+            and rest[2:3] == ["comments"]
+            and rest[4:] == ["replies"]
+        ):
+            number = int(rest[1])
+            body = self._body() or {}
+            comment_id = str(repo.next_object_id)
+            repo.next_object_id += 1
+            row = {
+                "id": comment_id,
+                "user": {"login": "crucible-spike[bot]", "type": "Bot"},
+                "body": str(body.get("body", "")),
+                "path": None,
+                "line": None,
+                "commit_id": repo.pulls[number].head_sha,
+                "pull_request_review_id": None,
+                "created_at": now_iso(),
+                "updated_at": now_iso(),
+                "reactions": {"total_count": 0},
+            }
+            repo.pulls[number].review_comments.append(row)
+            self._send(201, row)
+            return
         if rest[:1] == ["pulls"] and len(rest) >= 2 and rest[1].isdigit():
             number = int(rest[1])
             pull = repo.pulls[number]
