@@ -200,15 +200,27 @@ class KubernetesCredentialStore(KubernetesCredentialReader):
     def mark_dead(self, document: Mapping[str, Any]) -> None:
         if self._resource_version is None:
             raise ValueError("read the Codex credential before marking it dead")
+        used_token = self._refresh_token
         encoded = base64.b64encode(
             json.dumps(document, separators=(",", ":")).encode("utf-8")
         ).decode("ascii")
-        self.client.patch(
-            "secrets",
-            self.secret_name,
-            {"data": {"credential-dead.json": encoded}},
-            resource_version=self._resource_version,
-        )
+        while True:
+            try:
+                body = self.client.patch(
+                    "secrets",
+                    self.secret_name,
+                    {"data": {"credential-dead.json": encoded}},
+                    resource_version=self._resource_version,
+                )
+            except Exception as exc:
+                if getattr(exc, "status", None) != 409:
+                    raise
+                self.read()
+                if not used_token or self._refresh_token != used_token:
+                    raise  # A new login wins over the old login's dead marker.
+            else:
+                self._resource_version = body["metadata"]["resourceVersion"]
+                return
 
 
 def _claim(token: str, name: str) -> Any:

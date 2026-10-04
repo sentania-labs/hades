@@ -18,6 +18,7 @@ from crucible.adapters.execution.k8sapi import KubernetesApiError
 from crucible.adapters.execution.k8sfake import FakeKubernetesApi
 from crucible.application.credential_renewer import (
     CodexCredentialRenewer,
+    InvalidGrantError,
     KubernetesCredentialStore,
     ReadOnlyCredentialStore,
 )
@@ -239,6 +240,66 @@ def test_stale_dead_marker_cannot_poison_new_login() -> None:
         supervisor.mark_dead({"dead": True})
     assert exc.value.status == 409
     assert not admin_store.is_dead()
+
+
+def test_invalid_grant_retries_dead_marker_after_unrelated_edit() -> None:
+    client = FakeKubernetesApi()
+    _secret(client)
+    supervisor = KubernetesCredentialStore(client)
+    record, wake = Mock(), Mock()
+
+    def grant(_: str) -> Mapping[str, Any]:
+        client.patch("secrets", SECRET, {"metadata": {"labels": {"owner": "operator"}}})
+        raise InvalidGrantError("invalid_grant")
+
+    renewer = CodexCredentialRenewer(
+        store=supervisor,
+        clock=FakeClock(NOW),
+        grant=grant,
+        record=record,
+        wake=wake,
+    )
+    with pytest.raises(InvalidGrantError, match="invalid_grant"):
+        renewer.refresh("timer")
+    assert supervisor.is_dead()
+    record.assert_called_once_with(
+        EventKind.CREDENTIAL_REFRESH_FAILED,
+        {
+            "harness": "codex",
+            "reason": "invalid_grant: the login was revoked or refreshed by another session",
+            "result": "credential_dead",
+        },
+    )
+    wake.assert_called_once()
+
+
+def test_invalid_grant_dead_marker_refuses_new_login() -> None:
+    client = FakeKubernetesApi()
+    _secret(client)
+    supervisor = KubernetesCredentialStore(client)
+    admin_store = KubernetesCredentialStore(client)
+    record, wake = Mock(), Mock()
+
+    def grant(_: str) -> Mapping[str, Any]:
+        login = admin_store.read()
+        login["tokens"]["refresh_token"] = "new-interactive-login"
+        admin_store.write(login)
+        raise InvalidGrantError("invalid_grant")
+
+    renewer = CodexCredentialRenewer(
+        store=supervisor,
+        clock=FakeClock(NOW),
+        grant=grant,
+        record=record,
+        wake=wake,
+    )
+    with pytest.raises(KubernetesApiError) as exc:
+        renewer.refresh("timer")
+    assert exc.value.status == 409
+    assert admin_store.read()["tokens"]["refresh_token"] == "new-interactive-login"
+    assert not supervisor.is_dead()
+    record.assert_not_called()
+    wake.assert_not_called()
 
 
 def test_admin_login_write_rejects_a_concurrent_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
