@@ -463,6 +463,25 @@ def task_page(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Response:
                 ],
             }
         )
+        sections.append(
+            {
+                # hades #356: the diagnosis Foundry recorded for each CI certification
+                # failure, so the operator sees which kind of failure the task hit.
+                "title": "CI decisions",
+                "empty": "No CI decision is recorded for this task.",
+                "columns": ["Cause", "Action", "Reasoning", "By", "Recorded"],
+                "rows": [
+                    [
+                        decision.cause.replace("_", " "),
+                        decision.action,
+                        decision.reasoning,
+                        decision.principal,
+                        decision.created_at.isoformat(),
+                    ]
+                    for decision in record.ci_decisions
+                ],
+            }
+        )
     waivers = [d for d in view.decisions if d.get("kind") in (WAIVE_EXTERNAL_REVIEW, ACCEPT_NO_CI)]
     sections.append(
         {

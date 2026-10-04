@@ -423,15 +423,19 @@ cycle opens on that head.
 - Foundry's `POST /tasks/{id}/ci-decision` records the cause from the enum
   `false_pre_pr_evidence`, `wrong_sha_checked`, `correction_without_checks`,
   `environment_drift`, `flaky_test`, `crucible_verification_defect`,
-  `ci_infrastructure`, `other`, and the action: `rerun` (Crucible records the
-  intent and wakes the operator to re-run it on GitHub, because re-running
-  needs Actions write, which the App does not hold; 22), `correct` (a
-  correction follows), `reject`, `cancel`. After `rerun` the failure the
-  decision was about is stale: the decision's event lists the failed runs
-  (GitHub's id and when each concluded), those runs are not counted again,
-  the certification reads `pending` with a detail that says so, and the
-  task waits for a fresh result. Any other failure, including a re-run of
-  a workflow that fails again under the same id, is a new failure.
+  `implementation_defect`, `missing_worker_tooling`, `ci_infrastructure`,
+  `other`, and the action: `rerun` (Crucible records the intent and wakes
+  the operator to re-run it on GitHub, because re-running needs Actions
+  write, which the App does not hold; 22), `correct` (a correction
+  follows), `reject`, `cancel`. A `correct` action requires a cause other
+  than `ci_infrastructure` and `flaky_test`; a `rerun` requires one of
+  those two; any other combination is refused with 422 (hades #356). After
+  `rerun` the failure the decision was about is stale: the decision's
+  event lists the failed runs (GitHub's id and when each concluded), those
+  runs are not counted again, the certification reads `pending` with a
+  detail that says so, and the task waits for a fresh result. Any other
+  failure, including a re-run of a workflow that fails again under the
+  same id, is a new failure.
 - A task in `ci_certification_failed` that observes a green (or skipped)
   certification on its accepted head goes back to
   `awaiting_ci_certification` and on to `ready_for_merge`: someone re-ran
