@@ -20,8 +20,15 @@ from tests.unit.admin_ui_fixtures import (
 )
 
 
+@pytest.mark.parametrize(
+    "cursor,pending,request_label",
+    [(0, True, "Pending"), (2, False, "Handled"), (0, False, "None")],
+)
 async def test_t_auth_6_credentials_page_renewer_health_and_reason(
     monkeypatch: pytest.MonkeyPatch,
+    cursor: int,
+    pending: bool,
+    request_label: str,
 ) -> None:
     principal = SimpleNamespace(name="admin", role=Role.ADMIN)
     monkeypatch.setattr(credentials_page_module, "_require", lambda *_: (principal, "csrf"))
@@ -46,7 +53,8 @@ async def test_t_auth_6_credentials_page_renewer_health_and_reason(
     uow = Mock()
     uow.attempts.list_in_states.return_value = [SimpleNamespace(execution_id="running")]
     uow.executions.get.return_value = SimpleNamespace(harness="codex")
-    uow.events.list_global.return_value = [
+    uow.supervisor_status.get.return_value.refresh_request_cursor = cursor
+    refresh_events = [
         SimpleNamespace(
             kind=EventKind.CREDENTIAL_REFRESH_FAILED.value,
             ts=NOW,
@@ -58,6 +66,7 @@ async def test_t_auth_6_credentials_page_renewer_health_and_reason(
             payload={"harness": "codex", "result": "refreshed"},
         ),
     ]
+    uow.events.list_global.side_effect = [refresh_events, [object()] if pending else []]
     ctx: Any = SimpleNamespace(
         admin=SimpleNamespace(harnesses=SimpleNamespace(names=lambda: ["codex"]))
     )
@@ -76,6 +85,8 @@ async def test_t_auth_6_credentials_page_renewer_health_and_reason(
         "refreshed",
         "Failures (24h)",
         "Refresh now",
+        "Refresh request",
+        request_label,
         "Validate",
         "Probe",
         "Log in",

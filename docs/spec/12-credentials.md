@@ -138,6 +138,24 @@ Docker file atomically or patches each live Kubernetes attempt Secret. Kubernete
 Secret projection is eventually consistent, so the host waits and re-reads for up to
 90 seconds after a rejection. No shared read-write volume is used.
 
+Only a process serving the supervisor constructs a grant-capable renewer (including
+`serve --all`). API-only and local admin processes construct a read-only status store
+with `dead` and `last_refresh` reads, without renewal or Secret mutation methods.
+The Credentials page records `credential_refresh_requested`; it never calls the
+grant. The supervisor coalesces requests observed before a grant into one forced
+refresh per tick and durably acknowledges them through the supervisor status cursor.
+Requests arriving during the grant wait for the next tick. A transient failure leaves
+them pending, while success or a dead login acknowledges them. A renewal failure does
+not prevent the rest of the supervisor tick from running.
+
+The service Secret's token and `metadata.resourceVersion` come from one read. Renewal
+patches carry that version as a precondition. On 409, the store re-reads the Secret:
+if the stored refresh token is still the token used by the grant, it re-patches the
+freshly rotated tokens against the new version without another grant. A changed
+refresh token means a replacement login won; the old grant must not overwrite it.
+Dead-marker and admin login patches also carry their read version, so a concurrent
+change causes a conflict instead of poisoning or overwriting a newer login.
+
 Hermes is the narrow API-key exception. The admin UI and
 `crucible-admin credentials set --harness hermes` read the value from a password
 field or hidden stdin prompt, atomically replace `api-key` with mode 0600, and record

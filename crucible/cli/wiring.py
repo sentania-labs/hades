@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI
@@ -56,8 +56,11 @@ from crucible.application.admin.credentials import sweep_retired
 from crucible.application.admin.routing import local_endpoint_view
 from crucible.application.credential_renewer import (
     CodexCredentialRenewer,
+    FileCredentialReader,
     FileCredentialStore,
+    KubernetesCredentialReader,
     KubernetesCredentialStore,
+    ReadOnlyCredentialStore,
 )
 from crucible.application.delivery_tick import DeliveryConfig
 from crucible.application.errors import NotFoundError
@@ -142,8 +145,15 @@ class Wiring:
         """Both timer renewal and pending-request refresh (339)."""
         if self.credential_renewer is None:
             return False
-        self.credential_renewer.refresh_on_request()
-        return self.credential_renewer.refresh_if_due()
+        try:
+            if self.credential_renewer.refresh_on_request():
+                return True
+            return self.credential_renewer.refresh_if_due()
+        except Exception:
+            # A transient request remains pending. Maintenance and the rest of the
+            # supervisor tick must still run, even when the login is unavailable.
+            log.exception("Codex credential renewal failed")
+            return False
 
     def app(self) -> FastAPI:
         return create_app(self.ctx)
@@ -464,7 +474,10 @@ def enabled_database_endpoint(routing_document: Mapping[str, object] | None) -> 
     return endpoints[0] if len(endpoints) == 1 else None
 
 
-def wire(settings: Settings) -> Wiring:
+ProcessRole = Literal["api", "admin", "supervisor"]
+
+
+def wire(settings: Settings, *, role: ProcessRole) -> Wiring:
     engine = make_engine(settings.database.url)
     factory = SqlUnitOfWorkFactory(engine)
     database_endpoint: str | None = None
@@ -567,17 +580,15 @@ def wire(settings: Settings) -> Wiring:
         kubernetes_role_timeout_seed=settings.kubernetes.role_timeout_seconds,
         first_run=first_run,
     )
-    renewer = build_credential_renewer(settings, providers, factory, admin)
+    renewer = (
+        build_credential_renewer(settings, providers, factory, admin)
+        if role == "supervisor"
+        else None
+    )
+    api_renewer = _build_readonly_renewer(settings, providers)
     kubernetes = providers.get("kubernetes")
-    if renewer is not None and isinstance(kubernetes, KubernetesProvider):
-        kubernetes.set_credential_dead_check(lambda: renewer.dead)
-
-    # 339: the API process must not hold a grant-capable renewer.  The credentials
-    # page records a CREDENTIAL_REFRESH_REQUESTED event and the supervisor performs
-    # the refresh on its next tick.  The API context only carries a dead-check.
-    api_renewer: CodexCredentialRenewer | None = None
-    if renewer is not None:
-        api_renewer = _build_readonly_renewer(renewer)
+    if api_renewer is not None and isinstance(kubernetes, KubernetesProvider):
+        kubernetes.set_credential_dead_check(lambda: api_renewer.dead)
 
     ctx = AppContext(
         uow_factory=factory,
@@ -720,15 +731,25 @@ def build_credential_renewer(
         try:
             with factory() as uow:
                 cursor = uow.supervisor_status.get().refresh_request_cursor or 0
-                rows = uow.events.list_global(
-                    after_seq=cursor,
-                    kind=EventKind.CREDENTIAL_REFRESH_REQUESTED.value,
-                    since=datetime.min.replace(tzinfo=UTC),
-                    limit=1,
-                )
-                if not rows:
+                newest = cursor
+                while True:
+                    rows = uow.events.list_global(
+                        after_seq=newest,
+                        kind=EventKind.CREDENTIAL_REFRESH_REQUESTED.value,
+                        since=datetime.min.replace(tzinfo=UTC),
+                        limit=1000,
+                    )
+                    if not rows:
+                        break
+                    assert rows[-1].seq is not None
+                    newest = rows[-1].seq
+                    if len(rows) < 1000:
+                        break
+                if newest == cursor:
                     return False
-                _pending_seq[0] = rows[-1].seq
+                # All requests observed before the grant share one refresh. Requests
+                # arriving during it remain beyond this cursor for the next tick.
+                _pending_seq[0] = newest
                 return True
         except Exception:  # pragma: no cover - safe fallback for test fakes
             return False
@@ -754,35 +775,35 @@ def build_credential_renewer(
     return renewer
 
 
-def _build_readonly_renewer(full_renewer: CodexCredentialRenewer) -> CodexCredentialRenewer:
-    """Return a copy that only has dead-check capability (339).
-
-    The read-only renewer shares the same store so ``dead`` is accurate,
-    but ``grant`` is a no-op so the API process can never mutate the secret.
-    The ``_pending_request_checker`` is left unset so ``refresh_on_request``
-    is a no-op; only the supervisor's full renewer handles pending events.
-    """
-
-    ro_store = full_renewer.store
-
-    def noop_grant(_token: str) -> dict[str, str]:
-        return {}
-
-    def noop_propagate(_document: Mapping[str, str]) -> None:
-        pass
-
-    def noop_wake(_summary: str) -> None:
-        pass
-
-    ro = CodexCredentialRenewer(
-        store=ro_store,
-        grant=noop_grant,
-        clock=full_renewer.clock,
-        record=full_renewer.record,
-        propagate=noop_propagate,
-        wake=noop_wake,
-    )
-    return ro
+def _build_readonly_renewer(
+    settings: Settings, providers: Mapping[str, ExecutionProvider]
+) -> ReadOnlyCredentialStore | None:
+    """Build status reads directly, without first constructing a writer or grant."""
+    source = credential_sources(settings).get("codex")
+    spec = default_registry().require("codex").credential_spec()
+    assert spec is not None
+    if effective_mount_mode(spec, source) is not MountMode.RENEWER:
+        return None
+    if source is not None and source.path and (path := Path(source.path) / "auth.json").is_file():
+        return ReadOnlyCredentialStore(FileCredentialReader(path))
+    if (
+        settings.kubernetes.enabled
+        and not settings.docker.enabled
+        and isinstance((kubernetes := providers.get("kubernetes")), KubernetesProvider)
+    ):
+        reader = KubernetesCredentialReader(
+            kubernetes.client, kubernetes.credential_secret("codex")
+        )
+        try:
+            reader.read()
+        except KubernetesApiError as exc:
+            if exc.status != 404:
+                raise
+        except ValueError:
+            pass
+        else:
+            return ReadOnlyCredentialStore(reader)
+    return None
 
 
 def build_publisher(

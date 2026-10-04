@@ -1621,7 +1621,7 @@ def run(args: argparse.Namespace, *, root_api_url: str | None, timezone: str | N
             ensure_first_admin(settings.database.url, first_run_delivery(settings))
             document: Any = {"migrated_to": head_revision(settings.database.url)}
         else:
-            wiring = wire(settings)
+            wiring = wire(settings, role="admin")
             if args.command == "token":
                 document = _token(args, wiring)
             elif args.command in ("repository", "repositories"):

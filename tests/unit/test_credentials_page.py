@@ -29,6 +29,7 @@ async def test_credentials_page_renders_running_workers_against_active_cap(
         ),
         executions=SimpleNamespace(get=lambda _execution_id: SimpleNamespace(harness="codex")),
         events=SimpleNamespace(list_global=lambda **_kwargs: []),
+        supervisor_status=SimpleNamespace(get=lambda: SimpleNamespace(refresh_request_cursor=None)),
         policies=SimpleNamespace(list_versions=lambda _name: [policy]),
     )
     ctx = SimpleNamespace(

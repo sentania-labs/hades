@@ -62,6 +62,16 @@ async def credentials_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             limit=1000,
         )
     )
+    refresh_cursor = uow.supervisor_status.get().refresh_request_cursor or 0
+    pending_refresh = bool(
+        uow.events.list_global(
+            after_seq=refresh_cursor,
+            kind=EventKind.CREDENTIAL_REFRESH_REQUESTED.value,
+            since=None,
+            limit=1,
+        )
+    )
+    request_state = "Pending" if pending_refresh else "Handled" if refresh_cursor else "None"
     for name in names:
         view = credentials.state_view(ctx.admin, uow, name, secrets.get(name))
         state = str(view.get("state") or "")
@@ -135,6 +145,7 @@ async def credentials_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                 last_refresh.ts.isoformat() if last_refresh is not None else "Never",
                 str(last_refresh.payload.get("result", "")) if last_refresh is not None else "",
                 failures,
+                request_state if name == "codex" else "",
                 {"kind": "actions", "items": actions} if actions else "",
             ]
         )
@@ -151,6 +162,7 @@ async def credentials_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                 "Last refresh",
                 "Refresh result",
                 "Failures (24h)",
+                "Refresh request",
                 "",
             ],
             "rows": rows,

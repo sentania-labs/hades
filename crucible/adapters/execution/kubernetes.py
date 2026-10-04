@@ -2973,6 +2973,7 @@ class KubernetesProvider:
                     "metadata": {"labels": _owned_labels(harness)},
                     "data": {**body["data"], **stale},
                 },
+                resource_version=current["metadata"]["resourceVersion"],
             )
         except KubernetesApiError as exc:
             raise ProviderError(

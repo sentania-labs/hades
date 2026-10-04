@@ -47,17 +47,35 @@ Propagator = Callable[[Mapping[str, str]], None]
 Wake = Callable[[str], None]
 
 
-class CredentialStore(Protocol):
+class CredentialReader(Protocol):
     def read(self) -> dict[str, Any]: ...
 
-    def write(self, document: Mapping[str, Any]) -> None: ...
-
     def is_dead(self) -> bool: ...
+
+
+class ReadOnlyCredentialStore:
+    """The API status view: no grant, token read, write, or dead-marker mutation."""
+
+    def __init__(self, reader: CredentialReader) -> None:
+        self._reader = reader
+
+    @property
+    def dead(self) -> bool:
+        return self._reader.is_dead()
+
+    @property
+    def last_refresh(self) -> str | None:
+        value = self._reader.read().get("last_refresh")
+        return value if isinstance(value, str) else None
+
+
+class CredentialStore(CredentialReader, Protocol):
+    def write(self, document: Mapping[str, Any]) -> None: ...
 
     def mark_dead(self, document: Mapping[str, Any]) -> None: ...
 
 
-class FileCredentialStore:
+class FileCredentialReader:
     def __init__(self, login_path: Path) -> None:
         self.login_path = login_path
         self.dead_path = login_path.with_name(login_path.name + ".dead")
@@ -68,50 +86,52 @@ class FileCredentialStore:
             raise ValueError("Codex auth.json is not an object")
         return document
 
-    def write(self, document: Mapping[str, Any]) -> None:
-        atomic_write(self.login_path, document)
-
     def is_dead(self) -> bool:
         return self.dead_path.exists()
+
+
+class FileCredentialStore(FileCredentialReader):
+    def write(self, document: Mapping[str, Any]) -> None:
+        atomic_write(self.login_path, document)
 
     def mark_dead(self, document: Mapping[str, Any]) -> None:
         atomic_write(self.dead_path, document)
 
 
-class KubernetesCredentialStore:
-    """The service-held Codex Secret, read and patched as one API object.
+class SecretReader(Protocol):
+    def get(self, kind: str, name: str) -> dict[str, Any]: ...
 
-    ``write`` sends the read ``resourceVersion`` as an ``If-None-Match`` header
-    so the API server rejects stale patches with 409 Conflict (339).
-    """
 
-    def __init__(self, client: Any, secret_name: str = "crucible-harness-codex") -> None:
+class SecretWriter(SecretReader, Protocol):
+    def patch(
+        self,
+        kind: str,
+        name: str,
+        body: Mapping[str, Any],
+        *,
+        resource_version: str | None = None,
+    ) -> dict[str, Any]: ...
+
+
+class KubernetesCredentialReader:
+    """Read the service-held login without a Secret mutation method."""
+
+    def __init__(self, client: SecretReader, secret_name: str = "crucible-harness-codex") -> None:
         self.client = client
         self.secret_name = secret_name
-        self._resource_version: str | None = None
 
-    def _refresh_meta(self) -> str:
-        """Return the current resourceVersion, caching it."""
+    def _body(self) -> dict[str, Any]:
         body = self.client.get("secrets", self.secret_name)
         if not isinstance(body, dict):
             raise ValueError("Codex credential Secret is not an object")
-        meta = body.get("metadata") or {}
-        rv: str | None = meta.get("resourceVersion")
-        if rv is None:
-            raise ValueError("Codex credential Secret has no resourceVersion")
-        self._resource_version = rv
-        return rv
-
-    def _body(self) -> dict[str, Any]:
-        if self._resource_version is None:
-            self._refresh_meta()
-        body = self.client.get("secrets", self.secret_name)
-        assert isinstance(body, dict)
         return body
 
     def read(self) -> dict[str, Any]:
-        self._refresh_meta()
-        raw = (self.client.get("secrets", self.secret_name).get("data") or {}).get("auth.json")
+        return self._document(self._body())
+
+    @staticmethod
+    def _document(body: Mapping[str, Any]) -> dict[str, Any]:
+        raw = (body.get("data") or {}).get("auth.json")
         if not isinstance(raw, str):
             raise ValueError("Codex credential Secret has no auth.json")
         document = json.loads(base64.b64decode(raw))
@@ -119,29 +139,88 @@ class KubernetesCredentialStore:
             raise ValueError("Codex auth.json is not an object")
         return document
 
+    def is_dead(self) -> bool:
+        return "credential-dead.json" in (self._body().get("data") or {})
+
+
+class KubernetesCredentialStore(KubernetesCredentialReader):
+    """Patch against the version of the login read before the grant.
+
+    A metadata edit must not discard already rotated tokens. On conflict, retry
+    the same document against the new version only if the login token is unchanged.
+    """
+
+    def __init__(self, client: SecretWriter, secret_name: str = "crucible-harness-codex") -> None:
+        super().__init__(client, secret_name)
+        self.client: SecretWriter = client
+        self._resource_version: str | None = None
+        self._refresh_token: str | None = None
+
+    def read(self) -> dict[str, Any]:
+        # Token and version must come from the same GET snapshot.
+        body = self._body()
+        version = (body.get("metadata") or {}).get("resourceVersion")
+        if not isinstance(version, str):
+            raise ValueError("Codex credential Secret has no resourceVersion")
+        document = self._document(body)
+        self._resource_version = version
+        tokens = document.get("tokens")
+        token = tokens.get("refresh_token") if isinstance(tokens, dict) else None
+        self._refresh_token = token if isinstance(token, str) else None
+        return document
+
     def write(self, document: Mapping[str, Any]) -> None:
+        if self._resource_version is None:
+            raise ValueError("read the Codex credential before writing it")
+        used_token = self._refresh_token
         encoded = base64.b64encode(
             json.dumps(document, separators=(",", ":")).encode("utf-8")
         ).decode("ascii")
-        self.client.patch(
-            "secrets",
-            self.secret_name,
-            {"data": {"auth.json": encoded}},
-            resource_version=self._resource_version,
-        )
-        self._refresh_meta()
-
-    def is_dead(self) -> bool:
-        body = self.client.get("secrets", self.secret_name)
-        if not isinstance(body, dict):
-            raise ValueError("Codex credential Secret is not an object")
-        return "credential-dead.json" in (body.get("data") or {})
+        while True:
+            try:
+                body = self.client.patch(
+                    "secrets",
+                    self.secret_name,
+                    {"data": {"auth.json": encoded}},
+                    resource_version=self._resource_version,
+                )
+            except Exception as exc:
+                if getattr(exc, "status", None) != 409:
+                    raise
+                self.read()
+                if not used_token or self._refresh_token != used_token:
+                    raise  # A new login wins over the old login's grant.
+            else:
+                self._resource_version = body["metadata"]["resourceVersion"]
+                tokens = document.get("tokens")
+                token = tokens.get("refresh_token") if isinstance(tokens, dict) else None
+                self._refresh_token = token if isinstance(token, str) else None
+                return
 
     def mark_dead(self, document: Mapping[str, Any]) -> None:
+        if self._resource_version is None:
+            raise ValueError("read the Codex credential before marking it dead")
+        used_token = self._refresh_token
         encoded = base64.b64encode(
             json.dumps(document, separators=(",", ":")).encode("utf-8")
         ).decode("ascii")
-        self.client.patch("secrets", self.secret_name, {"data": {"credential-dead.json": encoded}})
+        while True:
+            try:
+                body = self.client.patch(
+                    "secrets",
+                    self.secret_name,
+                    {"data": {"credential-dead.json": encoded}},
+                    resource_version=self._resource_version,
+                )
+            except Exception as exc:
+                if getattr(exc, "status", None) != 409:
+                    raise
+                self.read()
+                if not used_token or self._refresh_token != used_token:
+                    raise  # A new login wins over the old login's dead marker.
+            else:
+                self._resource_version = body["metadata"]["resourceVersion"]
+                return
 
 
 def _claim(token: str, name: str) -> Any:
