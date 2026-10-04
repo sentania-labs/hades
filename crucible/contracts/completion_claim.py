@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import yaml
-from pydantic import Field, ValidationError, field_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 
 from crucible.contracts.common import StrictModel, check_major_version
 
@@ -75,6 +75,23 @@ class ProposedPullRequest(StrictModel):
     closes: list[str] = Field(default_factory=list)
 
 
+class FindingDisposition(StrictModel):
+    """A correcting worker's disposition of one Codex inline finding (hades #401)."""
+
+    review_comment_id: str = Field(min_length=1)
+    disposition: Literal["fixed", "declined"]
+    commit: str | None = Field(default=None, min_length=1)
+    reason: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _evidence_for_disposition(self) -> FindingDisposition:
+        if self.disposition == "fixed" and not self.commit:
+            raise ValueError("a fixed finding names the commit that fixed it")
+        if self.disposition == "declined" and not self.reason:
+            raise ValueError("a declined finding gives the reason")
+        return self
+
+
 def normalise_mapping(value: Any) -> Any:
     """`{AC1: {status: met, evidence: ...}}` as `[{id: AC1, status: met, ...}]`.
 
@@ -118,6 +135,7 @@ class CompletionClaimV1(StrictModel):
     risks: list[str]
     blockers: list[str]
     follow_ups: list[str]
+    finding_dispositions: list[FindingDisposition] = Field(default_factory=list)
 
     @field_validator("schema_version")
     @classmethod

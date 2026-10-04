@@ -12,6 +12,7 @@ does the I/O and hands the snapshot over.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import logging
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ from crucible.application.publish import (
 )
 from crucible.application.transitions import move_task, record_event
 from crucible.application.wakes import create_wake
+from crucible.contracts.task_contract import contract_sha256
 from crucible.contracts.wake import WakeReason
 from crucible.domain.certification import (
     CertificationState,
@@ -51,6 +53,7 @@ from crucible.domain.entities import (
     Reaction,
     ReviewComment,
     Task,
+    TaskContract,
 )
 from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
 from crucible.domain.external_review import (
@@ -141,6 +144,10 @@ class ObservationResult:
     certification: str = ""
     state: str = ""
     notes: list[str] = field(default_factory=list)
+    review_refusal: bool = False
+
+
+CODEX_ACCOUNT_REFUSAL = "to use codex here, create a codex account"
 
 
 def policy_for(uow: UnitOfWork, task: Task) -> dict[str, Any]:
@@ -547,6 +554,11 @@ def record_comments(
             )
         ):
             continue
+        connector_refusal = (
+            comment.kind == "issue_comment"
+            and comment.login in allowlist
+            and CODEX_ACCOUNT_REFUSAL in comment.body.lower()
+        )
         existing = uow.review_comments.get_by_github(
             pull_request.id, comment.kind, comment.github_id
         )
@@ -643,6 +655,10 @@ def record_comments(
             },
         )
         result.changed = True
+        if connector_refusal:
+            result.review_refusal = True
+            result.notes.append("the Codex connector refused the review because no account exists")
+            continue
         if (
             comment.kind == "review_comment"
             and comment.login in allowlist
@@ -1511,6 +1527,103 @@ def evaluate_delivery_gates(
     return summary
 
 
+def _schedule_findings_correction(
+    uow: UnitOfWork,
+    clock: Clock,
+    *,
+    task: Task,
+    pull_request: PullRequest,
+    policy: dict[str, Any],
+) -> bool:
+    """Build the first Codex findings correction directly from recorded facts.
+
+    One automatic correction is allowed for a task's external-review path. A later
+    review round remains an informational wake, which prevents an autonomous loop.
+    """
+    prior_auto = any(
+        event.payload.get("automatic_codex_findings") is True
+        for event in uow.events.list_for_task(task.id, after_seq=0, limit=10_000)
+        if event.kind == EventKind.TASK_CORRECTION_ATTACHED.value
+    )
+    if prior_auto:
+        return False
+    allowlist = reviewer_logins(policy)
+    findings = [
+        comment
+        for comment in uow.review_comments.list_for_pull_request(pull_request.id)
+        if comment.kind == "review_comment"
+        and comment.login in allowlist
+        and comment.reviewed_sha == pull_request.head_sha
+        and uow.dispositions.get_by_comment(comment.id, comment.body_sha256) is None
+    ]
+    if not findings:
+        return False
+    prior = uow.contracts.get(task.id, task.contract_version)
+    if prior is None:
+        return False
+    document = copy.deepcopy(prior.document)
+    rendered = "\n\n".join(
+        f"Finding {finding.id}\nPath: {finding.path or ''}\nLine: "
+        f"{finding.line if finding.line is not None else ''}\nBody:\n{finding.body}"
+        for finding in findings
+    )
+    document["correction"] = {
+        "of_version": task.contract_version,
+        "reason": "external_review",
+        "addresses": [{"kind": "review_comment", "id": finding.id} for finding in findings],
+        "instructions": (
+            "Fix each finding, or decline it in the report with the reason. Preserve "
+            "each finding verbatim as supplied below. Run every required verification "
+            "command, commit the result, and follow the standing report rules.\n\n" + rendered
+        ),
+        "resume_from": "remote_branch",
+        "request_internal_review": False,
+    }
+    version = max((row.version for row in uow.contracts.list_for_task(task.id)), default=0) + 1
+    stored = TaskContract(
+        id=new_id(),
+        task_id=task.id,
+        version=version,
+        document=document,
+        sha256=contract_sha256(document),
+        submitted_at=clock.now(),
+    )
+    uow.contracts.add(stored)
+    task.contract_version = version
+    task.head_sha = None
+    uow.tasks.save(task)
+    record_event(
+        uow,
+        clock,
+        EventKind.TASK_CORRECTION_ATTACHED,
+        principal=PRINCIPAL_CRUCIBLE,
+        task_id=task.id,
+        payload={
+            "contract_version": version,
+            "of_version": version - 1,
+            "reason": "external_review",
+            "automatic_codex_findings": True,
+            "review_comment_ids": [finding.id for finding in findings],
+            "review_head": pull_request.head_sha,
+        },
+    )
+    move_task(
+        uow,
+        clock,
+        task,
+        TaskState.SCHEDULED,
+        EventKind.TASK_SCHEDULED,
+        payload={
+            "role": "correct",
+            "reason": "external_review",
+            "contract_version": version,
+            "resume_from_work_branch": True,
+            "automatic_codex_findings": True,
+        },
+    )
+    return True
+
+
 def advance_delivery(
     uow: UnitOfWork,
     clock: Clock,
@@ -1529,6 +1642,20 @@ def advance_delivery(
         GateResult.SKIPPED.value,
     ) or "feedback_dispositions_complete" in policy.get("gates", {}).get("skipped", [])
     feedback_from = task.state
+    if result.review_refusal and task.state is TaskState.AWAITING_EXTERNAL_REVIEW:
+        create_wake(
+            uow,
+            clock,
+            principal_id=task.principal_id,
+            reason=WakeReason.EXTERNAL_FEEDBACK_RECEIVED,
+            summary=(
+                f"external review failed on #{pull_request.number}: the Codex connector "
+                "refused the round because the repository has no Codex account"
+            ),
+            task=task,
+            extra_links={"pull_request": f"/v1/tasks/{task.id}/pull-request"},
+        )
+        return
     feedback_activity = bool(
         result.accepted_signals or result.new_comments or result.edited_feedback
     )
@@ -1580,12 +1707,19 @@ def advance_delivery(
             # certification from this same observation. A signal after ready_for_merge
             # always leaves the task stepped back for a later reconciliation.
         if feedback_needs_wake:
+            automatically_corrected = False
+            if result.new_comments and feedback_from is TaskState.AWAITING_EXTERNAL_REVIEW:
+                automatically_corrected = _schedule_findings_correction(
+                    uow, clock, task=task, pull_request=pull_request, policy=policy
+                )
             create_wake(
                 uow,
                 clock,
                 principal_id=task.principal_id,
                 reason=WakeReason.EXTERNAL_FEEDBACK_RECEIVED,
-                summary=summary,
+                summary=(summary + "; Crucible launched the correction")
+                if automatically_corrected
+                else summary,
                 task=task,
                 extra_links={
                     "pull_request": f"/v1/tasks/{task.id}/pull-request",

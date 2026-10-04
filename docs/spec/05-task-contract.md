@@ -127,6 +127,11 @@ A correction version may narrow `scope` and `objective` and may not widen
 them; validation rejects a correction whose `allowed_paths` is not a subset
 of the previous version's. `required_verification` may not shrink.
 
+For the single automatic Codex findings correction (23), Crucible derives this section
+itself. `addresses` names every inline finding, `instructions` contains each finding's
+path, line and body verbatim plus the standing fix-or-decline and report rules, and the
+rest of the document is copied from the current task contract.
+
 ## Validation rules (deterministic, on submit)
 
 - Every field above present; unknown fields rejected.

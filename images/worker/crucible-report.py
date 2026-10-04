@@ -56,12 +56,13 @@ JUDGEMENT_FIELDS = (
     "follow_ups",
 )
 LIST_FIELDS = ("limitations", "risks", "blockers", "follow_ups")
+DISPOSITION_KEYS = ("review_comment_id", "disposition", "commit", "reason")
 STATUSES = ("met", "not_met", "not_exercised", "partial")
 MAPPING_KEYS = ("id", "status", "evidence")
 PULL_REQUEST_KEYS = ("title", "body", "closes")
 REFS_KEYS = ("branch", "head_sha", "commits")
 CHECK_KEYS = ("id", "command", "exit", "log")
-KNOWN = ("schema_version", *FACT_FIELDS, *JUDGEMENT_FIELDS)
+KNOWN = ("schema_version", *FACT_FIELDS, *JUDGEMENT_FIELDS, "finding_dispositions")
 VERSION = re.compile(r"^1\.[0-9]+$")
 
 WHY_UNKNOWN = {
@@ -346,6 +347,31 @@ def check(
             problems.append(f"{name} is missing: write a list, `[]` when there are none.")
         elif not _is_str_list(document[name]):
             problems.append(f"{name} must be a list of text items, `[]` when there are none.")
+
+    dispositions = document.get("finding_dispositions", [])
+    if not isinstance(dispositions, list):
+        problems.append("finding_dispositions must be a list.")
+    else:
+        for index, item in enumerate(dispositions):
+            at = f"finding_dispositions[{index}]"
+            if not isinstance(item, dict):
+                problems.append(f"{at} must be a mapping.")
+                continue
+            extra = sorted(str(k) for k in item if k not in DISPOSITION_KEYS)
+            if extra:
+                problems.append(f"{at} has fields that are not accepted: {', '.join(extra)}.")
+            if not (
+                isinstance(item.get("review_comment_id"), str) and item.get("review_comment_id")
+            ):
+                problems.append(f"{at}.review_comment_id must be text.")
+            disposition = item.get("disposition")
+            if disposition not in ("fixed", "declined"):
+                problems.append(f"{at}.disposition must be fixed or declined.")
+            required = "commit" if disposition == "fixed" else "reason"
+            if disposition in ("fixed", "declined") and not (
+                isinstance(item.get(required), str) and item.get(required)
+            ):
+                problems.append(f"{at}.{required} is required for a {disposition} finding.")
 
     for name in FACT_FIELDS:
         if document.get(name) is None:

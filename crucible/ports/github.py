@@ -319,6 +319,18 @@ class GitHubClient(Protocol):
         """Post one pull request issue comment under the App's identity."""
         ...
 
+    def reply_to_review_comment(
+        self,
+        token: InstallationToken,
+        *,
+        repository: str,
+        number: int,
+        comment_id: str,
+        body: str,
+    ) -> CommentRecord:
+        """Reply on an inline review finding under the App's identity."""
+        ...
+
     def closed_by(self, token: InstallationToken, *, repository: str, number: int) -> str | None:
         """Who closed the pull request, or None when it is not observable."""
         ...

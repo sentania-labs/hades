@@ -388,11 +388,18 @@ cycle opens on that head.
   disposition; Crucible records it and, when `required_rounds` is
   satisfied, advances to CI certification without a wake for judgment.
 - Received: Crucible stores the review, its comments (each with ID, path,
-  line, body, reviewed SHA), and reactions, then moves the task to
-  `external_feedback_received` and wakes Foundry.
-- Foundry reads the feedback and records a `ReviewDisposition` per
-  comment: `fix`, `decline`, `out_of_scope`, `already_addressed`,
-  `question`, with reasoning. Crucible never forwards feedback to a worker.
+  line, body, reviewed SHA), and reactions. On the first Codex round with findings it
+  builds one correction from those verbatim findings and the task's objective, scope,
+  required verification and report rules, then launches it under the task's policy.
+  The instruction is to fix each finding or decline it in the report with the reason.
+  Foundry receives one informational wake and may still attach a correction or cancel.
+  Findings from a later round on the corrected head wake Foundry but cannot start a
+  second automatic loop.
+- The correcting worker's report records one disposition per finding: fixed with its
+  commit, or declined with reasoning. Crucible stores these as `ReviewDisposition`
+  rows and replies to each declined inline finding with the reported reason. Summary
+  and security-summary comments without inline findings are recorded as noted and need
+  no disposition.
 - If any disposition is `fix`, Foundry attaches a correction contract (05)
   and the task re-enters supervision against the existing branch. The
   correcting worker reruns every required check; Crucible re-verifies,
@@ -421,6 +428,10 @@ cycle opens on that head.
   opened. The same rule governs `ci_certification_overdue`. Measuring from
   the PR would make a correction on a three-day-old PR overdue on its first
   poll.
+
+The connector reply beginning "To use Codex here, create a Codex account" is a terminal
+failed round, not a review result. Crucible raises an informational wake immediately so
+the task cannot wait silently (hades #343).
 
 ## CI certification
 

@@ -203,6 +203,18 @@ class MainCIPlan:
     base_ref: str = "main"
 
 
+@dataclass(frozen=True, slots=True)
+class DeclineReplyPlan:
+    task_id: str
+    repository_name: str
+    installation_id: int
+    pull_request_number: int
+    comment_id: str
+    github_comment_id: str
+    disposition_id: str
+    reasoning: str
+
+
 @dataclass(slots=True)
 class DeliveryCounts:
     published: int = 0
@@ -1028,6 +1040,7 @@ class DeliveryCoordinator:
     async def observe(self) -> int:
         if not await self._github_ready_async():
             return 0
+        await self._post_decline_replies()
         polled = 0
         if not self._rate_limited():
             plans = await self._host._db(self._due_polls)
@@ -1055,6 +1068,95 @@ class DeliveryCoordinator:
                     break
                 await self._observe_main_ci(main_plan)
         return polled
+
+    def _decline_reply_plans(self) -> list[DeclineReplyPlan]:
+        plans: list[DeclineReplyPlan] = []
+        with self._host._fenced() as uow:
+            states = OBSERVED_STATES | CORRECTION_STATES | {TaskState.PUBLISHING}
+            for state in sorted(states, key=lambda item: item.value):
+                for task in uow.tasks.list_by_state(state):
+                    pull = uow.pull_requests.get_for_task(task.id)
+                    repository = uow.repositories.get(task.repository_id)
+                    if pull is None or repository is None or repository.installation_id is None:
+                        continue
+                    events = uow.events.list_for_task(task.id, after_seq=0, limit=10_000)
+                    posted = {
+                        str(event.payload.get("disposition_id"))
+                        for event in events
+                        if event.kind == EventKind.DISPOSITION_RECORDED.value
+                        and event.payload.get("reply_posted") is True
+                    }
+                    for event in events:
+                        if (
+                            event.kind != EventKind.DISPOSITION_RECORDED.value
+                            or event.payload.get("reply_pending") is not True
+                            or str(event.payload.get("disposition_id")) in posted
+                        ):
+                            continue
+                        comment = uow.review_comments.get(
+                            str(event.payload.get("review_comment_id"))
+                        )
+                        if comment is None:
+                            continue
+                        plans.append(
+                            DeclineReplyPlan(
+                                task_id=task.id,
+                                repository_name=repository.name,
+                                installation_id=repository.installation_id,
+                                pull_request_number=pull.number,
+                                comment_id=comment.id,
+                                github_comment_id=comment.github_id,
+                                disposition_id=str(event.payload["disposition_id"]),
+                                reasoning=str(event.payload.get("reasoning") or "Declined"),
+                            )
+                        )
+        return plans
+
+    async def _post_decline_replies(self) -> None:
+        if self._github is None or self._rate_limited():
+            return
+        for plan in await self._host._db(self._decline_reply_plans):
+            token: InstallationToken | None = None
+            try:
+                token = await asyncio.to_thread(
+                    self._github.installation_token,
+                    installation_id=plan.installation_id,
+                    repository=plan.repository_name,
+                )
+                reply = await asyncio.to_thread(
+                    self._github.reply_to_review_comment,
+                    token,
+                    repository=plan.repository_name,
+                    number=plan.pull_request_number,
+                    comment_id=plan.github_comment_id,
+                    body=plan.reasoning,
+                )
+                await self._host._db(partial(self._record_decline_reply, plan, reply.github_id))
+            except GitHubError as exc:
+                if exc.response_class == "rate_limited":
+                    self._defer_for_rate_limit(exc)
+                    return
+                log.warning("posting declined finding reply failed", exc_info=True)
+            finally:
+                if token is not None:
+                    token.discard()
+
+    def _record_decline_reply(self, plan: DeclineReplyPlan, github_id: str) -> None:
+        with self._host._fenced() as uow:
+            record_event(
+                uow,
+                self._clock,
+                EventKind.DISPOSITION_RECORDED,
+                principal=PRINCIPAL_CRUCIBLE,
+                task_id=plan.task_id,
+                payload={
+                    "disposition_id": plan.disposition_id,
+                    "review_comment_id": plan.comment_id,
+                    "github_reply_id": github_id,
+                    "reply_posted": True,
+                },
+            )
+            uow.commit()
 
     def _main_ci_plans(self) -> list[MainCIPlan]:
         """hades #411: the merge commits Crucible made whose checks on main have no

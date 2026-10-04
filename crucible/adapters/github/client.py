@@ -542,6 +542,23 @@ class RestGitHubClient:
             )
         return normalize.issue_comment(payload)
 
+    def reply_to_review_comment(
+        self,
+        token: InstallationToken,
+        *,
+        repository: str,
+        number: int,
+        comment_id: str,
+        body: str,
+    ) -> CommentRecord:
+        path = f"/repos/{repository}/pulls/{number}/comments/{comment_id}/replies"
+        status, payload, _ = self._http.request(
+            "POST", path, bearer=token.reveal(), body={"body": body}
+        )
+        if status != 201 or not isinstance(payload, dict):
+            raise GitHubError(status, _message(payload), path=path)
+        return normalize.review_comment(payload)
+
     def delete_ref(self, token: InstallationToken, *, repository: str, ref: str) -> None:
         """Cleanup only (the live test tier). A default branch is refused here as well as
         by policy, because a delete is the one call with no undo."""
