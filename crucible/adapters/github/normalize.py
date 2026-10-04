@@ -74,6 +74,7 @@ def pull_request(payload: Any) -> PullRequestRef:
         closed_at=parse_time(payload["closed_at"]) if payload.get("closed_at") else None,
         closed_by=None,
         mergeable_state=str(payload.get("mergeable_state", "")),
+        mergeable=(bool(payload["mergeable"]) if payload.get("mergeable") is not None else None),
         title=title,
         draft=bool(payload.get("draft", False)),
     )

@@ -2014,6 +2014,7 @@ def apply_observation(
     pull_request.observed_head_sha = observation.pull_request.head_sha
     pull_request.observed_base_ref = observation.pull_request.base_ref
     pull_request.mergeable_state = observation.pull_request.mergeable_state
+    pull_request.mergeable = observation.pull_request.mergeable
     if with_reactions:
         pull_request.last_reactions_polled_at = now
     uow.pull_requests.save(pull_request)
@@ -2031,6 +2032,8 @@ def apply_observation(
             "pull_request": pull_request.number,
             "head_sha": observation.pull_request.head_sha,
             "state": observation.pull_request.state,
+            "mergeable": observation.pull_request.mergeable,
+            "mergeable_state": observation.pull_request.mergeable_state,
             "reviews": len(observation.reviews),
             "review_comments": len(observation.review_comments),
             "issue_comments": len(observation.issue_comments),

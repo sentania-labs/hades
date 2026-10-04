@@ -13,6 +13,7 @@ poll-only path and the webhook path be the same code.
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager
@@ -35,6 +36,7 @@ from crucible.application.observation import (
     policy_for,
     poll_due,
     settle_pull_request_state,
+    supersede_for_head,
     to_cycle,
 )
 from crucible.application.publish import (
@@ -53,14 +55,17 @@ from crucible.application.publish import (
     request_external_review,
     upsert_pull_request,
 )
+from crucible.application.release_hold import set_release_hold
 from crucible.application.review import latest_work_attempt
-from crucible.application.transitions import record_event
+from crucible.application.transitions import move_task, record_event
 from crucible.application.wakes import create_wake
+from crucible.contracts.task_contract import contract_sha256
 from crucible.contracts.wake import WakeReason
-from crucible.domain.entities import PullRequestState, Task
+from crucible.domain.entities import PullRequestState, Task, TaskContract
 from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
 from crucible.domain.exit_class import ExitClass
 from crucible.domain.external_review import completed_rounds
+from crucible.domain.ids import new_id
 from crucible.domain.lifecycle import CORRECTION_STATES, TaskState
 from crucible.domain.publication import body_sha256
 from crucible.domain.secrets import redact
@@ -74,7 +79,7 @@ from crucible.ports.github import (
     Observation,
     PullRequestRef,
 )
-from crucible.ports.publish import Publisher, PublishRequest
+from crucible.ports.publish import MergeMainOutcome, MergeMainRequest, Publisher, PublishRequest
 from crucible.ports.repository import UnitOfWork
 
 log = logging.getLogger("crucible.delivery")
@@ -160,6 +165,15 @@ class MergePlan:
     installation_id: int | None
     certified_head_sha: str
     base_ref: str
+
+
+@dataclass(frozen=True, slots=True)
+class MainCIPlan:
+    task_id: str
+    repository_name: str
+    installation_id: int | None
+    merge_sha: str
+    pull_request_number: int
 
 
 @dataclass(slots=True)
@@ -1000,7 +1014,162 @@ class DeliveryCoordinator:
                 if self._rate_limited():
                     break
                 await self._merge_one(merge_plan)
+        if not self._rate_limited():
+            for main_plan in await self._host._db(self._main_ci_plans):
+                await self._observe_main_ci(main_plan)
         return polled
+
+    def _main_ci_plans(self) -> list[MainCIPlan]:
+        plans: list[MainCIPlan] = []
+        with self._host._fenced() as uow:
+            for task in uow.tasks.list_by_state(TaskState.MERGED):
+                pull_request = uow.pull_requests.get_for_task(task.id)
+                repository = uow.repositories.get(task.repository_id)
+                if (
+                    pull_request is None
+                    or repository is None
+                    or not pull_request.merge_sha
+                    or pull_request.merged_by not in {"hades[bot]", "crucible[bot]"}
+                ):
+                    continue
+                plans.append(
+                    MainCIPlan(
+                        task_id=task.id,
+                        repository_name=repository_slug(repository),
+                        installation_id=repository.installation_id,
+                        merge_sha=pull_request.merge_sha,
+                        pull_request_number=pull_request.number,
+                    )
+                )
+        return plans
+
+    async def _observe_main_ci(self, plan: MainCIPlan) -> None:
+        assert self._github is not None
+        checks_for_commit = getattr(self._github, "checks_for_commit", None)
+        if not callable(checks_for_commit):
+            return
+        token: InstallationToken | None = None
+        try:
+            token = await asyncio.to_thread(
+                self._github.installation_token,
+                installation_id=plan.installation_id or 0,
+                repository=plan.repository_name,
+            )
+            checks = tuple(
+                await asyncio.to_thread(
+                    checks_for_commit,
+                    token,
+                    repository=plan.repository_name,
+                    head_sha=plan.merge_sha,
+                )
+            )
+        except GitHubError:
+            return
+        finally:
+            if token is not None:
+                token.discard()
+        completed = [row for row in checks if row.source != "check_suite"]
+        if not completed or any(row.status != "completed" for row in completed):
+            return
+        failed = [row for row in completed if row.conclusion not in {"success", "skipped"}]
+        await self._host._db(lambda: self._record_main_ci(plan, failed))
+
+    def _record_main_ci(self, plan: MainCIPlan, failed: list[Any]) -> None:
+        with self._host._fenced() as uow:
+            existing = uow.provider_settings.get("release.main_ci_hold")
+            if failed:
+                merged_numbers = (
+                    list(existing.document.get("merged_pull_requests", [])) if existing else []
+                )
+                if plan.pull_request_number not in merged_numbers:
+                    merged_numbers.append(plan.pull_request_number)
+                fix_task_id = existing.document.get("fix_task_id") if existing else None
+                if not fix_task_id:
+                    fix_task_id = self._open_fix_main_task(uow, plan, failed, merged_numbers)
+                set_release_hold(
+                    uow,
+                    self._clock,
+                    held=True,
+                    document={
+                        "merge_sha": plan.merge_sha,
+                        "merged_pull_requests": merged_numbers,
+                        "fix_task_id": fix_task_id,
+                    },
+                )
+            else:
+                set_release_hold(
+                    uow,
+                    self._clock,
+                    held=False,
+                    document={"last_green_sha": plan.merge_sha, "merged_pull_requests": []},
+                )
+            uow.commit()
+
+    def _open_fix_main_task(
+        self, uow: UnitOfWork, plan: MainCIPlan, failed: list[Any], merged_numbers: list[int]
+    ) -> str:
+        source = uow.tasks.get(plan.task_id)
+        assert source is not None
+        prior = uow.contracts.get(source.id, source.contract_version)
+        assert prior is not None
+        document = copy.deepcopy(prior.document)
+        external_id = f"{source.external_id}-fix-main-{plan.merge_sha[:8]}"
+        document.update(
+            {
+                "external_id": external_id,
+                "title": f"Fix red main after PR #{plan.pull_request_number}",
+                "objective": (
+                    "Fix main forward and restore every required check. Failing jobs: "
+                    + "; ".join(f"{row.name}: {row.conclusion}" for row in failed)
+                    + ". Merged pull requests since the last green main: "
+                    + ", ".join(f"#{number}" for number in merged_numbers)
+                ),
+                "correction": None,
+            }
+        )
+        now = self._clock.now()
+        task = Task(
+            id=new_id(),
+            external_id=external_id,
+            principal_id=source.principal_id,
+            project=source.project,
+            title=str(document["title"]),
+            state=TaskState.SCHEDULED,
+            contract_version=1,
+            policy_name=source.policy_name,
+            policy_version=source.policy_version,
+            repository_id=source.repository_id,
+            created_at=now,
+            updated_at=now,
+        )
+        uow.tasks.add(task)
+        uow.contracts.add(
+            TaskContract(
+                id=new_id(),
+                task_id=task.id,
+                version=1,
+                document=document,
+                sha256=contract_sha256(document),
+                submitted_at=now,
+            )
+        )
+        record_event(
+            uow,
+            self._clock,
+            EventKind.TASK_SUBMITTED,
+            principal=PRINCIPAL_CRUCIBLE,
+            task_id=task.id,
+            payload={"external_id": external_id, "reason": "fix_main", "merge_sha": plan.merge_sha},
+        )
+        record_event(
+            uow,
+            self._clock,
+            EventKind.TASK_SCHEDULED,
+            principal=PRINCIPAL_CRUCIBLE,
+            task_id=task.id,
+            payload={"reason": "fix_main", "contract_version": 1},
+        )
+        return task.id
 
     def _ready_merges(self) -> list[MergePlan]:
         out: list[MergePlan] = []
@@ -1016,6 +1185,8 @@ class DeliveryCoordinator:
                     pull_request is None
                     or pull_request.state is not PullRequestState.OPEN
                     or pull_request.head_sha != task.head_sha
+                    or pull_request.mergeable_state != "clean"
+                    or getattr(pull_request, "mergeable", True) is False
                 ):
                     continue
                 certification = uow.ci_certifications.get_for_head(
@@ -1101,6 +1272,15 @@ class DeliveryCoordinator:
                     )
                 )
                 return False
+            if current.mergeable_state != "clean" or current.mergeable is False:
+                await self._host._db(
+                    lambda: self._record_merge_refusal(
+                        plan,
+                        f"pull request is not mergeable ({current.mergeable_state or 'unknown'})",
+                        current,
+                    )
+                )
+                return False
             # Re-read the switch, accepted head and certification after GitHub I/O.
             # A correction or an administrator may have changed them during the read.
             if not await self._host._db(lambda: self._merge_still_allowed(plan)):
@@ -1162,6 +1342,8 @@ class DeliveryCoordinator:
                 or pull_request.head_sha != plan.certified_head_sha
                 or pull_request.base_ref != plan.base_ref
                 or pull_request.state is not PullRequestState.OPEN
+                or pull_request.mergeable_state != "clean"
+                or getattr(pull_request, "mergeable", True) is False
                 or not policy_for(uow, task).get("delivery", {}).get("auto_merge", True)
             ):
                 return False
@@ -1412,7 +1594,210 @@ class DeliveryCoordinator:
                 token.discard()
         fetched = plan.failed_check is not None
         await self._host._db(lambda: self._apply(plan, observation, excerpt, fetched))
+        if observation.pull_request.state == "open" and (
+            observation.pull_request.mergeable is False
+            or observation.pull_request.mergeable_state == "dirty"
+        ):
+            await self._resolve_conflicting_pull_request(plan, observation.pull_request.head_sha)
         return True
+
+    async def _resolve_conflicting_pull_request(self, plan: PollPlan, head_sha: str) -> None:
+        """Try the mechanical merge first, then hand real conflicts to a worker."""
+        await self._host._db(lambda: self._record_conflict_wake(plan, head_sha))
+        if self._publisher is None or self._github is None:
+            await self._host._db(lambda: self._schedule_merge_main_correction(plan, head_sha, ()))
+            return
+        merge_main = getattr(self._publisher, "merge_main", None)
+        if not callable(merge_main):
+            await self._host._db(lambda: self._schedule_merge_main_correction(plan, head_sha, ()))
+            return
+        token: InstallationToken | None = None
+        try:
+            token = await asyncio.to_thread(
+                self._github.installation_token,
+                installation_id=plan.installation_id or 0,
+                repository=plan.repository_name,
+            )
+            outcome: MergeMainOutcome = await merge_main(
+                MergeMainRequest(
+                    task_id=plan.task_id,
+                    attempt_id=plan.attempt_id,
+                    repository_url=f"https://github.com/{plan.repository_name}",
+                    work_branch=await self._host._db(lambda: self._work_branch(plan)),
+                    base_ref=plan.base_ref,
+                    expected_head=head_sha,
+                    timeout_seconds=self.config.publisher_timeout_seconds,
+                ),
+                token,
+            )
+        except Exception as exc:
+            log.warning("publisher merge-main attempt failed", exc_info=True)
+            outcome = MergeMainOutcome(merged=False, detail=redact(str(exc)))
+        finally:
+            if token is not None:
+                token.discard()
+        if outcome.merged and outcome.head_sha:
+            await self._host._db(lambda: self._record_merge_main_push(plan, head_sha, outcome))
+        else:
+            await self._host._db(
+                lambda: self._schedule_merge_main_correction(
+                    plan, head_sha, outcome.conflicting_files
+                )
+            )
+
+    def _work_branch(self, plan: PollPlan) -> str:
+        with self._host._fenced() as uow:
+            pull_request = uow.pull_requests.get(plan.pull_request_id)
+            return pull_request.work_branch if pull_request is not None else ""
+
+    def _record_conflict_wake(self, plan: PollPlan, head_sha: str) -> None:
+        with self._host._fenced() as uow:
+            task = uow.tasks.get(plan.task_id, for_update=True)
+            pull_request = uow.pull_requests.get(plan.pull_request_id, for_update=True)
+            if task is None or pull_request is None or pull_request.head_sha != head_sha:
+                return
+            conflict_marker = f"at {head_sha}"
+            if any(
+                event.payload.get("reason") == str(WakeReason.PULL_REQUEST_CONFLICTING)
+                and conflict_marker in str(event.payload.get("summary", ""))
+                for event in uow.events.list_for_task(task.id, after_seq=0, limit=10_000)
+            ):
+                return
+            create_wake(
+                uow,
+                self._clock,
+                principal_id=task.principal_id,
+                reason=WakeReason.PULL_REQUEST_CONFLICTING,
+                summary=(
+                    f"pull request #{pull_request.number} at {head_sha} conflicts with "
+                    f"{pull_request.base_ref}; "
+                    "Crucible is attempting merge-main, then will launch a correction if needed"
+                ),
+                task=task,
+                attempt_id=plan.attempt_id,
+                extra_links={"pull_request": f"/v1/tasks/{task.id}/pull-request"},
+            )
+            uow.commit()
+
+    def _record_merge_main_push(
+        self, plan: PollPlan, old_head: str, outcome: MergeMainOutcome
+    ) -> None:
+        with self._host._fenced() as uow:
+            task = uow.tasks.get(plan.task_id, for_update=True)
+            pull_request = uow.pull_requests.get(plan.pull_request_id, for_update=True)
+            if task is None or pull_request is None or pull_request.head_sha != old_head:
+                return
+            supersede_for_head(
+                uow,
+                self._clock,
+                task=task,
+                reason="merge_main",
+                new_head=outcome.head_sha,
+            )
+            task.head_sha = outcome.head_sha
+            pull_request.head_sha = outcome.head_sha
+            pull_request.observed_head_sha = outcome.head_sha
+            pull_request.mergeable_state = "unknown"
+            uow.tasks.save(task)
+            uow.pull_requests.save(pull_request)
+            record_event(
+                uow,
+                self._clock,
+                EventKind.BRANCH_PUSHED,
+                principal=PRINCIPAL_CRUCIBLE,
+                task_id=task.id,
+                attempt_id=plan.attempt_id,
+                payload={
+                    "head_sha": outcome.head_sha,
+                    "previous_head_sha": old_head,
+                    "reason": "merge_main",
+                    "force_with_lease": old_head,
+                },
+            )
+            move_task(
+                uow,
+                self._clock,
+                task,
+                TaskState.AWAITING_CI_CERTIFICATION,
+                EventKind.TASK_AWAITING_CI_CERTIFICATION,
+                payload={"head_sha": outcome.head_sha, "reason": "merge_main"},
+            )
+            uow.commit()
+
+    def _schedule_merge_main_correction(
+        self, plan: PollPlan, head_sha: str, conflicting_files: tuple[str, ...]
+    ) -> None:
+        with self._host._fenced() as uow:
+            task = uow.tasks.get(plan.task_id, for_update=True)
+            pull_request = uow.pull_requests.get(plan.pull_request_id, for_update=True)
+            if task is None or pull_request is None or pull_request.head_sha != head_sha:
+                return
+            scheduled = uow.events.latest_for_task_kind(task.id, EventKind.TASK_SCHEDULED.value)
+            if scheduled is not None and scheduled.payload.get("reason") == "merge_main":
+                return
+            prior = uow.contracts.get(task.id, task.contract_version)
+            if prior is None:
+                return
+            document = copy.deepcopy(prior.document)
+            document["correction"] = {
+                "of_version": task.contract_version,
+                "reason": "ci_certification",
+                "addresses": [],
+                "instructions": (
+                    "Merge origin/main, resolve every conflict keeping both behaviours, "
+                    "run every required check, commit the result, and report."
+                ),
+                "resume_from": "remote_branch",
+                "request_internal_review": False,
+            }
+            version = (
+                max(
+                    (row.version for row in uow.contracts.list_for_task(task.id)),
+                    default=0,
+                )
+                + 1
+            )
+            stored = TaskContract(
+                id=new_id(),
+                task_id=task.id,
+                version=version,
+                document=document,
+                sha256=contract_sha256(document),
+                submitted_at=self._clock.now(),
+            )
+            uow.contracts.add(stored)
+            task.contract_version = version
+            task.head_sha = None
+            uow.tasks.save(task)
+            record_event(
+                uow,
+                self._clock,
+                EventKind.TASK_CORRECTION_ATTACHED,
+                principal=PRINCIPAL_CRUCIBLE,
+                task_id=task.id,
+                payload={
+                    "contract_version": version,
+                    "of_version": version - 1,
+                    "reason": "merge_main",
+                    "conflicting_files": list(conflicting_files),
+                    "remote_head": head_sha,
+                },
+            )
+            move_task(
+                uow,
+                self._clock,
+                task,
+                TaskState.SCHEDULED,
+                EventKind.TASK_SCHEDULED,
+                payload={
+                    "role": "correct",
+                    "reason": "merge_main",
+                    "contract_version": version,
+                    "resume_from_work_branch": True,
+                    "conflicting_files": list(conflicting_files),
+                },
+            )
+            uow.commit()
 
     def _record_rate_limited(self, task_id: str, exc: GitHubError) -> None:
         with self._host._fenced() as uow:

@@ -65,7 +65,7 @@ ready_for_merge --correction attached--> scheduled
 
 {awaiting_external_review, external_feedback_received, awaiting_ci_certification, ready_for_merge}
     --PR head changed out of band--> head_diverged --wake-->
-head_diverged --head-decision recollect--> scheduled    (a `correct` execution against the remote work branch; the new head gets its own claim, then all gates, review, acceptance start over)
+head_diverged --head-decision adopt (legacy name: recollect)--> scheduled    (a `correct` execution recollected from the remote work branch tip; the new head gets its own claim, then all gates, review, acceptance start over)
 head_diverged --head-decision reject--> rejected
 head_diverged --cancel--> cancelled
 

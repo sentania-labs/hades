@@ -181,6 +181,21 @@ step, and closes the escalation the wait opened.
 After publication Crucible watches the PR until the task is terminal.
 Polling is the complete observation path; webhooks only shorten latency.
 
+Every poll records GitHub's `mergeable` result and `mergeable_state`. A `dirty` pull
+request does not wait in CI certification. Crucible raises one
+`pull_request_conflicting` wake and first asks the publisher to merge `origin/main`
+into the known remote branch tip without resolving conflicts. A clean merge is committed
+as Crucible and pushed with `--force-with-lease` against that tip, records
+`branch_pushed`, and certifies the new head. A real conflict schedules a correction from
+the remote branch tip with instructions to merge main, preserve both behaviours, run the
+required checks, commit, and report. Only a failed correction escalates.
+
+A `ready_for_merge` task merges as soon as GitHub says it is mergeable and all check
+runs on its accepted head passed. It does not re-test that head against current main.
+After Crucible merges it, the supervisor watches the checks on the merge commit. Red
+main opens one fix-main task carrying the failed jobs and pull request numbers merged
+since the last green main, and sets the release hold. Green main clears that hold.
+
 - **Polling** (always on): every `github.poll_interval_seconds` (default
   120) the supervisor fetches, for every PR in an observed state: the PR
   (state, head SHA, mergeability, merged flag and merger), its reviews,

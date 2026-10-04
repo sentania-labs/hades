@@ -404,6 +404,12 @@ class RestGitHubClient:
         )
         return tuple(out)
 
+    def checks_for_commit(
+        self, token: InstallationToken, *, repository: str, head_sha: str
+    ) -> tuple[CheckRecord, ...]:
+        """Public form used to watch main after Crucible merges a pull request."""
+        return self._checks_for(token, repository=repository, head_sha=head_sha)
+
     def ci_failure_log(
         self,
         token: InstallationToken,

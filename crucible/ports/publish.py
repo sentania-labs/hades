@@ -56,6 +56,29 @@ class PublishOutcome:
     log_tail: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class MergeMainRequest:
+    """A publisher-side attempt to merge the current base into the remote work tip."""
+
+    task_id: str
+    attempt_id: str
+    repository_url: str
+    work_branch: str
+    base_ref: str
+    expected_head: str
+    author_name: str = "Crucible"
+    author_email: str = "crucible-worker@users.noreply.github.com"
+    timeout_seconds: int = 600
+
+
+@dataclass(frozen=True, slots=True)
+class MergeMainOutcome:
+    merged: bool
+    head_sha: str = ""
+    conflicting_files: tuple[str, ...] = ()
+    detail: str = ""
+
+
 class Publisher(Protocol):
     """Push one verified head to one repository and report what happened."""
 

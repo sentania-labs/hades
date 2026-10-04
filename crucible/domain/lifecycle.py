@@ -160,6 +160,9 @@ TASK_TRANSITIONS: frozenset[tuple[TaskState, TaskState]] = frozenset(
         (_S.AWAITING_CI_CERTIFICATION, _S.HEAD_DIVERGED),
         (_S.READY_FOR_MERGE, _S.HEAD_DIVERGED),
         (_S.READY_FOR_MERGE, _S.CI_CERTIFICATION_FAILED),
+        # A clean publisher-side merge of current main creates a new branch head. Its
+        # checks certify that head; it does not need a test of the old head against main.
+        (_S.READY_FOR_MERGE, _S.AWAITING_CI_CERTIFICATION),
         (_S.READY_FOR_MERGE, _S.EXTERNAL_FEEDBACK_RECEIVED),
         (_S.READY_FOR_MERGE, _S.SCHEDULED),
         (_S.HEAD_DIVERGED, _S.REPORTED),

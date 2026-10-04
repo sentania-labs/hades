@@ -509,3 +509,10 @@ dead carry a `metadata.resourceVersion` precondition; a conflicting write is ref
 A renewal that conflicts with an unrelated Secret edit re-reads and retries the same
 fresh tokens under the new version if the stored refresh token is unchanged. A new
 login takes precedence over a grant from the previous login (12).
+
+## Main CI release hold
+
+The release path reads the durable `release.main_ci_hold` setting. While it is held,
+tagging and release-candidate actions are refused; the setting names the red merge
+commit and its automatically opened fix-main task. Observing green checks on main clears
+the hold.
