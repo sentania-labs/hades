@@ -222,6 +222,8 @@ class PathChange:
     path: str
     status: str
     blob: str
+    # #400: plain, shim, deleted, or error with a reason; empty for older collectors.
+    classification: str = ""
 
 
 @dataclass(frozen=True, slots=True)

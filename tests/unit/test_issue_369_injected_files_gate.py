@@ -605,3 +605,150 @@ def test_missing_or_invalid_prepared_base_fails_closed(tmp_path: Path, record: s
     assert not (tmp_path / "output/collector.ok").exists()
     for name in ("diff-raw.txt", "commit-raw.txt", "base-injected.txt"):
         assert not (tmp_path / "output" / name).exists()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Agents.md",
+        "AGENTS.MD",
+        "\u0410GENTS.md",
+        "AGENTS\u0410.md",
+        "CLAUDE\u200b.md",
+        "AGENTS.override.md",
+        "CLAUDE.local.md",
+        "GEMINI.md",
+        ".claude/settings.json",
+        ".codex/config.toml",
+        ".hermes/SOUL.md",
+        ".gemini/settings.json",
+        ".CRUCIBLE/x",
+        "crucible/Identity/x",
+        "nested/Agents.md",
+        "nested/.ClAuDe/settings.json",
+        "nested/CLAUDE\u2060.local.MD",
+        "nested/GEMINI\ufe0f.md",
+        "AGENTS\n.local.md",
+        ".claude/.\u200b./settings.json",
+    ],
+)
+@pytest.mark.parametrize("history_only", [False, True])
+def test_issue_400_instruction_names_through_collector(
+    tmp_path: Path,
+    name: str,
+    history_only: bool,
+) -> None:
+    repo = _repo(tmp_path)
+    _write(repo, name, "# instructions\n")
+    _commit(repo, "add instruction")
+    if history_only:
+        _git(repo, "rm", "-q", name)
+        _commit(repo, "remove instruction")
+    assert _collected(tmp_path, repo)[0] is GateResult.FAIL
+
+
+@pytest.mark.parametrize("name", [".claude", "nested/.CoDeX", ".hermes", ".gemini", ".crucible"])
+def test_issue_400_directory_symlink_through_collector(tmp_path: Path, name: str) -> None:
+    repo = _repo(tmp_path)
+    target = repo / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.symlink_to("elsewhere", target_is_directory=True)
+    _commit(repo, "directory symlink")
+    assert _collected(tmp_path, repo)[0] is GateResult.FAIL
+
+
+@pytest.mark.parametrize("suffix", ["", "\r\n", " \t\n", "\t\r\n\r\n"])
+@pytest.mark.parametrize("history_only", [False, True])
+def test_issue_400_near_shim_edit_through_collector(
+    tmp_path: Path,
+    suffix: str,
+    history_only: bool,
+) -> None:
+    repo = _repo(tmp_path)
+    (repo / "CLAUDE.md").write_bytes((injected_shim_text() + suffix).encode())
+    _commit(repo, "near shim")
+    if history_only:
+        _write(repo, "CLAUDE.md", "# ordinary project instructions\n")
+        _commit(repo, "ordinary edit")
+    result, _, bundle = _collected(tmp_path, repo)
+    assert result is GateResult.FAIL
+    assert any(c["classification"] == "shim" for c in bundle["commit_changes"])
+
+
+def test_issue_400_plain_edit_through_collector(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _write(repo, "CLAUDE.md", "# Follow the project conventions.\n")
+    _commit(repo, "plain edit")
+    assert _collected(tmp_path, repo)[0] is GateResult.PASS
+
+
+@pytest.mark.parametrize("bad_name", [False, True])
+def test_issue_400_unclassifiable_input_fails_with_reason(tmp_path: Path, bad_name: bool) -> None:
+    repo = _repo(tmp_path)
+    if bad_name:
+        name = os.fsdecode(b"ordinary-\xff.txt")
+        (repo / name).write_bytes(b"ordinary file")
+        reason = "undecodable name"
+    else:
+        (repo / "CLAUDE.md").write_bytes(b"\xff invalid UTF-8")
+        reason = "unreadable blob"
+    _commit(repo, "unclassifiable input")
+    gi = GateInput(
+        contract=contract_document(),
+        policy={},
+        head_sha="a" * 40,
+        evidence=_evidence(tmp_path, repo),
+    )
+    outcome = evaluate_gate(GateName.NO_INJECTED_FILES, gi)
+    assert outcome.result is GateResult.FAIL
+    assert reason in outcome.detail
+
+
+def test_issue_400_missing_blob_fails_with_reason(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _write(repo, "CLAUDE.md", "# a new blob to remove\n")
+    _commit(repo, "edit")
+    blob = _git(repo, "rev-parse", "HEAD:CLAUDE.md").strip()
+    (repo / ".git/objects" / blob[:2] / blob[2:]).unlink()
+    gi = GateInput(
+        contract=contract_document(),
+        policy={},
+        head_sha="a" * 40,
+        evidence=_evidence(tmp_path, repo),
+    )
+    outcome = evaluate_gate(GateName.NO_INJECTED_FILES, gi)
+    assert outcome.result is GateResult.FAIL
+    assert "unreadable blob" in outcome.detail
+    assert blob in outcome.detail
+
+
+def test_issue_400_spelling_variant_cannot_borrow_base_exemption(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _git(repo, "mv", "CLAUDE.md", "claude.md")
+    _commit(repo, "rename")
+    assert _collected(tmp_path, repo)[0] is GateResult.FAIL
+
+
+@pytest.mark.parametrize("name", ["d\u00ef/CLAUDE.local.md", "di\u0308/CLAUDE.local.md"])
+def test_issue_400_existing_unicode_path_plain_edit_passes(tmp_path: Path, name: str) -> None:
+    repo = _repo(tmp_path)
+    _git(repo, "checkout", "-q", "main")
+    _write(repo, name, "# existing instructions\n")
+    _commit(repo, "base instructions")
+    (tmp_path / "output/prepared-base.txt").write_text(_git(repo, "rev-parse", "HEAD"))
+    _git(repo, "checkout", "-q", "crucible/test")
+    _git(repo, "merge", "-q", "main")
+    _write(repo, name, "# plain edit\n")
+    _commit(repo, "edit")
+    assert _collected(tmp_path, repo)[0] is GateResult.PASS
+
+
+def test_issue_400_unknown_classification_fails_closed(tmp_path: Path) -> None:
+    raw = tmp_path / "diff-raw.txt"
+    raw.write_text(
+        '{"version":1,"changes":[{"path":"CLAUDE.md","status":"M",'
+        '"blob":"abc","classification":"unknown"}]}'
+    )
+    changes = read_path_changes(raw)
+    assert changes is not None
+    assert "unknown content classification" in changes[0].classification

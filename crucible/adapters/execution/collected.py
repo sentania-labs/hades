@@ -12,6 +12,7 @@ Everything here treats what it reads as data: it is a tree a worker influenced.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -218,19 +219,41 @@ _RAW_LIMIT = 8 * 1024 * 1024
 
 
 def read_path_changes(path: Path) -> tuple[PathChange, ...] | None:
-    """`git diff --raw -z` or `git log --diff-merges=separate --raw -z` records as
-    PathChange records (hades #369), in the order git printed them, or None when the
-    collector wrote no such file (an older collector script) or wrote more than is read.
-    A record that does not parse is skipped; the gate then treats its path as before
-    #369. `-z` keeps each path as its bytes, so a non-ASCII directory is not hidden
-    behind git's quoting."""
+    """Read #400 JSON path/content classifications, preserving Git's history order.
+
+    Legacy #369 raw NUL-separated records remain readable. Missing/oversized files
+    return None; the gate checks missing statuses and list limits. Malformed modern
+    records carry an explicit classification error instead of granting an exemption.
+    """
     try:
         if not path.is_file() or path.stat().st_size > _RAW_LIMIT:
             return None
     except OSError:
         return None
+    content = text(path, _RAW_LIMIT)
+    if content.startswith("{"):
+        try:
+            payload = json.loads(content)
+            if payload["version"] != 1 or not isinstance(payload["changes"], list):
+                raise ValueError("unsupported classification records")
+            changes = []
+            for record in payload["changes"]:
+                if not isinstance(record, dict) or not all(
+                    isinstance(record.get(key), str)
+                    for key in ("path", "status", "blob", "classification")
+                ):
+                    raise ValueError("malformed classification record")
+                classification = record["classification"]
+                if classification not in ("plain", "shim", "deleted") and not (
+                    classification.startswith("error:")
+                ):
+                    raise ValueError("unknown content classification")
+                changes.append(PathChange(**record))
+            return tuple(changes)
+        except (ValueError, KeyError, TypeError) as exc:
+            return (PathChange("", "", "", f"error: unreadable classification records: {exc}"),)
     out: list[PathChange] = []
-    fields = text(path, _RAW_LIMIT).split("\0")
+    fields = content.split("\0")
     at = 0
     while at < len(fields) - 1:
         match = _RAW_META.fullmatch(fields[at].lstrip("\n"))

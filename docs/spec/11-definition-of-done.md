@@ -134,7 +134,7 @@ is always advisory.
 | `exit_clean` | blocking | exit code 0 and exit class `completed` or `completed_without_report` (an `incomplete` attempt exits 0 too, issue 128) | attempt exit info |
 | `commits_present` | blocking | the collected `work_branch` has at least one commit beyond `base_ref`, the bundle verifies, and the bundle names its head. The head is the bundle's; a reported `head_sha` that differs is noted in the gate's detail and does not fail it (hades #187, 2026-09-28) | branch bundle from `collect` |
 | `scope_contained` | advisory, except a prohibited path | every changed path matches `allowed_paths` and none matches `prohibited_paths`. A path matching `prohibited_paths` stops the task even when the gate is advisory; a path merely outside `allowed_paths` is for the reviewer | diff path list from `collect` |
-| `no_injected_files` | blocking | `AGENTS.md`, `CLAUDE.md`, other shims, `.crucible/`, and identity paths absent from diff and from any commit on `work_branch` | diff, `git log --stat` |
+| `no_injected_files` | blocking | no instruction additions, harness paths or normalized shim content in the diff or any commit on `work_branch`; unclassifiable evidence fails closed (details below) | normalized path records, base paths and blob classifications from the collector |
 | `no_secrets` | always blocking | secret scanner over the diff, every commit message, and the report finds nothing | scanner output artifact |
 | `verification_ran` | blocking | for each `required_verification` command: Crucible itself re-ran the command after exit, in a fresh verifier container from the collected tree (same image, `network` per policy), and its exit matches `expect_exit`. The worker's own check logs are stored as a claim and shown to Foundry, never consumed by the gate. A check the worker's report says passed and the re-run failed is also recorded as the advisory finding "the worker reported V3 passing; Crucible's re-run failed it" (ADR 0024) | verifier exit and log (verified) |
 | `run_evidence_present` | advisory | each `kind: artifact` verification path exists and is non-empty | artifacts |
@@ -144,6 +144,26 @@ is always advisory.
 | `workspace_clean` | blocking | no leftover ephemeral clusters or containers labeled for this attempt | provider reconcile |
 | `internal_review_recorded` | always blocking | a `ReviewReportV1` for this exact head SHA exists from a reviewer that is not the implementing attempt; `pending` until then (the task waits in `awaiting_internal_review`) | review report with reviewer identity |
 | `commit_policy` | always advisory | every new commit is authored with the policy's `author_email`. The collector checks each commit's author, and a commit authored by someone else fails the gate, named by hash and address in the detail, so it is listed for the reviewer; it never stops the task. The attempt trailer is not checked. `skipped` only for an attempt collected before the check existed; `fail` (advisory) when the collector could not read the commits. The operator decided on 2026-09-29 that the trailer is not required and the task record is the paper trail (hades FDY-0143); before that the gate blocked (FDY-0135) | collector's author check over the collected checkout's commits, the ones the bundle carries |
+
+`no_injected_files` matches names after Unicode NFC, casefold and removal of
+zero-width and format characters, with common Cyrillic and Greek lookalikes folded
+to Latin (hades #400, option 1). Any `AGENTS*.md`, `CLAUDE*.md` or `GEMINI*.md`
+at any depth is an instruction name. Any entry or descendant of `.codex/`,
+`.claude/`, `.hermes/`, `.gemini/`, `.crucible/`, `.crucible-shims/` or
+`crucible/identity/` fails, including directory symlinks with those names. Symlink
+targets are not traversed outside the collected tree. Existing identity/shim names
+remain protected.
+
+As decided in #369, ordinary edits and deletions of the repository's own instruction
+files already present on the base are exempt. Ownership uses the original Git path,
+so a newly added spelling variant cannot borrow the exemption. Replacing such a file
+with a symlink still fails. Shim content is compared after normalizing line endings,
+trailing whitespace and final newlines, including every historical blob on the branch.
+The collector classifies all raw names before filtering records; a Git pathspec cannot
+perform this normalization. Undecodable names, unreadable or undecodable instruction
+blobs, malformed records and incomplete lists fail closed with a reason. Instruction
+blobs above the 8 MiB classification limit also fail closed. Older evidence without
+content classifications retains its conservative path/status and exact-blob checks.
 
 `commit_policy` is evaluated whatever `gates.pre_pr` lists, and a policy may
 not name it, so the reviewer always sees who authored the commits and a
