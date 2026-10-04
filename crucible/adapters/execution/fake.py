@@ -315,6 +315,14 @@ def default_report(
         "schema_version": "1.0",
         "task_external_id": spec.external_id,
         "summary": f"Fake worker completed {spec.external_id}.",
+        "self_review": {
+            "documentation": ["No documentation changed: this is a synthetic worker run."],
+            "acceptance_criteria": [
+                {"id": c["id"], "status": "met", "evidence": "report/evidence.md"}
+                for c in contract.get("acceptance_criteria", [])
+            ],
+            "omissions": [],
+        },
         "changed_files": list(changed_paths(contract, behavior)),
         "refs": {
             "branch": contract.get("repository", {}).get("work_branch", "crucible/unknown"),

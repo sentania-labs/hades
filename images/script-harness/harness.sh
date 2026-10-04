@@ -166,6 +166,13 @@ jq -n \
      schema_version: "1.0",
      task_external_id: $external,
      summary: "The e2e script harness made the requested change and ran every check.",
+     self_review: {
+       documentation: ["No documentation update needed for this synthetic e2e change."],
+       acceptance_criteria: [
+         $contract[0].acceptance_criteria[]? | { id: .id, status: "met", evidence: "run-evidence.md" }
+       ],
+       omissions: []
+     },
      changed_files: [$target],
      refs: { branch: $branch, head_sha: $head, commits: $commits },
      checks: $checks,

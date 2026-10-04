@@ -14,9 +14,11 @@ The project is Hades (the package, CLIs and images still say `crucible`).
    Open the PR when the work is done, not to find out whether it works.
 3. Every job in the branch's CI run must succeed. Hades certifies that itself
    from the check runs on the head; there is no gate job and the ruleset on
-   main names no required check. One internal review round
-   happens before the PR opens (the orchestrator's review of the worker's
-   branch). Codex reviews every PR once, automatically, and its findings get
+   main names no required check. The worker's required report self-review
+   covers documentation, every acceptance criterion with evidence, and anything
+   knowingly left out and why. Passing blocking gates and a complete report
+   let Hades record acceptance and publish. Codex reviews every PR once,
+   automatically, and its findings get
    a disposition (fix, or an explanation) before merge; Codex is not
    re-requested after a fix. Hades squash-merges the certified head; there is no
    merge queue. Do not push to `main` directly.

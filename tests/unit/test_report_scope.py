@@ -33,6 +33,14 @@ checker = _load_checker()
 def _create_minimal_report() -> dict[str, Any]:
     return {
         "schema_version": "1.0",
+        "self_review": {
+            "documentation": ["No documentation change needed for this test fixture."],
+            "acceptance_criteria": [
+                {"id": "AC1", "status": "met", "evidence": "Test fixture"},
+                {"id": "AC2", "status": "met", "evidence": "Test fixture"},
+            ],
+            "omissions": [],
+        },
         "summary": "test",
         "acceptance_mapping": [{"id": "AC1", "status": "met", "evidence": ""}],
         "proposed_pull_request": {"title": "t", "body": "b"},

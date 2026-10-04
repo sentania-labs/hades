@@ -4698,7 +4698,12 @@ class Supervisor:
             if outputs.report is not None and not cancelled:
                 # hades #215: Crucible's own facts in place of the worker's, then parse.
                 completed = complete_claim(outputs.report, claim_facts(task, outputs))
-                claim, errors = parse_claim(completed.document)
+                claim, errors = parse_claim(
+                    completed.document,
+                    criteria=[str(c["id"]) for c in stored.document.get("acceptance_criteria", [])]
+                    if stored is not None
+                    else None,
+                )
                 claim_ok = claim is not None
                 correction = (stored.document.get("correction") if stored else None) or {}
                 expected_findings = {

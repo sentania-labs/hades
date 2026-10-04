@@ -411,6 +411,8 @@ OBJECTIVE = """Make exactly this change and nothing else.
    `git rev-parse --abbrev-ref HEAD`, refs.head_sha from `git rev-parse HEAD`,
    refs.commits 1, one checks entry per verification command with its exit code and
    log file name, acceptance_mapping with id AC1 status met evidence run-evidence.md,
+   self_review with documentation naming notes/c5-live.txt, acceptance_criteria mapping
+   AC1 with status met and evidence run-evidence.md, and omissions [],
    run_evidence ["run-evidence.md"], proposed_pull_request with title
    "c5 live run for {external_id}", an empty body, and closes []; empty lists for
    limitations, risks, blockers and follow_ups.
@@ -448,6 +450,13 @@ claim = {{
     "schema_version": "1.0",
     "task_external_id": external_id,
     "summary": "Hermes appended and committed the required live-run line.",
+    "self_review": {{
+        "documentation": ["Updated notes/c5-live.txt."],
+        "acceptance_criteria": [
+            {{"id": "AC1", "status": "met", "evidence": "run-evidence.md"}}
+        ],
+        "omissions": []
+    }},
     "changed_files": ["notes/c5-live.txt"],
     "refs": {{"branch": branch, "head_sha": head, "commits": 1}},
     "checks": [

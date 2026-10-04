@@ -1,5 +1,17 @@
 # 05. Task contract schema (TaskContractV1)
 
+The worker self-review is the internal review. The required `self_review` section
+names where documentation was updated (or why no update was needed), maps every
+acceptance criterion with evidence, and lists anything knowingly left out and why.
+
+A missing or incomplete section fails `report_present`, naming `self_review`.
+When every blocking gate passes and the report is complete, Hades records acceptance
+and publishes without an orchestrator review or acceptance call, for first attempts
+and corrections alike. Publication sends one informational `published, PR #N` wake.
+The orchestrator can still cancel or attach a correction after publication. The
+review-report endpoint records operator out-of-band adversarial findings against
+the PR; a correction can be attached on the operator's word. It is not a gate.
+
 The contract is the only way work enters Crucible. It is authored by the
 orchestrator, validated on submit, stored verbatim with its SHA-256, and never
 edited in place. Sanitized example: `examples/task-contracts/`.
@@ -40,10 +52,6 @@ acceptance_criteria:               # each becomes a row the worker must map to
     text: "Import of a bundle with a duplicate ID fails with a 409 and no partial write."
   - id: "AC2"
     text: "Existing import tests still pass."
-
-# The completion report must contain self_review. It names where documentation was
-# updated, maps every acceptance criterion with evidence, and lists anything knowingly
-# left out and why. That worker self-review is the internal review used for publication.
 
 required_verification:             # must include every check the repository policy requires
   - { id: "V1", command: "make lint", expect_exit: 0 }

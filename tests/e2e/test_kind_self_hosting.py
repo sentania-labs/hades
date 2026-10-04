@@ -86,6 +86,11 @@ git commit -q -m 'docs: a line from the hades 184 kind proof' \
 cat > /crucible/report/report.yaml <<'EOF'
 schema_version: "1.0"
 summary: Appended one line to docs/roadmap.md for the hades 184 kind proof.
+self_review:
+  documentation: ["Updated docs/roadmap.md."]
+  acceptance_criteria:
+    - {id: AC1, status: met, evidence: "docs/roadmap.md gains the line"}
+  omissions: []
 acceptance_mapping:
   - {id: AC1, status: met, evidence: "docs/roadmap.md gains the line"}
 proposed_pull_request:

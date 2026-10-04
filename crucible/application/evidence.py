@@ -363,6 +363,7 @@ def record_collection_evidence(
         payload: dict[str, Any] = {
             "role": ROLE_COMPLETION_CLAIM,
             "parsed_ok": claim_parsed_ok,
+            "self_review_checked": claim_parsed_ok and isinstance(report.get("self_review"), dict),
             "parse_errors": parse_errors,
             "redacted": redacted,
         }

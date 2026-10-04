@@ -322,12 +322,39 @@ def check(
                 )
             elif not _is_str_list(self_review[name]):
                 problems.append(f"self_review.{name} must be a list of text items.")
+        if self_review.get("documentation") == []:
+            problems.append(
+                "self_review.documentation must say where docs changed or why none changed."
+            )
+        for name in ("documentation", "omissions"):
+            notes = self_review.get(name)
+            if isinstance(notes, list) and any(
+                isinstance(note, str) and not note.strip() for note in notes
+            ):
+                problems.append(f"self_review.{name} notes must not be blank.")
         if "acceptance_criteria" not in self_review:
             problems.append(
                 "self_review.acceptance_criteria is missing: map every acceptance criterion with evidence."
             )
         else:
             reviewed = _mapping_entries(self_review["acceptance_criteria"], problems)
+            if any(
+                not str(entry.get("evidence") or "").strip()
+                for entry in reviewed
+                if isinstance(entry, dict)
+            ):
+                problems.append(
+                    "self_review.acceptance_criteria must give evidence for every acceptance criterion."
+                )
+            ids = [
+                entry.get("id")
+                for entry in reviewed
+                if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+            ]
+            if len(ids) != len(set(ids)):
+                problems.append(
+                    "self_review.acceptance_criteria must map each criterion exactly once."
+                )
             reviewed_ids = {
                 str(entry.get("id"))
                 for entry in reviewed

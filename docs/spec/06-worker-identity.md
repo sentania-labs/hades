@@ -1,5 +1,9 @@
 # 06. Injected worker identity (WorkerIdentityV1)
 
+The worker self-review is the internal review. The required `self_review` section
+names where documentation was updated (or why no update was needed), maps every
+acceptance criterion with evidence, and lists anything knowingly left out and why.
+
 Crucible assembles a per-attempt identity bundle at launch, mounts it
 read-only into the worker, and never writes it into the repository.
 
@@ -57,7 +61,8 @@ the worker is told what to do, not how Crucible checks it. In order:
 8. **Report.** Write `/crucible/report/report.yaml` against
    `report-schema.json` with `schema_version: "1.0"` (the format version, not
    the schema's name, hades #181), `summary`, `self_review` (where documentation was
-   updated, every acceptance criterion mapped with evidence, and anything knowingly
+   updated or why no update was needed, every acceptance criterion mapped with evidence,
+   and anything knowingly
    left out and why), `acceptance_mapping` (one entry
    per criterion id, which it lists, hades #187), `proposed_pull_request`, and
    the four lists; then run `crucible-report check` and fix every problem it

@@ -82,31 +82,26 @@ PRE_PR_GATES: frozenset[str] = frozenset(
         GateName.INTERNAL_REVIEW_RECORDED,
     }
 )
-# hades FDY-0135: a pre-PR gate no policy lists, moves, or skips, evaluated alongside
-# the policy's `gates.pre_pr`, so a policy stored before the gate existed still gets it.
-# Since FDY-0143 (operator decision, 2026-09-29) it is always advisory: it is there so
-# the reviewer sees who authored the commits, not to stop a branch.
-ENFORCED_PRE_PR_GATES: frozenset[str] = frozenset({GateName.COMMIT_POLICY})
+# These gates always run, even when a stored policy omits them. Commit authorship is
+# advisory (FDY-0143); the complete report and self-review block publication (#402).
+ENFORCED_PRE_PR_GATES: frozenset[str] = frozenset({GateName.COMMIT_POLICY, GateName.REPORT_PRESENT})
 
 # ADR 0024, the operator on 2026-09-29: "We need to let the review be our enforcement
 # rather then dictating behavior". Hard gates stay where the damage is real or a claim is
-# false; these four are information for the reviewer unless a policy says otherwise.
+# false; these three are information for the reviewer unless a policy says otherwise.
 DEFAULT_ADVISORY_GATES: frozenset[str] = frozenset(
     {
-        GateName.REPORT_PRESENT,
         GateName.SCOPE_CONTAINED,
         GateName.CRITERIA_MAPPED,
         GateName.RUN_EVIDENCE_PRESENT,
     }
 )
-# The review is the enforcement, so it is never itself advisory. A secret, once pushed,
+# The complete report, including self-review, is required for acceptance. A secret, once pushed,
 # cannot be taken back, so no policy may send one to the reviewer instead of stopping.
-ALWAYS_BLOCKING_GATES: frozenset[str] = frozenset(
-    {GateName.INTERNAL_REVIEW_RECORDED, GateName.NO_SECRETS}
-)
+ALWAYS_BLOCKING_GATES: frozenset[str] = frozenset({GateName.REPORT_PRESENT, GateName.NO_SECRETS})
 # FDY-0143: the commit author is for the reviewer and the trailer is not checked at all,
 # so no policy can make commit_policy stop a task.
-ALWAYS_ADVISORY_GATES: frozenset[str] = ENFORCED_PRE_PR_GATES
+ALWAYS_ADVISORY_GATES: frozenset[str] = frozenset({GateName.COMMIT_POLICY})
 
 
 class GateClass(StrEnum):
@@ -309,8 +304,7 @@ def _parse_problems(errors: list[dict[str, Any]], shown: int = 3) -> str:
 
 
 def report_present(gi: GateInput) -> GateOutcome:
-    """A report that is malformed or lacks a judgement field is for the reviewer when the
-    gate is advisory; no report at all always stops the task (ADR 0024)."""
+    """A complete report including the worker self-review is required to publish."""
     item = gi.one("artifact_present", role="completion_claim")
     if item is None:
         missing = _missing("artifact_present", role="completion_claim")
@@ -318,16 +312,23 @@ def report_present(gi: GateInput) -> GateOutcome:
     notes = _claim_notes(item.payload)
     if not item.payload.get("parsed_ok"):
         errors = [e for e in item.payload.get("parse_errors") or [] if isinstance(e, dict)]
-        self_review_missing = any(
-            list(error.get("loc") or [])[:1] == ["self_review"] for error in errors
-        )
+        # Keep the missing review visible even when other schema problems fill the
+        # bounded detail. The section name is the worker's actionable failure reason.
+        errors.sort(key=lambda error: list(error.get("loc") or [])[:1] != ["self_review"])
         return GateOutcome(
             GateResult.FAIL,
             f"the report did not parse as CompletionClaimV1 ({len(errors)} problems)"
             + _parse_problems(errors)
             + notes,
             (item.id,),
-            always_blocks=self_review_missing,
+            always_blocks=True,
+        )
+    if item.payload.get("self_review_checked") is not True:
+        return GateOutcome(
+            GateResult.FAIL,
+            "the report has no validated self_review section; write self_review and rerun",
+            (item.id,),
+            always_blocks=True,
         )
     return GateOutcome(GateResult.PASS, "CompletionClaimV1 parsed" + notes, (item.id,))
 
@@ -826,23 +827,10 @@ def workspace_clean(gi: GateInput) -> GateOutcome:
 
 
 def internal_review_recorded(gi: GateInput) -> GateOutcome:
-    if not gi.internal_review_required:
-        return GateOutcome(
-            GateResult.SKIPPED, "the policy does not require an internal review for this head"
-        )
-    for item in gi.of_kind("review_received"):
-        if str(item.payload.get("reviewed_head_sha")) != str(gi.head_sha):
-            continue
-        if item.payload.get("reviewer_is_author"):
-            continue
-        return GateOutcome(
-            GateResult.PASS,
-            f"ReviewReportV1 for {gi.head_sha} from {item.payload.get('reviewer_kind')} "
-            f"with verdict {item.payload.get('verdict')}",
-            (item.id,),
-        )
+    # Retain the gate name for stored policies; report_present enforces the self-review.
     return GateOutcome(
-        GateResult.PENDING, f"no non-author ReviewReportV1 for head {gi.head_sha} yet"
+        GateResult.SKIPPED,
+        "the worker self-review is the internal review; report_present checks it",
     )
 
 

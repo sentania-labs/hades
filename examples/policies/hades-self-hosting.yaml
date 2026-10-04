@@ -128,11 +128,10 @@ gates:
   - feedback_dispositions_complete
   - ci_green_for_head
   skipped: []
-  # ADR 0024: a failure of these goes to the internal reviewer instead of stopping the
+  # ADR 0024: a failure of these is recorded for the reviewer instead of stopping the
   # task. A path matching a contract's prohibited_paths still stops it.
   advisory:
   - criteria_mapped
-  - report_present
   - run_evidence_present
   - scope_contained
 deliverables:

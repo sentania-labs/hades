@@ -1,23 +1,21 @@
 """Pre-PR gate evaluation and the task transitions it drives (09, 11).
 
-The evaluators are pure functions in `crucible.domain.gates`. This module supplies them
-with the contract, the policy, and the evidence rows, persists one GateResult per gate,
-and then moves the task: a fail or error on a blocking gate goes to
-`pre_pr_gates_failed`, a pending internal review goes to `awaiting_internal_review`,
-everything else to `gates_passed` and straight on to `awaiting_acceptance`. A failed
-advisory gate stops nothing: it is recorded and named for the reviewer (ADR 0024)."""
+The evaluators are pure functions in `crucible.domain.gates`. Hades persists their
+results, records acceptance when every blocking gate and the worker self-review pass,
+and publishes without an orchestrator review or acceptance call.
+"""
 
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-from crucible.application.transitions import move_task, record_event
 from crucible.application.acceptance import (
     PUBLISHED_DELIVERABLES,
     deliverable_kinds,
     record_gate_acceptance,
 )
+from crucible.application.transitions import move_task, record_event
 from crucible.application.wakes import create_wake
 from crucible.contracts.wake import WakeReason
 from crucible.domain.entities import (
@@ -263,40 +261,6 @@ def evaluate_and_advance(
             for_reviewer=summary["for_reviewer"],
         )
         return outcomes
-    if verdict is PrePrVerdict.REVIEW:
-        if task.state is TaskState.REPORTED:
-            move_task(
-                uow,
-                clock,
-                task,
-                TaskState.AWAITING_INTERNAL_REVIEW,
-                EventKind.TASK_AWAITING_INTERNAL_REVIEW,
-                execution_id=execution.id,
-                attempt_id=attempt.id,
-                payload={
-                    "head_sha": task.head_sha,
-                    "executor": gi.policy.get("internal_review", {}).get("executor"),
-                },
-            )
-            create_wake(
-                uow,
-                clock,
-                principal_id=task.principal_id,
-                reason=WakeReason.INTERNAL_REVIEW_NEEDED,
-                summary=(
-                    f"the blocking gates pass on {task.head_sha}; "
-                    "a non-author internal review is required before acceptance."
-                    + reviewer_note(summary["for_reviewer"])
-                ),
-                task=task,
-                attempt_id=attempt.id,
-                extra_links={
-                    "review": f"/v1/tasks/{task.id}/review",
-                    "gates": f"/v1/attempts/{attempt.id}/gates",
-                },
-                for_reviewer=summary["for_reviewer"],
-            )
-        return outcomes
     move_task(
         uow,
         clock,
@@ -333,16 +297,6 @@ def evaluate_and_advance(
         },
     )
     return outcomes
-
-
-def _review_note(uow: UnitOfWork, task: Task) -> str:
-    """A reviewer that asked for changes does not stop the gate, so the wake says so (11)."""
-    reports = [
-        r for r in uow.review_reports.list_for_task(task.id) if r.head_sha == (task.head_sha or "")
-    ]
-    if any(r.document.get("verdict") == "request_changes" for r in reports):
-        return "the internal review recorded request_changes, which no gate acts on; "
-    return ""
 
 
 def counts_for_metrics(outcomes: dict[str, GateOutcome]) -> tuple[int, int]:

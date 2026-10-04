@@ -1,5 +1,17 @@
 # 11. Definition of done, gates, and evidence
 
+The worker self-review is the internal review. The required `self_review` section
+names where documentation was updated (or why no update was needed), maps every
+acceptance criterion with evidence, and lists anything knowingly left out and why.
+
+A missing or incomplete section fails `report_present`, naming `self_review`.
+When every blocking gate passes and the report is complete, Hades records acceptance
+and publishes without an orchestrator review or acceptance call, for first attempts
+and corrections alike. Publication sends one informational `published, PR #N` wake.
+The orchestrator can still cancel or attach a correction after publication. The
+review-report endpoint records operator out-of-band adversarial findings against
+the PR; a correction can be attached on the operator's word. It is not a gate.
+
 ## Four levels
 
 1. **Worker completion.** The worker wrote a `CompletionClaimV1`, made local
@@ -12,9 +24,9 @@
    publication, Crucible completion extends to the post-PR gates: external
    review rounds received and dispositioned, CI certification green on the
    final head. Recorded as `ready_for_merge`.
-3. **Foundry acceptance.** Foundry read the claim, the diff, the verified
-   evidence, and the review, and recorded an `AcceptanceResult` for that
-   head. Semantic. Crucible never infers it. It precedes any push.
+3. **Hades acceptance.** Every blocking pre-PR gate passed and the completion
+   report contains the worker self-review. Hades records an `AcceptanceResult`
+   for the collected head and starts publication in the same transaction.
 4. **User approval.** Consequential decisions (merge, release, accepted
    risk, scope change) recorded as `Decision` rows with verbatim words.
    Merge is the operator's act on GitHub, observed by Crucible. Release
@@ -30,6 +42,7 @@ self_review:
   documentation: ["docs/retries.md"]
   acceptance_criteria:
     - { id: "AC1", status: "met", evidence: "tests/ledger/test_import.py covers it" }
+    - { id: "AC2", status: "met", evidence: "report/V2.log" }
   omissions: []
 changed_files: ["src/ledger/import.py", "tests/ledger/test_import.py"]   # fact
 refs:                              # fact
@@ -73,13 +86,12 @@ completed document; the worker's own document is kept as the worker's claim.
 id (`AC1: {status: met, evidence: "..."}`); Crucible stores the list form.
 Unknown fields are still refused.
 
-`self_review` is required. It names where documentation was updated, maps every
-acceptance criterion with evidence, and lists anything knowingly left out and why. This
-worker self-review is the internal review. A missing section makes `report_present`
-fail and names `self_review`. Once every blocking gate passes, Hades records acceptance
-and publishes without an orchestrator review or acceptance call, on first attempts and
-corrections alike. The review-report endpoint remains available for operator
-out-of-band adversarial findings and is not a gate.
+`self_review.documentation` is a nonempty list of paths with descriptions, or a
+statement explaining why documentation did not need an update.
+`self_review.acceptance_criteria` maps every contract criterion exactly once with its
+`id`, `status`, and nonempty `evidence`. `self_review.omissions` lists anything knowingly
+left out and why; write `[]` when nothing was omitted. The self-review covers the tests
+and required verification as evidence for the acceptance criteria.
 
 The worker image carries `crucible-report check <report.yaml>`, a
 standard-library mirror of this schema that prints each problem in plain
@@ -88,13 +100,10 @@ acceptance criterion has an entry. IDENTITY.md tells the worker to run it and
 fix every problem before exiting 0. A unit test holds the checker and the
 schema in agreement.
 
-All paths are relative to `/crucible/report`. Missing or unparsable report is
-a report-gate failure. An unparsable report is advisory by default (ADR 0024):
-the reviewer sees it and decides; a file that is not YAML is unparsable, not
-missing, and its parse error names the problem and position. No report at all
-stops the task.
-The claim has no `pushed`, `pull_request`, or `ci` fields: workers cannot
-push and never see CI. Those facts are Crucible's to observe.
+All paths are relative to `/crucible/report`. Missing, incomplete or unparsable
+reports fail the blocking `report_present` gate. Parse errors name the problem and
+position, and missing sections are named. A policy cannot omit this gate or make it
+advisory.
 
 ## ReviewReportV1 (operator out-of-band adversarial review)
 
@@ -117,7 +126,7 @@ different attempt (a `review` execution never shares an attempt with an
 ## Derivation from the delivery pipeline
 
 The operator's delivery skills define the pipeline: write, run every check
-the repository defines, see the use case work, one non-author review before
+the repository defines, see the use case work, the worker self-review before
 the PR, PR opened only when the work is already proven, one external review
 round, dispositions recorded, CI green on the final head, operator merge,
 release by annotated tag through the repository's own release workflow.
@@ -134,16 +143,16 @@ Each pre-PR gate is **blocking** or **advisory** (ADR 0024, the operator's
 decision of 2026-09-29). A failed blocking gate sends the task to
 `pre_pr_gates_failed`. A failed advisory gate is recorded with its detail and
 listed "for the reviewer" in the task view, the gate list, the admin UI's
-Tasks page and the wake, and the task goes on to its internal review, or to
-acceptance when the policy requires no review for that head. The policy's
+Tasks page and the wake, and the task goes on to automatic acceptance and
+publication when every blocking gate passes. The policy's
 `gates.advisory` decides (05b); the default is below, and
-`internal_review_recorded` and `no_secrets` always block, and `commit_policy`
+`report_present` and `no_secrets` always block, and `commit_policy`
 is always advisory.
 `error` counts as `fail` in both classes.
 
 | Gate | Default | Passes when | Evidence consumed |
 |---|---|---|---|
-| `report_present` | advisory, except no report at all | report parsed once Crucible filled its facts, every judgement field present; the detail names the facts Crucible filled and any the worker wrote differently (hades #215) | CompletionClaim artifact |
+| `report_present` | always blocking and always evaluated | report parsed once Crucible filled its facts, every judgement field including the complete self-review present; the detail names the facts Crucible filled and any the worker wrote differently (hades #215) | CompletionClaim artifact |
 | `exit_clean` | blocking | exit code 0 and exit class `completed` or `completed_without_report` (an `incomplete` attempt exits 0 too, issue 128) | attempt exit info |
 | `commits_present` | blocking | the collected `work_branch` has at least one commit beyond `base_ref`, the bundle verifies, and the bundle names its head. The head is the bundle's; a reported `head_sha` that differs is noted in the gate's detail and does not fail it (hades #187, 2026-09-28) | branch bundle from `collect` |
 | `scope_contained` | advisory, except a prohibited path | every changed path matches `allowed_paths` and none matches `prohibited_paths`. A path matching `prohibited_paths` stops the task even when the gate is advisory; a path merely outside `allowed_paths` is for the reviewer | diff path list from `collect` |
@@ -155,7 +164,7 @@ is always advisory.
 | `dependencies_unchanged` | blocking | when `may_add_dependencies` is false: lockfiles and manifests unchanged | diff |
 | `ci_unchanged` | blocking | when `may_modify_ci` is false: no change under workflow paths | diff |
 | `workspace_clean` | blocking | no leftover ephemeral clusters or containers labeled for this attempt | provider reconcile |
-| `internal_review_recorded` | always blocking | a `ReviewReportV1` for this exact head SHA exists from a reviewer that is not the implementing attempt; `pending` until then (the task waits in `awaiting_internal_review`) | review report with reviewer identity |
+| `internal_review_recorded` | retired, skipped | retained for stored policies; `report_present` enforces the worker self-review | none |
 | `commit_policy` | always advisory | every new commit is authored with the policy's `author_email`. The collector checks each commit's author, and a commit authored by someone else fails the gate, named by hash and address in the detail, so it is listed for the reviewer; it never stops the task. The attempt trailer is not checked. `skipped` only for an attempt collected before the check existed; `fail` (advisory) when the collector could not read the commits. The operator decided on 2026-09-29 that the trailer is not required and the task record is the paper trail (hades FDY-0143); before that the gate blocked (FDY-0135) | collector's author check over the collected checkout's commits, the ones the bundle carries |
 
 `no_injected_files` matches names after Unicode NFC, casefold and removal of
@@ -207,17 +216,10 @@ collection (`report_present`, `exit_clean`, `commits_present`,
 not `pending`, so a failed attempt reaches `pre_pr_gates_failed`
 unambiguously when that gate blocks, and is listed for the reviewer when it
 is advisory.
-`internal_review_recorded` is the one pre-PR gate whose evidence arrives
-after collection; it stays `pending` and the task waits in
-`awaiting_internal_review`. A gate whose evaluator belongs to a later
-phase (`verification_ran` and `workspace_clean` until C3's verifier
-container exists) reports `deferred` (09): it is non-blocking for
-`gates_passed`, is shown to Foundry with the phase that will implement
-it, and can never report `pass`; once the evaluator ships, the gate
-evaluates normally and `deferred` is no longer a possible result. The reviewer identity used
-by `internal_review_recorded` and `reviewer_must_not_be_author` is the
-authenticated principal that uploaded the report or the review attempt
-that produced it, never the identity the document claims.
+`internal_review_recorded` is retained as a skipped gate for stored policies. No
+orchestrator review report is needed to publish. Uploaded adversarial review reports
+remain bound to their authenticated reviewer and the reviewed head, and do not move
+the task or block its gates.
 
 ## Judgment (never a gate)
 
@@ -227,7 +229,7 @@ truly addressed, whether external feedback is correct or in scope, whether
 consumed by something when unclear, whether merged changes form a release,
 whether a risk or limitation is acceptable, whether scope grew,
 architectural soundness. Foundry evaluates these from the same evidence and
-records an `AcceptanceResult`, a `ReviewDisposition`, or a `Decision`;
+records a `ReviewDisposition`, a correction, or a `Decision`;
 consequential ones go to the user as escalations.
 
 ## Evidence model (EvidenceV1)

@@ -42,6 +42,7 @@ def _claim_payload(**overrides: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "role": "completion_claim",
         "parsed_ok": True,
+        "self_review_checked": True,
         "parse_errors": [],
         "claimed_head_sha": HEAD,
         "mapped_criteria": [{"id": "AC1", "status": "met"}, {"id": "AC2", "status": "met"}],
@@ -132,7 +133,10 @@ def test_all_pass_on_a_clean_run() -> None:
     assert blocking(outcomes) == []
     assert not waiting_for_review(outcomes)
     for gate, outcome in outcomes.items():
-        assert outcome.result is GateResult.PASS, (gate, outcome.detail)
+        expected = (
+            GateResult.SKIPPED if gate == GateName.INTERNAL_REVIEW_RECORDED else GateResult.PASS
+        )
+        assert outcome.result is expected, (gate, outcome.detail)
 
 
 def test_no_pre_pr_gate_is_deferred_any_more() -> None:
@@ -206,7 +210,7 @@ def test_missing_evidence_fails_rather_than_waits() -> None:
     outcomes = evaluate_pre_pr(sorted(PRE_PR_GATES), _gi([]))
     assert GateName.EXIT_CLEAN in blocking(outcomes)
     assert GateName.COMMITS_PRESENT in blocking(outcomes)
-    assert outcomes[GateName.INTERNAL_REVIEW_RECORDED].result is GateResult.PENDING
+    assert outcomes[GateName.INTERNAL_REVIEW_RECORDED].result is GateResult.SKIPPED
 
 
 def test_report_present_fails_when_the_claim_did_not_parse() -> None:
@@ -473,10 +477,10 @@ def test_dependencies_and_ci_gates_respect_the_contract_flags() -> None:
     assert evaluate_gate(GateName.CI_UNCHANGED, gi).result is GateResult.SKIPPED
 
 
-def test_internal_review_gate_waits_then_passes() -> None:
+def test_internal_review_gate_is_retired() -> None:
     evidence = [e for e in _passing_evidence() if e.kind != "review_received"]
     assert (
-        evaluate_gate(GateName.INTERNAL_REVIEW_RECORDED, _gi(evidence)).result is GateResult.PENDING
+        evaluate_gate(GateName.INTERNAL_REVIEW_RECORDED, _gi(evidence)).result is GateResult.SKIPPED
     )
     assert (
         evaluate_gate(
@@ -486,7 +490,7 @@ def test_internal_review_gate_waits_then_passes() -> None:
     )
     assert (
         evaluate_gate(GateName.INTERNAL_REVIEW_RECORDED, _gi(_passing_evidence())).result
-        is GateResult.PASS
+        is GateResult.SKIPPED
     )
 
 
@@ -517,7 +521,7 @@ def test_internal_review_gate_ignores_the_author_and_another_head() -> None:
         ),
     ]
     assert (
-        evaluate_gate(GateName.INTERNAL_REVIEW_RECORDED, _gi(author)).result is GateResult.PENDING
+        evaluate_gate(GateName.INTERNAL_REVIEW_RECORDED, _gi(author)).result is GateResult.SKIPPED
     )
     other_head = [
         *base,
@@ -545,7 +549,7 @@ def test_internal_review_gate_ignores_the_author_and_another_head() -> None:
     ]
     assert (
         evaluate_gate(GateName.INTERNAL_REVIEW_RECORDED, _gi(other_head)).result
-        is GateResult.PENDING
+        is GateResult.SKIPPED
     )
 
 
@@ -565,8 +569,12 @@ def test_configured_pre_pr_gates_reads_the_policy() -> None:
     from crucible.application.gates import configured_pre_pr_gates  # noqa: PLC0415
 
     enforced = sorted(ENFORCED_PRE_PR_GATES)
-    assert configured_pre_pr_gates({}) == sorted(PRE_PR_GATES) + enforced
-    assert configured_pre_pr_gates({"gates": {}}) == sorted(PRE_PR_GATES) + enforced
+    assert configured_pre_pr_gates({}) == sorted(PRE_PR_GATES) + sorted(
+        ENFORCED_PRE_PR_GATES - PRE_PR_GATES
+    )
+    assert configured_pre_pr_gates({"gates": {}}) == sorted(PRE_PR_GATES) + sorted(
+        ENFORCED_PRE_PR_GATES - PRE_PR_GATES
+    )
     assert configured_pre_pr_gates({"gates": {"pre_pr": []}}) == enforced
     narrowed = {"gates": {"pre_pr": ["exit_clean", "no_secrets"]}}
     assert configured_pre_pr_gates(narrowed) == ["exit_clean", "no_secrets", *enforced]

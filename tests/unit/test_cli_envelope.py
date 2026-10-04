@@ -93,8 +93,8 @@ def test_every_offered_action_is_complete_and_admitted(state: str, role: str | N
         # accept is the orchestrator route's; an admin token would be refused there.
         ("awaiting_acceptance", nx.ADMIN, {"corrections", "cancel"}),
         ("awaiting_internal_review", nx.ORCHESTRATOR, {"review", "cancel"}),
-        ("publish_failed", nx.ORCHESTRATOR, {"republish", "cancel"}),
-        ("publish_failed", nx.ADMIN, {"cancel"}),
+        ("publish_failed", nx.ORCHESTRATOR, {"republish", "corrections", "cancel"}),
+        ("publish_failed", nx.ADMIN, {"corrections", "cancel"}),
         ("ci_certification_failed", nx.ORCHESTRATOR, {"ci-decision", "corrections", "cancel"}),
         ("head_diverged", nx.ORCHESTRATOR, {"head-decision", "cancel"}),
         ("external_feedback_received", nx.ORCHESTRATOR, {"dispositions", "corrections", "cancel"}),

@@ -1,8 +1,8 @@
-"""Acceptance (04, 09, 11). Foundry's semantic verdict on a collected head.
+"""Acceptance for the collected head (09, 11).
 
-Crucible records it and never computes it. An `artifacts` deliverable reaches `accepted`
-here; a `branch` or `pull_request` deliverable records the AcceptanceResult and moves to
-`publishing`, where the supervisor pushes the verified head and opens the PR (23)."""
+Hades records acceptance from passing gates and the worker self-review. The acceptance
+API remains available for tasks left in awaiting_acceptance by older deployments.
+"""
 
 from __future__ import annotations
 
@@ -25,8 +25,7 @@ from crucible.domain.entities import (
     Role,
     Task,
 )
-from crucible.domain.events import EventKind
-from crucible.domain.events import PRINCIPAL_CRUCIBLE
+from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
 from crucible.domain.ids import new_id
 from crucible.domain.lifecycle import TaskState
 from crucible.ports.clock import Clock
@@ -51,7 +50,10 @@ def record_gate_acceptance(uow: UnitOfWork, clock: Clock, *, task: Task) -> Acce
         head_sha=head,
         principal_id=task.principal_id,
         verdict=AcceptanceVerdict.ACCEPTED,
-        reasoning="Every blocking pre-PR gate passed and the completion report includes the worker self-review.",
+        reasoning=(
+            "Every blocking pre-PR gate passed and the completion report includes "
+            "the worker self-review."
+        ),
         created_at=now,
     )
     uow.acceptance.add(result)

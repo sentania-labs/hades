@@ -79,7 +79,7 @@ def judgement_only() -> dict[str, Any]:
         {
             "summary": "Added greet.sh, its test and the Makefile targets.",
             "self_review": {
-                "documentation": [],
+                "documentation": ["No docs needed for the greeting script."],
                 "acceptance_criteria": [
                     {"id": criterion, "status": "met", "evidence": "covered"}
                     for criterion in CRITERIA
@@ -129,9 +129,9 @@ def test_ht_0004s_report_had_15_problems_and_now_has_only_the_worker_s_own() -> 
         "limitations",
         "proposed_pull_request.base",
         "proposed_pull_request.head",
-            "risks",
-            "self_review",
-            "summary",
+        "risks",
+        "self_review",
+        "summary",
     ]
     assert completed.filled == FACT_FIELDS
 
@@ -406,6 +406,7 @@ def test_report_present_says_what_crucible_filled_and_where_the_report_differs()
         payload={
             "role": "completion_claim",
             "parsed_ok": True,
+            "self_review_checked": True,
             "filled_by_crucible": ["checks", "run_evidence"],
             "differences": [{"field": "refs", "detail": "commits 2, collected 1"}],
         },
