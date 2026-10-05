@@ -13,6 +13,14 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 from crucible.adapters.persistence import migrate
+from crucible.adapters.persistence.migrations.versions import _0039_auto_merge_refusals
+from crucible.adapters.persistence.migrations.versions import (
+    _0043_credential_mount_mode as credential_mount_mode,
+)
+from crucible.adapters.persistence.migrations.versions import _0043_proposed_tasks as proposed_tasks
+from crucible.adapters.persistence.migrations.versions import (
+    _0044_merge_runtime_settings_proposals as merge_423_424,
+)
 
 REPO = Path(__file__).resolve().parents[2]
 MERGE = "0045_merge_0044_heads"
@@ -45,3 +53,43 @@ def test_the_cli_config_sees_the_same_single_head() -> None:
     script = ScriptDirectory.from_config(cfg)
     assert Path(script.dir).resolve() == migrate.MIGRATIONS_DIR.resolve()
     assert script.get_heads() == [MERGE]
+
+
+def _postgres_renders(kinds: list[str]) -> str:
+    """`pg_get_constraintdef` for a `kind IN (...)` CHECK on a varchar column."""
+    literals = ", ".join(f"'{kind}'::character varying" for kind in kinds)
+    return f"CHECK (((kind)::text = ANY ((ARRAY[{literals}])::text[])))"
+
+
+def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> None:
+    """A database on 0044_attempt_stall_shape or 0044_editor_leftovers_policy applied
+    0043_proposed_tasks and not its sibling, so its way to 0045 runs
+    0043_credential_mount_mode before 0044_merge_423_424 restores the union of kinds."""
+    script = _script()
+    for head in ("0044_attempt_stall_shape", "0044_editor_leftovers_policy"):
+        # The steps `alembic upgrade head` runs from `head`, in order; iterate_revisions
+        # would leave out the sibling branch, which is the whole point here.
+        plan = [step.revision.revision for step in script._upgrade_revs("head", head)]
+        assert plan.index("0043_credential_mount_mode") < plan.index("0044_merge_423_424")
+        assert plan[-1] == MERGE
+
+
+def test_0043_credential_mount_mode_keeps_the_kinds_the_live_check_permits() -> None:
+    """On that path the events table may hold proposal rows. The rebuilt CHECK keeps the
+    proposal kinds the live constraint permits, so PostgreSQL accepts it over those rows,
+    and the result is the union 0044_merge_423_424 settles."""
+    live = credential_mount_mode._kinds_in(_postgres_renders(proposed_tasks._event_kinds()))
+    assert live == proposed_tasks._event_kinds()
+    kinds = credential_mount_mode._kinds_to_permit(live)
+    assert set(proposed_tasks.EVENT_KINDS) <= set(kinds)
+    assert set(credential_mount_mode.EVENT_KINDS) <= set(kinds)
+    assert set(kinds) == set(merge_423_424._event_kinds())
+    assert len(kinds) == len(set(kinds))
+
+
+def test_0043_credential_mount_mode_is_unchanged_where_only_0042_was_applied() -> None:
+    live = credential_mount_mode._kinds_in(
+        _postgres_renders(_0039_auto_merge_refusals._event_kinds())
+    )
+    assert credential_mount_mode._kinds_to_permit(live) == credential_mount_mode._event_kinds()
+    assert credential_mount_mode._kinds_in(None) == []
