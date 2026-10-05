@@ -12,7 +12,7 @@ from tests.fixtures import FakeClock
 from tests.integration.conftest import (
     ARTIFACTS_DELIVERABLE,
     event_kinds,
-    review_and_settle,
+    legacy_acceptance_state,
     run_to_settled,
     run_until,
     submit_and_start,
@@ -85,7 +85,7 @@ async def test_amend_in_awaiting_acceptance_may_not_widen_scope(
     """The gate results name a head that ran under the previous version (09)."""
     task_id = submit_and_start(client, "crucible-worker:fake-succeed")
     await run_to_settled(supervisor, client, task_id)
-    await review_and_settle(supervisor, client, task_id)
+    await legacy_acceptance_state(supervisor, client, task_id)
     document = amended(client, task_id)
     document["scope"] = {**document["scope"], "allowed_paths": ["**"]}
     r = client.post(f"/v1/tasks/{task_id}/amend", json={"contract": document, "reason": "x"})
@@ -99,7 +99,7 @@ async def test_amend_may_not_turn_a_pull_request_into_an_artifacts_deliverable(
     """Otherwise a task that must be published walks to `accepted` unpublished."""
     task_id = submit_and_start(client, "crucible-worker:fake-succeed")
     await run_to_settled(supervisor, client, task_id)
-    await review_and_settle(supervisor, client, task_id)
+    await legacy_acceptance_state(supervisor, client, task_id)
     document = amended(client, task_id, deliverables=ARTIFACTS_DELIVERABLE)
     r = client.post(f"/v1/tasks/{task_id}/amend", json={"contract": document, "reason": "x"})
     assert r.status_code == 422
@@ -113,7 +113,7 @@ async def test_amend_is_refused_once_the_head_is_publishing(
     amendable: the head is already on its way to the remote (09)."""
     task_id = submit_and_start(client, "crucible-worker:fake-succeed")
     await run_to_settled(supervisor, client, task_id)
-    await review_and_settle(supervisor, client, task_id)
+    await legacy_acceptance_state(supervisor, client, task_id)
     accepted = client.post(
         f"/v1/tasks/{task_id}/accept", json={"verdict": "accepted", "reasoning": "publish it"}
     ).json()
@@ -132,7 +132,7 @@ async def test_a_correction_is_refused_once_the_head_is_accepted(
 
     task_id = submit_and_start(client, "crucible-worker:fake-succeed")
     await run_to_settled(supervisor, client, task_id)
-    await review_and_settle(supervisor, client, task_id)
+    await legacy_acceptance_state(supervisor, client, task_id)
     client.post(
         f"/v1/tasks/{task_id}/accept",
         json={"verdict": "needs_more_work", "reasoning": "AC2 is not exercised."},
@@ -218,10 +218,6 @@ async def test_close_an_accepted_task(client: TestClient, supervisor: Supervisor
         client, "crucible-worker:fake-succeed", deliverables=ARTIFACTS_DELIVERABLE
     )
     await run_to_settled(supervisor, client, task_id)
-    await review_and_settle(supervisor, client, task_id)
-    client.post(
-        f"/v1/tasks/{task_id}/accept", json={"verdict": "accepted", "reasoning": "It is right."}
-    )
     r = client.post(f"/v1/tasks/{task_id}/close", json={"note": "Foundry recorded the outcome."})
     assert r.status_code == 200 and r.json()["state"] == "closed"
     assert r.json()["closed_at"] is not None

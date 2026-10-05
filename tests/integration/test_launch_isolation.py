@@ -95,8 +95,8 @@ async def test_a_slow_prepare_holds_back_neither_the_lease_nor_another_launch(
     assert "attempt_collected" not in event_kinds(client, slow)
 
     provider.release_prepare("HT-SLOW")
-    assert await run_to_settled(supervisor, client, other) == "awaiting_internal_review"
-    assert await run_to_settled(supervisor, client, slow) == "awaiting_internal_review"
+    assert await run_to_settled(supervisor, client, other) == "publishing"
+    assert await run_to_settled(supervisor, client, slow) == "publishing"
     assert provider.worker(str(_attempt(client, slow)["id"])) is not None
     await supervisor.stop()
 
@@ -278,7 +278,7 @@ async def test_stopping_the_supervisor_ends_a_launch_in_flight(
     provider.release_prepare("HT-STOP")
     clock.advance(31)
     successor = make_supervisor(ctx, provider, holder="sup-b")
-    assert await run_to_settled(successor, client, task_id) == "awaiting_internal_review"
+    assert await run_to_settled(successor, client, task_id) == "publishing"
     assert "task_retry_scheduled" in event_kinds(client, task_id)
     await successor.stop()
 
@@ -305,5 +305,5 @@ async def test_a_supervisor_that_lost_its_lease_abandons_its_launches(
     assert not first._launches
     provider.release_prepare("HT-LEASE")
     assert provider.worker(stranded) is None
-    assert await run_to_settled(successor, client, task_id) == "awaiting_internal_review"
+    assert await run_to_settled(successor, client, task_id) == "publishing"
     await successor.stop()

@@ -33,7 +33,7 @@ from crucible.application.supervisor import Supervisor
 from crucible.contracts.api import ExternalReviewAttestation, RepositoryRegistration
 from crucible.domain.secrets import scan_text
 from tests.e2e import github_live
-from tests.e2e.conftest import RUN_ID, e2e_contract, run_until, submit_and_start, upload_review
+from tests.e2e.conftest import RUN_ID, e2e_contract, run_until, submit_and_start
 from tests.e2e.github_live import LiveConfig
 from tests.e2e.policy import e2e_policy_document, e2e_routing_document
 from tests.fixtures import promote_for_test
@@ -231,33 +231,8 @@ async def test_a_task_reaches_a_real_pull_request_and_a_real_merge(
         live_supervisor,
         live_client,
         task_id,
-        {"awaiting_internal_review", "pre_pr_gates_failed"},
-        max_ticks=60,
-    )
-    assert state == "awaiting_internal_review", live_client.get(f"/v1/tasks/{task_id}").json()[
-        "gate_summary"
-    ]
-    upload_review(live_client, task_id)
-    state = await run_until(
-        live_supervisor, live_client, task_id, {"awaiting_acceptance"}, max_ticks=20
-    )
-    view = live_client.get(f"/v1/tasks/{task_id}").json()
-    accepted = live_client.post(
-        f"/v1/tasks/{task_id}/accept",
-        json={
-            "verdict": "accepted",
-            "reasoning": "The live tier accepts its own head to exercise publication.",
-            "head_sha": view["head_sha"],
-        },
-    )
-    assert accepted.status_code == 200, accepted.text
-
-    state = await run_until(
-        live_supervisor,
-        live_client,
-        task_id,
         {"awaiting_ci_certification", "ready_for_merge", "publish_failed"},
-        max_ticks=20,
+        max_ticks=80,
         pause=2.0,
     )
     events = live_client.get(f"/v1/tasks/{task_id}/events", params={"limit": 200}).json()
@@ -269,6 +244,7 @@ async def test_a_task_reaches_a_real_pull_request_and_a_real_merge(
     record = live_client.get(f"/v1/tasks/{task_id}/pull-request").json()
     cleanup.add_pull_request(int(record["number"]))
     print(f"live pull request: {record['url']} at {record['head_sha']}")
+    view = live_client.get(f"/v1/tasks/{task_id}").json()
     assert record["head_sha"] == view["head_sha"]
     assert record["state"] == "open"
 
@@ -309,7 +285,7 @@ async def test_a_task_reaches_a_real_pull_request_and_a_real_merge(
         live_client,
         task_id,
         {"ready_for_merge", "external_feedback_received", "rejected"},
-        max_ticks=20,
+        max_ticks=80,
         pause=2.0,
     )
     if ready == "external_feedback_received":
@@ -393,31 +369,6 @@ async def test_a_real_required_check_failure_escalates_without_retry(
     document["scope"]["allowed_paths"] = [".crucible-force-ci-failure"]
     task_id = submit_and_start(live_client, document)
 
-    state = await run_until(
-        live_supervisor,
-        live_client,
-        task_id,
-        {"awaiting_internal_review", "pre_pr_gates_failed"},
-        max_ticks=60,
-    )
-    assert state == "awaiting_internal_review"
-    upload_review(live_client, task_id)
-    assert (
-        await run_until(
-            live_supervisor, live_client, task_id, {"awaiting_acceptance"}, max_ticks=20
-        )
-        == "awaiting_acceptance"
-    )
-    view = live_client.get(f"/v1/tasks/{task_id}").json()
-    accepted = live_client.post(
-        f"/v1/tasks/{task_id}/accept",
-        json={
-            "verdict": "accepted",
-            "reasoning": "Exercise the required CI failure path.",
-            "head_sha": view["head_sha"],
-        },
-    )
-    assert accepted.status_code == 200, accepted.text
     failed = await run_until(
         live_supervisor,
         live_client,
@@ -492,25 +443,11 @@ async def test_a_real_external_review_round_completes_the_cycle(
     document = live_contract(external_id, live_config, worker_image)
     task_id = submit_and_start(live_client, document)
     await run_until(
-        live_supervisor, live_client, task_id, {"awaiting_internal_review"}, max_ticks=60
-    )
-    upload_review(live_client, task_id)
-    await run_until(live_supervisor, live_client, task_id, {"awaiting_acceptance"}, max_ticks=20)
-    view = live_client.get(f"/v1/tasks/{task_id}").json()
-    live_client.post(
-        f"/v1/tasks/{task_id}/accept",
-        json={
-            "verdict": "accepted",
-            "reasoning": "publish it so the provider has something to review",
-            "head_sha": view["head_sha"],
-        },
-    )
-    await run_until(
         live_supervisor,
         live_client,
         task_id,
         {"awaiting_external_review", "publish_failed"},
-        max_ticks=20,
+        max_ticks=80,
         pause=2.0,
     )
     record = live_client.get(f"/v1/tasks/{task_id}/pull-request").json()
@@ -561,21 +498,11 @@ async def test_no_token_reaches_the_daemon_the_logs_or_the_database(
     document = live_contract(external_id, live_config, worker_image)
     task_id = submit_and_start(live_client, document)
     await run_until(
-        live_supervisor, live_client, task_id, {"awaiting_internal_review"}, max_ticks=60
-    )
-    upload_review(live_client, task_id)
-    await run_until(live_supervisor, live_client, task_id, {"awaiting_acceptance"}, max_ticks=20)
-    view = live_client.get(f"/v1/tasks/{task_id}").json()
-    live_client.post(
-        f"/v1/tasks/{task_id}/accept",
-        json={"verdict": "accepted", "reasoning": "publication only", "head_sha": view["head_sha"]},
-    )
-    await run_until(
         live_supervisor,
         live_client,
         task_id,
         {"awaiting_ci_certification", "ready_for_merge", "publish_failed"},
-        max_ticks=20,
+        max_ticks=80,
         pause=2.0,
     )
     record = live_client.get(f"/v1/tasks/{task_id}/pull-request").json()

@@ -48,7 +48,7 @@ from crucible.ports.execution import ObservationState
 from crucible.settings import Settings
 from tests.e2e.policy import e2e_policy_document, e2e_routing_document
 from tests.fixtures import REPOSITORY_URL, FakeClock, contract_document, promote_for_test
-from tests.integration.conftest import event_kinds, review_and_settle, run_to_settled
+from tests.integration.conftest import event_kinds, run_to_settled
 from tests.integration.fake_github import FakeGitHubServer
 
 pytestmark = pytest.mark.integration
@@ -212,7 +212,7 @@ async def test_a_task_runs_to_its_gates_on_the_kubernetes_provider(
     k8s_api.script_all("succeed", after=2)
     task_id = start(k8s_client, k8s_contract())
     state = await run_to_settled(k8s_supervisor, k8s_client, task_id, max_ticks=20)
-    assert state == "awaiting_internal_review"
+    assert state == "publishing"
 
     view = k8s_client.get(f"/v1/tasks/{task_id}").json()
     attempt = view["executions"][0]["attempts"][0]
@@ -385,7 +385,7 @@ async def test_a_second_supervisor_re_attaches_to_a_running_job_by_label(
     )
     clock.advance(31)
     state = await run_to_settled(successor, k8s_client, task_id, max_ticks=20)
-    assert state == "awaiting_internal_review"
+    assert state == "publishing"
 
 
 async def test_a_job_with_no_live_attempt_row_is_reported_as_an_orphan(
@@ -476,15 +476,10 @@ def _delivery_supervisor(
 
 
 async def _accepted(client: TestClient, supervisor: Supervisor, task_id: str) -> None:
-    """Run to the gates, record the internal review, and accept: `publishing`."""
+    """Run through automatic gate acceptance and available publication I/O."""
     await run_to_settled(supervisor, client, task_id, max_ticks=20)
-    await review_and_settle(supervisor, client, task_id)
-    accepted = client.post(
-        f"/v1/tasks/{task_id}/accept",
-        json={"verdict": "accepted", "reasoning": "The evidence shows the criteria met."},
-    )
-    assert accepted.status_code == 200, accepted.text
-    assert accepted.json()["state"] == "publishing"
+    view = client.get(f"/v1/tasks/{task_id}").json()
+    assert view["acceptance_results"][0]["verdict"] == "accepted"
 
 
 def _publisher_objects(api: FakeKubernetesApi) -> list[str]:
@@ -564,8 +559,8 @@ async def test_a_task_waiting_in_publishing_says_why_escalates_then_publishes_on
         k8s_ctx, k8s_provider, github_client, holder="k8s-v065", publisher=None
     )
     task_id = start(k8s_client, k8s_contract(deliverables=PULL_REQUEST_DELIVERABLE))
-    await _accepted(k8s_client, before, task_id)
     caplog.set_level(logging.WARNING, logger="crucible.delivery")
+    await _accepted(k8s_client, before, task_id)
     for _ in range(3):
         await before.tick()
     assert k8s_client.get(f"/v1/tasks/{task_id}").json()["state"] == "publishing"

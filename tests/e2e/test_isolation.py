@@ -81,7 +81,7 @@ async def test_a_worker_reaches_nothing_it_must_not(
         supervisor,
         client,
         task_id,
-        {"awaiting_internal_review", "gates_passed", "pre_pr_gates_failed"},
+        {"accepted", "gates_passed", "pre_pr_gates_failed"},
     )
 
     attempt_id = client.get(f"/v1/tasks/{task_id}").json()["latest_attempt"]["id"]

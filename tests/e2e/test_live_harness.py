@@ -65,7 +65,6 @@ from tests.e2e.conftest import (
     RUN_ID,
     e2e_contract,
     submit_and_start,
-    upload_review,
 )
 from tests.e2e.github_live import LiveConfig
 from tests.e2e.policy import e2e_routing_document
@@ -656,7 +655,14 @@ async def test_a_trivial_task_reaches_ready_for_merge_live(
             live_supervisor,
             live_client,
             task_id,
-            {"awaiting_internal_review", "pre_pr_gates_failed", "blocked"},
+            {
+                "awaiting_external_review",
+                "awaiting_ci_certification",
+                "ready_for_merge",
+                "publish_failed",
+                "pre_pr_gates_failed",
+                "blocked",
+            },
             max_ticks=240,
             pause=5.0,
             inspected=inspected,
@@ -720,31 +726,15 @@ async def test_a_trivial_task_reaches_ready_for_merge_live(
         assert routing_row["pool"] == ("lab-local" if harness == "hermes" else "e2e")
         assert routing_row["wall_ms"] == row.wall_ms
         entry["routing_history_recorded"] = True
-        assert state == "awaiting_internal_review", entry
+        assert state in {
+            "awaiting_external_review",
+            "awaiting_ci_certification",
+            "ready_for_merge",
+        }, entry
         if harness != "hermes":
             assert sync, "no credential_synced event: the copy was never synced back"
             assert sync.get("removed") is True, sync
 
-        upload_review(live_client, task_id)
-        await _drive(
-            live_supervisor,
-            live_client,
-            task_id,
-            {"awaiting_acceptance"},
-            max_ticks=20,
-            pause=1.0,
-            inspected=inspected,
-        )
-        view = live_client.get(f"/v1/tasks/{task_id}").json()
-        accepted = live_client.post(
-            f"/v1/tasks/{task_id}/accept",
-            json={
-                "verdict": "accepted",
-                "reasoning": "The live tier accepts its own head to exercise publication.",
-                "head_sha": view["head_sha"],
-            },
-        )
-        assert accepted.status_code == 200, accepted.text
         state = await _drive(
             live_supervisor,
             live_client,
@@ -839,7 +829,15 @@ async def test_hermes_lab_local_pool_runs_four_and_defers_the_fifth_live(
     completed = task_ids[:4]
     final_states: dict[str, str] = {}
     views: dict[str, dict[str, Any]] = {}
-    terminal = {"awaiting_internal_review", "pre_pr_gates_failed", "blocked", "cancelled"}
+    terminal = {
+        "awaiting_external_review",
+        "awaiting_ci_certification",
+        "ready_for_merge",
+        "publish_failed",
+        "pre_pr_gates_failed",
+        "blocked",
+        "cancelled",
+    }
     for _ in range(240):
         await live_supervisor.tick()
         views = {task_id: live_client.get(f"/v1/tasks/{task_id}").json() for task_id in completed}
@@ -890,7 +888,7 @@ async def test_hermes_lab_local_pool_runs_four_and_defers_the_fifth_live(
             }
         )
     all_completed = all(
-        run["state"] == "awaiting_internal_review"
+        run["state"] in {"awaiting_external_review", "awaiting_ci_certification", "ready_for_merge"}
         and run["exit_class"] == "completed"
         and run["exit_code"] == 0
         and run["pre_pr_gates_passed"]
@@ -913,7 +911,11 @@ async def test_hermes_lab_local_pool_runs_four_and_defers_the_fifth_live(
     )
 
     for task_id in completed:
-        if final_states[task_id] != "awaiting_internal_review":
+        if final_states[task_id] not in {
+            "awaiting_external_review",
+            "awaiting_ci_certification",
+            "ready_for_merge",
+        }:
             continue
         response = live_client.post(
             f"/v1/tasks/{task_id}/cancel",

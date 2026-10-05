@@ -37,7 +37,6 @@ from tests.integration.conftest import (
     correction_document,
     event_kinds,
     make_supervisor,
-    review_and_settle,
     run_to_settled,
     submit_and_start,
 )
@@ -156,14 +155,6 @@ async def publish(
     """Run a task from submit to a published pull request."""
     task_id = submit_and_start(client, image, external_id=external_id)
     await run_to_settled(supervisor, client, task_id)
-    await review_and_settle(supervisor, client, task_id)
-    accepted = client.post(
-        f"/v1/tasks/{task_id}/accept",
-        json={"verdict": "accepted", "reasoning": "The evidence shows the criteria met."},
-    )
-    assert accepted.status_code == 200, accepted.text
-    assert accepted.json()["state"] == "publishing"
-    await supervisor.tick()
     view = client.get(f"/v1/tasks/{task_id}").json()
     return task_id, view
 
@@ -321,6 +312,16 @@ async def test_token_mint_failure_republishes_from_before_push(
     assert len(publisher.pushes) == 1
 
 
+async def collect_before_publish(supervisor: Supervisor, client: TestClient, task_id: str) -> None:
+    """Pause publication I/O while testing changes to retained publication inputs."""
+    publisher = supervisor.delivery._publisher
+    supervisor.delivery._publisher = None
+    try:
+        assert await run_to_settled(supervisor, client, task_id) == "publishing"
+    finally:
+        supervisor.delivery._publisher = publisher
+
+
 async def test_pre_start_installation_failure_can_be_republished(
     client: TestClient,
     ctx: AppContext,
@@ -328,8 +329,7 @@ async def test_pre_start_installation_failure_can_be_republished(
     publisher: FakePublisher,
 ) -> None:
     task_id = submit_and_start(client, "crucible-worker:fake-succeed")
-    await run_to_settled(delivery_supervisor, client, task_id)
-    await review_and_settle(delivery_supervisor, client, task_id)
+    await collect_before_publish(delivery_supervisor, client, task_id)
     with ctx.uow_factory() as uow:
         task = uow.tasks.get(task_id)
         assert task is not None
@@ -339,11 +339,6 @@ async def test_pre_start_installation_failure_can_be_republished(
         uow.repositories.upsert(repository)
         uow.commit()
 
-    accepted = client.post(
-        f"/v1/tasks/{task_id}/accept",
-        json={"verdict": "accepted", "reasoning": "The evidence is sufficient."},
-    )
-    assert accepted.status_code == 200, accepted.text
     await delivery_supervisor.tick()
     assert client.get(f"/v1/tasks/{task_id}").json()["state"] == "publish_failed"
     assert "publish_started" in event_kinds(client, task_id)
@@ -376,8 +371,7 @@ async def test_pre_upgrade_bundle_is_sealed_before_publication(
     tmp_path: Path,
 ) -> None:
     task_id = submit_and_start(client, "crucible-worker:fake-succeed")
-    await run_to_settled(delivery_supervisor, client, task_id)
-    await review_and_settle(delivery_supervisor, client, task_id)
+    await collect_before_publish(delivery_supervisor, client, task_id)
     output = tmp_path / "output"
     output.mkdir()
     bundle = output / "work_branch.bundle"
@@ -401,11 +395,6 @@ async def test_pre_upgrade_bundle_is_sealed_before_publication(
             {"task_id": task_id},
         )
 
-    accepted = client.post(
-        f"/v1/tasks/{task_id}/accept",
-        json={"verdict": "accepted", "reasoning": "Publish the retained bundle."},
-    )
-    assert accepted.status_code == 200, accepted.text
     await delivery_supervisor.tick()
 
     assert client.get(f"/v1/tasks/{task_id}").json()["state"] == "awaiting_external_review"
@@ -423,8 +412,7 @@ async def test_republish_refuses_changed_bundle_content(
     tmp_path: Path,
 ) -> None:
     task_id = submit_and_start(client, "crucible-worker:fake-succeed")
-    await run_to_settled(delivery_supervisor, client, task_id)
-    await review_and_settle(delivery_supervisor, client, task_id)
+    await collect_before_publish(delivery_supervisor, client, task_id)
     output = tmp_path / "output"
     output.mkdir()
     bundle = output / "work_branch.bundle"
@@ -449,11 +437,6 @@ async def test_republish_refuses_changed_bundle_content(
             {"digest": sealed_sha256, "task_id": task_id},
         )
     publisher.refuse_push = "HTTP 503 Service Unavailable"
-    accepted = client.post(
-        f"/v1/tasks/{task_id}/accept",
-        json={"verdict": "accepted", "reasoning": "The evidence is sufficient."},
-    )
-    assert accepted.status_code == 200, accepted.text
     await delivery_supervisor.tick()
     assert client.get(f"/v1/tasks/{task_id}").json()["state"] == "publish_failed"
 
@@ -623,10 +606,6 @@ async def test_a_refused_push_lands_in_publish_failed_with_the_remote_head(
     publisher.refuse_push = "! [rejected] crucible/EX-0001 -> crucible/EX-0001 (non-fast-forward)"
     task_id = submit_and_start(client, "crucible-worker:fake-succeed")
     await run_to_settled(delivery_supervisor, client, task_id)
-    await review_and_settle(delivery_supervisor, client, task_id)
-    client.post(
-        f"/v1/tasks/{task_id}/accept", json={"verdict": "accepted", "reasoning": "publish it"}
-    )
     await delivery_supervisor.tick()
     view = client.get(f"/v1/tasks/{task_id}").json()
     assert view["state"] == "publish_failed"
@@ -1026,15 +1005,7 @@ async def test_a_correction_round_updates_the_head_of_the_same_pull_request(
     document = correction_document(client, task_id, image="crucible-worker:fake-succeed")
     response = client.post(f"/v1/tasks/{task_id}/corrections", json=document)
     assert response.status_code == 200, response.text
-    # 09: the default policy asks for no second internal review on a correction, so the
-    # corrected head reaches acceptance directly.
-    state = await run_to_settled(delivery_supervisor, client, task_id)
-    assert state == "awaiting_acceptance"
-    client.post(
-        f"/v1/tasks/{task_id}/accept",
-        json={"verdict": "accepted", "reasoning": "The correction is right."},
-    )
-    await delivery_supervisor.tick()
+    assert await run_to_settled(delivery_supervisor, client, task_id) == "awaiting_ci_certification"
     corrected = client.get(f"/v1/tasks/{task_id}").json()
     assert corrected["state"] == "awaiting_ci_certification"
     assert corrected["head_sha"] != view["head_sha"]
@@ -1089,8 +1060,8 @@ async def test_head_decision_recollect_returns_the_task_to_supervision(
     assert "head_decision_recorded" in event_kinds(client, task_id)
     await run_to_settled(delivery_supervisor, client, task_id)
     assert client.get(f"/v1/tasks/{task_id}").json()["state"] in (
-        "awaiting_internal_review",
-        "awaiting_acceptance",
+        "awaiting_external_review",
+        "awaiting_ci_certification",
         "pre_pr_gates_failed",
     )
 
@@ -1523,9 +1494,6 @@ async def test_a_reused_pull_request_that_does_not_match_the_contract_fails_publ
     document = correction_document(client, task_id, image="crucible-worker:fake-succeed")
     assert client.post(f"/v1/tasks/{task_id}/corrections", json=document).status_code == 200
     await run_to_settled(delivery_supervisor, client, task_id)
-    client.post(
-        f"/v1/tasks/{task_id}/accept", json={"verdict": "accepted", "reasoning": "corrected"}
-    )
     await delivery_supervisor.tick()
     assert client.get(f"/v1/tasks/{task_id}").json()["state"] == "publish_failed"
     failed = [

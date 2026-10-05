@@ -65,7 +65,7 @@ MODEL_LABELS = {"app": "stub-model"}
 ENDPOINT = f"http://stub-model.{MODEL_NAMESPACE}.svc.cluster.local:{MODEL_PORT}/v1"
 CHECKS = ("make lint", "make test-unit", "make scan")
 SETTLED = {
-    "awaiting_internal_review",
+    "accepted",
     "pre_pr_gates_failed",
     "failed",
     "blocked",
@@ -453,7 +453,7 @@ async def test_hades_184_a_hermes_task_passes_the_repositorys_own_checks_in_the_
     ]
 
     assert (attempt["harness"], attempt["model"]) == ("hermes", "fast")
-    assert state == "awaiting_internal_review", json.dumps(results, sort_keys=True)
+    assert state == "accepted", json.dumps(results, sort_keys=True)
     assert results["verification_ran"] == "pass", results
     assert sorted(run["command"] for run in runs) == sorted(CHECKS)
     assert all(run["ran"] and run["exit_code"] == 0 for run in runs), runs

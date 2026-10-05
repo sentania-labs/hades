@@ -3146,7 +3146,7 @@ async def test_the_tasks_page_marks_each_gate_and_lists_what_is_for_the_reviewer
         client, "crucible-worker:fake-out-of-scope", deliverables=ARTIFACTS_DELIVERABLE
     )
     supervisor = make_supervisor(ctx, provider)
-    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
+    assert await run_to_settled(supervisor, client, task_id) == "pre_pr_gates_failed"
     with TestClient(create_app(ctx)) as browser:
         ui_sign_in(browser, tokens["admin"])
         page = html.unescape(browser.get("/ui/tasks").text)

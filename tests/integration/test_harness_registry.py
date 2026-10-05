@@ -123,7 +123,7 @@ async def test_enabling_through_the_service_lets_the_same_harness_run(
         uow.commit()
     assert state.enabled and state.reason == "credential validated"
     task_id = submit_and_start(client, "crucible-worker:fake-succeed")
-    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
+    assert await run_to_settled(supervisor, client, task_id) == "publishing"
     kinds = event_kinds(client, task_id)
     assert "harness_refused" not in kinds
 
@@ -197,9 +197,7 @@ async def test_per_harness_concurrency_defers_the_second_launch(
     ctx.clock.advance(61)  # type: ignore[attr-defined]
     for _ in range(3):
         await supervisor.tick()
-    assert await run_to_settled(supervisor, client, second, max_ticks=40) == (
-        "awaiting_internal_review"
-    )
+    assert await run_to_settled(supervisor, client, second, max_ticks=40) == ("publishing")
 
 
 @pytest.mark.parametrize("local_harness", ["hermes", "codex"])
@@ -559,7 +557,7 @@ async def test_an_administrators_enable_replaces_the_configuration_default_witho
         assert codex["warning"] == UNVERIFIED
 
         task_id = _submit_pinned(client, tokens, "crucible-worker:fake-succeed", "EX-174-AFTER")
-        assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
+        assert await run_to_settled(supervisor, client, task_id) == "publishing"
         assert "harness_refused" not in event_kinds(client, task_id)
 
         audit = client.get("/v1/admin/audit", params={"limit": 200}, headers=admin_headers)

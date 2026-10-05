@@ -146,7 +146,7 @@ async def _route(
 async def _passes(client: TestClient, supervisor: Supervisor, task_id: str) -> None:
     """A clean attempt counts once its pre-PR gates pass, while it still waits for its
     review: a failure counts that early, so a pass must too."""
-    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
+    assert await run_to_settled(supervisor, client, task_id) == "publishing"
     await supervisor.tick()
 
 

@@ -54,6 +54,7 @@ CANCELLABLE = frozenset(
         "awaiting_acceptance",
         "pre_pr_gates_failed",
         "publish_failed",
+        "publishing",
         "awaiting_external_review",
         "external_feedback_received",
         "awaiting_ci_certification",

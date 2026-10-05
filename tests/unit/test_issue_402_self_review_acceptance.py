@@ -69,6 +69,9 @@ class _Acceptances:
     def add(self, result: AcceptanceResult) -> None:
         self.rows.append(result)
 
+    def list_for_task(self, task_id: str) -> list[AcceptanceResult]:
+        return [row for row in self.rows if row.task_id == task_id]
+
 
 class _ReviewReports:
     def __init__(self) -> None:
@@ -357,6 +360,7 @@ def test_incomplete_self_review_is_rejected_by_schema_and_worker_checker(review:
 @pytest.mark.parametrize(
     "state",
     [
+        TaskState.PUBLISHING,
         TaskState.AWAITING_EXTERNAL_REVIEW,
         TaskState.AWAITING_CI_CERTIFICATION,
         TaskState.READY_FOR_MERGE,

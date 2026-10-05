@@ -145,7 +145,7 @@ async def test_scripted_quota_reroutes_to_a_second_image_and_remote_branch(
         supervisor,
         client,
         task_id,
-        {"awaiting_internal_review", "pre_pr_gates_failed", "gates_passed"},
+        {"accepted", "pre_pr_gates_failed", "gates_passed"},
         max_ticks=10,
         pause=0.2,
     )

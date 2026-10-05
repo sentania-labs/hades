@@ -34,7 +34,7 @@ pytestmark = [
 
 # How long a wait for a launch or a settled task may take, by the clock.
 WAIT_SECONDS = 240
-DONE = {"awaiting_internal_review", "gates_passed", "awaiting_acceptance", "pre_pr_gates_failed"}
+DONE = {"accepted", "pre_pr_gates_failed"}
 
 
 async def _attempt_id(client: TestClient, task_id: str) -> str:
