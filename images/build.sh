@@ -62,7 +62,10 @@ case "${NO_CACHE:-0}" in 0|"") ;; *) no_cache="--no-cache" ;; esac
   "${JQ_VERSION:?}" "${MAKE_VERSION:?}" "${CA_CERTIFICATES_VERSION:?}" "${LAB_CA_SHA256:?}" \
   "${SOURCE_DATE_EPOCH:?}" "${BUILDKIT_IMAGE:?}" "${UV_VERSION:?}" "${UV_SHA256:?}" \
   "${CPYTHON_VERSION:?}" "${CPYTHON_BUILD:?}" "${CPYTHON_SHA256:?}" \
-  "${GITLEAKS_VERSION:?}" "${GITLEAKS_SHA256:?}" "${RIPGREP_VERSION:?}"
+  "${GITLEAKS_VERSION:?}" "${GITLEAKS_SHA256:?}" "${RIPGREP_VERSION:?}" \
+  "${LIBGL1_VERSION:?}" "${LIBEGL1_VERSION:?}" "${LIBXKBCOMMON0_VERSION:?}" \
+  "${LIBDBUS_1_3_VERSION:?}" "${LIBFONTCONFIG1_VERSION:?}" "${LIBFREETYPE6_VERSION:?}" \
+  "${LIBGLIB2_0_0_VERSION:?}" "${LIBX11_6_VERSION:?}" "${LIBXCB1_VERSION:?}"
 
 # rewrite-timestamp only clamps a file newer than SOURCE_DATE_EPOCH. A context file at
 # or before it (a checkout from before an epoch bump) would keep its own mtime in the
@@ -181,6 +184,15 @@ for image in "${images[@]}"; do
         --build-arg "PYTHON3_VERSION=$PYTHON3_VERSION" \
         --build-arg "PYTHON3_VENV_VERSION=$PYTHON3_VENV_VERSION" \
         --build-arg "RIPGREP_VERSION=$RIPGREP_VERSION" \
+        --build-arg "LIBGL1_VERSION=$LIBGL1_VERSION" \
+        --build-arg "LIBEGL1_VERSION=$LIBEGL1_VERSION" \
+        --build-arg "LIBXKBCOMMON0_VERSION=$LIBXKBCOMMON0_VERSION" \
+        --build-arg "LIBDBUS_1_3_VERSION=$LIBDBUS_1_3_VERSION" \
+        --build-arg "LIBFONTCONFIG1_VERSION=$LIBFONTCONFIG1_VERSION" \
+        --build-arg "LIBFREETYPE6_VERSION=$LIBFREETYPE6_VERSION" \
+        --build-arg "LIBGLIB2_0_0_VERSION=$LIBGLIB2_0_0_VERSION" \
+        --build-arg "LIBX11_6_VERSION=$LIBX11_6_VERSION" \
+        --build-arg "LIBXCB1_VERSION=$LIBXCB1_VERSION" \
         --build-arg "UV_VERSION=$UV_VERSION" \
         --build-arg "UV_SHA256=$UV_SHA256" \
         --build-arg "CPYTHON_VERSION=$CPYTHON_VERSION" \

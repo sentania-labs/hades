@@ -102,7 +102,13 @@ uv project's own checks call (`uv`,
 CPython 3.12 as `python3.12` only, and `gitleaks`, each pinned in
 `images/pins.env`; hades #184, ADR 0020), `crucible-report` (the worker's report checker, a
 standard-library script that borrows the Hermes environment's PyYAML for its
-own process, hades #215), and nothing else. No `gh`: workers have no GitHub
+own process, hades #215), the shared libraries Qt's offscreen platform loads
+(hades #430: `libgl1`, `libegl1`, `libxkbcommon0`, `libdbus-1-3`,
+`libfontconfig1`, `libfreetype6`, `libglib2.0-0`, `libx11-6` and `libxcb1`,
+the Debian packages for what `ldd` reports missing for PySide6's
+`libQt6Gui.so.6` and `libqoffscreen.so`, each pinned in `images/pins.env`
+at the `DEBIAN_SNAPSHOT` version; no X server or xvfb, so a GUI test
+suite runs with `QT_QPA_PLATFORM=offscreen`), and nothing else. No `gh`: workers have no GitHub
 credential to use it with. Where a CLI needs a companion binary to work at
 all, as Codex does for the 5.6 model family, the companion ships from the
 same pinned release, fetched and verified the same way, with its mtime set
@@ -180,7 +186,11 @@ Rules:
   runs `make images-policy-check`, which fails when the program a shipped
   policy's required check starts with (`make` for default-software), or a
   program a shipped policy declares in `repository.required_programs`, does
-  not resolve in the worker image (hades #181, #184). Pull requests import a BuildKit
+  not resolve in the worker image (hades #181, #184), and
+  `make images-qt-offscreen-check` (`tools/images/qt_offscreen.sh`), which
+  installs PySide6 into a venv inside the worker image and fails unless
+  `QApplication([])` exits 0 there with `QT_QPA_PLATFORM=offscreen`, as uid
+  1000 on a read-only root with no network (hades #430). Pull requests import a BuildKit
   layer cache; every push to main builds from scratch before exporting it.
 - **CI owns the digest lines** (`WORKER_DIGEST`, `SCRIPT_HARNESS_DIGEST`,
   every `*_DIGEST` line of `images/manifest.env`; the operator's decision,
