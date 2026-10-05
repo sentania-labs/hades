@@ -501,6 +501,9 @@ CI runs `make manifests`, from this same definition, on every pull request. It d
 Calico, a TLS registry and a full task lifecycle, which is the `e2e-kind` job's cost
 again, and `e2e-kind` is still establishing its own runtime and flake history. So
 `make deploy-kind` is a local gate and running it is the author's job, not CI's.
+When the author is a Crucible worker it is not run at all: the worker image has no
+Docker, kind or kubectl (ADR 0020, CONTRIBUTING.md), so the PR says so and a person
+with those tools runs it when the change warrants it.
 
 What kind proves: the manifests are valid, the RBAC grants what the process asks for, the
 volumes are there, the images pull, and a real task completes on the Kubernetes provider.
