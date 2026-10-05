@@ -98,7 +98,7 @@ def test_every_offered_action_is_complete_and_admitted(state: str, role: str | N
         ("ci_certification_failed", nx.ORCHESTRATOR, {"ci-decision", "corrections", "cancel"}),
         ("head_diverged", nx.ORCHESTRATOR, {"head-decision", "cancel"}),
         ("external_feedback_received", nx.ORCHESTRATOR, {"dispositions", "corrections", "cancel"}),
-        ("accepted", nx.ORCHESTRATOR, {"close"}),
+        ("accepted", nx.ORCHESTRATOR, {"close", "corrections", "cancel"}),
         ("merged", nx.ADMIN, set()),
         ("running", nx.ORCHESTRATOR, {"cancel"}),
         ("closed", nx.ORCHESTRATOR, set()),
@@ -169,7 +169,8 @@ def test_an_orchestrator_route_proves_the_role_without_a_probe(
     assert run(["accept", "T1", "--verdict", "accepted", "--reason", "ok"]) == 0
     assert [r["path"] for r in fake.requests] == ["/v1/tasks/T1/accept"]
     document = _out(capsys)
-    assert document["principal_role"] == "orchestrator" and _actions(document) == ["close"]
+    assert document["principal_role"] == "orchestrator"
+    assert _actions(document) == ["corrections", "close", "cancel"]
 
 
 def test_a_refusal_is_the_apis_problem_in_the_envelope(

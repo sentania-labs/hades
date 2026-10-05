@@ -325,12 +325,14 @@ def test_advisory_failure_requires_orchestrator_review_before_publication(
     assert github.posted == ["@codex review"]
 
 
-def test_correction_from_held_publishing_stops_delivery_and_schedules_work(
+@pytest.mark.parametrize("state", [TaskState.ACCEPTED, TaskState.PUBLISHING])
+def test_correction_from_accepted_or_publishing_stops_delivery_and_schedules_work(
     tmp_path: Path,
+    state: TaskState,
 ) -> None:
     store = _SelfReviewStore()
     task = _task(store)
-    task.state = TaskState.PUBLISHING
+    task.state = state
     clock = FakeClock(NOW)
     github = _GitHub()
     publisher = _Publisher()
@@ -422,13 +424,14 @@ def test_incomplete_self_review_is_rejected_by_schema_and_worker_checker(review:
 @pytest.mark.parametrize(
     "state",
     [
+        TaskState.ACCEPTED,
         TaskState.PUBLISHING,
         TaskState.AWAITING_EXTERNAL_REVIEW,
         TaskState.AWAITING_CI_CERTIFICATION,
         TaskState.READY_FOR_MERGE,
     ],
 )
-def test_orchestrator_can_cancel_after_publication(state: TaskState) -> None:
+def test_orchestrator_can_cancel_after_acceptance(state: TaskState) -> None:
     store = _SelfReviewStore()
     task = _task(store)
     task.state = state
@@ -486,3 +489,38 @@ def test_pre_upgrade_parsed_report_cannot_skip_self_review(
     outcome = next(row for row in store.gate_results.rows if row.gate == "report_present")
     assert outcome.blocking and "self_review" in outcome.detail
     assert store.acceptance.rows == []
+
+
+@pytest.mark.parametrize("correction", [False, True])
+def test_artifact_acceptance_wakes_principal_once_without_publisher(
+    tmp_path: Path, correction: bool
+) -> None:
+    store, supervisor, _github, publisher = _collected(tmp_path, correction=correction)
+    task = _task(store)
+    stored = store.contracts.get(task.id, task.contract_version)
+    assert stored is not None
+    stored.document["deliverables"] = [{"kind": "artifacts"}]
+    supervisor.delivery._publisher = None
+    supervisor.delivery._github = None
+
+    supervisor._evaluate_pending_gates()
+
+    assert task.state is TaskState.ACCEPTED
+    assert len(store.acceptance.rows) == 1
+    assert len(store.wakes.rows) == 1
+    wake = store.wakes.rows[0]
+    assert wake.principal_id == task.principal_id
+    assert wake.task_id == task.id
+    assert wake.reason == "accepted"
+    assert wake.payload["task"]["state"] == "accepted"
+    assert wake.payload["summary"] == (
+        "accepted, artifacts are ready; no branch or PR publication was requested."
+    )
+    work = latest_work_attempt(store.uow(), task)
+    assert work is not None
+    assert wake.payload["attempt_id"] == work[0].id
+    assert wake.payload["links"]["artifacts"] == f"/v1/attempts/{work[0].id}/artifacts"
+    assert asyncio.run(supervisor.delivery.publish()) == 0
+    supervisor._evaluate_pending_gates()
+    assert len(store.acceptance.rows) == len(store.wakes.rows) == 1
+    assert publisher.pushes == []

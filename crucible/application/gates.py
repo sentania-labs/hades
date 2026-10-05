@@ -347,6 +347,17 @@ def evaluate_and_advance(
             "automatic": True,
         },
     )
+    if destination is TaskState.ACCEPTED:
+        create_wake(
+            uow,
+            clock,
+            principal_id=task.principal_id,
+            reason=WakeReason.ACCEPTED,
+            summary=("accepted, artifacts are ready; no branch or PR publication was requested."),
+            task=task,
+            attempt_id=attempt.id,
+            extra_links={"artifacts": f"/v1/attempts/{attempt.id}/artifacts"},
+        )
     return outcomes
 
 

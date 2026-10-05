@@ -9,7 +9,7 @@ When every blocking gate passes and the report is complete, Hades records accept
 and publishes without an orchestrator review or acceptance call, for first attempts
 and corrections alike. Publication sends one informational `published, PR #N` wake.
 An advisory gate failure still requires an orchestrator review before automatic acceptance.
-The orchestrator can still cancel or attach a correction after publication. The
+The orchestrator can still cancel or attach a correction from accepted or after publication. The
 review-report endpoint records operator out-of-band adversarial findings against
 the PR; a correction can be attached on the operator's word. It is not a gate.
 
@@ -41,7 +41,7 @@ blocked --decision--> scheduled
 reported --a blocking pre-PR gate fails, including a missing self_review--> pre_pr_gates_failed --wake-->
 reported --every gate passes and the report carries self_review--> gates_passed
 reported --only advisory gates fail--> awaiting_internal_review --review recorded--> gates_passed
-gates_passed --Hades records acceptance, artifacts deliverable--> accepted
+gates_passed --Hades records acceptance, artifacts deliverable--> accepted --informational wake-->
 gates_passed --Hades records acceptance, branch or pull_request deliverable--> publishing
 
 legacy awaiting_acceptance --accept, deliverable is artifacts--> accepted
@@ -102,14 +102,21 @@ head_diverged --cancel--> cancelled
 merged --included in a release contract--> release_candidate
 release_candidate --release succeeded--> released
 release_candidate --release failed or cancelled--> merged
+accepted --correction attached--> scheduled
 {accepted, merged, released} --close (orchestrator POST)--> closed
 
 {submitted, scheduled, blocked, awaiting_internal_review, awaiting_acceptance,
- pre_pr_gates_failed, publish_failed, awaiting_external_review,
+ accepted, pre_pr_gates_failed, publishing, publish_failed, awaiting_external_review,
  external_feedback_received, awaiting_ci_certification, ci_certification_failed,
  head_diverged, ready_for_merge} --cancel--> cancelled
 running --cancel--> cancelling --all attempts terminal--> cancelled
 ```
+
+Artifact-only contracts stop in `accepted` without a publisher. Hades creates one
+informational `accepted` wake in the acceptance transaction, with the attempt and
+artifact links and a summary that artifacts are ready and no branch or PR publication
+was requested. This applies to first attempts and corrections; it asks for no
+review or acceptance call. The operator may cancel or correct the accepted task.
 
 Terminal: `cancelled`, `rejected`, `closed`. There is no task-level
 `failed`: a failed attempt with no retry remaining still produces a
