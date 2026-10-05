@@ -70,10 +70,14 @@ with the token. `migrate` is local only.
 ### Board
 
 `GET /v1/admin/board` is an admin-only, read-only view of the same data as the
-operator page at `/ui/board`. It returns `in_flight` groups, current-attempt
+operator page at `/ui/board`. It returns `in_flight` groups, the `kanban`
+(hades #334: `columns` left to right, each with `key`, `name`, `reserved`,
+`note` and `parents`, every parent holding its `tasks` as cards with `holder`
+and `age`, and `thresholds` with the attention and done windows), current-attempt
 `routing`, per-attempt and rolled-up `tokens`, and the 14-day `quality` log.
-Task and attempt timestamps are RFC 3339 in JSON. The HTML page renders them in
-the configured operator timezone.
+A card's `age.late` is true past the column's threshold; `age.budget_seconds` is
+null where a column has none. Task and attempt timestamps are RFC 3339 in JSON.
+The HTML page renders them in the configured operator timezone.
 
 Token values are reported only when a harness adapter supplied them. An attempt
 whose adapter supplied no usage has `recording: "not recorded"` and null token
