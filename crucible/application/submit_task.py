@@ -363,7 +363,11 @@ def submit_task(
     credential_sources: Mapping[str, CredentialSource] | None = None,
     secret_providers: Collection[str] = (),
     wired_providers: Collection[str] | None = None,
+    proposed: bool = False,
 ) -> tuple[Task, TaskContract]:
+    """`proposed` (hades #424) stores the same validated contract in `proposed` rather
+    than `submitted`: nobody has authorized it, so nothing can start it until an operator
+    approves it."""
     contract = parse_contract(body)
     require_operator_for_pin(principal, contract)
     repository = uow.repositories.get_by_name(contract.repository.name)
@@ -416,7 +420,7 @@ def submit_task(
         principal_id=principal.id,
         project=contract.project,
         title=contract.title,
-        state=TaskState.SUBMITTED,
+        state=TaskState.PROPOSED if proposed else TaskState.SUBMITTED,
         contract_version=1,
         policy_name=contract.policy.name,
         policy_version=contract.policy.version,
@@ -437,7 +441,7 @@ def submit_task(
     record_event(
         uow,
         clock,
-        EventKind.TASK_SUBMITTED,
+        EventKind.TASK_PROPOSED if proposed else EventKind.TASK_SUBMITTED,
         principal=principal.name,
         task_id=task.id,
         payload={

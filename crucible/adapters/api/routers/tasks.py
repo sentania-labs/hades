@@ -8,13 +8,19 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Header, Query, Request
 from fastapi.responses import JSONResponse
 
-from crucible.adapters.api.deps import Ctx, Mutator, Orchestrator, Reader, UoW
+from crucible.adapters.api.deps import Ctx, Mutator, Operator, Orchestrator, Reader, UoW
 from crucible.adapters.api.idempotency import with_idempotency
 from crucible.application.acceptance import close_task, record_acceptance
 from crucible.application.cancel_task import cancel_task
 from crucible.application.corrections import amend_task, attach_correction
 from crucible.application.decisions import record_decision, record_disposition
 from crucible.application.delivery_decisions import record_ci_decision, record_head_decision
+from crucible.application.proposals import (
+    approve_batch,
+    approve_task,
+    reject_proposal,
+    send_back_task,
+)
 from crucible.application.queries import (
     pull_request_view,
     task_events,
@@ -28,6 +34,9 @@ from crucible.application.submit_task import submit_task
 from crucible.contracts.api import (
     AcceptRequest,
     AmendRequest,
+    ApproveRequest,
+    BatchApprovalView,
+    BatchApproveRequest,
     CancelRequest,
     CIDecisionRequest,
     CloseRequest,
@@ -37,7 +46,9 @@ from crucible.contracts.api import (
     HeadDecisionRequest,
     PublishRetryRequest,
     PullRequestView,
+    RejectProposalRequest,
     ReviewRequest,
+    SendBackRequest,
     StartRequest,
     TaskList,
     TaskView,
@@ -51,8 +62,14 @@ IdemKey = Annotated[str | None, Header(alias="Idempotency-Key")]
 
 @router.post("", response_model=TaskView, status_code=201)
 async def submit(
-    request: Request, ctx: Ctx, principal: Mutator, idempotency_key: IdemKey = None
+    request: Request,
+    ctx: Ctx,
+    principal: Mutator,
+    idempotency_key: IdemKey = None,
+    proposed: bool = False,
 ) -> JSONResponse:
+    """`?proposed=true` (hades #424) stores the contract as a proposal, which only an
+    operator's approval starts."""
     body = await request.body()
     document: Any = await request.json() if body else {}
 
@@ -67,6 +84,7 @@ async def submit(
             credential_sources=ctx.credential_sources,
             secret_providers=ctx.secret_providers,
             wired_providers=frozenset(provider.name for provider in ctx.providers),
+            proposed=proposed,
         )
         return 201, task_view(uow, task.id).model_dump(mode="json")
 
@@ -76,6 +94,37 @@ async def submit(
         principal=principal,
         key=idempotency_key,
         body=body,
+        scope=str(request.url.path),
+        produce=produce,
+    )
+
+
+@router.post("/approvals", response_model=BatchApprovalView)
+async def approve_several(
+    body: BatchApproveRequest,
+    request: Request,
+    ctx: Ctx,
+    principal: Operator,
+    idempotency_key: IdemKey = None,
+) -> JSONResponse:
+    """hades #424: approve proposed tasks in one action; `task_ids` order is queue order."""
+    raw = await request.body()
+
+    async def produce(uow: UnitOfWork) -> tuple[int, dict[str, Any]]:
+        batch_id, tasks = approve_batch(
+            uow, ctx.clock, principal=principal, task_ids=body.task_ids, reason=body.reason
+        )
+        view = BatchApprovalView(
+            batch_id=batch_id, tasks=[task_view(uow, task.id) for task in tasks]
+        )
+        return 200, view.model_dump(mode="json")
+
+    return await with_idempotency(
+        uow_factory=ctx.uow_factory,
+        clock=ctx.clock,
+        principal=principal,
+        key=idempotency_key,
+        body=raw,
         scope=str(request.url.path),
         produce=produce,
     )
@@ -123,6 +172,101 @@ async def start(
 
     async def produce(uow: UnitOfWork) -> tuple[int, dict[str, Any]]:
         task = start_task(uow, ctx.clock, principal=principal, task_id=task_id, request=body)
+        return 200, task_view(uow, task.id).model_dump(mode="json")
+
+    return await with_idempotency(
+        uow_factory=ctx.uow_factory,
+        clock=ctx.clock,
+        principal=principal,
+        key=idempotency_key,
+        body=raw,
+        scope=str(request.url.path),
+        produce=produce,
+    )
+
+
+@router.post("/{task_id}/approve", response_model=TaskView)
+async def approve(
+    task_id: str,
+    body: ApproveRequest,
+    request: Request,
+    ctx: Ctx,
+    principal: Operator,
+    idempotency_key: IdemKey = None,
+) -> JSONResponse:
+    raw = await request.body()
+
+    async def produce(uow: UnitOfWork) -> tuple[int, dict[str, Any]]:
+        task = approve_task(
+            uow,
+            ctx.clock,
+            principal=principal,
+            task_id=task_id,
+            reason=body.reason,
+            note=body.note,
+        )
+        return 200, task_view(uow, task.id).model_dump(mode="json")
+
+    return await with_idempotency(
+        uow_factory=ctx.uow_factory,
+        clock=ctx.clock,
+        principal=principal,
+        key=idempotency_key,
+        body=raw,
+        scope=str(request.url.path),
+        produce=produce,
+    )
+
+
+@router.post("/{task_id}/send-back", response_model=TaskView)
+async def send_back(
+    task_id: str,
+    body: SendBackRequest,
+    request: Request,
+    ctx: Ctx,
+    principal: Operator,
+    idempotency_key: IdemKey = None,
+) -> JSONResponse:
+    raw = await request.body()
+
+    async def produce(uow: UnitOfWork) -> tuple[int, dict[str, Any]]:
+        task = send_back_task(
+            uow,
+            ctx.clock,
+            principal=principal,
+            task_id=task_id,
+            reason=body.reason,
+            note=body.note,
+        )
+        return 200, task_view(uow, task.id).model_dump(mode="json")
+
+    return await with_idempotency(
+        uow_factory=ctx.uow_factory,
+        clock=ctx.clock,
+        principal=principal,
+        key=idempotency_key,
+        body=raw,
+        scope=str(request.url.path),
+        produce=produce,
+    )
+
+
+@router.post("/{task_id}/reject", response_model=TaskView)
+async def reject(
+    task_id: str,
+    body: RejectProposalRequest,
+    request: Request,
+    ctx: Ctx,
+    principal: Operator,
+    idempotency_key: IdemKey = None,
+) -> JSONResponse:
+    """Rejects a proposed task only; a task in delivery is rejected through its decisions."""
+    raw = await request.body()
+
+    async def produce(uow: UnitOfWork) -> tuple[int, dict[str, Any]]:
+        task = reject_proposal(
+            uow, ctx.clock, principal=principal, task_id=task_id, reason=body.reason
+        )
         return 200, task_view(uow, task.id).model_dump(mode="json")
 
     return await with_idempotency(
