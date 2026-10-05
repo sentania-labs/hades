@@ -20,7 +20,22 @@ from crucible.adapters.execution import scripts
 from crucible.domain.gates import ENFORCED_PRE_PR_GATES, PRE_PR_GATES
 from crucible.ports.execution import IDENTITY_MOUNT, REPO_MOUNT, REPORT_MOUNT
 
-__all__ = ["IDENTITY_MOUNT", "REPORT_MOUNT", "REPO_MOUNT", "bundle_sha256", "write_bundle"]
+__all__ = [
+    "IDENTITY_MOUNT",
+    "REPORT_MOUNT",
+    "REPO_MOUNT",
+    "WORKER_ABSENT_PROGRAMS_SENTENCE",
+    "bundle_sha256",
+    "write_bundle",
+]
+
+# hades #429: the one sentence CONTRIBUTING.md and the Checks section share, so a worker
+# that reads a project's instructions to run the kind tier or build images does not
+# stop over a program it was never going to have (ADR 0020).
+WORKER_ABSENT_PROGRAMS_SENTENCE = (
+    "Docker, kind and kubectl are absent in a worker and are CI's; a missing one is "
+    "expected and is not a reason to stop."
+)
 
 
 def _items(values: Any) -> list[Any]:
@@ -129,7 +144,7 @@ def render_identity_md(
         + _bullets([_check(v) for v in checks])
         + "\n- If a required command's program is missing from the image, do not "
         "write a substitute for it; write report/blocked.md naming the program and "
-        "exit 75."
+        "exit 75.\n- " + WORKER_ABSENT_PROGRAMS_SENTENCE
     )
     sections.append(
         "## Report\n\n"

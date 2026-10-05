@@ -114,28 +114,24 @@ webhook_secret_path = "/var/lib/crucible/credentials/github/webhook.secret"
 
 # Harness credentials (12, 25). Each entry names a directory Crucible reads and seeds a
 # per-attempt copy from; only the named auth files are copied, the copy is owned by the
-# worker's uid, and it is removed right after the run. `mount_mode` may raise the
-# adapter's declared minimum to `rw-narrow` and never lowers it (25 step 7). The values
-# in these directories are never configuration and never appear in any record.
+# worker's uid, and it is removed right after the run. Mount mode is chosen on the
+# Credentials page. The values in these directories are never configuration and never
+# appear in any record.
 [credentials.claude_code]
 source = "directory"
 path = "/var/lib/crucible/credentials/claude_code"    # oauth-token (long-lived, S1b) and .claude.json
-mount_mode = "ro"          # the setup token never refreshes and nothing syncs back (12); rw-narrow would override the adapter's read-only minimum
 
 [credentials.codex]
 source = "directory"
 path = "/var/lib/crucible/credentials/codex"          # auth.json; the CLI writes session state beside it (S1)
-mount_mode = "rw-narrow"
 
 [credentials.agy]
 source = "directory"
 path = "/var/lib/crucible/credentials/agy"            # .gemini/antigravity-cli/antigravity-oauth-token
-mount_mode = "rw-narrow"   # the CLI rotated its token on the first run past expiry (C5 live run)
 
 [credentials.hermes]
 source = "directory"
 path = "/var/lib/crucible/credentials/hermes"        # api-key, written mode 600 by the admin surface
-mount_mode = "ro"
 
 # Administration (25, C5b): the same operations behind `/v1/admin` and `crucible admin`.
 # A rotated credential's previous directory is kept for `credential_retention_hours`
@@ -159,17 +155,6 @@ proxy_subnet = "10.88.0.0/24"
 # Crucible side and the operator's own session was confirmed valid afterwards (S1b
 # steps 5 and 6). Claude Code's long-lived token has no refresh, so it is verified; AGY
 # completed both steps during C5; Codex's dedicated token has not refreshed yet.
-[harnesses.claude_code]
-enabled = true
-reason = "session_compatibility verified (S1b)"
-
-[harnesses.codex]
-enabled = false
-reason = "unverified: the dedicated session's Crucible-side refresh has not been observed (S1b step 5), so the operator's session cannot yet be confirmed after it (step 6)"
-
-[harnesses.agy]
-enabled = true
-reason = "session_compatibility verified: the dedicated session refreshed on the Crucible side at 00:50 CDT on 2026-09-17 (S1b step 5) and the operator's own session answered and refreshed normally afterwards at 06:32 CDT (step 6)"
 
 [wake.foundry]
 mode = "poll"          # or "webhook"

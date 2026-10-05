@@ -22,7 +22,7 @@ the PR; a correction can be attached on the operator's word. It is not a gate.
 | `tasks` | id ULID PK, external_id, principal_id, project, title, state, contract_version, policy_name, policy_version, head_sha (current collected head), created_at, updated_at, closed_at; UNIQUE (principal_id, external_id) |
 | `task_contracts` | id, task_id, version, document JSONB, sha256, submitted_at; UNIQUE (task_id, version) |
 | `executions` | id, task_id, role (implement, correct, review), contract_version, harness, model, effort, provider, image, policy snapshot JSONB, state, created_at, ended_at |
-| `attempts` | id, execution_id, number, state, workspace_path, handle (provider ref), identity_sha256, image_digest, started_at, ended_at, exit_code, exit_class, timeout_at, drain_deadline, killed_at, termination_reason |
+| `attempts` | id, execution_id, number, state, workspace_path, handle (provider ref), identity_sha256, image_digest, started_at, ended_at, exit_code, exit_class, timeout_at, drain_deadline, killed_at, termination_reason, stall_shape and termination_detail (issue 278: the shape and reason of a stall ended before the time limit) |
 | `workers` | attempt_id PK, state, last_signal_at, last_signal |
 | `leases` | id, kind, key, holder, fenced_token BIGINT, expires_at; UNIQUE (kind, key) |
 | `heartbeats` | id BIGSERIAL, attempt_id, ts, signal, detail |

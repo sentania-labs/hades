@@ -95,21 +95,16 @@ directories.
 [credentials.claude_code]
 source = "directory"
 path = "/var/lib/crucible/credentials/claude_code"   # contains the CLI's auth state
-mount_mode = "ro"              # the long-lived setup token never refreshes
 [credentials.codex]
 source = "directory"
 path = "/var/lib/crucible/credentials/codex"
-mount_mode = "renewer"         # Hades refreshes; workers receive an access token only
 [credentials.agy]
 source = "directory"
 path = "/var/lib/crucible/credentials/agy"
-mount_mode = "rw-narrow"       # access-token renewal updates the expiry; the refresh token
-                               # remains reusable, and the file syncs back by expiry
 
 [credentials.hermes]
 source = "directory"
 path = "/var/lib/crucible/credentials/hermes"         # contains only api-key
-mount_mode = "ro"                # the gateway key never refreshes and never syncs back
 
 [github.app]
 app_id = 0                     # public identifier, not a secret
@@ -119,6 +114,11 @@ webhook_secret_path = "/var/lib/crucible/credentials/github/webhook.secret"
 
 Every `path` above is a directory that already exists when Crucible starts,
 owned by the service user and mode 0700 (13).
+
+Mount mode is not a deployment setting. An administrator chooses it on Credentials.
+`ro` gives the worker a read-only copy, `rw-narrow` permits only declared auth files to
+sync back, and `renewer` keeps renewal in Hades and gives workers an access token. The
+old environment or file value is accepted only as a seed until a saved choice exists.
 
 Subscription authentication is the requirement for harnesses: each harness
 is logged in once by the operator (interactive login) **into Crucible's

@@ -30,6 +30,7 @@ import pytest
 import yaml
 
 from crucible.adapters.first_run import SECRET_NAME
+from crucible.adapters.harness.claude_code import ClaudeCodeAdapter
 from crucible.settings import CredentialSettings, HarnessSettings, Settings
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -650,14 +651,15 @@ def test_the_base_config_carries_no_lab_local_endpoint_address(
         assert settings["CRUCIBLE_KUBERNETES__LOCAL_ENDPOINT_NAMESPACE"] == "", target
 
 
-def test_every_config_mounts_the_claude_code_credential_read_only(
+def test_every_config_omits_or_seeds_the_declared_claude_code_credential_mode(
     rendered: dict[str, list[dict[str, Any]]],
 ) -> None:
-    """hades#308: the adapter's minimum is read-only (PR 307); a configured rw-narrow
-    would override it, so no rendered config may say rw-narrow for Claude Code."""
+    """Mount mode is an admin setting; deployment input is an optional seed only."""
+    declared_mode = ClaudeCodeAdapter().credential_spec().minimum_mode.value
     for target in ("base", "overlays/lab", "overlays/kind"):
         settings = _named(rendered[target], "ConfigMap", "crucible-settings")["data"]
-        assert settings["CRUCIBLE_CREDENTIALS__CLAUDE_CODE__MOUNT_MODE"] == "ro", target
+        seed = settings.get("CRUCIBLE_CREDENTIALS__CLAUDE_CODE__MOUNT_MODE")
+        assert seed is None or seed == declared_mode, target
 
 
 def test_the_kind_overlay_renders_times_in_america_chicago(

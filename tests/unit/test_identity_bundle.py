@@ -141,7 +141,8 @@ def test_identity_md_is_short_and_carries_no_retired_instructions(tmp_path: Path
         "log file",
     ):
         assert retired not in text, retired
-    assert len(text.split()) <= 350, len(text.split())
+    # hades #429 added the one-sentence note that Docker, kind and kubectl are CI's.
+    assert len(text.split()) <= 370, len(text.split())
 
 
 def test_identity_md_renders_values_as_words_not_python(tmp_path: Path) -> None:

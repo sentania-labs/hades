@@ -4024,7 +4024,11 @@ class KubernetesProvider:
         # An optional credential whose Secret is absent is not seeded (see
         # `_seed_credential`), which keeps the adapter's unauthenticated fallback.
         secret_name = self.config.credential_secret_name(credential.harness)
-        configured = self.config.credential_modes.get(credential.harness)
+        configured = (
+            MountMode(spec.credential_mode)
+            if spec.credential_mode is not None
+            else self.config.credential_modes.get(credential.harness)
+        )
         mode = configured or (
             MountMode.RENEWER if credential.harness == "codex" else credential.minimum_mode
         )

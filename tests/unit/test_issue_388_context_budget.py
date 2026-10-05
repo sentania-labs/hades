@@ -198,6 +198,8 @@ class _Uow:
         self.events = SimpleNamespace(append=lambda *a, **k: None)
 
     def _setting(self, name: str) -> Any:
+        if name == "credentials.hermes.mount_mode":
+            return None
         assert name == "harness.hermes"
         return SimpleNamespace(document=dict(self.document))
 

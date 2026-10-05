@@ -11,6 +11,7 @@ from crucible.adapters.ui.actions import register
 from crucible.adapters.ui.pages import routing_models as routing_models_page
 from crucible.adapters.ui.render import _document_section, _duration_words, _page
 from crucible.adapters.ui.session import _require
+from crucible.application.admin import credentials as credentials_admin
 from crucible.application.admin import gate_classes as gate_classes_admin
 from crucible.application.admin import kubernetes as kubernetes_admin
 from crucible.application.admin import limits as limits_admin
@@ -717,9 +718,10 @@ async def _actions(
                 document=document,
                 reason=audited_reason,
                 concurrency_modes={
-                    name: source.mount_mode.value
-                    for name, source in ctx.credential_sources.items()
-                    if source.mount_mode is not None
+                    name: credentials_admin.mount_mode_value(ctx.admin, uow, name).value
+                    for name in ctx.admin.harnesses.names()
+                    if (adapter := ctx.admin.harnesses.get(name)) is not None
+                    and adapter.credential_spec() is not None
                 },
             )
     return None
