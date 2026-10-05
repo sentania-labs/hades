@@ -13,6 +13,7 @@ from crucible.adapters.ui.pages import (
     github,
     harnesses,
     images,
+    proposals,
     repositories,
     retention,
     routing,
@@ -40,6 +41,7 @@ router.routes.extend(repositories.router.routes)
 router.routes.extend(tokens.router.routes)
 router.routes.extend(github.router.routes)
 router.routes.extend(workers.router.routes)
+router.routes.extend(proposals.router.routes)
 router.routes.extend(tasks.router.routes)
 router.routes.extend(wakes.router.routes)
 router.routes.extend(retention.router.routes)

@@ -8,6 +8,13 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
+from crucible.adapters.ui.pages.proposals import (
+    action_forms,
+    batch_section,
+    contract_rows,
+    proposal_sections,
+    proposed_tasks,
+)
 from crucible.adapters.ui.render import _page, _redirect, _state_words
 from crucible.adapters.ui.session import _admin, _csrf, _form, _require
 from crucible.application.admin import (
@@ -198,8 +205,25 @@ def tasks_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         csrf,
         active="/ui/tasks",
         heading="Tasks",
-        intro="Tasks that need you, then every task by state.",
+        intro="Proposals waiting for your answer, tasks that need you, then every task by state.",
         sections=[
+            # hades #424: what the orchestrator proposed, readable, with the answers.
+            {
+                "title": "Proposed",
+                "note": (
+                    "Contracts the orchestrator proposed. None starts until an operator "
+                    "approves it. Each is shown in full below."
+                ),
+                "empty": "No task is waiting for approval.",
+                "columns": ["Task", "Title", "Proposed"],
+                "rows": [
+                    [_task_link(task.id, task.external_id), task.title, task.created_at.isoformat()]
+                    for task in proposed_tasks(uow)
+                    if task.id not in hidden
+                ],
+            },
+            *([batch] if (batch := batch_section(uow, principal)) else []),
+            *proposal_sections(uow, principal),
             {
                 "title": "Needs attention",
                 "empty": "No task needs attention.",
@@ -356,7 +380,18 @@ def task_page(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Response:
             if (delivery.pull_request_url or "").startswith("https://")
             else label
         )
+    proposal: list[dict[str, Any]] = []
+    task = (
+        uow.tasks.get(task_id) if view.state in (TaskState.PROPOSED, TaskState.SENT_BACK) else None
+    )
+    if task is not None:
+        # hades #424: the proposed contract, readable, and the operator's answers to it.
+        rows = contract_rows(uow, task)
+        if task.state is TaskState.PROPOSED and principal.role in (Role.OPERATOR, Role.ADMIN):
+            rows.append(["Answer", action_forms(task)])
+        proposal.append({"title": "Proposed contract", "columns": ["Field", "Value"], "rows": rows})
     sections: list[dict[str, Any]] = [
+        *proposal,
         {
             "title": "Task",
             "columns": ["Field", "Value"],

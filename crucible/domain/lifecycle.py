@@ -12,6 +12,11 @@ from enum import StrEnum
 
 
 class TaskState(StrEnum):
+    # hades #424: a contract the orchestrator wrote that nobody has authorized yet. Only
+    # an operator moves it on: approve (to submitted, then started), send back, reject.
+    PROPOSED = "proposed"
+    # Returned to the orchestrator with the operator's note; an amendment proposes it again.
+    SENT_BACK = "sent_back"
     SUBMITTED = "submitted"
     SCHEDULED = "scheduled"
     RUNNING = "running"
@@ -79,6 +84,8 @@ ATTEMPT_TERMINAL: frozenset[AttemptState] = frozenset(
 
 _S = TaskState
 _CANCELLABLE_AT_ONCE: tuple[TaskState, ...] = (
+    _S.PROPOSED,
+    _S.SENT_BACK,
     _S.SUBMITTED,
     _S.SCHEDULED,
     _S.BLOCKED,
@@ -120,6 +127,12 @@ CORRECTION_STATES: frozenset[TaskState] = frozenset(
 # drives the supervision half; the delivery half is reachable only from C2 on.
 TASK_TRANSITIONS: frozenset[tuple[TaskState, TaskState]] = frozenset(
     {
+        # hades #424: the operator's answers to a proposal. Approval goes through
+        # `submitted` so the start is the same one the orchestrator makes.
+        (_S.PROPOSED, _S.SUBMITTED),
+        (_S.PROPOSED, _S.SENT_BACK),
+        (_S.PROPOSED, _S.REJECTED),
+        (_S.SENT_BACK, _S.PROPOSED),
         (_S.SUBMITTED, _S.SCHEDULED),
         (_S.SCHEDULED, _S.RUNNING),
         (_S.SCHEDULED, _S.AWAITING_QUOTA),

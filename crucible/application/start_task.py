@@ -4,7 +4,11 @@ its next tick, because execution and attempt rows are fenced to the supervisor (
 
 from __future__ import annotations
 
-from crucible.application.errors import ContractValidationError, NotFoundError
+from crucible.application.errors import (
+    ContractValidationError,
+    NotFoundError,
+    TransitionNotAllowedError,
+)
 from crucible.application.transitions import move_task, require_contract
 from crucible.contracts.api import StartRequest
 from crucible.contracts.task_contract import TaskContractV1
@@ -21,6 +25,12 @@ def start_task(
     task = uow.tasks.get(task_id, for_update=True)
     if task is None:
         raise NotFoundError(f"task {task_id} not found")
+    if task.state in (TaskState.PROPOSED, TaskState.SENT_BACK):
+        # hades #424: nobody has authorized a proposal; an operator's approval starts it.
+        raise TransitionNotAllowedError(
+            f"task {task.id} is {task.state.value}; a proposed task starts only when an "
+            "operator approves it"
+        )
     stored = require_contract(uow, task)
     contract = TaskContractV1.model_validate(stored.document)
     problems = []

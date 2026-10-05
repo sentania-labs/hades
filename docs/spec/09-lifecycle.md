@@ -26,6 +26,11 @@ merged PR. Corrections loop back through the supervision half against the
 existing branch.
 
 ```
+proposed --approve (operator, with an optional note)--> submitted --start (in the same transaction)--> scheduled
+proposed --send back (operator, with a note)--> sent_back --wake sent_back-->
+sent_back --amend (orchestrator)--> proposed
+proposed --reject (operator)--> rejected --wake proposal_rejected-->
+{proposed, sent_back} --cancel--> cancelled
 submitted --start--> scheduled --launch--> running
 running --attempt collected--> reported          (every exit class, see below)
 running --attempt blocked--> blocked
@@ -105,12 +110,30 @@ release_candidate --release failed or cancelled--> merged
 accepted --correction attached--> scheduled
 {accepted, merged, released} --close (orchestrator POST)--> closed
 
-{submitted, scheduled, blocked, awaiting_internal_review, awaiting_acceptance,
+{proposed, sent_back, submitted, scheduled, blocked, awaiting_internal_review, awaiting_acceptance,
  accepted, pre_pr_gates_failed, publishing, publish_failed, awaiting_external_review,
  external_feedback_received, awaiting_ci_certification, ci_certification_failed,
  head_diverged, ready_for_merge} --cancel--> cancelled
 running --cancel--> cancelling --all attempts terminal--> cancelled
 ```
+
+A proposed task (hades #424) is a contract the orchestrator wrote with
+`POST /v1/tasks?proposed=true`. It is validated as a submission is, but nobody has
+authorized it: `start` refuses it and the supervisor never schedules it. Only an
+operator moves it on, from the Tasks page, the task page, the Board, or the API, and
+each answer is an audit event with the operator's reason. Approve moves it to
+`submitted` and starts it at once, as the orchestrator's `start` would, under the
+policy its contract names (refused if that policy version is retired; the proposal is
+then sent back for an amendment). Approve with a note does the same after appending
+the note verbatim to the contract's objective as operator direction, in a new contract
+version. Send back moves it to `sent_back` and wakes the orchestrator with the note;
+the orchestrator answers with an amendment, which proposes it again. Reject ends it in
+`rejected`. Approving several proposals in one action approves them in the order the
+operator selected, records that order on each approval, and schedules them in it. The
+supervisor takes scheduled tasks in the order they were queued (the event that last
+scheduled each one), so that order is the order they are materialized and launched.
+A contract the orchestrator submits without `proposed` is unchanged: `submitted`, and
+started by the orchestrator's own `start`.
 
 Artifact-only contracts stop in `accepted` without a publisher. Hades creates one
 informational `accepted` wake in the acceptance transaction, with the attempt and

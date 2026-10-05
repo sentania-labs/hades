@@ -72,8 +72,9 @@ with the token. `migrate` is local only.
 `GET /v1/admin/board` is an admin-only, read-only view of the same data as the
 operator page at `/ui/board`. It returns `in_flight` groups, the `kanban`
 (hades #334: `columns` left to right, each with `key`, `name`, `reserved`,
-`note` and `parents`, every parent holding its `tasks` as cards with `holder`
-and `age`, and `thresholds` with the attention and done windows), current-attempt
+`note` and `parents`, every parent holding its `tasks` as cards with `holder`,
+`age` and `queue` (hades #424: in Queued, `position` in queue order and the
+approval `batch` when there was one; the column is listed in queue order), and `thresholds` with the attention and done windows), current-attempt
 `routing`, per-attempt and rolled-up `tokens`, and the 14-day `quality` log.
 A card's `age.late` is true past the column's threshold; `age.budget_seconds` is
 null where a column has none. Task and attempt timestamps are RFC 3339 in JSON.

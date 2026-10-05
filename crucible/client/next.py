@@ -45,6 +45,8 @@ OPTIONAL_REASON = [
 # 09's cancellable states plus `running`, which cancels through `cancelling`.
 CANCELLABLE = frozenset(
     {
+        "proposed",
+        "sent_back",
         "submitted",
         "scheduled",
         "running",
