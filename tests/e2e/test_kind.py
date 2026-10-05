@@ -177,8 +177,25 @@ def _provider(
         api,
         registry,
         harnesses=harnesses,
-        resolver=resolver,
+        resolver=resolver or _tier_resolver,
     )
+
+
+def _tier_resolver(host: str) -> list[str]:
+    """The provider's lookup as the tier's cluster DNS answers it (hades #425).
+
+    A worker's and a verifier's allowlist is always resolved, `broad_egress` or not, and
+    the tier's policy allowlists github.com. Cluster DNS answers it with the stand-in
+    git host (`GIT_HOST_DNS`, the CoreDNS patch in tools/kind/e2e-kind.sh), so the
+    provider resolves it the same way rather than through the runner's own DNS, whose
+    answer is the real GitHub. Any other name is looked up as the provider would."""
+    if host in ("github.com", "api.github.com"):
+        return [f"{GIT_HOST_DNS}/32"]
+    try:
+        infos = socket.getaddrinfo(host, None, family=socket.AF_INET, type=socket.SOCK_STREAM)
+    except OSError:
+        return []
+    return sorted({f"{info[4][0]}/32" for info in infos})
 
 
 def _origin(name: str, behavior: str = "succeed", extra: dict[str, str] | None = None) -> str:
@@ -1386,8 +1403,9 @@ async def test_scripted_quota_reroutes_on_kubernetes(
 # ----- the login Job, the service-owned Secret and the probe (25, 26, ADR 0015) ----------
 
 # The stand-in harness's credential directory and its "model endpoint". The endpoint is
-# a public name the worker's policy permits (the tier's provider renders the broad rule),
-# so the attempt reaching it and the login Job not reaching it is the policy's doing.
+# a public name the worker's policy permits (resolved and pinned: a worker never takes the
+# broad rule, hades #425), so the attempt reaching it and the login Job not reaching it is
+# the policy's doing.
 STAND_IN_DIR = "/home/worker/.crucible-login"
 STAND_IN_MODEL_ENDPOINT = "example.com"
 
@@ -2017,19 +2035,25 @@ async def test_hades_425_a_worker_reaches_an_allowlisted_host_and_the_probe_reco
     198.51.100.10) is the allowlisted host: under resolved rules and hostAliases the
     worker fetches from it, the launch wrapper's probe reports it reachable and the
     allowlisted-but-silent host unreachable, and under the supervisor the probe lands on
-    the attempt record and the task page."""
+    the attempt record and the task page. Part one runs on the tier's `broad_egress`,
+    as the isolation test does, and the worker's curl to example.com (on no allowlist)
+    is refused under the same NetworkPolicy and wrapper."""
     # Part one: the provider's resolved rules, the way the lab runs them.
     client = _recording_client()
     fixed = _provider(
         client,
         registry,
         resolver=_stub_hosts(GIT_HOST_POLICY, GIT_HOST_SILENT),
-        broad_egress=False,
     )
     url, bare = _stand_in_repository("hades-425")
+    # The tier's own `broad_egress`, which the isolation test runs under too: the worker
+    # still gets its resolved allowlist, so the host it names answers and example.com,
+    # which no policy names (the isolation probe's egress-not-allowlisted), does not.
     fetch = (
         f"if curl -sS --connect-timeout 5 --max-time 10 http://github.com:443/git/{bare.name}/HEAD;"
-        " then echo ' git-host=reached'; else echo 'git-host=denied'; fi"
+        " then echo ' git-host=reached'; else echo 'git-host=denied'; fi; "
+        "if curl -sS -f --connect-timeout 5 --max-time 10 https://example.com/ >/dev/null;"
+        " then echo 'unlisted=reached'; else echo 'unlisted=refused'; fi"
     )
     spec = _spec(63, url, command=("sh", "-c", fetch), network_hosts=("github.com", SILENT_HOST))
     workspace = await fixed.prepare(spec)
@@ -2041,6 +2065,7 @@ async def test_hades_425_a_worker_reaches_an_allowlisted_host_and_the_probe_reco
             "utf-8", "replace"
         )
         assert "ref: refs/heads/main" in body and "git-host=reached" in body, body
+        assert "unlisted=refused" in body and "unlisted=reached" not in body, body
         probe = find_probe(body)
         assert probe is not None, body
         by_host = {row["host"]: row for row in probe["hosts"]}
@@ -2064,6 +2089,11 @@ async def test_hades_425_a_worker_reaches_an_allowlisted_host_and_the_probe_reco
             p for p in policies if _selects(p, worker["spec"]["template"]["metadata"]["labels"])
         ]
         assert len(selecting) == 1 and _permits(selecting[0], GIT_HOST_POLICY), selecting
+        assert all(
+            peer.get("ipBlock", {}).get("cidr") != "0.0.0.0/0"
+            for rule in selecting[0]["spec"]["egress"]
+            for peer in rule.get("to", [])
+        ), selecting
         assert "github.com" in selecting[0]["metadata"]["annotations"][k8sspec.ANNOTATION_EGRESS]
         print(
             f"hades-425: the worker under {selecting[0]['metadata']['name']} fetched from "

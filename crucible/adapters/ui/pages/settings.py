@@ -56,8 +56,9 @@ def _setting_applies(path: str, settings: Any) -> bool:
 # 26 and issue 61: the one restart-bound setting that widens what a worker can reach. The
 # page intro already says every setting here is read at start (crucible#115).
 _BROAD_EGRESS_REASON = (
-    "On, a worker's egress is the public internet on 443 minus the denied ranges, GitHub "
-    "included, instead of the resolved allowlist."
+    "On, the git and login roles' egress is the public internet on 443 minus the denied "
+    "ranges, GitHub included, instead of the resolved allowlist. A worker and a verifier "
+    "always get the resolved allowlist."
 )
 
 

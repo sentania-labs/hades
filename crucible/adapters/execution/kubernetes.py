@@ -371,9 +371,9 @@ class KubernetesConfig:
     # them". A plain `networking.k8s.io/v1` CNI has no FQDN rule, so the names are
     # resolved here and the policy carries their addresses. Turning this off gives the
     # broad rule instead ("the public internet on 443, minus every denied range"), which
-    # a deployment may want when its CNI enforces names some other way; it is off by
-    # default because that rule would let a worker reach every public address, whether
-    # or not the policy named it.
+    # a deployment may want when its CNI enforces names some other way. It applies to
+    # the git and login roles only; a worker and a verifier always get their resolved
+    # allowlist (`_broad_for`, hades #425).
     broad_egress: bool = False
     # How long a resolved address stays in a policy before it is looked up again.
     resolve_ttl_seconds: float = 300.0
@@ -3197,7 +3197,7 @@ class KubernetesProvider:
                 return
             plan = self._egress_plan(spec, k8sspec.ROLE_LOGIN)
             if not plan.empty:
-                plan = await self._resolve_plan(plan)
+                plan = await self._resolve_plan(plan, broad=self._broad_for(k8sspec.ROLE_LOGIN))
                 policy_name = k8sspec.object_name("np-login", login_id)
                 await self._call(
                     self.client.create,
@@ -3919,14 +3919,29 @@ class KubernetesProvider:
         is pinned to (`k8sspec.host_aliases`, hades #191)."""
         if plan.empty:
             return None, plan
-        plan = await self._resolve_plan(plan)
+        plan = await self._resolve_plan(plan, broad=self._broad_for(role))
         name = k8sspec.object_name(f"np-{role}", spec.attempt_id)
         body = self._policy_body(name, self._labels(spec, role), spec.attempt_id, role, plan)
         create = self._create_with_backoff if use_backoff else self._create
         await create("networkpolicies", body)
         return name, plan
 
-    async def _resolve_plan(self, plan: EgressPlan) -> EgressPlan:
+    def _broad_for(self, role: str) -> bool:
+        """Whether a role's policy may take the broad rule (`broad_egress`).
+
+        Never for the worker or the verifier: their hosts are the policy's
+        `egress_allowlist` as written (hades #425), and they run code the attempt
+        controls. The broad rule is "the public internet on 443", so a worker whose
+        allowlist named one host would reach every public address, which is what
+        `test_isolation_probes_are_refused_on_kubernetes` caught once the worker's list
+        stopped being empty. Their hosts are always resolved to addresses and pinned in
+        the Pod's hosts file; the opt-out applies to the git and login roles, whose
+        destinations are fixed by the provider rather than by the policy."""
+        if role in (k8sspec.ROLE_WORKER, k8sspec.ROLE_VERIFIER):
+            return False
+        return self.config.broad_egress
+
+    async def _resolve_plan(self, plan: EgressPlan, *, broad: bool | None = None) -> EgressPlan:
         """Turn the allowlist's names into the addresses a CIDR-only CNI can enforce.
 
         A name that does not resolve refuses the launch rather than being dropped or
@@ -3977,8 +3992,9 @@ class KubernetesProvider:
                 f"denies: {sorted(endpoint_forbidden)}"
             )
         plan = replace(plan, endpoints=tuple(dict.fromkeys(resolved_endpoints)))
-        if self.config.broad_egress or not plan.hosts:
-            return replace(plan, broad=self.config.broad_egress)
+        broad = self.config.broad_egress if broad is None else broad
+        if broad or not plan.hosts:
+            return replace(plan, broad=broad)
         cidrs: list[str] = []
         by_host: list[tuple[str, tuple[str, ...]]] = []
         unresolved: list[str] = []

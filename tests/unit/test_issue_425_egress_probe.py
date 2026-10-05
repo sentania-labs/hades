@@ -33,6 +33,7 @@ from starlette.requests import Request
 
 from crucible.adapters.execution import k8sspec
 from crucible.adapters.execution.docker import LAUNCH_WRAPPER, DockerProvider
+from crucible.adapters.execution.kubernetes import KubernetesConfig
 from crucible.adapters.harness.script import ScriptHarnessAdapter
 from crucible.adapters.ui.pages import tasks as tasks_mod
 from crucible.application.errors import NotFoundError
@@ -65,10 +66,13 @@ from crucible.ports.execution import CleanupPolicy, LogChunk
 from crucible.ports.harness import ExitInfo, LaunchContext
 from tests.unit.kubernetes_fixtures import build, pod_of, spec
 from tests.unit.test_credential_copy import StubClient, config
-from tests.unit.test_kubernetes_network_policy import allows
+from tests.unit.test_kubernetes_network_policy import allows, policies
 
 GITHUB = "140.82.121.4"
 PYPI = "151.101.0.223"
+# What the kind tier's isolation probe dials as its host no policy names (example.com),
+# and a documentation address: neither is anything an allowlist here resolves to.
+UNRELATED = ("23.192.228.80", "203.0.113.9")
 
 
 def _policy(*hosts: str) -> dict[str, Any]:
@@ -123,6 +127,48 @@ async def test_a_worker_under_a_policy_that_does_not_allowlist_github_does_not_g
     assert allows(policy, PYPI, 443)
     assert _env(pod)["CRUCIBLE_EGRESS_ALLOWLIST"] == "pypi.org"
     assert all("github.com" not in alias["hostnames"] for alias in pod["hostAliases"])
+
+
+def _config(*, broad_egress: bool) -> KubernetesConfig:
+    return KubernetesConfig(
+        poll_interval_seconds=0,
+        launch_timeout_seconds=5,
+        storage_class="lab-ssd",
+        image_pull_secret="ghcr-pull",
+        broad_egress=broad_egress,
+    )
+
+
+@pytest.mark.parametrize("broad_egress", [False, True])
+async def test_one_allowlisted_host_admits_that_host_and_denies_an_unrelated_one(
+    broad_egress: bool,
+) -> None:
+    """The regression the kind tier's isolation probe caught: with github.com no longer
+    dropped, the worker's list was not empty, and under `broad_egress` (the tier's
+    setting) a non-empty list rendered "the public internet on 443", so the probe's
+    curl to example.com was let through. A worker and a verifier get their resolved
+    allowlist whatever `broad_egress` says, so the one host they name is all they reach."""
+    rendered = await policies(
+        config=_config(broad_egress=broad_egress), policy=_policy("github.com")
+    )
+    for role in (k8sspec.ROLE_WORKER, k8sspec.ROLE_VERIFIER):
+        policy = rendered[role]
+        assert allows(policy, GITHUB, 443), role
+        for address in UNRELATED:
+            assert not allows(policy, address, 443), (role, address)
+        assert not allows(policy, PYPI, 443), role
+        for rule in policy["spec"]["egress"]:
+            for destination in rule.get("to") or []:
+                cidr = (destination.get("ipBlock") or {}).get("cidr")
+                assert cidr != "0.0.0.0/0", (role, rule)
+
+
+async def test_broad_egress_still_reaches_the_git_roles() -> None:
+    """The opt-out keeps its meaning where the provider, not the policy, fixes the
+    destinations: the preparer takes the broad rule, the worker beside it does not."""
+    rendered = await policies(config=_config(broad_egress=True), policy=_policy("github.com"))
+    assert allows(rendered[k8sspec.ROLE_PREPARER], UNRELATED[1], 443)
+    assert not allows(rendered[k8sspec.ROLE_WORKER], UNRELATED[1], 443)
 
 
 async def test_the_kubernetes_worker_is_wrapped_so_the_probe_runs_before_the_harness() -> None:

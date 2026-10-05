@@ -668,8 +668,9 @@ class EgressPlan:
 
     `broad` is the opt-out: a deployment whose CNI enforces FQDN rules some other way
     can ask for "the public internet on 443, minus every range 26 denies" instead of a
-    resolved set. It is off by default, because that rule would let a worker reach every
-    public address, whether or not the policy named it."""
+    resolved set. It is off by default, and the provider never sets it on a worker's or a
+    verifier's plan, because that rule would let them reach every public address,
+    whether or not the policy named it (hades #425)."""
 
     hosts: tuple[str, ...] = ()
     cidrs: tuple[str, ...] = ()

@@ -310,8 +310,14 @@ out against the default deny (hades #191, 2026-09-28). The broad rule pins
 nothing. `kubernetes.broad_egress`
 (default false) replaces the resolved addresses with the broad rule, the
 public internet on 443 minus every denied range, for a CNI that enforces names
-some other way; that rule lets a worker reach any public address whether or not
-the policy named it, so a deployment turns it on deliberately or not at all.
+some other way, and does so for the git and login roles only, whose destinations
+the provider fixes. The worker and the verifier never take it: their hosts are
+the policy's `egress_allowlist` as written and they run code the attempt
+controls, so the broad rule would let them reach any public address the policy
+never named. Their names are always resolved, ruled by address and pinned in
+`hostAliases`, whatever `broad_egress` says (hades #425: once the worker's list
+stopped dropping github.com, the kind tier's broad setting let its isolation
+probe reach example.com, which no policy names).
 Both are restart-bound settings, set like `kubernetes.probe_image` and shown on
 the admin UI's settings page. (Made concrete 2026-09-25, issue 61.)
 
