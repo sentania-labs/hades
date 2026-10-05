@@ -8,16 +8,118 @@ from collections.abc import Iterable
 from datetime import datetime, timedelta
 from typing import Any
 
+from crucible.application.observation import DEFAULT_CI_TIMEOUT_HOURS
 from crucible.application.queries import (
     board_batch_records,
     board_imported_attempts,
     board_latest_unacked_wakes,
 )
+from crucible.domain.certification import wait_timeout_hours
 from crucible.domain.entities import PullRequestState
+from crucible.domain.events import EventKind
 from crucible.domain.lifecycle import TASK_TERMINAL, AttemptState, ExecutionState, TaskState
 from crucible.ports.repository import UnitOfWork
 
 QUALITY_DAYS = 14
+
+# hades #334: the kanban's columns, left to right, keyed for the template and the admin API.
+# The first position is reserved for the Proposed state of hades #424 and holds no state
+# until that issue lands; nothing here implements it.
+KANBAN_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("proposed", "Proposed"),
+    ("queued", "Queued"),
+    ("running", "Running"),
+    ("foundry", "Awaiting Foundry"),
+    ("codex", "Awaiting Codex"),
+    ("ci", "Awaiting CI"),
+    ("merge", "Ready to merge"),
+    ("blocked", "Blocked or failed"),
+    ("done", "Done in the last 24 hours"),
+)
+RESERVED_COLUMNS: frozenset[str] = frozenset({"proposed"})
+RESERVED_NOTES = {"proposed": "Reserved for the Proposed state (issue 424). Not in use yet."}
+# A card in Awaiting Foundry or Awaiting Codex colours after this long; one in Awaiting CI
+# colours after the policy's CI budget (`ci_certification.wait_timeout_hours`).
+ATTENTION_MINUTES = 30
+DONE_HOURS = 24
+
+_C = TaskState
+COLUMN_BY_STATE: dict[TaskState, str] = {
+    _C.SUBMITTED: "queued",
+    _C.SCHEDULED: "queued",
+    _C.AWAITING_QUOTA: "queued",
+    _C.RUNNING: "running",
+    _C.CANCELLING: "running",
+    # Hades holds these between the worker and the next wait: gates, acceptance,
+    # publication. They are short and the chip says what Hades is doing.
+    _C.REPORTED: "running",
+    _C.GATES_PASSED: "running",
+    _C.ACCEPTED: "running",
+    _C.PUBLISHING: "running",
+    _C.AWAITING_INTERNAL_REVIEW: "foundry",
+    _C.AWAITING_ACCEPTANCE: "foundry",
+    _C.EXTERNAL_FEEDBACK_RECEIVED: "foundry",
+    _C.AWAITING_EXTERNAL_REVIEW: "codex",
+    _C.AWAITING_CI_CERTIFICATION: "ci",
+    _C.READY_FOR_MERGE: "merge",
+    _C.BLOCKED: "blocked",
+    _C.PRE_PR_GATES_FAILED: "blocked",
+    _C.PUBLISH_FAILED: "blocked",
+    _C.CI_CERTIFICATION_FAILED: "blocked",
+    _C.HEAD_DIVERGED: "blocked",
+    _C.MERGED: "done",
+    _C.RELEASE_CANDIDATE: "done",
+    _C.RELEASED: "done",
+    _C.CLOSED: "done",
+    _C.CANCELLED: "done",
+    _C.REJECTED: "done",
+}
+
+# The operator decides these from the task page or the API; the other blocked states
+# carry a wake the operator reads on the Wakes page.
+OPERATOR_DECISION_STATES: frozenset[TaskState] = frozenset(
+    {_C.HEAD_DIVERGED, _C.CI_CERTIFICATION_FAILED}
+)
+
+# Each transition writes its event in the same transaction as the state change (09), so
+# the event stream is the record of when a card entered a column. A state with no event
+# of its own (release candidate, released) falls back to the task's `updated_at`.
+STATE_BY_ENTRY_EVENT: dict[str, TaskState] = {
+    EventKind.TASK_SUBMITTED.value: _C.SUBMITTED,
+    EventKind.TASK_SCHEDULED.value: _C.SCHEDULED,
+    EventKind.TASK_RETRY_SCHEDULED.value: _C.SCHEDULED,
+    EventKind.TASK_AWAITING_QUOTA.value: _C.AWAITING_QUOTA,
+    EventKind.TASK_RUNNING.value: _C.RUNNING,
+    EventKind.TASK_REPORTED.value: _C.REPORTED,
+    EventKind.TASK_BLOCKED.value: _C.BLOCKED,
+    EventKind.TASK_PRE_PR_GATES_FAILED.value: _C.PRE_PR_GATES_FAILED,
+    EventKind.TASK_AWAITING_INTERNAL_REVIEW.value: _C.AWAITING_INTERNAL_REVIEW,
+    EventKind.TASK_GATES_PASSED.value: _C.GATES_PASSED,
+    EventKind.TASK_AWAITING_ACCEPTANCE.value: _C.AWAITING_ACCEPTANCE,
+    EventKind.TASK_ACCEPTED.value: _C.ACCEPTED,
+    EventKind.TASK_PUBLISHING.value: _C.PUBLISHING,
+    EventKind.TASK_PUBLISH_FAILED.value: _C.PUBLISH_FAILED,
+    EventKind.TASK_AWAITING_EXTERNAL_REVIEW.value: _C.AWAITING_EXTERNAL_REVIEW,
+    EventKind.TASK_EXTERNAL_FEEDBACK_RECEIVED.value: _C.EXTERNAL_FEEDBACK_RECEIVED,
+    EventKind.TASK_AWAITING_CI_CERTIFICATION.value: _C.AWAITING_CI_CERTIFICATION,
+    EventKind.TASK_CI_CERTIFICATION_FAILED.value: _C.CI_CERTIFICATION_FAILED,
+    EventKind.TASK_HEAD_DIVERGED.value: _C.HEAD_DIVERGED,
+    EventKind.TASK_READY_FOR_MERGE.value: _C.READY_FOR_MERGE,
+    EventKind.TASK_MERGED.value: _C.MERGED,
+    EventKind.TASK_CANCELLING.value: _C.CANCELLING,
+    EventKind.TASK_CANCELLED.value: _C.CANCELLED,
+    EventKind.TASK_REJECTED.value: _C.REJECTED,
+    EventKind.TASK_CLOSED.value: _C.CLOSED,
+}
+
+DONE_WORDS = {
+    _C.MERGED: "Merged",
+    _C.RELEASE_CANDIDATE: "Release candidate",
+    _C.RELEASED: "Released",
+    _C.CLOSED: "Closed",
+    _C.CANCELLED: "Cancelled",
+    _C.REJECTED: "Rejected",
+}
 
 GROUPS = (
     "Running",
@@ -266,6 +368,200 @@ def _severity(body: str) -> str:
     return match.group(1).lower() if match else "unspecified"
 
 
+def kanban_column(state: TaskState, *, has_open_escalation: bool = False) -> str:
+    """The column a task's card sits in. An open escalation moves a card that is not done
+    to Awaiting Foundry, as the list view's escalation group does."""
+    column = COLUMN_BY_STATE[state]
+    if has_open_escalation and column != "done":
+        return "foundry"
+    return column
+
+
+def age_words(seconds: int) -> str:
+    """How long a card has sat in its column, in the unit an operator reads it in."""
+    minutes = max(0, seconds) // 60
+    if minutes < 1:
+        return "under a minute"
+    if minutes < 60:
+        return f"{minutes} min"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours} h {minutes:02d} min"
+    days, hours = divmod(hours, 24)
+    return f"{days} d {hours} h"
+
+
+def _state_words(state: TaskState) -> str:
+    return state.value.replace("_", " ")
+
+
+def kanban_holder(
+    column: str, state: TaskState, attempt: Any | None, wake: Any | None
+) -> dict[str, str]:
+    """Who holds the ball: the worker (harness and model), Foundry, Codex, CI, the
+    operator for a wake or decision, or Hades between waits. `detail` is the one line
+    under the chip."""
+    if column == "foundry":
+        # A card moved here by an open escalation says so; one here by state shows its
+        # newest pending wake, as the list view does.
+        in_place = COLUMN_BY_STATE[state] == "foundry"
+        detail = waiting_line(wake, state) if in_place else "escalation open"
+        return {"kind": "foundry", "label": "Foundry", "detail": detail}
+    if column == "running" and state is _C.RUNNING and attempt is not None:
+        return {
+            "kind": "worker",
+            "label": f"Worker: {attempt.selected_harness} / {attempt.selected_model}",
+            "detail": f"pool {attempt.selected_pool}" if attempt.selected_pool else "",
+        }
+    if column == "codex":
+        return {"kind": "codex", "label": "Codex", "detail": waiting_line(wake, state)}
+    if column == "ci":
+        return {"kind": "ci", "label": "CI", "detail": waiting_line(wake, state)}
+    if column == "blocked":
+        detail = "decision" if state in OPERATOR_DECISION_STATES else "wake"
+        return {
+            "kind": "operator",
+            "label": "Operator",
+            "detail": f"{detail}: {waiting_line(wake, state)}",
+        }
+    if column == "done":
+        return {"kind": "done", "label": DONE_WORDS.get(state, "Done"), "detail": ""}
+    detail = "merge" if column == "merge" else _state_words(state)
+    return {"kind": "hades", "label": "Hades", "detail": detail}
+
+
+def _column_entries(events: list[Any]) -> dict[str, list[tuple[datetime, int, str]]]:
+    """Per task, its state-entry events as (ts, seq, column), in order."""
+    entries: dict[str, list[tuple[datetime, int, str]]] = defaultdict(list)
+    for event in events:
+        state = STATE_BY_ENTRY_EVENT.get(event.kind)
+        if state is None or not event.task_id:
+            continue
+        entries[event.task_id].append((event.ts, int(event.seq or 0), COLUMN_BY_STATE[state]))
+    for rows in entries.values():
+        rows.sort(key=lambda item: (item[0], item[1]))
+    return entries
+
+
+def column_entered_at(
+    entries: list[tuple[datetime, int, str]], column: str, fallback: datetime
+) -> datetime:
+    """When the card entered its current column: the first event of the latest run of
+    entries into that column. A queued card that went submitted then scheduled has been
+    queued since it was submitted. The fallback is used when the events do not end in
+    the column the task is in (no entry event for the state, or an imported task)."""
+    entered: datetime | None = None
+    previous: str | None = None
+    for ts, _seq, entry_column in entries:
+        if entry_column != previous:
+            entered = ts
+        previous = entry_column
+    if previous != column or entered is None:
+        return fallback
+    return entered
+
+
+def _ci_budget_seconds(uow: UnitOfWork, task: Any, cache: dict[tuple[str, int], int]) -> int:
+    key = (str(task.policy_name), int(task.policy_version))
+    if key not in cache:
+        stored = uow.policies.get(*key)
+        document = stored.document if stored else {}
+        cache[key] = (
+            wait_timeout_hours(document, "ci_certification", DEFAULT_CI_TIMEOUT_HOURS) * 3600
+        )
+    return cache[key]
+
+
+def kanban_age(
+    column: str, entered_at: datetime, now: datetime, *, ci_budget_seconds: int | None
+) -> dict[str, Any]:
+    seconds = max(0, int((now - entered_at).total_seconds()))
+    budget: int | None = None
+    if column in {"foundry", "codex"}:
+        budget = ATTENTION_MINUTES * 60
+    elif column == "ci":
+        budget = ci_budget_seconds
+    return {
+        "entered_at": entered_at,
+        "seconds": seconds,
+        "label": age_words(seconds),
+        "late": budget is not None and seconds > budget,
+        "budget_seconds": budget,
+    }
+
+
+def _kanban_groups(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Cards under their parent, oldest first; the list view's nesting, inside a column."""
+    ordered = sorted(cards, key=lambda card: card["age"]["entered_at"])
+    grouped: dict[str | None, dict[str, Any]] = {}
+    for card in ordered:
+        parent = card["parent_external_id"]
+        group = grouped.setdefault(
+            parent,
+            {
+                "parent_external_id": parent,
+                "parent_task_id": card["parent_task_id"],
+                "tasks": [],
+            },
+        )
+        group["tasks"].append(card)
+    return list(grouped.values())
+
+
+def _kanban(
+    uow: UnitOfWork,
+    now: datetime,
+    *,
+    tasks: list[Any],
+    contracts: dict[str, dict[str, Any]],
+    current_attempt: dict[str, Any],
+    wake_by_task: dict[str, Any],
+    open_escalations: set[str],
+    events: list[Any],
+) -> dict[str, Any]:
+    entries = _column_entries(events)
+    task_by_external_id = {task.external_id: task for task in tasks}
+    done_cutoff = now - timedelta(hours=DONE_HOURS)
+    budgets: dict[tuple[str, int], int] = {}
+    cards: dict[str, list[dict[str, Any]]] = {key: [] for key, _name in KANBAN_COLUMNS}
+    for task in tasks:
+        column = kanban_column(task.state, has_open_escalation=task.id in open_escalations)
+        fallback = (task.closed_at if column == "done" else None) or task.updated_at
+        entered_at = column_entered_at(entries.get(task.id, []), column, fallback)
+        if column == "done" and entered_at < done_cutoff:
+            continue
+        fields = contracts.get(task.id, {})
+        parent_external_id = fields.get("parent_external_id")
+        parent = task_by_external_id.get(str(parent_external_id)) if parent_external_id else None
+        attempt = current_attempt.get(task.id)
+        budget = _ci_budget_seconds(uow, task, budgets) if column == "ci" else None
+        cards[column].append(
+            {
+                "id": task.id,
+                "external_id": task.external_id,
+                "title": task.title,
+                "state": task.state.value,
+                "parent_external_id": parent_external_id,
+                "parent_task_id": parent.id if parent else None,
+                "holder": kanban_holder(column, task.state, attempt, wake_by_task.get(task.id)),
+                "age": kanban_age(column, entered_at, now, ci_budget_seconds=budget),
+            }
+        )
+    return {
+        "columns": [
+            {
+                "key": key,
+                "name": name,
+                "reserved": key in RESERVED_COLUMNS,
+                "note": RESERVED_NOTES.get(key),
+                "parents": _kanban_groups(cards[key]),
+            }
+            for key, name in KANBAN_COLUMNS
+        ],
+        "thresholds": {"attention_minutes": ATTENTION_MINUTES, "done_hours": DONE_HOURS},
+    }
+
+
 def board_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
     tasks = _all_tasks(uow)
     task_by_id = {task.id: task for task in tasks}
@@ -280,12 +576,20 @@ def board_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
     pr_by_task = {pr.task_id: pr for pr in prs}
     cutoff = now - timedelta(days=QUALITY_DAYS)
     recent_prs = [pr for pr in prs if pr.opened_at >= cutoff]
+    # hades #334: a card finished in the last day keeps its parent nesting, so the contract
+    # read covers recently closed, cancelled and rejected tasks as well as the active ones.
+    shown = active + [
+        task
+        for task in tasks
+        if task.state in TASK_TERMINAL
+        and (task.closed_at or task.updated_at) >= now - timedelta(hours=DONE_HOURS)
+    ]
     contract_documents, comments_by_pr, dispositions = board_batch_records(
         uow,
-        {task.id: task.contract_version for task in active},
+        {task.id: task.contract_version for task in shown},
         [pr.id for pr in recent_prs],
     )
-    contracts = _contract_fields(contract_documents, active)
+    contracts = _contract_fields(contract_documents, shown)
     events = _events(uow)
     corrections, failed_gates, latest_ci, latest_ci_decision = _event_maps(events)
     metrics = list(uow.attempt_metrics.list_since(since=None, model=None, task_ids=None))
@@ -401,6 +705,16 @@ def board_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
     return {
         "generated_at": now,
         "in_flight": grouped,
+        "kanban": _kanban(
+            uow,
+            now,
+            tasks=tasks,
+            contracts=contracts,
+            current_attempt=current_attempt,
+            wake_by_task=wake_by_task,
+            open_escalations=open_escalations,
+            events=events,
+        ),
         "routing": routing,
         "tokens": _token_view(metrics),
         "quality": {"days": QUALITY_DAYS, "totals": quality_totals(quality), "tasks": quality},
@@ -417,10 +731,20 @@ def _parents(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 __all__ = [
+    "ATTENTION_MINUTES",
+    "COLUMN_BY_STATE",
+    "DONE_HOURS",
     "GROUPS",
+    "KANBAN_COLUMNS",
+    "RESERVED_COLUMNS",
+    "age_words",
     "board_view",
     "ci_summary",
+    "column_entered_at",
     "eta_bound",
+    "kanban_age",
+    "kanban_column",
+    "kanban_holder",
     "quality_totals",
     "waiting_group",
     "waiting_line",

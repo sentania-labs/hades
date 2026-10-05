@@ -88,6 +88,66 @@ def _in_flight_sections(document: dict[str, Any]) -> list[dict[str, Any]]:
     return sections
 
 
+def _kanban_columns(document: dict[str, Any]) -> list[dict[str, Any]]:
+    """hades #334: one column per stage, one card per task, linked to its task page."""
+    columns = []
+    for column in document["kanban"]["columns"]:
+        parents = []
+        count = 0
+        for group in column["parents"]:
+            cards = [{**card, "href": f"/ui/tasks/{quote(card['id'])}"} for card in group["tasks"]]
+            count += len(cards)
+            parents.append(
+                {
+                    "parent_external_id": group["parent_external_id"],
+                    "href": (
+                        f"/ui/tasks/{quote(group['parent_task_id'])}"
+                        if group["parent_task_id"]
+                        else None
+                    ),
+                    "tasks": cards,
+                }
+            )
+        columns.append(
+            {
+                "key": column["key"],
+                "name": column["name"],
+                "reserved": column["reserved"],
+                "note": column["note"],
+                "count": count,
+                "empty": "No tasks here.",
+                "parents": parents,
+            }
+        )
+    return columns
+
+
+def _kanban_section(document: dict[str, Any]) -> dict[str, Any]:
+    thresholds = document["kanban"]["thresholds"]
+    return {
+        "title": "In flight",
+        "note": (
+            "One card per task, in the column for its state, with who holds it and for "
+            "how long. Hades moves cards as states change; nothing is dragged. A card "
+            f"colours after {thresholds['attention_minutes']} minutes in Awaiting Foundry "
+            "or Awaiting Codex, and after the policy's CI budget in Awaiting CI. Columns "
+            "scroll sideways."
+        ),
+        "kanban": _kanban_columns(document),
+    }
+
+
+def _list_section(document: dict[str, Any]) -> dict[str, Any]:
+    """The Board's earlier list, every task as a table row, still reachable under the
+    kanban (hades #334)."""
+    return {
+        "title": "Task list",
+        "note": "The same tasks as tables, grouped by what they wait on and their parent.",
+        "details_label": "Show the task list",
+        "details": _in_flight_sections(document),
+    }
+
+
 def _routing_section(document: dict[str, Any]) -> dict[str, Any]:
     rows = []
     for item in document["routing"]:
@@ -239,11 +299,12 @@ def board_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         active="/ui/board",
         heading="Board",
         intro=(
-            "Every task in flight, its route and wait, followed by usage and recent "
-            "quality evidence."
+            "Every task in flight as a card in the column for its stage, then the same "
+            "tasks as a list, their routes, usage and recent quality evidence."
         ),
         sections=[
-            *_in_flight_sections(document),
+            _kanban_section(document),
+            _list_section(document),
             _routing_section(document),
             *_tokens_sections(document),
             *_quality_sections(document),
