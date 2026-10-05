@@ -53,6 +53,7 @@ from crucible.application.harnesses import HarnessRegistry
 from crucible.application.repositories import register_repository
 from crucible.application.supervisor import Supervisor
 from crucible.contracts.api import ExternalReviewAttestation, RepositoryRegistration
+from crucible.domain.egress_probe import find_probe
 from crucible.domain.entities import Role
 from crucible.ports.execution import (
     REPORT_MOUNT,
@@ -1981,6 +1982,136 @@ async def test_hades_191_git_pods_reach_the_address_their_policy_permits(
             ]
     finally:
         await fixed.cleanup(workspace, CleanupPolicy.DELETE, spec)
+
+
+# hades #425: a name the policy allowlists for the worker, stood in for by the tier's
+# blackhole address: a host the policy permits and that never answers.
+SILENT_HOST = "silent.example"
+
+
+def _stub_hosts(git_address: str, silent_address: str) -> Any:
+    def resolve(host: str) -> list[str]:
+        if host in ("github.com", "api.github.com"):
+            return [f"{git_address}/32"]
+        if host == SILENT_HOST:
+            return [f"{silent_address}/32"]
+        return []
+
+    return resolve
+
+
+async def test_hades_425_a_worker_reaches_an_allowlisted_host_and_the_probe_records_it(
+    engine: Engine,
+    migrated: str,
+    artifact_root: Path,
+    api: KubernetesClient,
+    registry: CraneRegistryClient,
+    provider: KubernetesProvider,
+) -> None:
+    """hades #425 on Calico, with the provider's real NetworkPolicies enforced.
+
+    The lab's worker ran under a policy that allowlists github.com and its curl to
+    github.com timed out: the provider subtracted github.com from the worker's rules on
+    26's old sentence that a worker never reaches GitHub, so the allowlist was not
+    enforced as written. Here the tier's stand-in github.com (range-http on
+    198.51.100.10) is the allowlisted host: under resolved rules and hostAliases the
+    worker fetches from it, the launch wrapper's probe reports it reachable and the
+    allowlisted-but-silent host unreachable, and under the supervisor the probe lands on
+    the attempt record and the task page."""
+    # Part one: the provider's resolved rules, the way the lab runs them.
+    client = _recording_client()
+    fixed = _provider(
+        client,
+        registry,
+        resolver=_stub_hosts(GIT_HOST_POLICY, GIT_HOST_SILENT),
+        broad_egress=False,
+    )
+    url, bare = _stand_in_repository("hades-425")
+    fetch = (
+        f"if curl -sS --connect-timeout 5 --max-time 10 http://github.com:443/git/{bare.name}/HEAD;"
+        " then echo ' git-host=reached'; else echo 'git-host=denied'; fi"
+    )
+    spec = _spec(63, url, command=("sh", "-c", fetch), network_hosts=("github.com", SILENT_HOST))
+    workspace = await fixed.prepare(spec)
+    try:
+        handle = await fixed.launch(workspace, spec)
+        observed = await _terminal(fixed, handle)
+        assert observed.exit_code == 0, observed
+        body = b"".join(chunk.content for chunk in await fixed.logs(handle, LogOffset())).decode(
+            "utf-8", "replace"
+        )
+        assert "ref: refs/heads/main" in body and "git-host=reached" in body, body
+        probe = find_probe(body)
+        assert probe is not None, body
+        by_host = {row["host"]: row for row in probe["hosts"]}
+        assert set(by_host) == {"github.com", SILENT_HOST}, body
+        # range-http speaks plain HTTP on 443, so the TLS handshake fails after the
+        # connection was made: reachable, curl 35.
+        assert by_host["github.com"]["reachable"] is True, by_host
+        assert by_host[SILENT_HOST]["reachable"] is False, by_host
+        assert by_host[SILENT_HOST]["curl_exit"] == 28, by_host
+        worker = next(
+            body
+            for _, kind, body in client.made
+            if kind == "jobs"
+            and body["metadata"]["name"].startswith("worker-")
+            and body["metadata"]["labels"].get(k8sspec.LABEL_ATTEMPT) == spec.attempt_id
+        )
+        aliases = worker["spec"]["template"]["spec"]["hostAliases"]
+        assert {"ip": GIT_HOST_POLICY, "hostnames": ["github.com"]} in aliases, aliases
+        policies = [body for _, kind, body in client.made if kind == "networkpolicies"]
+        selecting = [
+            p for p in policies if _selects(p, worker["spec"]["template"]["metadata"]["labels"])
+        ]
+        assert len(selecting) == 1 and _permits(selecting[0], GIT_HOST_POLICY), selecting
+        assert "github.com" in selecting[0]["metadata"]["annotations"][k8sspec.ANNOTATION_EGRESS]
+        print(
+            f"hades-425: the worker under {selecting[0]['metadata']['name']} fetched from "
+            f"github.com ({GIT_HOST_POLICY}); probe {by_host}"
+        )
+    finally:
+        await fixed.cleanup(workspace, CleanupPolicy.DELETE, spec)
+
+    # Part two: through the supervisor, the record on the attempt and the task page.
+    # The tier's policy allowlists github.com, which cluster DNS answers as the stand-in.
+    ctx, tokens, app, harnesses = _kind_app(
+        engine, migrated, artifact_root, provider, registry, version=42
+    )
+    headers = {"Authorization": f"Bearer {tokens['operator']}"}
+    with TestClient(app, headers=headers) as api_client:
+        supervisor = Supervisor(
+            ctx.uow_factory,
+            {"kubernetes": provider},
+            ctx.clock,
+            holder="e2e-kind-hades-425",
+            artifact_store=ctx.artifact_store,
+            lease_ttl_seconds=120,
+            grace_seconds=5,
+            harnesses=harnesses,
+        )
+        task = _kind_task(api_client, ctx, "hades-425-task", _origin("hades-425-task"), version=42)
+        await run_until(
+            supervisor,
+            api_client,
+            task,
+            {"accepted", "pre_pr_gates_failed"},
+            max_ticks=120,
+            pause=0.5,
+        )
+        await supervisor.stop()
+        latest = api_client.get(f"/v1/tasks/{task}").json()["latest_attempt"]
+        assert latest["egress_probe"] is not None, latest
+        attempt = api_client.get(f"/v1/attempts/{latest['id']}").json()
+        recorded = attempt["egress_probe"]
+        assert [row["host"] for row in recorded["hosts"]] == ["github.com"], recorded
+        assert recorded["hosts"][0]["reachable"] is True, recorded
+        assert recorded["recorded_at"], recorded
+    with TestClient(app) as browser:
+        _ui_sign_in(browser, tokens["operator"])
+        page = browser.get(f"/ui/tasks/{task}")
+        assert page.status_code == 200, page.text
+        assert "Egress" in page.text and "github.com" in page.text, page.text
+        assert "reachable" in page.text, page.text
 
 
 def _kind_app(

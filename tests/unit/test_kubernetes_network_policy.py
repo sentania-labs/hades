@@ -278,9 +278,12 @@ async def test_the_login_role_gets_the_harness_login_endpoints() -> None:
 
 
 async def test_the_verifier_gets_the_policys_registries_and_not_the_model_endpoints() -> None:
+    """The policy's allowlist as written (hades #425), which is what the Docker
+    verifier reaches through the proxy too; the harness endpoints are not part of it."""
     _api, _registry, provider = build()
-    plan = provider._egress_plan(spec(), k8sspec.ROLE_VERIFIER)
-    assert set(plan.hosts) == {"pypi.org"}
+    plan = provider._egress_plan(spec(harness="codex"), k8sspec.ROLE_VERIFIER)
+    assert set(plan.hosts) == {"pypi.org", "github.com"}
+    assert "api.openai.com" not in plan.hosts
 
 
 # ----- the denials are real for a resolved allowlist -----------------------
@@ -326,11 +329,12 @@ async def test_the_rendered_rules_never_name_a_denied_address() -> None:
                         ]
 
 
-async def test_a_worker_never_reaches_the_git_remote_whatever_the_policy_names() -> None:
-    """26 is unconditional: GitHub is not reachable from a worker; the preparer and the
-    publisher do the git traffic. The seeded default policy names `github.com` in its
-    `egress_allowlist` for the roles that need it, so the worker role subtracts it
-    rather than trusting the list."""
+async def test_a_worker_reaches_the_git_remote_when_the_policy_names_it() -> None:
+    """hades #425: the worker's egress is the policy's `egress_allowlist` as written (05b:
+    "hostnames the egress proxy permits for workers"). Until #425 the provider subtracted
+    github.com from the worker, so a policy that allowlisted it produced a worker whose
+    curl to github.com timed out while the task page said it was permitted. The worker
+    still holds no GitHub credential, so what it gets is read-only in effect."""
     rendered = await policies(
         policy={
             "images": {"allowlist": ["crucible-worker:*"]},
@@ -343,16 +347,17 @@ async def test_a_worker_never_reaches_the_git_remote_whatever_the_policy_names()
         }
     )
     worker = rendered[k8sspec.ROLE_WORKER]
-    assert not allows(worker, "140.82.121.4", 443)
-    assert not allows(worker, "140.82.121.6", 443)
+    assert allows(worker, "140.82.121.4", 443)
+    assert allows(worker, "140.82.121.6", 443)
     assert allows(worker, "151.101.0.223", 443)
-    # What was granted is what the annotation records.
-    assert "github.com" not in worker["metadata"]["annotations"][k8sspec.ANNOTATION_EGRESS]
-    # The preparer still does the git traffic.
+    # What was granted is what the annotation records: the list as written.
+    hosts = worker["metadata"]["annotations"][k8sspec.ANNOTATION_EGRESS].split(",")
+    assert {"github.com", "api.github.com", "pypi.org"} <= set(hosts)
+    # The preparer still does the git traffic, whether or not the policy names GitHub.
     assert allows(rendered[k8sspec.ROLE_PREPARER], "140.82.121.4", 443)
 
 
-async def test_the_verifier_does_not_get_the_git_remote_either() -> None:
+async def test_the_verifier_gets_the_git_remote_when_the_policy_names_it() -> None:
     _api, _registry, provider = build()
     plan = provider._egress_plan(
         spec(
@@ -368,7 +373,7 @@ async def test_the_verifier_does_not_get_the_git_remote_either() -> None:
         ),
         k8sspec.ROLE_VERIFIER,
     )
-    assert set(plan.hosts) == {"pypi.org"}
+    assert set(plan.hosts) == {"github.com", "pypi.org"}
 
 
 # ----- selectors that survive a translating CNI (crucible#91) ---------------

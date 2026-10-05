@@ -90,6 +90,7 @@ from crucible.contracts.policy import RoutingPolicyV1, window_seconds
 from crucible.contracts.task_contract import TaskContractV1
 from crucible.contracts.wake import WakeReason
 from crucible.domain.command_timeout import effective_command_timeout_ms
+from crucible.domain.egress_probe import find_probe, unreachable_hosts
 from crucible.domain.entities import (
     Attempt,
     AttemptMetrics,
@@ -3272,6 +3273,22 @@ class Supervisor:
                 text = chunk.content.decode("utf-8", "replace")
                 cleaned = redact(text)
                 content = chunk.content if cleaned == text else cleaned.encode("utf-8")
+                if attempt.egress_probe is None:
+                    # hades #425: the launch wrapper's one probe line, kept on the attempt
+                    # the first time it is seen; the harness's later output never replaces it.
+                    probe = find_probe(cleaned)
+                    if probe is not None:
+                        attempt.egress_probe = {
+                            **probe,
+                            "recorded_at": self._clock.now().isoformat(),
+                        }
+                        unreachable = unreachable_hosts(probe)
+                        log.info(
+                            "egress probe: %d host(s) checked, unreachable: %s",
+                            len(probe["hosts"]),
+                            ", ".join(unreachable) or "none",
+                            extra={"attempt_id": attempt_id},
+                        )
                 end = offset + len(content)
                 uow.logs.append(
                     LogChunkRecord(

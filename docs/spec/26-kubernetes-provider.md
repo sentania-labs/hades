@@ -260,19 +260,26 @@ generates the proxy allowlist locally (05b routing pools, the adapter's
 declared endpoints, 13), resolved to CIDRs or FQDN rules where the CNI
 supports them:
 
-- worker: the model provider endpoints of the routed harness, the package
-  registries the project policy names, and, for a local route, the configured
-  `endpoint_url` hostname and port over HTTP or HTTPS. GitHub is not
-  reachable from a worker; the preparer and the publisher do the git
-  traffic.
+- worker: the policy's `egress_allowlist` as written (05b: "hostnames the
+  egress proxy permits for workers"), the model provider endpoints of the
+  routed harness, and, for a local route, the configured `endpoint_url`
+  hostname and port over HTTP or HTTPS. GitHub is on that list exactly when
+  the policy puts it there: a worker holds no GitHub credential, so what it
+  gets is read-only in effect, and the git traffic Crucible itself does is the
+  preparer's and the publisher's. Until hades #425 (2026-10-05) the provider
+  subtracted `github.com` and `api.github.com` from the worker and the
+  verifier on the strength of an older sentence here, so a policy that
+  allowlisted github.com produced a worker whose curl to it timed out against
+  the default deny while the task page said it was permitted; the Docker
+  provider's Squid had permitted it all along.
 - preparer and publisher: `github.com` and `api.github.com` only. For a
   private repository whose `github.credential_host` is not `github.com`
   (GitHub Enterprise Server, ADR 0019), the preparer and the refresher may
   also reach that host and port, resolved like any other allowlisted name,
   and the publisher always may, because that is where it pushes.
 - collector, bundle verifier, verifier: no egress at all (the verifier
-  gets the registries only when `required_verification` needs them and the
-  policy says so).
+  gets the policy's `egress_allowlist` as written, the same list the Docker
+  verifier reaches through the proxy, and never the harness endpoints).
 - login Job: the harness's login endpoints only, the adapter's
   `login_endpoints` (Claude Code `platform.claude.com` and `api.anthropic.com`,
   Codex `auth.openai.com`, AGY `oauth2.googleapis.com` and `www.googleapis.com`),
@@ -303,10 +310,50 @@ out against the default deny (hades #191, 2026-09-28). The broad rule pins
 nothing. `kubernetes.broad_egress`
 (default false) replaces the resolved addresses with the broad rule, the
 public internet on 443 minus every denied range, for a CNI that enforces names
-some other way; that rule lets a worker reach GitHub, so a deployment turns it
-on deliberately or not at all. Both are restart-bound settings, set like
-`kubernetes.probe_image` and shown on the admin UI's settings page. (Made
-concrete 2026-09-25, issue 61.)
+some other way; that rule lets a worker reach any public address whether or not
+the policy named it, so a deployment turns it on deliberately or not at all.
+Both are restart-bound settings, set like `kubernetes.probe_image` and shown on
+the admin UI's settings page. (Made concrete 2026-09-25, issue 61.)
+
+**How a worker reaches an allowlisted host (hades #425).** On this provider
+the path is direct. There is no proxy and no proxy variable in the worker's
+environment: `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` are the Docker
+provider's (13) and are never set here, so a plain `curl https://pypi.org/`
+or a `uv sync` connects straight to the host. What lets the connection through
+is the attempt's worker NetworkPolicy, an `ipBlock` per address the name
+resolved to when the policy was written, on TCP 443, and what makes the Pod
+connect to one of those addresses rather than a fresh answer from the resolver
+is the `hostAliases` entry that pins the name to them. A host the policy names
+but the worker cannot reach is therefore one of three things: the name resolved
+to an address the namespace denies (the launch is refused and says so), the
+name's rule was not written at all (the cause of #425, now gone), or the far
+end did not answer on 443. An address that two allowlisted names share is
+permitted for both; an unlisted name that happens to resolve to a permitted
+address (raw.githubusercontent.com beside objects.githubusercontent.com, both
+on Fastly) answers too, which is a property of address-based enforcement and
+not a wider grant. IPv6 is denied entirely, so a name's AAAA answer never
+matters.
+
+**The egress probe.** Before the harness starts, the launch wrapper the
+worker command is wrapped in (the same wrapper on both providers, 07) tries
+every name in `CRUCIBLE_EGRESS_ALLOWLIST`, which the provider sets to the
+worker's resolved plan: all names at once, `curl` to `https://<host>/` with a
+5 second connect timeout and 10 seconds in all, certificate not checked, the
+proxy variables honoured where they exist. A `host:port` entry (a local model
+endpoint) is left alone. It writes one line to stderr,
+`crucible-egress-probe: {"hosts": [...]}`, with per host `reachable` (true
+when a connection was made: curl 0, or 35 and 52 when only the TLS handshake
+or the HTTP exchange failed after it), `curl_exit`, `ms` and curl's own
+message as `detail`. A host it cannot reach is reported, never a reason not
+to start the harness, and a missing `curl` is reported the same way. The
+supervisor reads the line off the log stream it already pulls and keeps the
+parsed document, with `recorded_at`, as the attempt's `egress_probe` (the
+first such line only; the harness echoing one later never replaces it), which
+`GET /tasks/{id}` and `GET /attempts/{id}` return and the task page shows as
+its Egress section, one row per attempt and host. So a dependency install
+that failed reads against what the worker could reach before it started,
+and is attributed to the egress path or to the worker accordingly. An attempt
+with no allowlisted host is not wrapped for the probe and records nothing.
 
 Two destinations are denied explicitly, because a naive policy lets them
 through: cluster DNS is allowed on port 53 UDP and TCP to the cluster's DNS
@@ -603,7 +650,8 @@ Pod names, the node, the effective limits and requests, the pod PID limit and
 the NetworkPolicy applied) is stored as one `report/kubernetes-launch.json`
 artifact of the attempt, which carries an `artifact_present` evidence row like
 any other per-attempt fact Crucible observed (11). The image digest stays on
-the attempt row. (Made concrete 2026-09-21 during C8a.) `limits.as_dict()`
+the attempt row, and so does the launch wrapper's egress probe (`egress_probe`,
+hades #425, above). (Made concrete 2026-09-21 during C8a.) `limits.as_dict()`
 (issue 93) carries `cpu_request` and `memory_request` beside `cpu` and
 `memory`, so the evidence records what was actually asked of the scheduler
 next to what was allowed to run. The limits are read back from the live Pod
@@ -702,6 +750,12 @@ manifests, and runs the same cases as the Docker tier plus:
 
 - every NetworkPolicy denial from inside a worker pod: API server, cluster
   DNS on any port but 53, another namespace, link-local, the lab ranges;
+- a worker under a policy that allowlists a host reaches it (hades #425): the
+  tier's stand-in github.com on `198.51.100.10`, under resolved rules and
+  `hostAliases`, fetched from inside the worker, with the launch wrapper's
+  probe reporting it reachable and the allowlisted-but-silent
+  `198.51.100.30` unreachable; then the same through the supervisor, with
+  the probe on the attempt record and the task page;
 - a Pod evicted or deleted out of band is `lost`;
 - a worker that ignores SIGTERM is killed at the grace period;
 - the per-attempt Secret is gone after cleanup under every policy;

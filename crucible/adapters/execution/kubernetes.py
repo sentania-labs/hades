@@ -221,12 +221,14 @@ OBJECT_PREFIX: dict[str, str] = {
     k8sspec.ROLE_READER: "reader",
 }
 
-# 26 is unconditional: "GitHub is not reachable from a worker; the preparer and the
-# publisher do the git traffic." A policy document may still name these in its
-# `egress_allowlist` for the roles that do need them (05b's default does), so the worker
-# role subtracts them rather than trusting the list. The removal is recorded in the
-# policy's annotation, so what was asked for and what was granted are both readable.
-WORKER_DENIED_HOSTS: frozenset[str] = frozenset({"github.com", "api.github.com"})
+# hades #425: the worker's egress is the policy's `egress_allowlist` as written (05b:
+# "hostnames the egress proxy permits for workers"), the same list the Docker provider's
+# Squid permits. Until #425 this provider subtracted `github.com` and `api.github.com`
+# from the worker and the verifier on 26's old sentence that a worker never reaches
+# GitHub, so a policy that allowlisted github.com produced a worker whose curl to it timed
+# out against the default deny while the task page said it was permitted. The git roles
+# (preparer, cache refresher, publisher) still get GitHub whether or not the policy names
+# it; a worker gets it only when the policy does, and holds no credential for it either way.
 
 DEFAULT_IMAGE_ALLOWLIST: tuple[str, ...] = (
     "crucible-worker:*",
@@ -370,7 +372,8 @@ class KubernetesConfig:
     # resolved here and the policy carries their addresses. Turning this off gives the
     # broad rule instead ("the public internet on 443, minus every denied range"), which
     # a deployment may want when its CNI enforces names some other way; it is off by
-    # default because that rule would let a worker reach GitHub, and 26 says it cannot.
+    # default because that rule would let a worker reach every public address, whether
+    # or not the policy named it.
     broad_egress: bool = False
     # How long a resolved address stays in a policy before it is looked up again.
     resolve_ttl_seconds: float = 300.0
@@ -3731,7 +3734,9 @@ class KubernetesProvider:
         return mounts, volumes, init
 
     def _command(self, spec: LaunchSpec) -> tuple[list[str], dict[str, str]]:
-        """The harness argv, wrapped exactly as the Docker provider wraps it (07)."""
+        """The harness argv, wrapped exactly as the Docker provider wraps it (07), and
+        always when the attempt has allowlisted hosts: the wrapper's egress probe runs
+        before the harness and reports each of them (hades #425)."""
         from crucible.adapters.execution.docker import LAUNCH_WRAPPER  # noqa: PLC0415
 
         argv = list(spec.command)
@@ -3741,6 +3746,7 @@ class KubernetesProvider:
                 argv = list(adapter.build_launch(self._launch_context(spec)).argv)
         wrapped = bool(spec.env_from_files or spec.stdin_files or spec.stdin_text)
         wrapped = wrapped or bool(spec.transcript_path)
+        wrapped = wrapped or bool(self._egress_plan(spec, k8sspec.ROLE_WORKER).hosts)
         if not wrapped:
             return argv, {}
         env: dict[str, str] = {}
@@ -3799,12 +3805,12 @@ class KubernetesProvider:
         policy_hosts = [str(h) for h in (network.get("egress_allowlist") or [])]
         extra = [str(h) for h in (spec.contract.get("constraints", {}).get("egress_extra") or [])]
         if role == k8sspec.ROLE_WORKER:
+            # The allowlist as written, GitHub included when the policy names it (hades
+            # #425): the worker reaches exactly what the policy document says it may.
             wanted = tuple(
-                host
-                for host in egress_allowlist(
+                egress_allowlist(
                     self.harnesses, spec.harness, policy_hosts, extra, spec.endpoint_url
                 )
-                if host not in WORKER_DENIED_HOSTS
             )
         elif role in (
             k8sspec.ROLE_PREPARER,
@@ -3812,8 +3818,7 @@ class KubernetesProvider:
             k8sspec.ROLE_PUBLISHER,
         ):
             # 26: the preparer, the cache refresher and the publisher do the git
-            # traffic, and nothing else.
-            # GitHub is not reachable from a worker.
+            # traffic, and nothing else, whether or not the policy names GitHub.
             wanted = ("api.github.com", "github.com")
         elif role == k8sspec.ROLE_LOGIN:
             # 26: "the harness's login endpoints only" (crucible#58). The adapter's
@@ -3822,11 +3827,10 @@ class KubernetesProvider:
             wanted = tuple(sorted(adapter.capabilities().login_endpoints)) if adapter else ()
         elif role == k8sspec.ROLE_VERIFIER:
             # 26: the verifier gets the registries only when the policy says so. The
-            # policy's own allowlist is that statement; the harness endpoints are not
-            # part of it, because the verifier runs the repository's commands and never
-            # a model, and the git remote is not part of it either, for the same reason
-            # a worker does not get it.
-            wanted = tuple(sorted(set(policy_hosts) - WORKER_DENIED_HOSTS))
+            # policy's own allowlist is that statement, as written (hades #425); the
+            # harness endpoints are not part of it, because the verifier runs the
+            # repository's commands and never a model.
+            wanted = tuple(sorted(set(policy_hosts)))
         else:
             # Collector, bundle verifier, reader, cleaner: no egress at all.
             return EgressPlan()

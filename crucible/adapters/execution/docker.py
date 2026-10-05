@@ -172,8 +172,49 @@ WORKER_UID = 1000
 # `"session_id"` per command (Hermes's process registry, issue 152). While the harness
 # runs, the wrapper counts them every 10 seconds and writes the count to stderr whenever
 # it changes, so the supervisor can see a command in flight during the run. Only the
-# count leaves the file.
+# count leaves the file. CRUCIBLE_EGRESS_ALLOWLIST (hades #425) lists the hosts the
+# attempt's egress permits: before the harness starts, `egress_probe` tries each name on
+# 443 the way the harness would (through HTTPS_PROXY when it is set, straight through the
+# NetworkPolicy when it is not), all at once and for at most ten seconds, and writes one
+# `crucible-egress-probe: {...}` line to stderr (crucible/domain/egress_probe.py), which
+# the supervisor records on the attempt. A host it cannot reach is reported, never a
+# reason not to start; a `host:port` entry is a local endpoint and is left alone.
 LAUNCH_WRAPPER = r"""set -u
+egress_probe() {
+  list=${CRUCIBLE_EGRESS_ALLOWLIST:-}
+  [ -n "$list" ] || return 0
+  dir=$(mktemp -d 2>/dev/null) || return 0
+  i=0
+  for host in ${list//,/ }; do
+    case "$host" in *:*) continue;; esac
+    host=$(printf '%s' "$host" | tr -d '"\\')
+    i=$((i + 1))
+    (
+      start=${EPOCHREALTIME:-0}; start=${start/./}
+      detail=$(curl -sS -k -o /dev/null --connect-timeout 5 --max-time 10 "https://$host/" 2>&1)
+      code=$?
+      now=${EPOCHREALTIME:-0}; now=${now/./}
+      ms=$(( (now - start) / 1000 ))
+      [ "$ms" -ge 0 ] || ms=0
+      case "$code" in 0|35|52) reachable=true;; *) reachable=false;; esac
+      detail=$(printf '%s' "$detail" | tr -d '"\\' | tr '\n\r\t' '   ' | head -c 200)
+      printf '{"host":"%s","reachable":%s,"curl_exit":%s,"ms":%s,"detail":"%s"}' \
+        "$host" "$reachable" "$code" "$ms" "$detail" > "$dir/$i"
+    ) &
+  done
+  wait
+  rows=
+  j=1
+  while [ "$j" -le "$i" ]; do
+    if [ -s "$dir/$j" ]; then
+      rows="$rows${rows:+,}$(cat "$dir/$j")"
+    fi
+    j=$((j + 1))
+  done
+  printf 'crucible-egress-probe: {"hosts":[%s]}\n' "$rows" >&2
+  rm -rf "$dir"
+}
+egress_probe
 if [ -n "${CRUCIBLE_CODEX_CONFIG:-}" ]; then
   mkdir -p "$CODEX_HOME" || exit 1
   printf '%s\n' "$CRUCIBLE_CODEX_CONFIG" > "$CODEX_HOME/config.toml" || exit 1
@@ -834,16 +875,9 @@ class DockerProvider:
             **PACKAGE_CACHE_ENV,
             **spec.env,
         }
-        network_policy = str(spec.policy.get("network", {}).get("mode", "egress-proxy"))
-        if spec.network == "none" or network_policy == "none":
+        wanted = self._egress_wanted(spec)
+        if wanted is None:
             return "none", env
-        wanted = egress_allowlist(
-            self.harnesses,
-            spec.harness,
-            [str(h) for h in (spec.policy.get("network", {}).get("egress_allowlist") or [])],
-            [str(h) for h in (spec.contract.get("constraints", {}).get("egress_extra") or [])],
-            spec.endpoint_url,
-        )
         configured = set(self.config.proxy_allowlist)
         if configured and not set(wanted) <= configured:
             missing = sorted(set(wanted) - configured)
@@ -899,16 +933,40 @@ class DockerProvider:
             "HostConfig": host_config,
         }
 
+    def _egress_wanted(self, spec: LaunchSpec) -> tuple[str, ...] | None:
+        """Every destination this attempt's egress permits (13, S6): the policy's
+        `egress_allowlist`, the contract's `egress_extra`, the adapter's declared
+        endpoints and a local route's `host:port`. None when the attempt has no network
+        at all."""
+        network_policy = str(spec.policy.get("network", {}).get("mode", "egress-proxy"))
+        if spec.network == "none" or network_policy == "none":
+            return None
+        return tuple(
+            egress_allowlist(
+                self.harnesses,
+                spec.harness,
+                [str(h) for h in (spec.policy.get("network", {}).get("egress_allowlist") or [])],
+                [str(h) for h in (spec.contract.get("constraints", {}).get("egress_extra") or [])],
+                spec.endpoint_url,
+            )
+        )
+
+    def _probe_hosts(self, spec: LaunchSpec) -> tuple[str, ...]:
+        """hades #425: the allowlisted names the launch wrapper probes before the harness
+        starts. `host:port` entries are local endpoints, which the probe leaves alone."""
+        return tuple(h for h in (self._egress_wanted(spec) or ()) if ":" not in h)
+
     def _command(self, spec: LaunchSpec) -> tuple[list[str], dict[str, str]]:
-        """The harness argv, wrapped only when the launch needs stdin, a transcript, or
-        a variable filled from a credential file (07). A plain argv stays plain."""
+        """The harness argv, wrapped only when the launch needs stdin, a transcript, a
+        variable filled from a credential file (07), or the egress probe (hades #425: an
+        attempt with allowlisted hosts). A plain argv with no network stays plain."""
         argv = list(spec.command)
         if not argv:
             adapter = self.harnesses.get(spec.harness)
             if adapter is not None:
                 argv = list(adapter.build_launch(self._launch_context(spec)).argv)
         wrapped = bool(spec.env_from_files or spec.stdin_files or spec.stdin_text)
-        wrapped = wrapped or bool(spec.transcript_path)
+        wrapped = wrapped or bool(spec.transcript_path) or bool(self._probe_hosts(spec))
         if not wrapped:
             return argv, {}
         env: dict[str, str] = {}

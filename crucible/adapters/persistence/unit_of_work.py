@@ -664,6 +664,7 @@ class Attempts:
             effective_settings=(
                 dict(row.effective_settings) if row.effective_settings is not None else None
             ),
+            egress_probe=dict(row.egress_probe) if row.egress_probe is not None else None,
         )
 
     def add(self, attempt: Attempt) -> None:
@@ -702,6 +703,7 @@ class Attempts:
                 resume_from_remote=attempt.resume_from_remote,
                 routing_version=attempt.routing_version,
                 effective_settings=attempt.effective_settings,
+                egress_probe=attempt.egress_probe,
             )
         )
         self._s.flush()
@@ -745,6 +747,7 @@ class Attempts:
                 resume_from_remote=attempt.resume_from_remote,
                 routing_version=attempt.routing_version,
                 effective_settings=attempt.effective_settings,
+                egress_probe=attempt.egress_probe,
             )
         )
 
