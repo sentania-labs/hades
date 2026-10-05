@@ -201,6 +201,10 @@ class AttemptView(Response):
     effective_settings: dict[str, Any] | None = None
     ordered_candidates: list[dict[str, Any]] = Field(default_factory=list)
     resume_from_remote: bool = False
+    # Issue 278: a stall ended early: its shape (loop:wait, loop:empty_command,
+    # loop:command, no_activity) and the reason, naming the repeated command.
+    stall_shape: str | None = None
+    termination_detail: str | None = None
 
 
 class ExecutionView(Response):

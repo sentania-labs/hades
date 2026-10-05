@@ -26,7 +26,8 @@ ends its turn is a background process that dies with the sandbox, not unfinished
 (issue 153): Codex exits only once the turn is over, so it never exits while a command
 it was waiting on is still running, and its exit is classified on the exit code and
 the report alone. While the run lasts, an open `command_execution` item still counts as
-activity for the stall clock (issue 152).
+activity for the stall clock (issue 152). The same live log says when the model runs one
+command over and over, or has called no tool at all (issue 278).
 """
 
 from __future__ import annotations
@@ -286,32 +287,86 @@ class CodexAdapter:
         return CommandTracker()
 
 
+# Issue 278: the `--json` item types that are the model calling a tool. A
+# `command_execution` is counted for loops too; a `file_change` is the model editing,
+# which ends any run of repeats, since a command repeated around edits is iteration.
+_TOOL_ITEMS = frozenset({"command_execution", "file_change", "mcp_tool_call", "web_search"})
+# The events `codex exec --json` writes once the turn has begun.
+_TURN_BEGINS = frozenset({"thread.started", "turn.started"})
+
+
 class CommandTracker(base.LineTracker):
     """Issue 152: `command_execution` items the live `--json` log started and has not
-    completed. Only commands count: other items (a todo list) stay open for a turn."""
+    completed. Only commands count: other items (a todo list) stay open for a turn.
+
+    Issue 278: also the run of identical commands the log ends with, whether the turn
+    has begun and whether the model has called any tool (a CommandLoopTracker)."""
 
     def __init__(self) -> None:
         super().__init__()
         self._started: dict[str, str] = {}
+        self._counted: set[str] = set()
+        self._last_command: str | None = None
+        self._repeats = 0
+        self._responding = False
+        self._tool_called = False
 
     def line(self, text: str) -> None:
         event = base.json_object(text) or {}
+        kind = event.get("type")
+        if kind in _TURN_BEGINS:
+            self._responding = True
         item = event.get("item")
-        if not isinstance(item, dict) or item.get("type") != "command_execution":
+        if not isinstance(item, dict) or item.get("type") not in _TOOL_ITEMS:
+            return
+        self._responding = True
+        self._tool_called = True
+        if item.get("type") == "file_change":
+            self._last_command, self._repeats = None, 0
+        if item.get("type") != "command_execution":
             return
         item_id = item.get("id")
         if not isinstance(item_id, str):
             return
-        if event.get("type") == "item.started":
+        command = str(item.get("command") or "")
+        if kind == "item.started":
+            if item_id not in self._counted:
+                self._counted.add(item_id)
+                self._count(command)
             self._started[item_id] = base.in_flight_summary(
-                f"command {item_id}", str(item.get("command") or item_id)
+                f"command {item_id}", command or item_id
             )
-        elif event.get("type") == "item.completed":
+        elif kind == "item.completed":
+            if item_id in self._counted:
+                self._counted.discard(item_id)
+            else:
+                # A command that failed before it started can arrive completed only.
+                self._count(command)
             self._started.pop(item_id, None)
+
+    def _count(self, command: str) -> None:
+        if command == self._last_command:
+            self._repeats += 1
+        else:
+            self._last_command, self._repeats = command, 1
 
     @property
     def running(self) -> tuple[tuple[str, str], ...]:
         return tuple(self._started.items())
+
+    @property
+    def repeated(self) -> tuple[str, int] | None:
+        if self._last_command is None:
+            return None
+        return self._last_command, self._repeats
+
+    @property
+    def responding(self) -> bool:
+        return self._responding
+
+    @property
+    def tool_called(self) -> bool:
+        return self._tool_called
 
 
 # Codex app-server `codexErrorInfo` variants that carry the HTTP status of the call that
