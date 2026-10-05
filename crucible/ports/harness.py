@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from crucible.domain.command_timeout import DEFAULT_COMMAND_TIMEOUT_MS
 from crucible.domain.endpoints import validate_endpoint
@@ -381,6 +381,32 @@ class CommandTracker(Protocol):
 
     @property
     def running(self) -> tuple[tuple[str, str], ...]: ...
+
+
+@runtime_checkable
+class CommandLoopTracker(CommandTracker, Protocol):
+    """Issue 278: what a CommandTracker can also say about a degenerate run, read from
+    the same live log. A tracker without it is held to the time-based stall limits only.
+
+    `repeated` is the last command started and how many times in a row it has started,
+    with no other command and no file edit between; `responding` is whether the
+    model is working on the harness's turn (so neither the preparer's time nor the
+    harness's own start is counted); `tool_called` is whether the model has made any
+    tool call yet. `workspace_changed` is the supervisor telling the tracker it saw the
+    worker's files move (its fingerprint or its activity probe), which ends the run of
+    repeats as an edit in the log does: a command that edits through the shell shows
+    the log no edit, and repeating it is iteration, not a loop."""
+
+    @property
+    def repeated(self) -> tuple[str, int] | None: ...
+
+    def workspace_changed(self) -> None: ...
+
+    @property
+    def responding(self) -> bool: ...
+
+    @property
+    def tool_called(self) -> bool: ...
 
 
 class HarnessAdapter(Protocol):

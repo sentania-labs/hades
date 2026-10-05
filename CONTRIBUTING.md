@@ -12,6 +12,9 @@ The project is Hades (the package, CLIs and images still say `crucible`).
    it with `make up` and exercise the change against the live API or `/ui`;
    describe in the PR what you saw working and what you could not exercise.
    Open the PR when the work is done, not to find out whether it works.
+   When the author is a worker, see "When the author is a worker" below:
+   the worker runs the lint, unit and scan tiers and the test file its
+   contract names, and leaves the tiers that need Docker to CI.
 3. Every job in the branch's CI run must succeed. Hades certifies that itself
    from the check runs on the head; there is no gate job and the ruleset on
    main names no required check. The worker's required report self-review
@@ -24,16 +27,48 @@ The project is Hades (the package, CLIs and images still say `crucible`).
    re-requested after a fix. Hades squash-merges the certified head; there is no
    merge queue. Do not push to `main` directly.
 
+## When the author is a worker
+
+A Crucible worker (a task on the `hades-self-hosting` policy) runs in the
+worker image, which carries the check toolchain and nothing that drives a
+container or a cluster (ADR 0020). Docker, kind and kubectl are absent in a
+worker and are CI's; a missing one is expected and is not a reason to stop.
+The tiers split by who has the tools:
+
+- Worker-local tiers, run before the commit and listed in the report's
+  checks: `make lint`, `make test-unit`, `make scan`, and the unit test file
+  the contract names (`uv run pytest -q tests/unit/test_issue_<n>_<slug>.py`).
+  These are the only checks a contract may require; the contract model
+  refuses a `required_verification` command that runs `docker`, `kind` or
+  `kubectl`, or a `make` target named for one of them, naming the program.
+- CI-only tiers, run by the branch's CI on the pushed head: the integration
+  tier (`make test-integration`, a Postgres container), the compose smoke
+  (`make up` and `make smoke`), the Docker e2e tier (`make e2e`), the kind
+  tier (`make e2e-kind`), and the image builds and digests (the `images` job
+  and `images-digest.yml`). A worker does not run them, does not write a
+  substitute for them, and does not write `blocked.md` because they are
+  missing. The PR body says which of them the author could not exercise, and
+  CI's run is the proof of record.
+
+`make deploy-kind` is not in either list: CI does not run it, and a worker
+cannot. A worker-authored change to the manifests relies on `make manifests`
+and the `e2e-kind` job in CI, and says so in the PR body; a person with
+Docker and kind runs `make deploy-kind` when the change warrants it.
+
 ## Kubernetes manifests
 
 A change under `deploy/` runs `make manifests`. When it touches the workers
-namespace or the provider, run `make deploy-kind` and the `e2e-kind` target.
+namespace or the provider, an author with Docker and kind runs
+`make deploy-kind` and the `e2e-kind` target; a worker leaves both to CI
+(see "When the author is a worker").
 Worker image changes: anything under `images/` changes the worker image, so
 the tag and harness lines of `images/manifest.env` must match it
 (`make lint` names the tag it expects; `make images` on a machine with Docker
-rewrites the whole file). The `*_DIGEST` lines are CI's: never edit them by
-hand or in a worker pass. On a branch, when every tag and harness version
-reproduced, CI commits the digest it built and runs CI again on that commit.
+rewrites the whole file). A worker edits only the tag line(s) that
+`images/check-manifest.sh` reports, by hand, and never builds the image. The
+`*_DIGEST` lines are CI's: never edit them by hand or in a worker pass. On a
+branch, when every tag and harness version reproduced, CI commits the digest
+it built and runs CI again on that commit.
 That is two workflows, so that no branch code ever holds a write token: the
 `images` job in `ci.yml` runs the branch's scripts with the read-only token
 and only uploads the built digest lines as the `images-digests` artifact;

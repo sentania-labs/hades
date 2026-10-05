@@ -333,6 +333,41 @@ read every half second while a silent command ran (`make e2e-command-timeout`).
 | Hermes | under `-z` Hermes writes nothing while it works, so the launch wrapper reads its process registry (`CRUCIBLE_IN_FLIGHT_FILE`, the same `processes.json`) every 10 seconds and writes `crucible-launch: commands running: <n>` to stderr whenever the count changes; only the count leaves the file. The registry lists background commands only: a foreground command, which Hermes ends at `TERMINAL_TIMEOUT`, gives no live evidence, and the stall limits count it as silence |
 | AGY | none: no tracker, and the stall clock runs as for any silent worker |
 
+### Degenerate runs (issue 278)
+
+A tracker may also say when a run has gone degenerate (a `CommandLoopTracker`):
+the last command it started and how many times in a row it started, whether the
+harness's turn has begun, and whether the model has called any tool. The supervisor
+reads it on every tick, after the tracker is fed, and ends the attempt as a stall
+(16) at once when:
+
+- the same command has started 8 times in a row (the accepted bound is 5 to 10),
+  with no other command and no file edit between: a loop, on any route. A command
+  repeated around edits is iteration and does not count. An edit is one the log
+  shows or one the supervisor's own workspace check verifies (the fingerprint walk
+  or the activity probe of 10), since a command that edits through the shell, a
+  script that fixes one failure per call, shows the log only commands: the
+  supervisor tells the tracker (`workspace_changed`) and the run starts over. On a
+  provider whose probe is throttled (Kubernetes asks no more often than a command
+  renews activity), a loop verdict asks the probe once more, past the throttle,
+  before the attempt is ended, so repeats between two probes are not mistaken for
+  a loop;
+- the attempt runs on a local endpoint, its turn began 300 seconds ago, and the
+  model has made no tool call: `no_activity`. The clock starts at the stored log
+  chunk where the tracker first saw the model working on the turn, so the
+  preparer, the image pull and the harness's own start are not in it.
+
+Only Codex's tracker says this today. It counts each `command_execution` item once,
+at `item.started` (or at `item.completed` for one that never started), and resets
+on a `file_change` item or a verified workspace change; `turn.started` begins the
+turn (`thread.started` comes before it, when the thread is created, and whatever
+the CLI does between the two is not the model's time), and a `command_execution`,
+`file_change`, `mcp_tool_call` or `web_search` item is a tool call. It reads the
+`codex exec --json` stream, which is what the local route launches; the
+subscription route's app-server host writes its events to the report transcript
+and not to the log, so there only the time-based limits apply. Every other harness
+keeps the time-based stall limits alone.
+
 ### Codex on the local gateway (FDY-0149, issue #249)
 
 For `endpoint: local`, Codex uses the same read-only `api-key` credential as Hermes,

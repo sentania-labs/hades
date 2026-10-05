@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import logging
 import stat
 import time
@@ -66,6 +67,7 @@ from crucible.application.routing import (
     reserve,
     select_model,
 )
+from crucible.application.runtime_settings import resolve as resolve_runtime_setting
 from crucible.application.transitions import (
     move_attempt,
     move_execution,
@@ -116,7 +118,13 @@ from crucible.domain.entities import (
     Task,
 )
 from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
-from crucible.domain.exit_class import CLEAN_EXIT_CLASSES, ExitClass, classify_exit
+from crucible.domain.exit_class import (
+    CLEAN_EXIT_CLASSES,
+    STALL_NO_ACTIVITY,
+    ExitClass,
+    classify_exit,
+    loop_shape,
+)
 from crucible.domain.gates import GateName, GateResult, evaluate_gate
 from crucible.domain.harness_settings import effective_settings, setting_name
 from crucible.domain.ids import new_id
@@ -159,6 +167,7 @@ from crucible.ports.execution import (
 )
 from crucible.ports.github import GitHubClient
 from crucible.ports.harness import (
+    CommandLoopTracker,
     CommandTracker,
     CredentialSource,
     ExitInfo,
@@ -246,6 +255,19 @@ COMMAND_LOG_PAGE = 500
 # A command still reported this long past its command timeout no longer counts: the
 # command timeout, not the stall limit, bounds a command, and it bounds it here too.
 COMMAND_OVERRUN_SECONDS = 60
+# Issue 278: a worker that starts the same command this many times in a row, with no
+# other command and no file edit between, is in a loop (`/bin/bash -lc wait`, an empty
+# command) and is ended as a stall on the next tick, not at stall_fail_seconds. The
+# accepted bound is 5 to 10. An edit is one the log shows or one the supervisor's own
+# workspace check verifies, so a command that edits through the shell is iteration.
+COMMAND_LOOP_REPEATS = 8
+# Issue 278: a worker on a local endpoint whose turn has begun and that has made no tool
+# call this long after is ended as a `no_activity` stall. Counted from the harness's own
+# event that the model is working on the turn (Codex's `turn.started`), so the preparer,
+# the image pull and the harness's own start are not in it.
+LOCAL_FIRST_RESPONSE_SECONDS = 300
+# How much of a repeated command a stall reason quotes.
+LOOP_COMMAND_QUOTE = 200
 # Hades #353: infrastructure interruptions retried per contract version before the task
 # blocks for the endpoint.
 INFRASTRUCTURE_RETRY_BUDGET = 3
@@ -267,6 +289,48 @@ def worker_stall_action(
     quiet = (now - quiet_baseline).total_seconds()
     if quiet >= warn_seconds and (warned_at is None or warned_at < quiet_baseline):
         return "warn"
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class EarlyStall:
+    """Issue 278: a stall found before the time-based limit: its shape and its reason."""
+
+    shape: str
+    detail: str
+
+
+def degenerate_stall(
+    *,
+    now: datetime,
+    repeated: tuple[str, int] | None,
+    tool_called: bool,
+    responding_since: datetime | None,
+    local: bool,
+    repeat_limit: int = COMMAND_LOOP_REPEATS,
+    first_response_seconds: int = LOCAL_FIRST_RESPONSE_SECONDS,
+) -> EarlyStall | None:
+    """Issue 278: whether what the harness's live log shows is a degenerate run. The same
+    command started `repeat_limit` times in a row is a loop, on any route; a local-route
+    turn with no tool call `first_response_seconds` after it began is `no_activity`."""
+    if repeated is not None and repeated[1] >= repeat_limit:
+        command, count = repeated
+        quoted = json.dumps(command[:LOOP_COMMAND_QUOTE], ensure_ascii=False)
+        return EarlyStall(
+            loop_shape(command),
+            f"the worker ran the same command {count} times in a row: {quoted}",
+        )
+    if (
+        local
+        and not tool_called
+        and responding_since is not None
+        and (now - responding_since).total_seconds() >= first_response_seconds
+    ):
+        return EarlyStall(
+            STALL_NO_ACTIVITY,
+            f"the local model made no tool call in the {first_response_seconds} seconds "
+            "after its turn began",
+        )
     return None
 
 
@@ -358,6 +422,10 @@ class _CommandWatch:
     command_timeout_seconds: float = 0.0
     after_id: int = 0
     first_seen: dict[str, datetime] = field(default_factory=dict)
+    # Issue 278: whether the attempt runs on a local endpoint, and the stored chunk time
+    # at which the tracker first said the harness's turn had begun.
+    local: bool = False
+    responding_since: datetime | None = None
 
 
 @dataclass(slots=True)
@@ -1680,6 +1748,35 @@ class Supervisor:
                 if selected_harness
                 else None
             )
+            credential_sources = getattr(self, "_credential_sources", {})
+            seed_source = credential_sources.get(settings_harness)
+            settings_adapter = self._harnesses.get(settings_harness) if self._harnesses else None
+            declaration = settings_adapter.credential_spec() if settings_adapter else None
+            launch_mount_mode = (
+                MountMode.RO
+                if endpoint == "local" and selected_harness == "codex"
+                else MountMode(
+                    resolve_runtime_setting(
+                        route_uow,
+                        name=f"credentials.{settings_harness}.mount_mode",
+                        field="mount_mode",
+                        seed=(
+                            seed_source.mount_mode.value
+                            if seed_source is not None and seed_source.mount_mode is not None
+                            else None
+                        ),
+                        seed_source="environment",
+                        default=(
+                            MountMode.RENEWER.value
+                            if settings_harness == "codex"
+                            else declaration.minimum_mode.value
+                        ),
+                        applies="next launch",
+                    ).value
+                )
+                if declaration is not None
+                else None
+            )
             resume_bundle: dict[str, str] = {}
             interruption_retry = attempt.number > 1 and any(
                 prior.exit_class in {ExitClass.INFRASTRUCTURE, ExitClass.QUOTA_EXHAUSTED}
@@ -1818,6 +1915,7 @@ class Supervisor:
             command_timeout_ms=command_timeout_ms,
             harness_settings=harness_settings,
             effective_settings=dict(effective) if effective is not None else None,
+            credential_mode=launch_mount_mode.value if launch_mount_mode is not None else None,
             resume_bundle_path=resume_bundle.get("path"),
             resume_bundle_attempt_id=resume_bundle.get("attempt_id"),
             resume_bundle_head=resume_bundle.get("head"),
@@ -1835,6 +1933,10 @@ class Supervisor:
         credential_adapter = self._harnesses.get(credential_harness) if self._harnesses else None
         credential = credential_adapter.credential_spec() if credential_adapter else None
         source = self._credential_sources.get(credential_harness)
+        if source is not None and launch_mount_mode is not None:
+            source = replace(source, mount_mode=launch_mount_mode)
+        elif launch_mount_mode is not None:
+            source = CredentialSource(path="", mount_mode=launch_mount_mode)
         if credential_mounted is None:
             if credential is not None:
                 if source is not None and credential.held_by(source.path):
@@ -1973,7 +2075,25 @@ class Supervisor:
         if local_codex:
             credential = None
         if credential is not None:
-            source = self._credential_sources.get(execution.harness)
+            source = getattr(self, "_credential_sources", {}).get(execution.harness)
+            seed = source.mount_mode.value if source is not None and source.mount_mode else None
+            mode = resolve_runtime_setting(
+                uow,
+                name=f"credentials.{execution.harness}.mount_mode",
+                field="mount_mode",
+                seed=seed,
+                seed_source="environment",
+                default=(
+                    MountMode.RENEWER.value
+                    if execution.harness == "codex"
+                    else credential.minimum_mode.value
+                ),
+                applies="next launch",
+            )
+            source = CredentialSource(
+                path=source.path if source is not None else "",
+                mount_mode=MountMode(mode.value),
+            )
             if effective_mount_mode(credential, source) is MountMode.RW_NARROW and not getattr(
                 adapter, "parallel_attempts_safe", False
             ):
@@ -3792,7 +3912,29 @@ class Supervisor:
             changed = await self._workspace_changed(attempt, provider, handle)
             if changed:
                 await self._db(partial(self._record_workspace_activity, attempt.id))
+                self._note_workspace_edit(attempt.id)
             await self._note_running_commands(attempt)
+            early = await self._db(partial(self._early_stall, attempt.id))
+            # A loop verdict is checked against the workspace first. A provider whose
+            # workspace is probed no more often than a command renews activity
+            # (Kubernetes) can have many repeats of an editing command between two
+            # probes; one more probe now, past the throttle, says whether the repeats
+            # were iteration. It costs one exec, once per verdict.
+            if (
+                early is not None
+                and early.shape != STALL_NO_ACTIVITY
+                and not changed
+                and await self._workspace_changed(attempt, provider, handle, force=True)
+            ):
+                await self._db(partial(self._record_workspace_activity, attempt.id))
+                self._note_workspace_edit(attempt.id)
+                early = await self._db(partial(self._early_stall, attempt.id))
+            if early is not None:
+                await provider.terminate(handle, "drain")
+                await self._db(
+                    partial(self._record_drain, attempt.id, TERMINATION_STALL, early=early)
+                )
+                return False
             stall = await self._db(partial(self._stall_action, attempt.id))
             if stall == "fail":
                 await provider.terminate(handle, "drain")
@@ -4219,14 +4361,20 @@ class Supervisor:
             )
             uow.commit()
 
-    def _record_drain(self, attempt_id: str, reason: str) -> None:
+    def _record_drain(
+        self, attempt_id: str, reason: str, *, early: EarlyStall | None = None
+    ) -> None:
         with self._fenced() as uow:
             attempt = uow.attempts.get(attempt_id, for_update=True)
             assert attempt is not None
             now = self._clock.now()
             attempt.drain_deadline = now + timedelta(seconds=self.grace_seconds)
             attempt.termination_reason = reason
+            if early is not None:
+                attempt.stall_shape = early.shape
+                attempt.termination_detail = early.detail
             uow.attempts.save(attempt)
+            shape = {"stall_shape": early.shape, "detail": early.detail} if early else {}
             record_event(
                 uow,
                 self._clock,
@@ -4239,6 +4387,7 @@ class Supervisor:
                     "reason": reason,
                     "drain_deadline": attempt.drain_deadline.isoformat(),
                     "grace_seconds": self.grace_seconds,
+                    **shape,
                 },
             )
             if reason == TERMINATION_STALL:
@@ -4250,9 +4399,33 @@ class Supervisor:
                     task_id=attempt.task_id,
                     execution_id=attempt.execution_id,
                     attempt_id=attempt.id,
-                    payload={"reason": "stall"},
+                    payload={"reason": "stall", **shape},
                 )
             uow.commit()
+
+    def _early_stall(self, attempt_id: str) -> EarlyStall | None:
+        """Issue 278: a degenerate run the live log shows, read from the tracker that
+        `_note_running_commands` has just fed. Only for a harness whose tracker can say
+        (a CommandLoopTracker); every other is held to the time-based limits alone."""
+        watch = self._command_watches.get(attempt_id)
+        tracker = watch.tracker if watch is not None else None
+        if watch is None or not isinstance(tracker, CommandLoopTracker):
+            return None
+        with self._uow_factory() as uow:
+            attempt = uow.attempts.get(attempt_id)
+            if (
+                attempt is None
+                or attempt.state is not AttemptState.RUNNING
+                or attempt.drain_deadline is not None
+            ):
+                return None
+        return degenerate_stall(
+            now=self._clock.now(),
+            repeated=tracker.repeated,
+            tool_called=tracker.tool_called,
+            responding_since=watch.responding_since,
+            local=watch.local,
+        )
 
     def _stall_action(self, attempt_id: str) -> str | None:
         """Return the action due from verified activity, without changing state."""
@@ -4290,12 +4463,13 @@ class Supervisor:
             )
 
     async def _workspace_changed(
-        self, attempt: Attempt, provider: ExecutionProvider, handle: Handle
+        self, attempt: Attempt, provider: ExecutionProvider, handle: Handle, *, force: bool = False
     ) -> bool:
         """Whether the worker's files moved since the last look. A local workspace is
         walked here every tick. A provider whose workspace is not local (Kubernetes)
         answers through its activity probe instead (FDY-0140), asked no more often than
-        a command in flight renews activity, since each ask is an exec into the Pod."""
+        a command in flight renews activity, since each ask is an exec into the Pod,
+        unless `force` (issue 278: a loop verdict asks once more before it stands)."""
         probe = getattr(provider, "activity", None)
         if probe is None:
             current: tuple[int, int, int] | None = await self._db(
@@ -4304,7 +4478,7 @@ class Supervisor:
         else:
             now = self._clock.now()
             asked = self._activity_asked.get(attempt.id)
-            if asked is not None:
+            if asked is not None and not force:
                 refresh = self._activity_refresh.get(attempt.id)
                 if refresh is None:
                     refresh = await self._db(partial(self._activity_refresh_seconds, attempt))
@@ -4331,6 +4505,14 @@ class Supervisor:
             int(limits.get("stall_warn_seconds", 300)),
             int(limits.get("stall_fail_seconds", 1800)),
         )
+
+    def _note_workspace_edit(self, attempt_id: str) -> None:
+        """Issue 278: a verified workspace change ends the tracker's run of repeated
+        commands, as an edit in the log does. Only a tracker that counts them hears it."""
+        watch = self._command_watches.get(attempt_id)
+        tracker = watch.tracker if watch is not None else None
+        if isinstance(tracker, CommandLoopTracker):
+            tracker.workspace_changed()
 
     def _record_workspace_activity(self, attempt_id: str) -> None:
         with self._fenced() as uow:
@@ -4373,6 +4555,17 @@ class Supervisor:
         )
         watch = _CommandWatch(adapter.command_tracker() if adapter is not None else None)
         if execution is not None:
+            try:
+                routing = load_attempt_routing(
+                    uow, execution.policy_snapshot or {}, attempt.routing_version
+                )
+                model = attempt.selected_model or execution.model
+                route = routing.model(model) if routing is not None else None
+                watch.local = route is not None and route.endpoint == "local"
+            except Exception:
+                # Issue 278 must not cost the attempt its command tracking (issue 152):
+                # with no route known, only the local first-response deadline is lost.
+                log.exception("reading the attempt's route failed; no first-response deadline")
             limits = (execution.policy_snapshot or {}).get("limits", {})
             watch.refresh_seconds = command_refresh_seconds(
                 int(limits.get("stall_warn_seconds", 300)),
@@ -4424,6 +4617,12 @@ class Supervisor:
                         watch.first_seen.pop(gone, None)
                     for key in after - before:
                         watch.first_seen.setdefault(key, chunk.ts)
+                    if (
+                        watch.responding_since is None
+                        and isinstance(tracker, CommandLoopTracker)
+                        and tracker.responding
+                    ):
+                        watch.responding_since = chunk.ts
                 if len(chunks) < COMMAND_LOG_PAGE:
                     break
         return commands_counted(
@@ -6092,8 +6291,13 @@ class Supervisor:
                 summary=(
                     wake_summary
                     or (
-                        f"attempt {attempt.number} ended {exit_class.value} with no retry "
-                        "remaining; the pre-PR gates will say so"
+                        f"attempt {attempt.number} ended {exit_class.value}"
+                        + (
+                            f" ({attempt.termination_detail})"
+                            if exit_class is ExitClass.STALLED and attempt.termination_detail
+                            else ""
+                        )
+                        + " with no retry remaining; the pre-PR gates will say so"
                     )
                 ),
                 task=task,

@@ -1081,6 +1081,8 @@ class DockerProvider:
         mode = (
             MountMode.RO
             if spec.harness == "codex" and spec.endpoint == "local"
+            else MountMode(spec.credential_mode)
+            if spec.credential_mode is not None
             else effective_mount_mode(credential, source)
         )
         return _CredentialCopy(

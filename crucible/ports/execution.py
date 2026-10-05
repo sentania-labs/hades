@@ -112,6 +112,9 @@ class LaunchSpec:
     # attempt runs with (also in harness_settings), for the supervisor to record on the
     # attempt. None when the harness reads none of them.
     effective_settings: dict[str, Any] | None = None
+    # The resolved runtime credential mode captured for this launch. Running attempts
+    # retain it even if an administrator changes the setting later.
+    credential_mode: str | None = None
     # An unpublished correction starts from the preceding attempt's sealed bundle.
     # The provider mounts this one file into the preparer; the worker never sees the
     # preceding workspace.

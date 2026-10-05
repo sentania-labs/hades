@@ -581,6 +581,8 @@ def attempt_view(uow: UnitOfWork, attempt_id: str) -> AttemptView:
         egress_probe=a.egress_probe,
         ordered_candidates=a.ordered_candidates,
         resume_from_remote=a.resume_from_remote,
+        stall_shape=a.stall_shape,
+        termination_detail=a.termination_detail,
     )
 
 

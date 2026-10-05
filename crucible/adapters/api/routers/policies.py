@@ -8,6 +8,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Body, Query
 
 from crucible.adapters.api.deps import Admin, Ctx, Reader, UoW
+from crucible.application.admin import credentials
 from crucible.application.errors import NotFoundError
 from crucible.application.policies import (
     get_policy,
@@ -56,10 +57,13 @@ def upload_policy(
         version=version,
         document=document,
         concurrency_modes={
-            name: source.mount_mode.value
-            for name, source in ctx.credential_sources.items()
-            if source.mount_mode is not None
-        },
+            name: credentials.mount_mode_value(ctx.admin, uow, name).value
+            for name in ctx.admin.harnesses.names()
+            if (adapter := ctx.admin.harnesses.get(name)) is not None
+            and adapter.credential_spec() is not None
+        }
+        if ctx.admin is not None
+        else {},
     )
     uow.commit()
     return PolicyView(

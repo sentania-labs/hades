@@ -665,6 +665,8 @@ class Attempts:
                 dict(row.effective_settings) if row.effective_settings is not None else None
             ),
             egress_probe=dict(row.egress_probe) if row.egress_probe is not None else None,
+            stall_shape=row.stall_shape,
+            termination_detail=row.termination_detail,
         )
 
     def add(self, attempt: Attempt) -> None:
@@ -704,6 +706,8 @@ class Attempts:
                 routing_version=attempt.routing_version,
                 effective_settings=attempt.effective_settings,
                 egress_probe=attempt.egress_probe,
+                stall_shape=attempt.stall_shape,
+                termination_detail=attempt.termination_detail,
             )
         )
         self._s.flush()
@@ -748,6 +752,8 @@ class Attempts:
                 routing_version=attempt.routing_version,
                 effective_settings=attempt.effective_settings,
                 egress_probe=attempt.egress_probe,
+                stall_shape=attempt.stall_shape,
+                termination_detail=attempt.termination_detail,
             )
         )
 

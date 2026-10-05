@@ -507,6 +507,32 @@ def admin_credential(harness: str, ctx: Ctx, uow: UoW, _principal: Admin) -> dic
     return credentials.state_view(_admin(ctx), uow, harness)
 
 
+@router.post("/admin/credentials/{harness}/mount-mode")
+def admin_credential_mount_mode(
+    harness: str,
+    ctx: Ctx,
+    uow: UoW,
+    principal: Admin,
+    body: Annotated[dict[str, Any], Body()],
+) -> dict[str, Any]:
+    mode = body.get("mount_mode", body.get("mode"))
+    if not isinstance(mode, str):
+        raise ContractValidationError(
+            "mount_mode is required",
+            errors=[{"path": "mount_mode", "message": "must be a string"}],
+        )
+    result = credentials.set_mount_mode(
+        _admin(ctx),
+        uow,
+        principal=principal.name,
+        harness=harness,
+        mode=mode,
+        reason=_reason(body),
+    )
+    uow.commit()
+    return result
+
+
 @router.post("/admin/credentials/{harness}/validate")
 async def admin_validate(
     harness: str, ctx: Ctx, uow: UoW, principal: Admin, body: Annotated[dict[str, Any], Body()]

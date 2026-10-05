@@ -43,6 +43,7 @@ async def credentials_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     secrets_held = credentials.secret_store(ctx.admin) is not None
     admin = principal.role is Role.ADMIN
     rows: list[list[Any]] = []
+    modes_by_harness: dict[str, str] = {}
     compatibility: list[list[Any]] = []
     live_by_harness: dict[str, int] = {}
     for attempt in uow.attempts.list_in_states(list(CREDENTIAL_HOLDING_STATES)):
@@ -119,6 +120,7 @@ async def credentials_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                     }
                 )
         mode = str(view.get("mount_mode") or "read-only")
+        modes_by_harness[name] = mode
         related = [
             event
             for event in refresh_events
@@ -175,6 +177,47 @@ async def credentials_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             ],
         }
     ]
+    mode_rows: list[list[Any]] = []
+    consequences = {
+        "ro": "Worker receives a read-only copy; no credential changes are retained.",
+        "rw-narrow": "Worker may update declared auth files; parallel use can be restricted.",
+        "renewer": "Hades renews the login; workers receive only the access token.",
+    }
+    for name in names:
+        current = modes_by_harness.get(name)
+        if current is None or current == "read-only":
+            continue
+        for mode_name, consequence in consequences.items():
+            mode_rows.append(
+                [
+                    name,
+                    mode_name,
+                    consequence,
+                    {
+                        "kind": "form",
+                        "action": "/ui/actions/credential",
+                        "label": "Current" if current == mode_name else "Use mode",
+                        "reason": True,
+                        "hidden": {
+                            "harness": name,
+                            "verb": "mount-mode",
+                            "mount_mode": mode_name,
+                        },
+                    }
+                    if admin and current != mode_name
+                    else "Current"
+                    if current == mode_name
+                    else "Administrator only",
+                ]
+            )
+    sections.append(
+        {
+            "title": "Credential mount modes",
+            "intro": "A saved change applies to the next launch. Running attempts keep their mode.",
+            "columns": ["Harness", "Mode", "Consequence", ""],
+            "rows": mode_rows,
+        }
+    )
     if admin and not secrets_held:
         options = [
             (name, name)
@@ -298,6 +341,16 @@ async def _action_credential(
                 "harness": "codex",
                 "reason": reason or "administrator requested refresh",
             },
+        )
+        uow.commit()
+    elif verb == "mount-mode":
+        credentials.set_mount_mode(
+            ctx.admin,
+            uow,
+            principal=principal.name,
+            harness=form.get("harness", ""),
+            mode=form.get("mount_mode", ""),
+            reason=reason,
         )
         uow.commit()
     else:

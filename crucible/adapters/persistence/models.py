@@ -175,6 +175,8 @@ class AttemptRow(Base):
     routing_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     effective_settings: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     egress_probe: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    stall_shape: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    termination_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class LogChunkRow(Base):

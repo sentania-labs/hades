@@ -303,8 +303,10 @@ observation (10).
 ## Worker
 
 `injected` -> `alive` (first heartbeat) -> `quiet` (no activity for
-`stall_warn_seconds`) -> `stalled` (past `stall_fail_seconds`; attempt is
-terminated with exit_class `timeout`, reason `stall`) | `exited`.
+`stall_warn_seconds`) -> `stalled` (past `stall_fail_seconds`, or a degenerate
+run: a command loop or, on a local endpoint, no tool call before the first-response
+deadline (16, issue 278); attempt is terminated with exit_class `stalled`, reason
+`stall`) | `exited`.
 
 ## PullRequest
 
