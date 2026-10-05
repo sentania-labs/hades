@@ -135,12 +135,21 @@ def render_identity_md(
         "## Report\n\n"
         f"Write `{REPORT_MOUNT}/report.yaml` (schema: `{IDENTITY_MOUNT}/report-schema.json`) "
         "with "
-        '`schema_version: "1.0"`, `summary`, `acceptance_mapping` (one entry per '
+        '`schema_version: "1.0"`, `summary`, `self_review` (`documentation`, '
+        "`acceptance_criteria`, `omissions`), "
+        "`acceptance_mapping` (one entry per "
         f"criterion id: {ids}; `status` is `met`, `not_met`, `partial` or "
         "`not_exercised`, with `evidence`), `proposed_pull_request` (`title`, `body`), "
         "and `limitations`, `risks`, `blockers`, `follow_ups` (lists, `[]` if none). "
         f"Then run `crucible-report check {REPORT_MOUNT}/report.yaml` and fix every "
         "problem it prints."
+    )
+    sections.append(
+        "The worker self-review is the internal review. The required `self_review` section "
+        "names where documentation was updated (or why no update was needed), maps every "
+        "acceptance criterion with evidence, and lists anything knowingly left out and why."
+        " Hades records acceptance and publishes after passing gates, without an "
+        "orchestrator review or acceptance call, for first attempts and corrections."
     )
     conditions = [str(c) for c in _items(escalation.get("conditions"))]
     stuck = (
@@ -159,7 +168,8 @@ def render_policy_md(policy: dict[str, Any], contract: dict[str, Any]) -> str:
     gates = policy.get("gates", {})
     # With no list the whole pre-PR set runs (11), and the enforced gates run either way.
     listed = gates.get("pre_pr")
-    pre_pr = [*(sorted(PRE_PR_GATES) if listed is None else listed), *sorted(ENFORCED_PRE_PR_GATES)]
+    pre_pr = list(sorted(PRE_PR_GATES) if listed is None else listed)
+    pre_pr.extend(sorted(ENFORCED_PRE_PR_GATES - set(pre_pr)))
     timeout = contract.get("timeout_seconds") or limits.get("timeout_seconds", {}).get("default")
     return f"""# Delivery policy
 

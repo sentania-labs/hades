@@ -17,6 +17,7 @@ from crucible.domain.endpoints import validate_endpoint
 from crucible.domain.exit_class import ExitClass
 from crucible.domain.gates import (
     ALL_GATES,
+    ALWAYS_ADVISORY_GATES,
     ALWAYS_BLOCKING_GATES,
     DEFAULT_ADVISORY_GATES,
     ENFORCED_PRE_PR_GATES,
@@ -206,7 +207,7 @@ class Gates(StrictModel):
         fixed = sorted(set(value) & ALWAYS_BLOCKING_GATES)
         if fixed:
             raise ValueError(f"gates.advisory may not include {fixed}: these always block")
-        always = sorted(set(value) & ENFORCED_PRE_PR_GATES)
+        always = sorted(set(value) & ALWAYS_ADVISORY_GATES)
         if always:
             raise ValueError(
                 f"gates.advisory may not include {always}: these are always advisory "
@@ -221,7 +222,7 @@ class Gates(StrictModel):
     def _partition(self) -> Gates:
         groups = (self.pre_pr, self.publication, self.post_pr, self.skipped)
         listed = [gate for group in groups for gate in group]
-        enforced = sorted(set(listed) & ENFORCED_PRE_PR_GATES)
+        enforced = sorted(set(listed) & (ENFORCED_PRE_PR_GATES - PRE_PR_GATES))
         if enforced:
             raise ValueError(f"{enforced} always run before review and are not listed in a policy")
         unknown = sorted(set(listed) - ALL_GATES)

@@ -1,8 +1,8 @@
-"""Acceptance (04, 09, 11). Foundry's semantic verdict on a collected head.
+"""Acceptance for the collected head (09, 11).
 
-Crucible records it and never computes it. An `artifacts` deliverable reaches `accepted`
-here; a `branch` or `pull_request` deliverable records the AcceptanceResult and moves to
-`publishing`, where the supervisor pushes the verified head and opens the PR (23)."""
+Hades records acceptance from passing gates and the worker self-review. The acceptance
+API remains available for tasks left in awaiting_acceptance by older deployments.
+"""
 
 from __future__ import annotations
 
@@ -25,13 +25,53 @@ from crucible.domain.entities import (
     Role,
     Task,
 )
-from crucible.domain.events import EventKind
+from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
 from crucible.domain.ids import new_id
 from crucible.domain.lifecycle import TaskState
 from crucible.ports.clock import Clock
 from crucible.ports.repository import UnitOfWork
 
 PUBLISHED_DELIVERABLES = frozenset({"pull_request", "branch"})
+
+
+def record_gate_acceptance(uow: UnitOfWork, clock: Clock, *, task: Task) -> AcceptanceResult:
+    """Record Hades' acceptance once every blocking gate and the self-review pass.
+
+    The task owner remains the relational principal for the result; the audit event names
+    Crucible as the actor. This is an automatic consequence of the verified gate result,
+    not an orchestrator decision.
+    """
+    head = task.head_sha or ""
+    now = clock.now()
+    uow.acceptance.supersede_for_task(task.id, now)
+    result = AcceptanceResult(
+        id=new_id(),
+        task_id=task.id,
+        head_sha=head,
+        principal_id=task.principal_id,
+        verdict=AcceptanceVerdict.ACCEPTED,
+        reasoning=(
+            "Every blocking pre-PR gate passed and the completion report includes "
+            "the worker self-review."
+        ),
+        created_at=now,
+    )
+    uow.acceptance.add(result)
+    record_event(
+        uow,
+        clock,
+        EventKind.ACCEPTANCE_RECORDED,
+        principal=PRINCIPAL_CRUCIBLE,
+        task_id=task.id,
+        payload={
+            "acceptance_id": result.id,
+            "head_sha": head,
+            "verdict": result.verdict.value,
+            "reasoning": result.reasoning,
+            "automatic": True,
+        },
+    )
+    return result
 
 
 def deliverable_kinds(uow: UnitOfWork, task: Task) -> list[str]:

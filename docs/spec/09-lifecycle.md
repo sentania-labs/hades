@@ -1,5 +1,18 @@
 # 09. Lifecycle state machines
 
+The worker self-review is the internal review. The required `self_review` section
+names where documentation was updated (or why no update was needed), maps every
+acceptance criterion with evidence, and lists anything knowingly left out and why.
+
+A missing or incomplete section fails `report_present`, naming `self_review`.
+When every blocking gate passes and the report is complete, Hades records acceptance
+and publishes without an orchestrator review or acceptance call, for first attempts
+and corrections alike. Publication sends one informational `published, PR #N` wake.
+An advisory gate failure still requires an orchestrator review before automatic acceptance.
+The orchestrator can still cancel or attach a correction from accepted or after publication. The
+review-report endpoint records operator out-of-band adversarial findings against
+the PR; a correction can be attached on the operator's word. It is not a gate.
+
 Every state is a column value guarded by a transition table in
 `crucible/domain/lifecycle.py`. An illegal transition raises and is recorded
 as an event; nothing bypasses the table. Each transition writes one event in
@@ -25,13 +38,13 @@ awaiting_quota --wait cap exceeded, or reroute cap exceeded--> reported --wake--
 awaiting_quota --cancel--> cancelled
 blocked --decision--> scheduled
 
-reported --a blocking pre-PR gate fails--> pre_pr_gates_failed --wake-->
-reported --no blocking gate fails, internal review required for this head--> awaiting_internal_review --wake-->
-reported --no blocking gate fails, internal review not required for this head--> gates_passed
-awaiting_internal_review --ReviewReport recorded for this head--> gates_passed
-gates_passed --wake--> awaiting_acceptance
+reported --a blocking pre-PR gate fails, including a missing self_review--> pre_pr_gates_failed --wake-->
+reported --every gate passes and the report carries self_review--> gates_passed
+reported --only advisory gates fail--> awaiting_internal_review --review recorded--> gates_passed
+gates_passed --Hades records acceptance, artifacts deliverable--> accepted --informational wake-->
+gates_passed --Hades records acceptance, branch or pull_request deliverable--> publishing
 
-awaiting_acceptance --accept, deliverable is artifacts--> accepted
+legacy awaiting_acceptance --accept, deliverable is artifacts--> accepted
 awaiting_acceptance --accept, deliverable is branch or pull_request--> publishing
 awaiting_acceptance --reject--> rejected
 awaiting_acceptance --needs_more_work (correction attached)--> scheduled
@@ -89,14 +102,21 @@ head_diverged --cancel--> cancelled
 merged --included in a release contract--> release_candidate
 release_candidate --release succeeded--> released
 release_candidate --release failed or cancelled--> merged
+accepted --correction attached--> scheduled
 {accepted, merged, released} --close (orchestrator POST)--> closed
 
 {submitted, scheduled, blocked, awaiting_internal_review, awaiting_acceptance,
- pre_pr_gates_failed, publish_failed, awaiting_external_review,
+ accepted, pre_pr_gates_failed, publishing, publish_failed, awaiting_external_review,
  external_feedback_received, awaiting_ci_certification, ci_certification_failed,
  head_diverged, ready_for_merge} --cancel--> cancelled
 running --cancel--> cancelling --all attempts terminal--> cancelled
 ```
+
+Artifact-only contracts stop in `accepted` without a publisher. Hades creates one
+informational `accepted` wake in the acceptance transaction, with the attempt and
+artifact links and a summary that artifacts are ready and no branch or PR publication
+was requested. This applies to first attempts and corrections; it asks for no
+review or acceptance call. The operator may cancel or correct the accepted task.
 
 Terminal: `cancelled`, `rejected`, `closed`. There is no task-level
 `failed`: a failed attempt with no retry remaining still produces a
@@ -111,15 +131,12 @@ A correction re-enters at `scheduled` with a `correct` execution whose
 workspace starts from the remote `work_branch` head (08). It then passes
 through `reported`, every mechanical pre-PR gate including the full
 verification re-run, acceptance, and `publishing` again; the push updates
-the PR head. A correction does not automatically require another internal
-review: `awaiting_internal_review` is entered for a corrected head only
-when the correction contract sets `request_internal_review: true` (Foundry
-asks for one when the correction is substantial, expands scope, or creates
-architectural risk) or the policy sets
-`internal_review.required_for_corrections: true`. Because the default
-policy has `retrigger_after_correction: false` and `required_rounds: 1`,
-the second pass through `publishing` lands in `awaiting_ci_certification`,
-never back in `awaiting_external_review`.
+the PR head. Its required self-review is its internal review. Legacy policy fields
+`internal_review.required_for_corrections` and correction
+`request_internal_review` do not add a publication gate. If the PR already has its
+required external round, the corrected head goes to `awaiting_ci_certification`;
+otherwise it goes to `awaiting_external_review`. Publication never requests another
+Codex review after the PR's first request.
 
 That includes a correction attached in `ready_for_merge`, after Foundry's
 own review of the full diff found a defect (hades #360). The round already
@@ -131,7 +148,9 @@ merge observed in any state of the correction moves the task to `merged`,
 publishing and publish_failed included (hades #379).
 
 Only `needs_more_work` or `internal_review` can start a correction from
-`ready_for_merge`.
+`ready_for_merge`. Corrections can also be attached during `awaiting_external_review`,
+`awaiting_ci_certification`, or `publish_failed`, without first recording an acceptance
+verdict or a review report.
 
 Publishing and publish_failed count as correction states only when an
 earlier publication of the task completed; a first publication that fails
@@ -304,7 +323,7 @@ change.
 | attempt `collected` | artifacts, evidence, claim rows, branch bundle; verification re-run scheduled (11); checkout lease released per cleanup policy |
 | attempt classified | retry decision per policy; task transition |
 | task `reported` | pre-PR gate evaluation scheduled |
-| task `awaiting_internal_review` | wake (reason `internal_review_needed`); if policy `executor` is `crucible` and the contract names a reviewer execution request, a `review` execution is created |
+| legacy task `awaiting_internal_review` | re-evaluate the report and gates; the orchestrator review no longer blocks publication |
 | task `gates_passed` / `pre_pr_gates_failed` | wake created for the submitting principal |
 | task `publishing` | publisher job enqueued: mint installation token, push bundle head, open or update PR, render body; events before and after each GitHub call |
 | task `publish_failed` to `publishing` | an orchestrator or operator supplies a reason through `republish`; the same accepted head and sealed bundle resume at the failed step, subject to `limits.publish_retry_max`; no tick retries automatically |

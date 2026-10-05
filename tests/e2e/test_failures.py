@@ -34,7 +34,7 @@ pytestmark = [
 
 # How long a wait for a launch or a settled task may take, by the clock.
 WAIT_SECONDS = 240
-DONE = {"awaiting_internal_review", "gates_passed", "awaiting_acceptance", "pre_pr_gates_failed"}
+DONE = {"accepted", "pre_pr_gates_failed"}
 
 
 async def _attempt_id(client: TestClient, task_id: str) -> str:
@@ -256,7 +256,16 @@ async def test_the_run_completes_with_no_client_attached(
         waiting = uow.wakes.list_for_principal(
             task.principal_id, since=None, include_acked=False, limit=50
         )
-    assert waiting, "nothing was waiting for Foundry to poll"
+    assert task.state.value == "accepted"
+    accepted = [wake for wake in waiting if wake.task_id == task_id]
+    assert len(accepted) == 1, "Foundry must hear that the artifacts are accepted"
+    wake = accepted[0]
+    assert wake.reason == "accepted"
+    assert wake.payload["task"]["state"] == "accepted"
+    assert wake.payload["summary"] == (
+        "accepted, artifacts are ready; no branch or PR publication was requested."
+    )
+    assert wake.payload["links"]["artifacts"].endswith("/artifacts")
 
 
 async def test_a_second_attempt_on_the_same_branch_waits_for_the_checkout_lease(

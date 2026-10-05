@@ -135,12 +135,7 @@ async def test_codex_finding_fix_correction_green_reaches_ready_for_merge(
     document = correction_document(client, task_id, image="crucible-worker:fake-succeed")
     response = client.post(f"/v1/tasks/{task_id}/corrections", json=document)
     assert response.status_code == 200, response.text
-    assert await run_to_settled(delivery_supervisor, client, task_id) == "awaiting_acceptance"
-    client.post(
-        f"/v1/tasks/{task_id}/accept",
-        json={"verdict": "accepted", "reasoning": "The correction addresses the finding."},
-    )
-    await delivery_supervisor.tick()
+    assert await run_to_settled(delivery_supervisor, client, task_id) == "awaiting_ci_certification"
     corrected = client.get(f"/v1/tasks/{task_id}").json()
     assert corrected["state"] == "awaiting_ci_certification"
     assert corrected["head_sha"] != first_head

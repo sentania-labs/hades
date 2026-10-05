@@ -79,7 +79,6 @@ from tests.e2e.conftest import (
     register,
     run_until,
     submit_and_start,
-    upload_review,
 )
 from tests.e2e.policy import e2e_policy_document, e2e_routing_document
 from tests.e2e.repo import make_origin
@@ -476,12 +475,12 @@ async def test_rows_5_7_11_23_supervisor_restart_and_full_gate_lifecycle(
             successor,
             client,
             task_id,
-            {"awaiting_internal_review", "pre_pr_gates_failed"},
+            {"accepted", "pre_pr_gates_failed"},
             max_ticks=90,
             pause=0.5,
         )
         results = gate_results(client, task_id)
-        assert state == "awaiting_internal_review", json.dumps(results, sort_keys=True)
+        assert state == "accepted", json.dumps(results, sort_keys=True)
         for gate in (
             "verification_ran",
             "workspace_clean",
@@ -490,11 +489,6 @@ async def test_rows_5_7_11_23_supervisor_restart_and_full_gate_lifecycle(
             "no_secrets",
         ):
             assert results[gate] == "pass", results
-        upload_review(client, task_id)
-        assert (
-            await run_until(successor, client, task_id, {"awaiting_acceptance"})
-            == "awaiting_acceptance"
-        )
 
         attempt_id = client.get(f"/v1/tasks/{task_id}").json()["latest_attempt"]["id"]
         with engine.begin() as connection:
@@ -537,10 +531,10 @@ async def test_rows_5_7_11_23_supervisor_restart_and_full_gate_lifecycle(
             successor,
             client,
             timeout_task,
-            {"awaiting_internal_review", "pre_pr_gates_failed"},
+            {"accepted", "pre_pr_gates_failed"},
             max_ticks=60,
             pause=0.5,
-        ) in {"awaiting_internal_review", "pre_pr_gates_failed"}
+        ) in {"accepted", "pre_pr_gates_failed"}
         timeout_attempt = client.get(f"/v1/tasks/{timeout_task}").json()["latest_attempt"]
         with engine.begin() as connection:
             timeout_row = connection.execute(
@@ -661,7 +655,7 @@ async def test_rows_5_7_11_23_supervisor_restart_and_full_gate_lifecycle(
             successor,
             client,
             stall_task,
-            {"awaiting_internal_review", "pre_pr_gates_failed"},
+            {"accepted", "pre_pr_gates_failed"},
             max_ticks=50,
             pause=0.5,
         )
@@ -693,7 +687,7 @@ async def test_rows_5_7_11_23_supervisor_restart_and_full_gate_lifecycle(
             with ctx.uow_factory() as uow:
                 detached = uow.tasks.get(detached_task)
                 assert detached is not None
-                if detached.state.value in ("awaiting_internal_review", "pre_pr_gates_failed"):
+                if detached.state.value in ("accepted", "pre_pr_gates_failed"):
                     break
             await asyncio.sleep(0.5)
         else:
@@ -1269,7 +1263,7 @@ async def test_isolation_probes_are_refused_on_kubernetes(
             supervisor,
             client,
             task_id,
-            {"awaiting_internal_review", "gates_passed", "pre_pr_gates_failed"},
+            {"accepted", "gates_passed", "pre_pr_gates_failed"},
             max_ticks=90,
             pause=0.5,
         )
@@ -1639,7 +1633,7 @@ async def test_login_from_an_empty_secret_to_a_probe_and_an_attempt_through_the_
                 supervisor,
                 client,
                 task_id,
-                {"awaiting_internal_review", "pre_pr_gates_failed"},
+                {"accepted", "pre_pr_gates_failed"},
                 max_ticks=120,
                 pause=0.5,
             )
@@ -2541,34 +2535,8 @@ async def test_fdy_0133_a_task_in_publishing_is_pushed_by_the_kubernetes_publish
             document["deliverables"] = [
                 {"kind": "pull_request", "target": "main", "draft": False, "closes": []}
             ]
-            task_id = submit_and_start(client, document)
-            state = await run_until(
-                supervisor,
-                client,
-                task_id,
-                {"awaiting_internal_review", "pre_pr_gates_failed"},
-                max_ticks=90,
-                pause=0.5,
-            )
-            assert state == "awaiting_internal_review", gate_results(client, task_id)
-            gates = gate_results(client, task_id)
-            assert gates["commit_policy"] == "pass", gates
-            upload_review(client, task_id)
-            assert (
-                await run_until(supervisor, client, task_id, {"awaiting_acceptance"})
-                == "awaiting_acceptance"
-            )
-            accepted = client.post(
-                f"/v1/tasks/{task_id}/accept",
-                json={"verdict": "accepted", "reasoning": "FDY-0133 kind proof."},
-            )
-            assert accepted.status_code == 200, accepted.text
-            assert accepted.json()["state"] == "publishing"
-            head = str(client.get(f"/v1/tasks/{task_id}").json()["head_sha"])
-            branch = "crucible/E2E-FDY-0133"
-            assert _branch_head(bare, branch) is None
-
             started = time.monotonic()
+            task_id = submit_and_start(client, document)
             state = await run_until(
                 supervisor,
                 client,
@@ -2578,11 +2546,17 @@ async def test_fdy_0133_a_task_in_publishing_is_pushed_by_the_kubernetes_publish
                     "awaiting_ci_certification",
                     "ready_for_merge",
                     "publish_failed",
+                    "pre_pr_gates_failed",
                 },
-                max_ticks=10,
+                max_ticks=100,
                 pause=0.5,
                 min_seconds=0,
             )
+            gates = gate_results(client, task_id)
+            assert gates["commit_policy"] == "pass", gates
+            assert state != "pre_pr_gates_failed", gates
+            head = str(client.get(f"/v1/tasks/{task_id}").json()["head_sha"])
+            branch = "crucible/E2E-FDY-0133"
             events = client.get(f"/v1/tasks/{task_id}/events", params={"limit": 200}).json()
             finished = [e for e in events["items"] if e["kind"] == "publisher_finished"]
             assert state != "publish_failed", json.dumps(finished, indent=2)
@@ -2774,10 +2748,10 @@ async def test_lab_findings_a_long_collect_blocks_no_launch_and_the_sweep_frees_
         assert longest_tick < 15
         assert other_launched_during_collect
 
-        review = {"awaiting_internal_review", "pre_pr_gates_failed"}
+        review = {"accepted", "pre_pr_gates_failed"}
         for task in (slow, other):
             state = await run_until(supervisor, client, task, review, max_ticks=120)
-            assert state == "awaiting_internal_review", gate_results(client, task)
+            assert state == "accepted", gate_results(client, task)
         other_attempt_id = str(client.get(f"/v1/tasks/{other}").json()["latest_attempt"]["id"])
         with engine.begin() as connection:
             cleaned = connection.execute(
@@ -2856,7 +2830,7 @@ async def test_lab_findings_an_api_server_outage_during_collect_loses_no_attempt
             supervisor,
             client,
             task_id,
-            {"awaiting_internal_review", "pre_pr_gates_failed"},
+            {"accepted", "pre_pr_gates_failed"},
             max_ticks=240,
             min_seconds=300,
         )
@@ -2866,7 +2840,7 @@ async def test_lab_findings_an_api_server_outage_during_collect_loses_no_attempt
             f"task {state}, attempt exit class {attempt['exit_class']}"
         )
         assert outage_api.refused == [k8sspec.ROLE_COLLECTOR, k8sspec.ROLE_COLLECTOR]
-        assert state == "awaiting_internal_review", gate_results(client, task_id)
+        assert state == "accepted", gate_results(client, task_id)
         assert attempt["exit_class"] == "completed"
         executions = client.get(f"/v1/tasks/{task_id}").json()["executions"]
         assert sum(len(e["attempts"]) for e in executions) == 1
@@ -2895,7 +2869,7 @@ async def test_fdy_0140_a_silent_worker_is_not_stalled_and_uncommitted_edits_are
         engine, migrated, artifact_root, provider, registry, version=40, stall_seconds=(2, 6)
     )
     headers = {"Authorization": f"Bearer {tokens['operator']}"}
-    done = {"awaiting_internal_review", "pre_pr_gates_failed"}
+    done = {"accepted", "pre_pr_gates_failed"}
     with TestClient(app, headers=headers) as client:
         supervisor = Supervisor(
             ctx.uow_factory,

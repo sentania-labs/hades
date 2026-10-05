@@ -29,6 +29,14 @@ def judgement_only() -> dict[str, Any]:
     return {
         "schema_version": "1.0",
         "summary": "Returned 409 on a duplicate import id and kept the existing tests.",
+        "self_review": {
+            "documentation": ["No documentation update needed for this synthetic report."],
+            "acceptance_criteria": [
+                {"id": "AC1", "status": "met", "evidence": "V2.log: duplicate case passes"},
+                {"id": "AC2", "status": "met", "evidence": "V2.log: existing tests pass"},
+            ],
+            "omissions": [],
+        },
         "acceptance_mapping": {
             "AC1": {"status": "met", "evidence": "V2.log: the new duplicate case passes"},
             "AC2": {"status": "met", "evidence": "V2.log: every existing import test passes"},
@@ -54,7 +62,7 @@ async def test_a_report_with_only_the_judgement_fields_passes_once_crucible_fill
     task_id = submit_and_start(
         client, "crucible-worker:fake-succeed", deliverables=ARTIFACTS_DELIVERABLE
     )
-    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
+    assert await run_to_settled(supervisor, client, task_id) == "accepted"
     attempt_id, rows = gate_rows(client, task_id)
     report_present = rows[GateName.REPORT_PRESENT]
     assert report_present["result"] == "pass", report_present["detail"]
@@ -100,7 +108,7 @@ async def test_a_fact_the_worker_wrote_differently_is_noted_not_failed(
     task_id = submit_and_start(
         client, "crucible-worker:fake-succeed", deliverables=ARTIFACTS_DELIVERABLE
     )
-    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
+    assert await run_to_settled(supervisor, client, task_id) == "accepted"
     _, rows = gate_rows(client, task_id)
     detail = rows[GateName.REPORT_PRESENT]["detail"]
     assert rows[GateName.REPORT_PRESENT]["result"] == "pass", detail
@@ -125,11 +133,11 @@ async def test_a_report_missing_judgement_fails_report_present_in_its_own_words(
     task_id = submit_and_start(
         client, "crucible-worker:fake-succeed", deliverables=ARTIFACTS_DELIVERABLE
     )
-    # ADR 0024: report_present is advisory, so the task goes on to its review.
-    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
+    # A complete report is required for automatic acceptance.
+    assert await run_to_settled(supervisor, client, task_id) == "pre_pr_gates_failed"
     attempt_id, rows = gate_rows(client, task_id)
     assert rows[GateName.REPORT_PRESENT]["result"] == "fail"
-    assert rows[GateName.REPORT_PRESENT]["classification"] == "advisory"
+    assert rows[GateName.REPORT_PRESENT]["classification"] == "blocking"
     errors = client.get(f"/v1/attempts/{attempt_id}").json()["report"]["parse_errors"]
     assert sorted(".".join(e["loc"]) for e in errors) == ["limitations", "summary"]
 
@@ -145,7 +153,7 @@ async def test_a_null_fact_is_left_out_and_filled_not_a_crash(
     task_id = submit_and_start(
         client, "crucible-worker:fake-succeed", deliverables=ARTIFACTS_DELIVERABLE
     )
-    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
+    assert await run_to_settled(supervisor, client, task_id) == "accepted"
     _, rows = gate_rows(client, task_id)
     assert rows[GateName.REPORT_PRESENT]["result"] == "pass"
     assert rows[GateName.COMMITS_PRESENT]["result"] == "pass"

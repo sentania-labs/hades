@@ -1,5 +1,18 @@
 # 14. PostgreSQL schema outline and migration strategy
 
+The worker self-review is the internal review. The required `self_review` section
+names where documentation was updated (or why no update was needed), maps every
+acceptance criterion with evidence, and lists anything knowingly left out and why.
+
+A missing or incomplete section fails `report_present`, naming `self_review`.
+When every blocking gate passes and the report is complete, Hades records acceptance
+and publishes without an orchestrator review or acceptance call, for first attempts
+and corrections alike. Publication sends one informational `published, PR #N` wake.
+An advisory gate failure still requires an orchestrator review before automatic acceptance.
+The orchestrator can still cancel or attach a correction after publication. The
+review-report endpoint records operator out-of-band adversarial findings against
+the PR; a correction can be attached on the operator's word. It is not a gate.
+
 ## Tables (v0.x)
 
 | Table | Key columns |
@@ -50,6 +63,12 @@
 Indexes: tasks (state), (principal_id, updated_at); events (task_id, seq);
 attempts (state); leases (expires_at); wakes (principal_id, acked_at) partial
 where acked_at is null.
+
+Automatic acceptance stores the task owner as the `acceptance_results.principal_id`
+foreign key; the `acceptance_recorded` event names `crucible` as the actor and carries
+`automatic: true`. Acceptance, the gate results, and the publication transition share
+the supervisor's fenced transaction. The `published` wake is recorded with the PR
+number only after publication succeeds. Review report events include the PR id.
 
 Triggers: `events`, `task_contracts`, `release_contracts`, `review_dispositions`, and `ci_decisions` reject UPDATE and DELETE. No table ever holds a token, key, or secret; a CI check asserts no column name matches the secret-name pattern. Writes to
 `executions`, `attempts`, `workers`, `heartbeats`, `gate_results`,

@@ -24,6 +24,11 @@ CLAIM = {
     "schema_version": "1.0",
     "task_external_id": "EX-0001",
     "summary": "Added one line.",
+    "self_review": {
+        "documentation": ["Updated notes/c5.txt."],
+        "acceptance_criteria": [{"id": "AC1", "status": "met", "evidence": "run-evidence.md"}],
+        "omissions": [],
+    },
     "changed_files": ["notes/c5.txt"],
     "refs": {"branch": "crucible/EX-0001", "head_sha": "a" * 40, "commits": 1},
     "checks": [{"id": "V1", "command": "echo ok", "exit": 0, "log": "V1.log"}],

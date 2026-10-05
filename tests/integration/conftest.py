@@ -26,6 +26,7 @@ from crucible.application.repositories import register_repository
 from crucible.application.supervisor import Supervisor
 from crucible.contracts.api import ExternalReviewAttestation, RepositoryRegistration
 from crucible.domain.entities import Role
+from crucible.domain.lifecycle import TaskState
 from crucible.ports.notification import DeliveryResult
 from tests.fixtures import REPOSITORY_URL, FakeClock, contract_document
 from tests.integration.postgres import SERVER_URL
@@ -331,6 +332,14 @@ async def run_until(
 # run settles past `reported` rather than in it.
 POST_REPORT_STATES = {
     "reported",
+    "publishing",
+    "accepted",
+    "publish_failed",
+    "awaiting_external_review",
+    "awaiting_ci_certification",
+    "external_feedback_received",
+    "ci_certification_failed",
+    "ready_for_merge",
     "pre_pr_gates_failed",
     "awaiting_internal_review",
     "gates_passed",
@@ -377,19 +386,33 @@ def upload_review(
     return client.post(f"/v1/tasks/{task_id}/review", json={"report": report})
 
 
-async def review_and_settle(
-    supervisor: Supervisor,
-    client: TestClient,
-    task_id: str,
-    *,
-    verdict: str = "approve",
+def legacy_review_state(supervisor: Supervisor, task_id: str) -> None:
+    """Seed an old deployment's waiting task for compatibility tests of the review API.
+
+    Fresh runs never enter this state. These fixtures exercise persisted legacy tasks.
+    """
+    with supervisor._fenced() as uow:
+        task = uow.tasks.get(task_id, for_update=True)
+        assert task is not None
+        task.state = TaskState.AWAITING_INTERNAL_REVIEW
+        uow.tasks.save(task)
+        uow.commit()
+
+
+async def legacy_acceptance_state(
+    supervisor: Supervisor, client: TestClient, task_id: str, *, verdict: str = "approve"
 ) -> str:
-    """Upload a review, then tick: gate_results is fenced to the supervisor (14), so the
-    next tick is what resolves internal_review_recorded."""
+    """Seed the pre-upgrade review and acceptance state for legacy API tests only."""
+    legacy_review_state(supervisor, task_id)
     response = upload_review(client, task_id, verdict=verdict)
     assert response.status_code == 200, response.text
-    await supervisor.tick()
-    return str(client.get(f"/v1/tasks/{task_id}").json()["state"])
+    with supervisor._fenced() as uow:
+        task = uow.tasks.get(task_id, for_update=True)
+        assert task is not None
+        task.state = TaskState.AWAITING_ACCEPTANCE
+        uow.tasks.save(task)
+        uow.commit()
+    return "awaiting_acceptance"
 
 
 def correction_document(

@@ -28,9 +28,18 @@ ROOT = Path(__file__).resolve().parents[2]
 def _report(dispositions: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "schema_version": "1.0",
+        "self_review": {
+            "documentation": ["No documentation change needed for this test fixture."],
+            "acceptance_criteria": [
+                {"id": "AC1", "status": "met", "evidence": "Test fixture"},
+                {"id": "AC2", "status": "met", "evidence": "Test fixture"},
+            ],
+            "omissions": [],
+        },
         "summary": "Corrected the review findings.",
         "acceptance_mapping": [
-            {"id": "AC1", "status": "met", "evidence": "covered by the correction"}
+            {"id": "AC1", "status": "met", "evidence": "covered by the correction"},
+            {"id": "AC2", "status": "met", "evidence": "regressions passed"},
         ],
         "proposed_pull_request": {"title": "Apply Codex findings", "body": "Done."},
         "limitations": [],
@@ -87,7 +96,7 @@ def test_worker_report_checker_mirrors_finding_dispositions() -> None:
                 }
             ]
         ),
-        criteria=["AC1"],
+        criteria=["AC1", "AC2"],
     )
     assert problems == []
 

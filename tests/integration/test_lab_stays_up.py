@@ -124,7 +124,7 @@ async def test_a_cancelled_tasks_workspace_goes_on_the_next_tick(
 ) -> None:
     supervisor = make_supervisor(ctx, provider)
     task_id = submit_and_start(client, "crucible-worker:fake-succeed", "EX-DONE")
-    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
+    assert await run_to_settled(supervisor, client, task_id) == "publishing"
     (attempt,) = _attempts(client, task_id)
     await supervisor.tick()
     assert provider.released == []
@@ -169,9 +169,9 @@ async def test_a_long_collection_holds_back_neither_the_lease_nor_another_launch
     hold.set()
     # A collection that ends between ticks reports the task then; the next tick's gates
     # move it on.
-    review = {"awaiting_internal_review"}
-    assert await run_until(supervisor, client, slow, review) == "awaiting_internal_review"
-    assert await run_until(supervisor, client, other, review) == "awaiting_internal_review"
+    review = {"publishing"}
+    assert await run_until(supervisor, client, slow, review) == "publishing"
+    assert await run_until(supervisor, client, other, review) == "publishing"
     await supervisor.stop()
 
 
@@ -191,10 +191,8 @@ async def test_a_collection_in_flight_is_abandoned_with_the_lease_and_collected_
     assert "attempt_collected" not in event_kinds(client, task_id)
 
     successor = make_supervisor(ctx, provider, holder="sup-b")
-    review = {"awaiting_internal_review"}
-    assert await run_until(successor, client, task_id, review, max_ticks=20) == (
-        "awaiting_internal_review"
-    )
+    review = {"publishing"}
+    assert await run_until(successor, client, task_id, review, max_ticks=20) == ("publishing")
     await successor.stop()
 
 
@@ -211,8 +209,8 @@ async def test_a_collection_the_cluster_could_not_answer_is_tried_again(
     supervisor = make_supervisor(ctx, provider)
     task_id = submit_and_start(client, "crucible-worker:fake-succeed", "EX-FLAKY")
     provider.collect_unavailable("EX-FLAKY", times=2)
-    review = {"awaiting_internal_review"}
-    assert await run_until(supervisor, client, task_id, review) == "awaiting_internal_review"
+    review = {"publishing"}
+    assert await run_until(supervisor, client, task_id, review) == "publishing"
     (attempt,) = _attempts(client, task_id)
     assert attempt["exit_class"] == "completed"
     assert provider.collect_calls.count(attempt["id"]) == 3
@@ -338,7 +336,7 @@ async def test_a_workspace_cleanup_deleted_is_never_released_again(
         "EX-DELETED",
         lifecycle={"max_attempts": 1, "retry_on": [], "cleanup": "policy"},
     )
-    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
+    assert await run_to_settled(supervisor, client, task_id) == "publishing"
     (attempt,) = _attempts(client, task_id)
     with ctx.uow_factory() as uow:
         cleaned = [
@@ -421,7 +419,7 @@ async def test_the_retention_sweep_leaves_a_finished_attempt_alone_until_its_cle
     monkeypatch.setattr(provider, "retention", recorded)
     supervisor = make_supervisor(ctx, provider)
     task_id = submit_and_start(client, "crucible-worker:fake-succeed", "EX-SWEEP")
-    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
+    assert await run_to_settled(supervisor, client, task_id) == "publishing"
     (attempt,) = _attempts(client, task_id)
     assert attempt["state"] == "succeeded"
     await supervisor.tick()

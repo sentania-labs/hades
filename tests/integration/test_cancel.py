@@ -10,7 +10,6 @@ from tests.fixtures import FakeClock
 from tests.integration.conftest import (
     ARTIFACTS_DELIVERABLE,
     event_kinds,
-    review_and_settle,
     run_to_settled,
     run_until,
     submit_and_start,
@@ -148,9 +147,9 @@ async def test_cancel_with_partial_report_is_not_parsed(
 
 
 async def test_cancel_waiting_task_is_accepted(client: TestClient, supervisor: Supervisor) -> None:
-    """09 lists awaiting_internal_review among the states a cancel may take at once."""
+    """The orchestrator may cancel while publication is waiting for its publisher."""
     task_id = submit_and_start(client, "crucible-worker:fake-succeed")
-    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
+    assert await run_to_settled(supervisor, client, task_id) == "publishing"
     r = client.post(f"/v1/tasks/{task_id}/cancel", json=CANCEL)
     assert r.status_code == 200 and r.json()["state"] == "cancelled"
 
@@ -163,13 +162,7 @@ async def test_cancel_from_a_state_the_table_forbids_is_409(
     task_id = submit_and_start(
         client, "crucible-worker:fake-succeed", deliverables=ARTIFACTS_DELIVERABLE
     )
-    await run_to_settled(supervisor, client, task_id)
-    assert await review_and_settle(supervisor, client, task_id) == "awaiting_acceptance"
-    accepted = client.post(
-        f"/v1/tasks/{task_id}/accept",
-        json={"verdict": "accepted", "reasoning": "It does what the contract asked."},
-    )
-    assert accepted.json()["state"] == "accepted"
+    assert await run_to_settled(supervisor, client, task_id) == "accepted"
 
     r = client.post(f"/v1/tasks/{task_id}/cancel", json=CANCEL)
     assert r.status_code == 409

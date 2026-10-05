@@ -64,7 +64,6 @@ def _out_of_scope() -> list[EvidenceItem]:
 def test_the_default_classification_is_the_operators() -> None:
     assert {
         GateName.SCOPE_CONTAINED,
-        GateName.REPORT_PRESENT,
         GateName.CRITERIA_MAPPED,
         GateName.RUN_EVIDENCE_PRESENT,
         GateName.COMMIT_POLICY,
@@ -78,6 +77,7 @@ def test_the_default_classification_is_the_operators() -> None:
         GateName.NO_INJECTED_FILES,
         GateName.WORKSPACE_CLEAN,
         GateName.EXIT_CLEAN,
+        GateName.REPORT_PRESENT,
         GateName.INTERNAL_REVIEW_RECORDED,
     ):
         assert gate_class(gate, DEFAULT) is GateClass.BLOCKING, gate
@@ -93,10 +93,10 @@ def test_a_policy_without_the_field_takes_the_default() -> None:
     }
 
 
-def test_a_policy_list_decides_and_the_review_always_blocks() -> None:
+def test_a_policy_list_decides_and_the_report_always_blocks() -> None:
     assert advisory_gates({"gates": {"advisory": []}}) == {GateName.COMMIT_POLICY}
     chosen = advisory_gates(
-        {"gates": {"advisory": ["ci_unchanged", "no_secrets", "internal_review_recorded"]}}
+        {"gates": {"advisory": ["ci_unchanged", "no_secrets", "report_present"]}}
     )
     assert chosen == {GateName.CI_UNCHANGED, GateName.COMMIT_POLICY}
 
@@ -109,7 +109,7 @@ def test_an_advisory_failure_leaves_the_task_moving() -> None:
     outcomes = evaluate_pre_pr(sorted(PRE_PR_GATES), gi)
     assert outcomes[GateName.SCOPE_CONTAINED].result is GateResult.FAIL
     assert blocking(outcomes, DEFAULT) == []
-    assert pre_pr_verdict(outcomes, DEFAULT) is PrePrVerdict.REVIEW
+    assert pre_pr_verdict(outcomes, DEFAULT) is PrePrVerdict.PASSED
     items = for_reviewer(outcomes, DEFAULT)
     assert items == [
         {
@@ -163,8 +163,8 @@ def test_a_path_merely_outside_allowed_paths_does_not_always_block() -> None:
     assert not outcomes[GateName.SCOPE_CONTAINED].always_blocks
 
 
-def test_a_missing_judgement_field_is_for_the_reviewer() -> None:
-    """report_present: a report without `risks` did not parse, and the task moves on."""
+def test_a_missing_judgement_field_blocks_publication() -> None:
+    """report_present: a report without `risks` did not parse, and publication stops."""
     claim = _claim_payload(
         parsed_ok=False,
         parse_errors=[{"loc": ["risks"], "msg": "Field required", "type": "missing"}],
@@ -173,14 +173,13 @@ def test_a_missing_judgement_field_is_for_the_reviewer() -> None:
     outcomes = evaluate_pre_pr(sorted(PRE_PR_GATES), _gi(evidence))
     assert outcomes[GateName.REPORT_PRESENT].result is GateResult.FAIL
     assert outcomes[GateName.CRITERIA_MAPPED].result is GateResult.FAIL
-    assert pre_pr_verdict(outcomes, DEFAULT) is PrePrVerdict.REVIEW
+    assert pre_pr_verdict(outcomes, DEFAULT) is PrePrVerdict.FAILED
     assert {i["gate"] for i in for_reviewer(outcomes, DEFAULT)} == {
-        GateName.REPORT_PRESENT,
         GateName.CRITERIA_MAPPED,
     }
 
 
-def test_a_report_that_is_not_yaml_is_for_the_reviewer_with_its_parse_error() -> None:
+def test_a_report_that_is_not_yaml_blocks_with_its_parse_error() -> None:
     """The correction to FDY-0138: a report file that is there but is not YAML is recorded
     as present and unparsed (only a message and position, no fact fields), and goes to
     the reviewer with the parser's problem."""
@@ -189,10 +188,10 @@ def test_a_report_that_is_not_yaml_is_for_the_reviewer_with_its_parse_error() ->
     evidence = _without_review(_replace(_passing_evidence(), 1, _ev("artifact_present", claim)))
     outcomes = evaluate_pre_pr(sorted(PRE_PR_GATES), _gi(evidence))
     report = outcomes[GateName.REPORT_PRESENT]
-    assert report.result is GateResult.FAIL and not report.always_blocks
+    assert report.result is GateResult.FAIL and report.always_blocks
     assert "report.yaml is not YAML: mapping values are not allowed here" in report.detail
     assert "at line 1, column 12" in report.detail
-    assert pre_pr_verdict(outcomes, DEFAULT) is PrePrVerdict.REVIEW
+    assert pre_pr_verdict(outcomes, DEFAULT) is PrePrVerdict.FAILED
 
 
 def test_the_parse_problems_shown_are_few_redacted_and_short() -> None:
@@ -356,7 +355,7 @@ def test_the_policy_field_is_optional_and_validated() -> None:
     for bad, words in (
         (["ci_green_for_head"], "not pre-PR gates"),
         (["no_such_gate"], "not pre-PR gates"),
-        (["internal_review_recorded"], "always block"),
+        (["report_present"], "always block"),
         (["no_secrets"], "always block"),
         (["commit_policy"], "always advisory"),
         (["scope_contained", "scope_contained"], "duplicate"),
@@ -402,7 +401,7 @@ def test_a_commit_by_another_author_is_for_the_reviewer_and_never_stops_the_task
     advisory = advisory_gates({"gates": {"advisory": []}})
     assert outcomes[GateName.COMMIT_POLICY].result is GateResult.FAIL
     assert blocking(outcomes, advisory) == []
-    assert pre_pr_verdict(outcomes, advisory) is PrePrVerdict.REVIEW
+    assert pre_pr_verdict(outcomes, advisory) is PrePrVerdict.PASSED
     assert for_reviewer(outcomes, advisory) == [
         {
             "gate": GateName.COMMIT_POLICY,

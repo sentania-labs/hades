@@ -99,7 +99,7 @@ async def test_a_task_that_cannot_progress_shows_on_the_supervisor_not_on_readin
     assert ready.status_code == 200 and ready.json()["supervisor"]["ok"] is False
     assert client.get("/v1/supervisor").json()["healthy"] is False
     monkeypatch.undo()
-    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
+    assert await run_to_settled(supervisor, client, task_id) == "publishing"
 
 
 def test_ready_reports_schema_drift(client: TestClient, engine: Engine, migrated: str) -> None:

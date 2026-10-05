@@ -9,7 +9,6 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
 
 from crucible.adapters.api.app import create_app
 from crucible.adapters.api.deps import AppContext
@@ -20,8 +19,7 @@ from tests.integration.conftest import (
     ARTIFACTS_DELIVERABLE,
     correction_document,
     event_kinds,
-    make_supervisor,
-    review_and_settle,
+    legacy_acceptance_state,
     run_to_settled,
     run_until,
     submit_and_start,
@@ -177,7 +175,7 @@ async def test_a_decision_on_a_blocked_task_launches_a_new_attempt(
     assert "execution_resumed" in event_kinds(client, task_id)
 
     state = await run_to_settled(supervisor, client, task_id)
-    assert state == "awaiting_internal_review"
+    assert state == "publishing"
     attempts = client.get(f"/v1/tasks/{task_id}").json()["executions"][0]["attempts"]
     assert [(a["number"], a["state"]) for a in attempts] == [(1, "blocked"), (2, "succeeded")]
 
@@ -192,120 +190,6 @@ async def test_a_decision_without_reschedule_leaves_the_task_blocked(
     view = client.get(f"/v1/tasks/{task_id}").json()
     assert view["state"] == "blocked"
     assert len(view["executions"][0]["attempts"]) == 1
-
-
-# ----- 2: a review execution that produces no report ---------------------------
-
-
-async def _await_review(
-    client: TestClient, supervisor: Supervisor, image: str, external_id: str
-) -> dict[str, Any]:
-    task_id = submit_and_start(client, "crucible-worker:fake-succeed", external_id=external_id)
-    await run_to_settled(supervisor, client, task_id)
-    request = {**REVIEW_EXECUTION, "image": image}
-    assert (
-        client.post(f"/v1/tasks/{task_id}/review", json={"execution": request}).status_code == 200
-    )
-    for _ in range(5):
-        await supervisor.tick()
-    return dict(client.get(f"/v1/tasks/{task_id}").json())
-
-
-def _assert_review_failed_cleanly(client: TestClient, view: dict[str, Any]) -> None:
-    """The task waits where 09 put it, the attempt is terminal, and Foundry is woken."""
-    assert view["state"] == "awaiting_internal_review"
-    review = next(e for e in view["executions"] if e["role"] == "review")
-    assert review["state"] == "failed"
-    assert all(a["state"] == "failed" for a in review["attempts"])
-    assert view["review_reports"] == []
-    author = next(e for e in view["executions"] if e["role"] == "implement")["attempts"][0]["id"]
-    assert gates(client, author)[GateName.INTERNAL_REVIEW_RECORDED] == "pending"
-    reasons = [w["reason"] for w in client.get("/v1/wakes").json()["items"]]
-    assert "attempt_failed" in reasons
-    assert "transition_rejected" not in event_kinds(client, view["id"])
-
-
-async def test_a_review_execution_whose_prepare_fails_does_not_strand_the_task(
-    client: TestClient, supervisor: Supervisor
-) -> None:
-    view = await _await_review(
-        client, supervisor, "crucible-worker:fake-prepare-fails", "EX-REVIEW-PREPARE"
-    )
-    _assert_review_failed_cleanly(client, view)
-
-
-async def test_a_review_execution_that_crashes_does_not_strand_the_task(
-    client: TestClient, supervisor: Supervisor
-) -> None:
-    view = await _await_review(client, supervisor, "crucible-worker:fake-crash", "EX-REVIEW-CRASH")
-    _assert_review_failed_cleanly(client, view)
-
-
-async def test_a_lost_review_execution_does_not_strand_the_task(
-    client: TestClient, supervisor: Supervisor
-) -> None:
-    view = await _await_review(client, supervisor, "crucible-worker:fake-vanish", "EX-REVIEW-LOST")
-    _assert_review_failed_cleanly(client, view)
-
-
-async def test_a_review_execution_refused_by_the_quota_does_not_strand_the_task(
-    ctx: AppContext, provider: FakeProvider, client: TestClient, tokens: dict[str, str]
-) -> None:
-    """05b: the authoritative pool check happens at launch. A refused review execution
-    ends on the review path like any other, rather than attempting `reported`."""
-    supervisor = make_supervisor(ctx, provider)
-    task_id = submit_and_start(
-        client, "crucible-worker:fake-succeed", external_id="EX-REVIEW-QUOTA"
-    )
-    await run_to_settled(supervisor, client, task_id)
-
-    # Tighten the pool the review model draws on, after the task was admitted.
-    # FDY-0051 seeds version 4, so this test uses a distinct scratch version.
-    routing = client.get("/v1/routing/default-routing/2").json()["document"]
-    routing["version"] = 40
-    routing["pools"]["anthropic-sub"] = {
-        "window": "5h",
-        "budget_units": "attempts",
-        "soft_limit": 1,
-    }
-    admin = {"Authorization": f"Bearer {tokens['admin']}"}
-    assert (
-        client.put("/v1/routing/default-routing/40", json=routing, headers=admin).status_code == 200
-    )
-    policy = client.get("/v1/policies/default-software/2").json()["document"]
-    policy["version"] = 40
-    policy["routing"]["policy"]["version"] = 40
-    assert (
-        client.put("/v1/policies/default-software/40", json=policy, headers=admin).status_code
-        == 200
-    )
-
-    # The review execution snapshots the policy the task names, so point the task at the
-    # version whose pool is now tight. `tasks` is the API role's table (14).
-    with ctx.engine.begin() as conn:
-        conn.execute(text("UPDATE tasks SET policy_version = 40 WHERE id = :id"), {"id": task_id})
-
-    assert (
-        client.post(
-            f"/v1/tasks/{task_id}/review",
-            json={
-                "execution": {
-                    **REVIEW_EXECUTION,
-                    "harness": "claude_code",
-                    "model": "claude-sonnet-5",
-                }
-            },
-        ).status_code
-        == 200
-    )
-    for _ in range(5):
-        await supervisor.tick()
-    view = client.get(f"/v1/tasks/{task_id}").json()
-    assert view["state"] == "awaiting_internal_review"
-    assert "quota_exhausted" in event_kinds(client, task_id)
-    review = next(e for e in view["executions"] if e["role"] == "review")
-    assert review["state"] == "failed"
-    assert "transition_rejected" not in event_kinds(client, task_id)
 
 
 # ----- 3: a later contract version satisfies the submit-time rules -------------
@@ -408,7 +292,7 @@ async def test_a_non_proof_amendment_in_awaiting_acceptance_is_allowed(
 ) -> None:
     task_id = submit_and_start(client, "crucible-worker:fake-succeed")
     await run_to_settled(supervisor, client, task_id)
-    await review_and_settle(supervisor, client, task_id)
+    await legacy_acceptance_state(supervisor, client, task_id)
     document = contract_of(client, task_id)
     document["title"] = "A clearer title for the same work"
     document["context"] = [*document["context"], {"kind": "doc", "ref": "docs/ledger.md"}]
@@ -425,7 +309,7 @@ async def test_a_proof_affecting_amendment_in_awaiting_acceptance_is_refused(
     would leave a `pass` standing for a question that was never asked (11)."""
     task_id = submit_and_start(client, "crucible-worker:fake-succeed")
     await run_to_settled(supervisor, client, task_id)
-    await review_and_settle(supervisor, client, task_id)
+    await legacy_acceptance_state(supervisor, client, task_id)
     document = contract_of(client, task_id)
     if field == "acceptance_criteria":
         document[field] = [
@@ -499,7 +383,7 @@ async def test_an_uploaded_artifact_carries_the_name_the_contract_asked_for(
     `pre_pr_gates_failed` no edge back to `gates_passed`, so a head that already failed
     is Foundry's to correct, not to top up."""
     task_id = submit_and_start(client, "crucible-worker:fake-succeed")
-    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
+    assert await run_to_settled(supervisor, client, task_id) == "publishing"
     attempt_id = client.get(f"/v1/tasks/{task_id}").json()["latest_attempt"]["id"]
 
     r = client.post(

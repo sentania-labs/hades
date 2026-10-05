@@ -111,6 +111,8 @@ def test_attempt_table() -> None:
         (TaskState.REPORTED, TaskState.AWAITING_INTERNAL_REVIEW),
         (TaskState.AWAITING_INTERNAL_REVIEW, TaskState.GATES_PASSED),
         (TaskState.GATES_PASSED, TaskState.AWAITING_ACCEPTANCE),
+        (TaskState.GATES_PASSED, TaskState.ACCEPTED),
+        (TaskState.GATES_PASSED, TaskState.PUBLISHING),
         (TaskState.AWAITING_ACCEPTANCE, TaskState.ACCEPTED),
         (TaskState.AWAITING_ACCEPTANCE, TaskState.REJECTED),
         (TaskState.AWAITING_ACCEPTANCE, TaskState.SCHEDULED),
@@ -130,15 +132,12 @@ def test_c2_task_allowed(current: TaskState, target: TaskState) -> None:
     ("current", "target"),
     [
         (TaskState.REPORTED, TaskState.AWAITING_ACCEPTANCE),
-        (TaskState.GATES_PASSED, TaskState.ACCEPTED),
         (TaskState.AWAITING_INTERNAL_REVIEW, TaskState.AWAITING_ACCEPTANCE),
         (TaskState.AWAITING_ACCEPTANCE, TaskState.GATES_PASSED),
         (TaskState.PRE_PR_GATES_FAILED, TaskState.ACCEPTED),
         (TaskState.PRE_PR_GATES_FAILED, TaskState.GATES_PASSED),
         (TaskState.REJECTED, TaskState.SCHEDULED),
         (TaskState.ACCEPTED, TaskState.AWAITING_ACCEPTANCE),
-        # Only Foundry's acceptance reaches `accepted`; gates alone never do (11).
-        (TaskState.GATES_PASSED, TaskState.PUBLISHING),
     ],
 )
 def test_c2_task_disallowed(current: TaskState, target: TaskState) -> None:

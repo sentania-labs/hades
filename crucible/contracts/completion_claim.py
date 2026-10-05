@@ -13,6 +13,7 @@ criterion id as well as a list."""
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -32,6 +33,7 @@ FACT_FIELDS: tuple[str, ...] = (
 )
 JUDGEMENT_FIELDS: tuple[str, ...] = (
     "summary",
+    "self_review",
     "acceptance_mapping",
     "proposed_pull_request",
     "limitations",
@@ -65,6 +67,35 @@ class AcceptanceMapping(StrictModel):
     id: str = Field(min_length=1)
     status: Literal["met", "not_met", "not_exercised", "partial"]
     evidence: str
+
+
+class SelfReview(StrictModel):
+    """The worker's internal review of its own completed change (hades #402)."""
+
+    documentation: list[str] = Field(min_length=1)
+    acceptance_criteria: list[AcceptanceMapping]
+    omissions: list[str]
+
+    @field_validator("acceptance_criteria", mode="before")
+    @classmethod
+    def _mapping(cls, value: Any) -> Any:
+        return normalise_mapping(value)
+
+    @field_validator("documentation", "omissions")
+    @classmethod
+    def _nonblank_notes(cls, value: list[str]) -> list[str]:
+        if any(not note.strip() for note in value):
+            raise ValueError("self_review notes must not be blank")
+        return value
+
+    @field_validator("acceptance_criteria")
+    @classmethod
+    def _reviewed_criteria(cls, value: list[AcceptanceMapping]) -> list[AcceptanceMapping]:
+        if len({entry.id for entry in value}) != len(value):
+            raise ValueError("self_review must map each acceptance criterion exactly once")
+        if any(not entry.evidence.strip() for entry in value):
+            raise ValueError("self_review must give evidence for every acceptance criterion")
+        return value
 
 
 class ProposedPullRequest(StrictModel):
@@ -121,6 +152,7 @@ class CompletionClaimV1(StrictModel):
     )
     task_external_id: str | None = Field(default=None, min_length=1, description=_FILLED)
     summary: str = Field(min_length=1)
+    self_review: SelfReview
     changed_files: list[str] | None = Field(default=None, description=_FILLED)
     refs: ClaimRefs | None = Field(default=None, description=_FILLED)
     checks: list[ClaimCheck] | None = Field(default=None, description=_FILLED)
@@ -148,12 +180,30 @@ class CompletionClaimV1(StrictModel):
         return normalise_mapping(value)
 
 
-def parse_claim(document: object) -> tuple[CompletionClaimV1 | None, list[dict[str, Any]]]:
+def parse_claim(
+    document: object, *, criteria: Sequence[str] | None = None
+) -> tuple[CompletionClaimV1 | None, list[dict[str, Any]]]:
     """Parse a report document. Returns (claim, errors); errors is empty on success."""
     if not isinstance(document, dict):
         return None, [{"loc": [], "msg": "report is not a mapping"}]
     try:
-        return CompletionClaimV1.model_validate(document), []
+        claim = CompletionClaimV1.model_validate(document)
+        if criteria is not None:
+            reviewed = {entry.id for entry in claim.self_review.acceptance_criteria}
+            missing = sorted(set(criteria) - reviewed)
+            extra = sorted(reviewed - set(criteria))
+            if missing or extra:
+                return None, [
+                    {
+                        "loc": ["self_review", "acceptance_criteria"],
+                        "msg": (
+                            "self_review must map every contract criterion; "
+                            f"missing: {missing}; unknown: {extra}"
+                        ),
+                        "type": "criteria",
+                    }
+                ]
+        return claim, []
     except ValidationError as exc:
         errors = [
             {"loc": [str(part) for part in err["loc"]], "msg": err["msg"], "type": err["type"]}

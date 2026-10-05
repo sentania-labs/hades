@@ -1108,6 +1108,13 @@ class Supervisor:
         with self._fenced() as uow:
             for state in (
                 TaskState.REPORTED,
+                TaskState.PUBLISHING,
+                TaskState.AWAITING_EXTERNAL_REVIEW,
+                TaskState.AWAITING_CI_CERTIFICATION,
+                TaskState.EXTERNAL_FEEDBACK_RECEIVED,
+                TaskState.CI_CERTIFICATION_FAILED,
+                TaskState.READY_FOR_MERGE,
+                TaskState.ACCEPTED,
                 TaskState.AWAITING_INTERNAL_REVIEW,
                 TaskState.PRE_PR_GATES_FAILED,
                 TaskState.AWAITING_ACCEPTANCE,
@@ -1175,9 +1182,8 @@ class Supervisor:
     def _evaluate_pending_gates(self) -> None:
         """10 step 5: every task in `reported` with pending gates is evaluated.
 
-        A task waiting in `awaiting_internal_review` is re-evaluated too: gate_results is
-        fenced to the supervisor (14), so the API records the review report and the next
-        tick is what resolves the gate."""
+        Persisted tasks from older deployments in `awaiting_internal_review` also
+        resume through the self-review gate and automatic acceptance path."""
         for state in (TaskState.REPORTED, TaskState.AWAITING_INTERNAL_REVIEW):
             with self._fenced() as uow:
                 for task in uow.tasks.list_by_state(state, for_update=True):
@@ -1190,6 +1196,7 @@ class Supervisor:
                     evaluate_and_advance(
                         uow, self._clock, task=task, attempt=attempt, execution=execution
                     )
+                    self._metrics_for_task(uow, task)
                 uow.commit()
 
     def _refresh_attempt_metrics(self) -> None:
@@ -4698,7 +4705,12 @@ class Supervisor:
             if outputs.report is not None and not cancelled:
                 # hades #215: Crucible's own facts in place of the worker's, then parse.
                 completed = complete_claim(outputs.report, claim_facts(task, outputs))
-                claim, errors = parse_claim(completed.document)
+                claim, errors = parse_claim(
+                    completed.document,
+                    criteria=[str(c["id"]) for c in stored.document.get("acceptance_criteria", [])]
+                    if stored is not None
+                    else None,
+                )
                 claim_ok = claim is not None
                 correction = (stored.document.get("correction") if stored else None) or {}
                 expected_findings = {

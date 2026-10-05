@@ -32,7 +32,7 @@ pytestmark = [
     pytest.mark.timeout(600),
 ]
 
-SETTLED = {"awaiting_internal_review", "gates_passed", "awaiting_acceptance", "pre_pr_gates_failed"}
+SETTLED = {"accepted", "pre_pr_gates_failed"}
 # No spaces, so git would accept it as a branch name; the only thing that stops the
 # payload is that the preparer never lets it reach a command line as text.
 PAYLOAD = "crucible/$(touch /crucible/work/output/pwned)"
@@ -97,7 +97,7 @@ async def test_two_verification_ids_that_differ_only_in_a_separator_stay_apart(
     ]
     task_id = submit_and_start(client, document)
     state = await run_until(supervisor, client, task_id, SETTLED)
-    assert state == "awaiting_internal_review", gate_results(client, task_id)
+    assert state == "accepted", gate_results(client, task_id)
 
     attempt_id = client.get(f"/v1/tasks/{task_id}").json()["latest_attempt"]["id"]
     evidence = client.get(f"/v1/attempts/{attempt_id}/evidence").json()["items"]

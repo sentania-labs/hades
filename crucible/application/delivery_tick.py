@@ -1017,6 +1017,17 @@ class DeliveryCoordinator:
                     head_sha=plan.head_sha,
                     policy=plan.policy,
                 )
+            if pull_request is not None:
+                create_wake(
+                    uow,
+                    self._clock,
+                    principal_id=task.principal_id,
+                    reason=WakeReason.PUBLISHED,
+                    summary=f"published, PR #{pull_request.number}",
+                    task=task,
+                    attempt_id=plan.attempt_id,
+                    extra_links={"pull_request": f"/v1/tasks/{task.id}/pull-request"},
+                )
             if others and pull_request is not None:
                 # hades #379: published to the task's own pull request; the others on the
                 # work branch are not the task's, and Foundry decides what becomes of them.

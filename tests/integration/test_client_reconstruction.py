@@ -14,7 +14,6 @@ from crucible.application.supervisor import Supervisor
 from crucible.domain.gates import DEFERRED_TO_C3
 from tests.integration.conftest import (
     ARTIFACTS_DELIVERABLE,
-    review_and_settle,
     run_to_settled,
     run_until,
     submit_and_start,
@@ -76,13 +75,7 @@ async def test_a_client_reconstructs_the_whole_run_from_the_api(
     task_id = submit_and_start(
         client, "crucible-worker:fake-succeed", deliverables=ARTIFACTS_DELIVERABLE
     )
-    await run_to_settled(supervisor, client, task_id)
-    assert await review_and_settle(supervisor, client, task_id) == "awaiting_acceptance"
-    client.post(
-        f"/v1/tasks/{task_id}/accept",
-        json={"verdict": "accepted", "reasoning": "The evidence shows the criteria met."},
-    )
-    await supervisor.tick()
+    assert await run_to_settled(supervisor, client, task_id) == "accepted"
 
     view = reconstruct(client, task_id)
     assert view["state"] == "accepted" and view["pull_request"] is None
@@ -94,9 +87,9 @@ async def test_a_client_reconstructs_the_whole_run_from_the_api(
     assert {g for g, r in results.items() if r == "pending"} == set(DEFERRED_TO_C3)
     assert view["gate_summary"]["failing"] == []
     assert view["reports"][0]["parsed_ok"] is True
-    assert view["review_reports"][0]["verdict"] == "approve"
+    assert view["review_reports"] == []
     assert view["acceptance_results"][0]["verdict"] == "accepted"
-    assert [kind for kind, _ in view["wakes"]] == ["internal_review_needed", "gates_passed"]
+    assert view["wakes"] == []
     assert view["events"][0] == "task_submitted"
     assert "task_accepted" in view["events"]
     # The claim the worker asserted is visible and marked unverified.

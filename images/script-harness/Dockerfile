@@ -17,7 +17,7 @@ ARG HARNESS_VERSION=1.0.0
 # script's sha256 here is what puts the script into that hash, and the check below
 # is what makes a Dockerfile and a script that disagree fail the build instead of
 # producing a second image under the same tag.
-ARG HARNESS_SCRIPT_SHA256=1cbfe46a2c009fa28d5954fd44ae790a5302a45dc24687034105763f29b448ab
+ARG HARNESS_SCRIPT_SHA256=4e41d2471ef8832110662225e5333c59190e93916f2fc9ab910a892a1f51db0d
 ARG DEBIAN_SNAPSHOT=20260916T000000Z
 ARG GIT_VERSION=1:2.39.5-0+deb12u3
 ARG CURL_VERSION=7.88.1-10+deb12u15

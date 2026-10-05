@@ -11,6 +11,8 @@ Only when judgment is required or work has stopped needing it:
 | `pre_pr_gates_failed` | `pre_pr_gates_failed` |
 | `needs_more_work` | after a `needs_more_work` verdict, until a correction is attached |
 | `blocked` | `blocked` (escalation opened) |
+| `accepted` | `accepted`: informational once when gates automatically accept artifact-only deliverables; artifacts are ready, no branch or PR publication was requested, and attempt and artifact links are included |
+| `published` | informational once per publication: `published, PR #N` for a pull request |
 | `publish_failed` | `publish_failed` |
 | `external_feedback_received` | informational once per completed review round; on the first Codex round with findings Crucible has already launched its bounded correction, while a later round remains a wake for Foundry |
 | `external_review_overdue` | repeat, no state change |

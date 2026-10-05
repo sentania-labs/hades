@@ -16,7 +16,7 @@ pytestmark = pytest.mark.integration
 async def test_submit_start_run_to_reported(client: TestClient, supervisor: Supervisor) -> None:
     task_id = submit_and_start(client, "crucible-worker:fake-succeed-2")
     state = await run_to_settled(supervisor, client, task_id)
-    assert state == "awaiting_internal_review"
+    assert state == "publishing"
 
     view = client.get(f"/v1/tasks/{task_id}").json()
     assert view["schema_version"] == "1.0"
@@ -61,12 +61,13 @@ async def test_submit_start_run_to_reported(client: TestClient, supervisor: Supe
         "execution_succeeded",
         "task_reported",
         "gates_evaluated",
-        "task_awaiting_internal_review",
-        "wake_created",
+        "task_gates_passed",
+        "acceptance_recorded",
+        "task_publishing",
+        "attempt_metrics_recorded",
+        "task_publish_pending",
         # 08, 16: cleanup runs after the gates and only ever after logs_drained.
         "attempt_cleaned_up",
-        # ADR 0028: the passed gates count for routing while the review is awaited.
-        "attempt_metrics_recorded",
     ]
     events = client.get(f"/v1/tasks/{task_id}/events").json()["items"]
     principals = {e["kind"]: e["principal"] for e in events}

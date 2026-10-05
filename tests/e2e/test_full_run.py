@@ -18,7 +18,6 @@ from tests.e2e.conftest import (
     register,
     run_until,
     submit_and_start,
-    upload_review,
 )
 
 pytestmark = [
@@ -28,7 +27,7 @@ pytestmark = [
     pytest.mark.timeout(600),
 ]
 
-SETTLED = {"awaiting_internal_review", "gates_passed", "awaiting_acceptance", "pre_pr_gates_failed"}
+SETTLED = {"accepted", "pre_pr_gates_failed"}
 
 
 async def test_a_script_harness_run_reaches_acceptance_with_every_gate_green(
@@ -45,7 +44,7 @@ async def test_a_script_harness_run_reaches_acceptance_with_every_gate_green(
     task_id = submit_and_start(client, e2e_contract("E2E-0001", "full-run", worker_image))
 
     state = await run_until(supervisor, client, task_id, SETTLED)
-    assert state == "awaiting_internal_review", gate_results(client, task_id)
+    assert state == "accepted", gate_results(client, task_id)
 
     results = gate_results(client, task_id)
     assert results["verification_ran"] == "pass", results
@@ -54,10 +53,6 @@ async def test_a_script_harness_run_reaches_acceptance_with_every_gate_green(
     assert results["no_injected_files"] == "pass", results
     assert results["no_secrets"] == "pass", results
     assert "deferred" not in set(results.values())
-
-    upload_review(client, task_id)
-    state = await run_until(supervisor, client, task_id, {"awaiting_acceptance"})
-    assert state == "awaiting_acceptance"
 
     view = client.get(f"/v1/tasks/{task_id}").json()
     attempt_id = view["latest_attempt"]["id"]

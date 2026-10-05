@@ -1,4 +1,4 @@
-"""Internal non-author review (04, 11).
+"""Out-of-band adversarial review reports (04, 11).
 
 `POST /tasks/{id}/review` either uploads a ReviewReportV1 the orchestrator produced
 through its own harness, or asks for a Crucible `review` execution on the collected head.
@@ -31,7 +31,7 @@ from crucible.domain.entities import (
 )
 from crucible.domain.events import EventKind
 from crucible.domain.ids import new_id
-from crucible.domain.lifecycle import TaskState
+from crucible.domain.lifecycle import CORRECTION_STATES, TaskState
 from crucible.ports.clock import Clock
 from crucible.ports.repository import UnitOfWork
 
@@ -87,7 +87,7 @@ def record_review_report(
     principal_name: str,
     artifact_id: str | None = None,
 ) -> ReviewReportRecord:
-    """Store the report and the `review_received` evidence the gate reads."""
+    """Store findings against the task, PR and reviewed head without moving the task."""
     report, errors = parse_review_report(document)
     if report is None:
         raise ContractValidationError(
@@ -178,6 +178,9 @@ def record_review_report(
         task_id=task.id,
         attempt_id=reviewer_attempt_id,
         payload={
+            "pull_request_id": (
+                pr.id if (pr := uow.pull_requests.get_for_task(task.id)) is not None else None
+            ),
             "review_report_id": record.id,
             "head_sha": record.head_sha,
             "reviewer_kind": reviewer_kind,
@@ -223,9 +226,13 @@ def request_review(
     if task is None:
         raise NotFoundError(f"task {task_id} not found")
     require_task_principal(principal, task)
-    if task.state is not TaskState.AWAITING_INTERNAL_REVIEW:
+    published = uow.pull_requests.get_for_task(task.id)
+    if task.state is not TaskState.AWAITING_INTERNAL_REVIEW and (
+        published is None or task.state in CORRECTION_STATES
+    ):
         raise TransitionNotAllowedError(
-            f"a review is accepted only in awaiting_internal_review; task is {task.state.value}"
+            "an out-of-band review requires a published PR with no correction in flight; "
+            f"task is {task.state.value}"
         )
     work = latest_work_attempt(uow, task)
     if work is None:
@@ -234,8 +241,6 @@ def request_review(
     policy = execution.policy_snapshot or {}
     executor = str(policy.get("internal_review", {}).get("executor", "orchestrator_or_crucible"))
     if request.report is not None:
-        if executor == "crucible":
-            raise ForbiddenError("the policy requires a Crucible review execution")
         record_review_report(
             uow,
             clock,
@@ -246,9 +251,11 @@ def request_review(
             reviewer_principal_id=principal.id,
             principal_name=principal.name,
         )
-        # gate_results is fenced to the supervisor (14), so the next tick resolves
-        # internal_review_recorded and moves the task on.
+        # Most reports are out-of-band findings and do not move the task. A report on a
+        # head held for advisory failures lets the next gate tick approve that exception.
         return task
+    if task.state is not TaskState.AWAITING_INTERNAL_REVIEW:
+        raise TransitionNotAllowedError("upload an out-of-band ReviewReportV1 for this PR")
     if executor == "orchestrator":
         raise ForbiddenError("the policy requires an uploaded ReviewReportV1")
     assert request.execution is not None

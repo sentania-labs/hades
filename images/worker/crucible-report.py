@@ -12,8 +12,8 @@ YAML parser.
 
 It mirrors CompletionClaimV1 in crucible/contracts/completion_claim.py, which is what
 Crucible itself parses; tests/unit/test_report_check.py holds the two in agreement.
-The worker writes judgement: summary, acceptance_mapping, the proposed pull request's
-title and body, limitations, risks, blockers and follow_ups. Crucible fills the facts
+The worker writes judgement: summary, self_review, acceptance_mapping, the proposed pull
+request's title and body, limitations, risks, blockers and follow_ups. Crucible fills the facts
 (task_external_id, changed_files, refs, checks, run_evidence) from its own evidence, so
 they are optional here.
 
@@ -48,6 +48,7 @@ REEXEC_MARK = "CRUCIBLE_REPORT_REEXEC"
 FACT_FIELDS = ("task_external_id", "changed_files", "refs", "checks", "run_evidence")
 JUDGEMENT_FIELDS = (
     "summary",
+    "self_review",
     "acceptance_mapping",
     "proposed_pull_request",
     "limitations",
@@ -59,6 +60,7 @@ LIST_FIELDS = ("limitations", "risks", "blockers", "follow_ups")
 DISPOSITION_KEYS = ("review_comment_id", "disposition", "commit", "reason")
 STATUSES = ("met", "not_met", "not_exercised", "partial")
 MAPPING_KEYS = ("id", "status", "evidence")
+SELF_REVIEW_KEYS = ("documentation", "acceptance_criteria", "omissions")
 PULL_REQUEST_KEYS = ("title", "body", "closes")
 REFS_KEYS = ("branch", "head_sha", "commits")
 CHECK_KEYS = ("id", "command", "exit", "log")
@@ -299,6 +301,76 @@ def check(
         problems.append("summary is missing: say in a few sentences what you changed and why.")
     elif not (isinstance(summary, str) and summary.strip()):
         problems.append("summary must be text saying what you changed and why.")
+
+    self_review = document.get("self_review")
+    if self_review is None:
+        problems.append(
+            "self_review is missing: name the documentation updated, map every acceptance "
+            "criterion with evidence, and list anything knowingly left out and why."
+        )
+    elif not isinstance(self_review, dict):
+        problems.append(
+            "self_review must be a mapping of documentation, acceptance_criteria and omissions."
+        )
+    else:
+        for key in sorted(str(k) for k in self_review if k not in SELF_REVIEW_KEYS):
+            problems.append(f"self_review.{key} is not a field: remove it.")
+        for name in ("documentation", "omissions"):
+            if name not in self_review:
+                problems.append(
+                    f"self_review.{name} is missing: write a list, `[]` when there are none."
+                )
+            elif not _is_str_list(self_review[name]):
+                problems.append(f"self_review.{name} must be a list of text items.")
+        if self_review.get("documentation") == []:
+            problems.append(
+                "self_review.documentation must say where docs changed or why none changed."
+            )
+        for name in ("documentation", "omissions"):
+            notes = self_review.get(name)
+            if isinstance(notes, list) and any(
+                isinstance(note, str) and not note.strip() for note in notes
+            ):
+                problems.append(f"self_review.{name} notes must not be blank.")
+        if "acceptance_criteria" not in self_review:
+            problems.append(
+                "self_review.acceptance_criteria is missing: map every acceptance criterion with evidence."
+            )
+        else:
+            reviewed = _mapping_entries(self_review["acceptance_criteria"], problems)
+            if any(
+                not str(entry.get("evidence") or "").strip()
+                for entry in reviewed
+                if isinstance(entry, dict)
+            ):
+                problems.append(
+                    "self_review.acceptance_criteria must give evidence for every acceptance criterion."
+                )
+            ids = [
+                entry.get("id")
+                for entry in reviewed
+                if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+            ]
+            if len(ids) != len(set(ids)):
+                problems.append(
+                    "self_review.acceptance_criteria must map each criterion exactly once."
+                )
+            reviewed_ids = {
+                str(entry.get("id"))
+                for entry in reviewed
+                if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+            }
+            if criteria is not None:
+                for criterion in criteria:
+                    if criterion not in reviewed_ids:
+                        problems.append(
+                            f"acceptance criterion {criterion} has no entry in self_review.acceptance_criteria."
+                        )
+                for extra in sorted(reviewed_ids - set(criteria)):
+                    problems.append(
+                        f"self_review.acceptance_criteria has {extra}, which is not an acceptance criterion "
+                        "of this contract: remove it."
+                    )
 
     if "acceptance_mapping" not in document:
         problems.append(

@@ -1,17 +1,20 @@
 """Pre-PR gate evaluation and the task transitions it drives (09, 11).
 
-The evaluators are pure functions in `crucible.domain.gates`. This module supplies them
-with the contract, the policy, and the evidence rows, persists one GateResult per gate,
-and then moves the task: a fail or error on a blocking gate goes to
-`pre_pr_gates_failed`, a pending internal review goes to `awaiting_internal_review`,
-everything else to `gates_passed` and straight on to `awaiting_acceptance`. A failed
-advisory gate stops nothing: it is recorded and named for the reviewer (ADR 0024)."""
+The evaluators are pure functions in `crucible.domain.gates`. Hades persists their
+results, records acceptance when every blocking gate and the worker self-review pass,
+and publishes without an orchestrator review or acceptance call.
+"""
 
 from __future__ import annotations
 
 import logging
 from typing import Any
 
+from crucible.application.acceptance import (
+    PUBLISHED_DELIVERABLES,
+    deliverable_kinds,
+    record_gate_acceptance,
+)
 from crucible.application.transitions import move_task, record_event
 from crucible.application.wakes import create_wake
 from crucible.contracts.wake import WakeReason
@@ -51,17 +54,8 @@ PHASE_PRE_PR = "pre_pr"
 def internal_review_required(
     policy: dict[str, Any], contract: dict[str, Any], role: ExecutionRole
 ) -> bool:
-    """09: a correction needs another internal review only when the correction contract
-    asks for one or the policy requires one for corrections."""
-    review = policy.get("internal_review", {})
-    if not review.get("required", True):
-        return False
-    if role is not ExecutionRole.CORRECT:
-        return True
-    if review.get("required_for_corrections", False):
-        return True
-    correction = contract.get("correction") or {}
-    return bool(correction.get("request_internal_review", False))
+    """The report self-review replaced the pre-publication orchestrator review (#402)."""
+    return False
 
 
 def evidence_items(uow: UnitOfWork, attempt_id: str, task_id: str) -> tuple[EvidenceItem, ...]:
@@ -160,6 +154,14 @@ def reviewer_note(items: list[dict[str, str]]) -> str:
     return " For the reviewer: " + ", ".join(sorted({i["gate"] for i in items})) + "."
 
 
+def _advisory_review_recorded(uow: UnitOfWork, task: Task) -> bool:
+    """Whether an orchestrator has reviewed the current head's advisory findings."""
+    return any(
+        report.head_sha == (task.head_sha or "")
+        for report in uow.review_reports.list_for_task(task.id)
+    )
+
+
 def _unchanged(
     uow: UnitOfWork,
     *,
@@ -204,7 +206,15 @@ def evaluate_and_advance(
     advisory = advisory_gates(gi.policy)
     outcomes = evaluate_pre_pr(gates, gi)
     summary = summarize(outcomes, advisory)
-    if _unchanged(uow, task=task, attempt=attempt, outcomes=outcomes, advisory=advisory):
+    reviewed_advisories = (
+        task.state is TaskState.AWAITING_INTERNAL_REVIEW
+        and bool(summary["for_reviewer"])
+        and _advisory_review_recorded(uow, task)
+    )
+    if (
+        _unchanged(uow, task=task, attempt=attempt, outcomes=outcomes, advisory=advisory)
+        and not reviewed_advisories
+    ):
         # A task waiting for its internal review is re-evaluated on every tick; writing
         # the same answer again would make reconciliation not idempotent (10).
         return outcomes
@@ -267,7 +277,7 @@ def evaluate_and_advance(
             for_reviewer=summary["for_reviewer"],
         )
         return outcomes
-    if verdict is PrePrVerdict.REVIEW:
+    if summary["for_reviewer"] and not reviewed_advisories:
         if task.state is TaskState.REPORTED:
             move_task(
                 uow,
@@ -279,7 +289,8 @@ def evaluate_and_advance(
                 attempt_id=attempt.id,
                 payload={
                     "head_sha": task.head_sha,
-                    "executor": gi.policy.get("internal_review", {}).get("executor"),
+                    "executor": "orchestrator",
+                    "reason": "advisory_gate_failure",
                 },
             )
             create_wake(
@@ -289,7 +300,7 @@ def evaluate_and_advance(
                 reason=WakeReason.INTERNAL_REVIEW_NEEDED,
                 summary=(
                     f"the blocking gates pass on {task.head_sha}; "
-                    "a non-author internal review is required before acceptance."
+                    "an orchestrator review is required for advisory gate failures."
                     + reviewer_note(summary["for_reviewer"])
                 ),
                 task=task,
@@ -311,42 +322,43 @@ def evaluate_and_advance(
         attempt_id=attempt.id,
         payload={"head_sha": task.head_sha, "results": summary["results"]},
     )
+    acceptance = record_gate_acceptance(uow, clock, task=task)
+    kinds = deliverable_kinds(uow, task)
+    destination = (
+        TaskState.PUBLISHING if PUBLISHED_DELIVERABLES & set(kinds) else TaskState.ACCEPTED
+    )
+    event = (
+        EventKind.TASK_PUBLISHING
+        if destination is TaskState.PUBLISHING
+        else EventKind.TASK_ACCEPTED
+    )
     move_task(
         uow,
         clock,
         task,
-        TaskState.AWAITING_ACCEPTANCE,
-        EventKind.TASK_AWAITING_ACCEPTANCE,
+        destination,
+        event,
         execution_id=execution.id,
         attempt_id=attempt.id,
-        payload={"head_sha": task.head_sha},
+        payload={
+            "head_sha": task.head_sha,
+            "acceptance_id": acceptance.id,
+            "deliverables": kinds,
+            "automatic": True,
+        },
     )
-    create_wake(
-        uow,
-        clock,
-        principal_id=task.principal_id,
-        reason=WakeReason.GATES_PASSED,
-        summary=(
-            f"every blocking pre-PR gate passed on {task.head_sha}; "
-            "Foundry's AcceptanceResult is what moves this forward."
-            + reviewer_note(summary["for_reviewer"])
-        ),
-        task=task,
-        attempt_id=attempt.id,
-        extra_links={"accept": f"/v1/tasks/{task.id}/accept"},
-        for_reviewer=summary["for_reviewer"],
-    )
+    if destination is TaskState.ACCEPTED:
+        create_wake(
+            uow,
+            clock,
+            principal_id=task.principal_id,
+            reason=WakeReason.ACCEPTED,
+            summary=("accepted, artifacts are ready; no branch or PR publication was requested."),
+            task=task,
+            attempt_id=attempt.id,
+            extra_links={"artifacts": f"/v1/attempts/{attempt.id}/artifacts"},
+        )
     return outcomes
-
-
-def _review_note(uow: UnitOfWork, task: Task) -> str:
-    """A reviewer that asked for changes does not stop the gate, so the wake says so (11)."""
-    reports = [
-        r for r in uow.review_reports.list_for_task(task.id) if r.head_sha == (task.head_sha or "")
-    ]
-    if any(r.document.get("verdict") == "request_changes" for r in reports):
-        return "the internal review recorded request_changes, which no gate acts on; "
-    return ""
 
 
 def counts_for_metrics(outcomes: dict[str, GateOutcome]) -> tuple[int, int]:
