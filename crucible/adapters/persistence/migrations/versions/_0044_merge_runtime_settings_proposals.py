@@ -1,6 +1,6 @@
 """Merge the credential setting and proposed task migration heads.
 
-Revision ID: 0044_merge_runtime_settings_proposals
+Revision ID: 0044_merge_423_424
 Revises: 0043_credential_mount_mode, 0043_proposed_tasks
 """
 
@@ -15,7 +15,7 @@ from crucible.adapters.persistence.migrations.versions._0043_proposed_tasks impo
     EVENT_KINDS as PROPOSAL_EVENT_KINDS,
 )
 
-revision = "0044_merge_runtime_settings_proposals"
+revision = "0044_merge_423_424"
 down_revision = ("0043_credential_mount_mode", "0043_proposed_tasks")
 branch_labels = None
 depends_on = None
