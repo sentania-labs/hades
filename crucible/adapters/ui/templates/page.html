@@ -45,8 +45,36 @@
   {% elif cell is mapping or (cell is sequence and cell is not string) %}{{ render_panel(panel_from_cell(cell)) }}
   {% else %}{{ safe_value(column, cell) }}{% endif %}
 {%- endmacro %}
+{% macro render_card(card, column) -%}
+      <a class="admin-kanban-card{% if card.age.late %} admin-kanban-card--late{% endif %}" href="{{ card.href }}">
+        <span class="admin-kanban-card-title">{{ safe_value("title", card.title) }}</span>
+        <span class="admin-kanban-card-id">{{ safe_value("external_id", card.external_id) }}</span>
+        <span class="admin-kanban-card-foot">
+          <span class="admin-chip admin-chip--{{ card.holder.kind }}"{% if card.holder.detail %} title="{{ safe_value("detail", card.holder.detail) }}"{% endif %}>{{ safe_value("holder", card.holder.label) }}</span>
+          <span class="admin-kanban-age{% if card.age.late %} admin-kanban-age--late{% endif %}" title="In {{ column.name }} since {{ card.age.entered_at }}">{{ card.age.label }}</span>
+        </span>
+        {% if card.holder.detail %}<span class="admin-hint">{{ safe_value("detail", card.holder.detail) }}</span>{% endif %}
+      </a>
+{%- endmacro %}
+{% macro render_kanban(columns) -%}
+  <div class="admin-kanban" role="list" aria-label="Board columns">
+    {% for column in columns %}
+    <section class="admin-kanban-column{% if column.reserved %} admin-kanban-column--reserved{% endif %}" role="listitem" data-column="{{ column.key }}" aria-label="{{ column.name }}">
+      <header class="admin-kanban-head"><h3>{{ column.name }}</h3><span class="admin-kanban-count">{{ column.count }}</span></header>
+      {% if column.note %}<p class="admin-hint">{{ column.note }}</p>{% endif %}
+      {% for group in column.parents %}
+      {% if group.parent_external_id %}<div class="admin-kanban-parent"><div class="admin-kanban-parent-head">{% if group.href %}<a href="{{ group.href }}">{{ safe_value("parent", group.parent_external_id) }}</a>{% else %}{{ safe_value("parent", group.parent_external_id) }}{% endif %}</div>
+        {% for card in group.tasks %}{{ render_card(card, column) }}{% endfor %}</div>
+      {% else %}{% for card in group.tasks %}{{ render_card(card, column) }}{% endfor %}{% endif %}
+      {% endfor %}
+      {% if not column.parents and not column.reserved %}<p class="admin-empty">{{ column.empty or "No tasks here." }}</p>{% endif %}
+    </section>
+    {% endfor %}
+  </div>
+{%- endmacro %}
 {% macro render_section_body(section) -%}
     {% if section.note %}<p class="lat-hint">{{ section.note }}</p>{% endif %}
+    {% if section.kanban is defined %}{{ render_kanban(section.kanban) }}{% endif %}
     {% if section.button %}<p><a class="lat-btn lat-btn--primary" href="{{ section.button.href }}"{% if not section.button.href.startswith('/ui') %} rel="noopener noreferrer"{% endif %}>{{ section.button.label }}</a></p>{% endif %}
     {% if section.rows is defined %}
       {% if section.rows %}<div class="admin-table-wrap lat-table-scroll"><table class="admin-table lat-table"><thead><tr>{% for column in section.columns %}<th>{{ column }}</th>{% endfor %}</tr></thead><tbody>

@@ -10,10 +10,30 @@ without Foundry.
 ## Board
 
 The read-only Board is next to Tasks in the administration navigation. It leads
-with every non-terminal task, grouped by what it waits on and then by its parent
-external ID. A task row links to the full task page and shows its closing issues,
-current route, state age, newest pending wake, pull request and CI state,
-corrections, and elapsed attempt time against the attempt timeout.
+with a kanban (hades #334): one column per lifecycle stage, left to right,
+Queued, Running, Awaiting Foundry, Awaiting Codex, Awaiting CI, Ready to merge,
+Blocked or failed, and Done in the last 24 hours, with one position before Queued
+reserved for the Proposed state of hades #424 and empty until that lands. Every
+open task is one card, in the column for its state: the title, the external ID
+small, a chip for who holds the ball (the worker with its harness and model,
+Foundry, Codex, CI, the operator for a wake or a decision, or Hades between
+waits) and the time since the card entered its column. The age is read from the
+task's transition events, which are written in the same transaction as the state
+change, so a card that went submitted then scheduled has been Queued since it was
+submitted. The age colours after 30 minutes in Awaiting Foundry or Awaiting
+Codex and after the policy's CI budget (`ci_certification.wait_timeout_hours`,
+default 6 hours) in Awaiting CI. An open escalation moves a card to Awaiting
+Foundry. Nothing is dragged; Hades moves cards as states change, and the page is
+a projection over the task, event, wake and policy tables with no table of its
+own. Child tasks stay nested under their parent external ID inside the column,
+and the whole card links to the task page. The columns are a strip that scrolls
+sideways, one column to a phone screen.
+
+Under the kanban, the earlier list is still there behind "Show the task list":
+every non-terminal task as a table row, grouped by what it waits on and then by
+its parent external ID, linking to the full task page and showing its closing
+issues, current route, state age, newest pending wake, pull request and CI
+state, corrections, and elapsed attempt time against the attempt timeout.
 
 Routing expands the ordered candidates recorded on the current attempt, including
 busy candidates skipped before the selected route. Tokens follow with both
