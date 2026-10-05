@@ -169,6 +169,13 @@ recorded only after the correction attempt succeeds.
 - `required_verification` includes every command the repository policy's
   `repository.required_checks` lists (05b); missing ones are a 422 naming
   the check.
+- No `required_verification` command needs `docker`, `kind` or `kubectl`
+  (hades #429): no worker image has them (ADR 0020), so such a check could
+  only fail `verification_ran`. The contract model refuses a command that
+  names one of them as a word (`docker compose up`, `/usr/bin/kubectl`,
+  `sudo kind create cluster`) or runs a `make` target with one as a component
+  of its name (`make deploy-kind`, `make e2e-kind`), with a reason naming the
+  program. The tiers that need them are CI's (CONTRIBUTING.md).
 - `policy` exists and is not retired; `lifecycle.max_attempts` within it.
 - `execution_request` names no model, harness, or image. At submit the
   advisory check is that the routing policy has at least one selectable
