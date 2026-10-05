@@ -31,6 +31,19 @@ run that is taking turns is not stalled while it works silently; for AGY, and a
 Hermes foreground command that writes nothing, the stall limit counts their
 silent commands as before.
 
+A worker in a degenerate run is ended as a stall too, without waiting for
+`stall_fail_seconds` (issue 278; how each harness reports it is in 07): the same
+command started 8 times in a row, or, on a local endpoint, no tool call 300 seconds
+after the harness's turn began. The attempt is drained on the tick that sees it,
+with termination reason `stall`, so it is `stalled` as above. The attempt also
+records `stall_shape` and `termination_detail`: the shape is `loop:wait` (a shell
+`wait`), `loop:empty_command` (a command with nothing in it once its shell wrapper is
+off), `loop:command` (any other repeated command) or `no_activity`, so quality
+feedback can count it; the detail names the repeated command. Both are on the
+`attempt_timeout_drain` and `worker_stalled` events, the attempt view and the
+`exit_info` evidence, and the failure wake quotes the detail. A stall at the time
+limit records neither.
+
 Retry is never a way to re-roll the worker's judgment. A class retries only
 when it is in both the policy's `retry.eligible_classes` and the contract's
 `retry_on`. Each retry is a new attempt with the same contract version and a
