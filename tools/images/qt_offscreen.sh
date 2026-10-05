@@ -67,12 +67,20 @@ if ! $docker run "${pod[@]}" -w /work --network none -e QT_QPA_PLATFORM=offscree
     --entrypoint sh "$image" -c '
     set -eu
     qt=/work/venv/lib/python3.12/site-packages/PySide6/Qt
-    missing=$(ldd "$qt/lib/libQt6Gui.so.6" "$qt/plugins/platforms/libqoffscreen.so" | grep "not found" || true)
-    if [ -n "$missing" ]; then
-        echo "shared libraries missing from the image:" >&2
-        echo "$missing" >&2
-        exit 1
-    fi
+    for library in "$qt/lib/libQt6Gui.so.6" "$qt/plugins/platforms/libqoffscreen.so"; do
+        if ! dependencies=$(ldd "$library" 2>&1); then
+            echo "ldd failed for $library:" >&2
+            echo "$dependencies" >&2
+            exit 1
+        fi
+        printf "%s\n" "$dependencies"
+        case "$dependencies" in
+            *"not found"*)
+                echo "shared libraries missing from $library" >&2
+                exit 1
+                ;;
+        esac
+    done
     exec /work/venv/bin/python -c "from PySide6.QtWidgets import QApplication; QApplication([])"
 '; then
     echo "qt_offscreen.sh: QApplication([]) with QT_QPA_PLATFORM=offscreen fails inside $image" >&2

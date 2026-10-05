@@ -190,7 +190,12 @@ Rules:
   `make images-qt-offscreen-check` (`tools/images/qt_offscreen.sh`), which
   installs PySide6 into a venv inside the worker image and fails unless
   `QApplication([])` exits 0 there with `QT_QPA_PLATFORM=offscreen`, as uid
-  1000 on a read-only root with no network (hades #430). Pull requests import a BuildKit
+  1000 on a read-only root with no network (hades #430). Before starting Qt, it
+  runs `ldd` separately on `libQt6Gui.so.6` and `libqoffscreen.so`, logs each
+  dependency list, and fails on either an `ldd` error or an unresolved library.
+  PySide6 6.11.2 links no xcb helpers through these two libraries; `libxcb1`
+  is needed through `libX11`, while xcb helpers belong to the xcb platform
+  plugin. Pull requests import a BuildKit
   layer cache; every push to main builds from scratch before exporting it.
 - **CI owns the digest lines** (`WORKER_DIGEST`, `SCRIPT_HARNESS_DIGEST`,
   every `*_DIGEST` line of `images/manifest.env`; the operator's decision,

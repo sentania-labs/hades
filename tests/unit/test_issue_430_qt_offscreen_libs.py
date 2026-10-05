@@ -18,6 +18,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPOSITORY = Path(__file__).resolve().parents[2]
 PINS = REPOSITORY / "images" / "pins.env"
 DOCKERFILE = REPOSITORY / "images" / "worker" / "Dockerfile"
@@ -190,3 +192,40 @@ def test_the_check_fails_when_the_install_does_not_complete(tmp_path: Path) -> N
     assert result.returncode == 1
     assert "installing PySide6-Essentials" in result.stderr
     assert "the only networked step" in result.stderr
+
+
+@pytest.mark.parametrize("library", ["libQt6Gui.so.6", "libqoffscreen.so"])
+@pytest.mark.parametrize("failure", ["ldd_error", "missing_library"])
+def test_the_check_rejects_failed_dependency_inspection(
+    tmp_path: Path, library: str, failure: str
+) -> None:
+    # Execute the actual container shell body, so a successful grep or a second
+    # ldd invocation cannot hide the first library inspection failing.
+    result, calls = _run(tmp_path)
+    assert result.returncode == 0
+    start = next(c for c in calls if any("QApplication([])" in word for word in c))
+    ldd = tmp_path / "ldd"
+    ldd.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        f"  */{library})\n"
+        + (
+            '    echo "cannot inspect library" >&2; exit 1 ;;\n'
+            if failure == "ldd_error"
+            else '    echo "libGL.so.1 => not found"; exit 0 ;;\n'
+        )
+        + '  *) echo "libGL.so.1 => /lib/libGL.so.1" ;;\nesac\n',
+        encoding="utf-8",
+    )
+    ldd.chmod(0o755)
+    inspected = subprocess.run(
+        ["sh", "-c", start[-1]],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
+    )
+    assert inspected.returncode == 1
+    expected = "ldd failed for" if failure == "ldd_error" else "shared libraries missing from"
+    assert expected in inspected.stderr
+    assert library in inspected.stderr
