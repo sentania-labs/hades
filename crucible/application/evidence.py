@@ -334,6 +334,8 @@ def record_collection_evidence(
             "exit_code": attempt.exit_code,
             "exit_class": attempt.exit_class.value if attempt.exit_class else None,
             "termination_reason": attempt.termination_reason,
+            "stall_shape": attempt.stall_shape,
+            "termination_detail": attempt.termination_detail,
         },
     )
     claim_artifact_id: str | None = None

@@ -24,9 +24,7 @@ def test_the_sample_config_keeps_read_only_adapters_read_only() -> None:
             continue
         if spec.minimum_mode is MountMode.RO:
             checked.add(adapter.name)
-            assert entry["mount_mode"] == "ro", (
-                f"{adapter.name}: sample says {entry['mount_mode']!r}, adapter is read-only"
-            )
+            assert "mount_mode" not in entry
     # Claude Code's minimum became read-only in PR 307; the test must not pass by
     # finding nothing to check (Codex review of PR 323).
     assert "claude_code" in checked

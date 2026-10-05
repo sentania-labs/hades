@@ -39,6 +39,7 @@ class GateName(StrEnum):
     SCOPE_CONTAINED = "scope_contained"
     NO_INJECTED_FILES = "no_injected_files"
     NO_SECRETS = "no_secrets"
+    EDITOR_LEFTOVERS = "editor_leftovers"
     VERIFICATION_RAN = "verification_ran"
     RUN_EVIDENCE_PRESENT = "run_evidence_present"
     CRITERIA_MAPPED = "criteria_mapped"
@@ -73,6 +74,7 @@ PRE_PR_GATES: frozenset[str] = frozenset(
         GateName.SCOPE_CONTAINED,
         GateName.NO_INJECTED_FILES,
         GateName.NO_SECRETS,
+        GateName.EDITOR_LEFTOVERS,
         GateName.VERIFICATION_RAN,
         GateName.RUN_EVIDENCE_PRESENT,
         GateName.CRITERIA_MAPPED,
@@ -587,6 +589,72 @@ def no_secrets(gi: GateInput) -> GateOutcome:
     )
 
 
+# Editor and merge leftover name patterns (issue 362).
+EDITOR_LEFTOVERS_PATTERN: re.Pattern[str] = re.compile(
+    r"(?:\.bak|\.orig|\.rej|\~)$|\.swp|(?:^|/)\.\#"
+)
+
+
+def _editor_leftover_path(path: str) -> bool:
+    """Return True when *path* matches an editor or merge leftover name.
+
+    Covers common patterns: *.bak, *.orig, *.rej, *~, .*.swp, .#* and friends.
+    """
+    return bool(EDITOR_LEFTOVERS_PATTERN.search(path))
+
+
+def _diff_change_status(item: EvidenceItem) -> dict[str, str] | None:
+    """Return a mapping of path -> status from diff_paths ``changes``, or None."""
+    changes = item.payload.get("changes")
+    if not changes:
+        return None
+    result: dict[str, str] = {}
+    for c in changes:
+        if isinstance(c, dict) and "path" in c and "status" in c:
+            result[c["path"]] = c["status"]
+    return result if result else None
+
+
+def editor_leftovers(gi: GateInput) -> GateOutcome:
+    """Fail when the diff adds editor or merge leftover files.
+
+    Patterns: *.bak, *.orig, *.rej, *~, .*.swp, .#* and similar.
+    Only newly added files (status ``A``) are checked. A leftover that
+    exists on the base and is only edited or deleted does not fail.
+    When change-status information is unavailable the gate conservatively
+    falls back to all paths (the evidence did not include ``changes``).
+
+    The failure always blocks so an advisory ``scope_contained`` gate
+    still stops the task.
+    """
+    item = gi.one("diff_paths")
+    if item is None:
+        return _missing("diff_paths")
+    paths = [str(p) for p in item.payload.get("paths", [])]
+
+    # Determine which paths were newly added (status "A").
+    change_status = _diff_change_status(item)
+    if change_status is not None:
+        added: set[str] = {p for p, s in change_status.items() if s == "A"}
+        leftovers = [p for p in paths if _editor_leftover_path(p) and p in added]
+    else:
+        # No change-status information: fall back to all paths.
+        leftovers = [p for p in paths if _editor_leftover_path(p)]
+
+    if leftovers:
+        return GateOutcome(
+            GateResult.FAIL,
+            f"editor or merge leftovers in the diff: {', '.join(sorted(leftovers))}",
+            (item.id,),
+            always_blocks=True,
+        )
+    return GateOutcome(
+        GateResult.PASS,
+        f"no editor or merge leftovers among {len(paths)} changed path(s)",
+        (item.id,),
+    )
+
+
 def run_evidence_present(gi: GateInput) -> GateOutcome:
     harness_evidence = gi.one("artifact_present", role="harness_run_evidence")
     if harness_evidence is not None and not harness_evidence.payload.get("parsed_ok", False):
@@ -894,6 +962,7 @@ PRE_PR_EVALUATORS: dict[str, Callable[[GateInput], GateOutcome]] = {
     GateName.SCOPE_CONTAINED: scope_contained,
     GateName.NO_INJECTED_FILES: no_injected_files,
     GateName.NO_SECRETS: no_secrets,
+    GateName.EDITOR_LEFTOVERS: editor_leftovers,
     GateName.VERIFICATION_RAN: verification_ran,
     GateName.RUN_EVIDENCE_PRESENT: run_evidence_present,
     GateName.CRITERIA_MAPPED: criteria_mapped,

@@ -664,6 +664,8 @@ class Attempts:
             effective_settings=(
                 dict(row.effective_settings) if row.effective_settings is not None else None
             ),
+            stall_shape=row.stall_shape,
+            termination_detail=row.termination_detail,
         )
 
     def add(self, attempt: Attempt) -> None:
@@ -702,6 +704,8 @@ class Attempts:
                 resume_from_remote=attempt.resume_from_remote,
                 routing_version=attempt.routing_version,
                 effective_settings=attempt.effective_settings,
+                stall_shape=attempt.stall_shape,
+                termination_detail=attempt.termination_detail,
             )
         )
         self._s.flush()
@@ -745,6 +749,8 @@ class Attempts:
                 resume_from_remote=attempt.resume_from_remote,
                 routing_version=attempt.routing_version,
                 effective_settings=attempt.effective_settings,
+                stall_shape=attempt.stall_shape,
+                termination_detail=attempt.termination_detail,
             )
         )
 
