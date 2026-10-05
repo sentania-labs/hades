@@ -246,7 +246,9 @@ seed, then the application default. Settings shows the effective value, `saved`,
 
 `credentials.<harness>.mount_mode` is edited on Credentials and applies at the next
 launch. The three modes are `ro`, `rw-narrow`, and `renewer`; the harness declaration
-may forbid a mode. A running attempt keeps the mode captured when it launched. Harness
+may forbid a mode. Read-only declarations, including Claude Code, refuse both
+`rw-narrow` and `renewer`; Codex allows `renewer` and its serial `rw-narrow` fallback.
+A running attempt keeps the mode captured when it launched. Harness
 enablement and its reason are edited only on Harnesses and apply immediately. Their old
 environment entries remain seeds for upgrade compatibility, not deployment controls.
 

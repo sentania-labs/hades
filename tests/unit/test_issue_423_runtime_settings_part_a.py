@@ -84,14 +84,27 @@ def test_saved_mode_changes_policy_validation_and_is_audited() -> None:
         )
 
 
-def test_harness_declaration_refuses_an_unsupported_mode() -> None:
+def test_claude_code_defaults_to_read_only_without_a_saved_setting() -> None:
     ctx, uow = _context()
-    with pytest.raises(ContractValidationError, match="does not support renewer"):
+    value = mount_mode_value(ctx, uow, "claude_code")
+    assert value.value == "ro"
+    assert value.source == "default"
+    assert value.applies == "next launch"
+    assert uow.provider_settings.rows == {}
+
+
+@pytest.mark.parametrize("mode", ["rw-narrow", "renewer"])
+def test_harness_declaration_refuses_an_unsupported_mode(mode: str) -> None:
+    """hades#308: Claude Code must not get writable credentials through admin settings."""
+    ctx, uow = _context()
+    with pytest.raises(ContractValidationError, match=f"does not support {mode}"):
         set_mount_mode(
             ctx,
             uow,
             principal="admin",
             harness="claude_code",
-            mode="renewer",
+            mode=mode,
             reason="try it",
         )
+    assert uow.provider_settings.rows == {}
+    assert mount_mode_value(ctx, uow, "claude_code").value == "ro"

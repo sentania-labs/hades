@@ -136,7 +136,7 @@ def set_mount_mode(
     allowed = (
         {MountMode.RENEWER, MountMode.RW_NARROW}
         if spec.minimum_mode is MountMode.RENEWER
-        else {MountMode.RO, MountMode.RW_NARROW}
+        else {MountMode.RO}
         if spec.minimum_mode is MountMode.RO
         else {MountMode.RW_NARROW}
     )
