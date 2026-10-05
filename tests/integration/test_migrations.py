@@ -1532,3 +1532,26 @@ def test_0035_to_head_upgrades_a_populated_database(database_url: str) -> None:
             )
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "head",
+    ["0044_attempt_stall_shape", "0044_editor_leftovers_policy", "0044_merge_423_424"],
+)
+def test_each_0044_head_upgrades_through_the_0045_merge(database_url: str, head: str) -> None:
+    """FDY-0385: PRs 426, 438 and 441 each added a 0044 head. A database standing on any
+    one of them reaches the single 0045 merge head with no drift."""
+    migrate.downgrade(database_url, head)
+    engine = make_engine(database_url)
+    try:
+        with engine.connect() as conn:
+            versions = {
+                row[0] for row in conn.execute(text("SELECT version_num FROM alembic_version"))
+            }
+        assert versions == {head}
+        migrate.upgrade(database_url)
+        assert migrate.current_revision(engine) == "0045_merge_0044_heads"
+        ok, detail = migrate.is_current(engine, database_url)
+        assert ok, detail
+    finally:
+        engine.dispose()
