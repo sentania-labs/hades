@@ -393,7 +393,7 @@ a different shape there. `deploy/kubernetes` is the manifests and
 |---|---|
 | the socket proxy, and the create-request policy behind it | no Docker socket at all; Pod Security admission at `restricted` on `crucible-workers` is the enforcement, and the namespaced ServiceAccount is the authority (26) |
 | the egress proxy with a hostname allowlist | one NetworkPolicy per attempt per role that needs egress, over a namespace default deny (26) |
-| the credential root, a directory per harness, created 0700 before start | one Secret per harness in `crucible-workers`, readable only by the supervisor's account; `credentials.<harness>.path` is not set at all, only `mount_mode` |
+| the credential root, a directory per harness, created 0700 before start | one Secret per harness in `crucible-workers`, readable only by the supervisor's account; mount mode is chosen on Credentials |
 | `crucible serve --all` in one container | `--api` and `--supervisor` in two Deployments, the supervisor at one replica with the same database lease |
 
 The artifact root is the one thing that gets harder rather than simpler: it is

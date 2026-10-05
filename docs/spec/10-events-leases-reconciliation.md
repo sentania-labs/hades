@@ -103,7 +103,9 @@ the checkout, the report directory and the home, no more often than a
 `command_running` renewal (FDY-0140). The supervisor derives worker state:
 any signal within `stall_warn_seconds` is `alive`; none within
 `stall_fail_seconds` is `stalled`. Defaults: 300 s warn, 1800 s fail,
-overridable per policy. A worker that emits progress lines but changes
+overridable per policy. A worker the live log shows in a command loop, or on a
+local endpoint with no tool call before its first-response deadline, is `stalled`
+on the tick that sees it, whatever its signals (16, issue 278). A worker that emits progress lines but changes
 nothing for the fail window is still stalled; progress lines are unverified.
 
 ## Timeouts

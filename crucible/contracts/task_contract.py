@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import posixpath
+import shlex
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -103,11 +104,95 @@ class AcceptanceCriterion(StrictModel):
     text: str = Field(min_length=1)
 
 
+# hades #429: the programs no worker image has and never will (ADR 0020: the worker
+# image carries the project's check toolchain, no Docker daemon, no cluster). A required
+# check that needs one of them could only ever fail `verification_ran`, so the contract
+# is refused at validation and the reason names the program. The tiers that need them
+# (the compose smoke, e2e, e2e-kind, image builds and digests) are CI's.
+WORKER_ABSENT_PROGRAMS: tuple[str, ...] = ("docker", "kind", "kubectl")
+
+_SHELL_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "(", ")"})
+_SHELL_PROGRAMS = frozenset({"sh", "bash", "dash", "ash", "ksh", "zsh"})
+
+
+def _shell_command(words: list[str]) -> str | None:
+    """Find the literal command argument of a shell's -c option."""
+    index = 0
+    while index < len(words):
+        option = words[index]
+        if option == "--" or not option.startswith("-"):
+            return None
+        if option == "--command" or (not option.startswith("--") and "c" in option[1:]):
+            return words[index + 1] if index + 1 < len(words) else None
+        # These options consume an argument before the next shell option.
+        index += 2 if option in {"-o", "-O", "--rcfile", "--init-file"} else 1
+    return None
+
+
+def _program_name(word: str) -> str:
+    """`/usr/local/bin/docker` and `docker` are the same program; `docker-compose` is
+    the Docker CLI too."""
+    name = word.rsplit("/", 1)[-1]
+    return name.split("-", 1)[0] if name.startswith("docker-") else name
+
+
+def worker_absent_program(command: str) -> str | None:
+    """The program among WORKER_ABSENT_PROGRAMS the command needs, or None.
+
+    Two readings of the command line, both deliberately plain: a word that is one of
+    the programs (`docker compose up`, `kubectl apply`, `sudo kind create cluster`),
+    and a `make` target whose name carries one as a component (`make deploy-kind`,
+    `make e2e-kind`), since a target named for kind runs kind. Flags, assignments and
+    paths are not programs: `pytest tests/unit/test_kind.py` and `--kind=x` pass.
+    Literal shell -c command strings are inspected at each nesting level; ordinary
+    quoted arguments remain data. This does not resolve variables or script files."""
+    pending = [command]
+    while pending:
+        source = pending.pop()
+        try:
+            lexer = shlex.shlex(source, posix=True, punctuation_chars=";&|()")
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            words = list(lexer)
+        except ValueError:
+            words = source.split()
+        after_make = False
+        for index, word in enumerate(words):
+            if word in _SHELL_SEPARATORS:
+                after_make = False
+                continue
+            name = _program_name(word)
+            if name in WORKER_ABSENT_PROGRAMS:
+                return name
+            if name in _SHELL_PROGRAMS:
+                nested = _shell_command(words[index + 1 :])
+                if nested is not None:
+                    pending.append(nested)
+            if after_make and not word.startswith("-") and "=" not in word:
+                for part in word.replace("_", "-").split("-"):
+                    if part in WORKER_ABSENT_PROGRAMS:
+                        return part
+            after_make = after_make or name == "make"
+    return None
+
+
 class CommandVerification(StrictModel):
     id: str = Field(min_length=1)
     kind: Literal["command"] = "command"
     command: str = Field(min_length=1)
     expect_exit: int = 0
+
+    @model_validator(mode="after")
+    def _runs_in_a_worker(self) -> CommandVerification:
+        program = worker_absent_program(self.command)
+        if program is not None:
+            raise ValueError(
+                f"required_verification {self.id} runs `{self.command}`, which needs "
+                f"{program}: no worker image has docker, kind or kubectl (ADR 0020). The "
+                "compose smoke, e2e, e2e-kind and image tiers are CI's, not a check a "
+                "worker runs."
+            )
+        return self
 
 
 class ArtifactVerification(StrictModel):

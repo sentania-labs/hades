@@ -209,20 +209,11 @@ services:
       CRUCIBLE_GITHUB__PUBLISHER_NETWORK: crucible-publish
       CRUCIBLE_GITHUB__PUBLISHER_EGRESS_PROXY: http://publish-proxy:3128
       # The harness credentials (12): one directory per harness under the root mounted
-      # below, referenced by path, never by value. The mount mode is the adapter's
-      # minimum unless raised here (25 step 7).
+      # below, referenced by path, never by value. Mount mode is chosen on Credentials.
       CRUCIBLE_CREDENTIALS__CLAUDE_CODE__PATH: /var/lib/crucible/credentials/claude_code
       CRUCIBLE_CREDENTIALS__CODEX__PATH: /var/lib/crucible/credentials/codex
       CRUCIBLE_CREDENTIALS__AGY__PATH: /var/lib/crucible/credentials/agy
       CRUCIBLE_CREDENTIALS__HERMES__PATH: /var/lib/crucible/credentials/hermes
-      # 25 and S1b: a harness ships disabled until its dedicated session and its
-      # daily-session compatibility are verified. Claude Code and AGY are verified; Codex
-      # waits on its Crucible-side refresh (S1b step 5). Enable by configuration here and
-      # by `crucible admin harnesses enable` (C5b) once verified.
-      CRUCIBLE_HARNESSES__CODEX__ENABLED: "${CRUCIBLE_HARNESS_CODEX_ENABLED:-false}"
-      CRUCIBLE_HARNESSES__CODEX__REASON: "unverified: Crucible-side refresh not yet observed (S1b step 5)"
-      CRUCIBLE_HARNESSES__AGY__ENABLED: "${CRUCIBLE_HARNESS_AGY_ENABLED:-true}"
-      CRUCIBLE_HARNESSES__AGY__REASON: "session_compatibility verified (S1b steps 5 and 6, 2026-09-17)"
     volumes:
       - crucible-artifacts:/var/lib/crucible/artifacts
       # The credential root (12, 25), on this container only. Ordinary workers receive

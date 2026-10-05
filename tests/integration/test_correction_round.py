@@ -14,6 +14,7 @@ from crucible.adapters.api.app import create_app
 from crucible.adapters.api.deps import AppContext
 from crucible.adapters.execution.fake import FakeProvider
 from crucible.application.supervisor import Supervisor
+from crucible.contracts.task_contract import TaskContractV1
 from crucible.domain.gates import GateName
 from tests.integration.conftest import (
     ARTIFACTS_DELIVERABLE,
@@ -319,8 +320,10 @@ async def test_a_proof_affecting_amendment_in_awaiting_acceptance_is_refused(
     else:
         document[field] = [
             *document[field],
-            {"id": "V5", "command": "make e2e", "expect_exit": 0, "kind": "command"},
+            {"id": "V5", "command": "make test-unit", "expect_exit": 0, "kind": "command"},
         ]
+    # Keep the replacement valid so the refusal exercises the amendment rule.
+    TaskContractV1.model_validate(document)
     r = client.post(f"/v1/tasks/{task_id}/amend", json={"contract": document, "reason": "x"})
     assert r.status_code == 422
     assert any(e["path"] == field for e in r.json()["errors"])
