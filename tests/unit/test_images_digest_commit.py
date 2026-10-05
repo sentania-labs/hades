@@ -683,6 +683,26 @@ def test_the_privileged_workflow_executes_only_the_default_branchs_script() -> N
     assert "gh workflow run ci.yml" in dispatch["run"]
 
 
+def test_job_level_env_uses_only_contexts_github_accepts_there() -> None:
+    # GitHub rejected run 37244945865: jobs.<id>.env may not read runner (nor steps or
+    # job); only github, needs, strategy, matrix, vars, secrets and inputs exist there.
+    allowed = {"github", "needs", "strategy", "matrix", "vars", "secrets", "inputs"}
+    for path in (CI, DIGEST_WORKFLOW):
+        for name, job in load_workflow(path)["jobs"].items():
+            for key, value in (job.get("env") or {}).items():
+                for expression in re.findall(r"\$\{\{(.*?)\}\}", str(value)):
+                    contexts = set(re.findall(r"(?<![\w.])([a-z_]+)\.", expression))
+                    assert contexts <= allowed, (path.name, name, key, expression)
+
+
+def test_the_artifact_dir_lies_in_the_workspace_outside_both_checkouts() -> None:
+    env = digest_job()["env"]
+    assert env["ARTIFACT_DIR"] == "${{ github.workspace }}/images-digests"
+    for checkout in (env["TRUSTED"], env["CHECKOUT"]):
+        assert not env["ARTIFACT_DIR"].startswith(checkout + "/")
+        assert not checkout.startswith(env["ARTIFACT_DIR"] + "/")
+
+
 def test_the_trusted_checkout_carries_the_script_the_workflow_calls() -> None:
     trusted = digest_job()["steps"][0]
     assert trusted["with"]["sparse-checkout"] == "tools/images/digest_commit.py"
