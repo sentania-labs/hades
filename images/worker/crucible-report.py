@@ -109,6 +109,25 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ),
 ]
 
+# The closing-keyword and at-mention regexes that publication.py's validate_title
+# uses.  Copied here so the standalone checker enforces the same rules (hades #314).
+_CLOSING_KEYWORDS: tuple[str, ...] = (
+    "close",
+    "closes",
+    "closed",
+    "fix",
+    "fixes",
+    "fixed",
+    "resolve",
+    "resolves",
+    "resolved",
+)
+CLOSING_RE = re.compile(
+    r"\b(" + "|".join(_CLOSING_KEYWORDS) + r")\b(\s*:?\s*)(?=(?:[\w.-]+/[\w.-]+)?#\d+|https?://)",
+    re.IGNORECASE,
+)
+MENTION_RE = re.compile(r"(?<!\w)@(?=[A-Za-z0-9][\w-]*)")
+
 
 def _glob_re(pattern: str) -> re.Pattern[str]:
     """Return a compiled regex that matches * at one level and ** at any depth."""
@@ -409,6 +428,24 @@ def check(
         title = pull_request.get("title")
         if not (isinstance(title, str) and title):
             problems.append("proposed_pull_request.title must be a one-line title, as text.")
+        else:
+            clean_title = " ".join(title.split())
+            if not clean_title:
+                problems.append("proposed_pull_request.title must be a one-line title, as text.")
+            elif "\n" in title.strip() or "\r" in title.strip():
+                problems.append("a pull request title is one line")
+            else:
+                if CLOSING_RE.search(clean_title):
+                    problems.append(
+                        "the proposed title carries a closing keyword; only "
+                        "deliverables[].closes may close an issue (23)"
+                    )
+                if MENTION_RE.search(clean_title):
+                    problems.append(
+                        "the proposed title carries an at-mention; a mention "
+                        "notifies people and can trigger the external reviewer "
+                        "under Crucible's identity (23)"
+                    )
         if not isinstance(pull_request.get("body"), str):
             problems.append("proposed_pull_request.body must be text.")
         if "closes" in pull_request and not _is_str_list(pull_request["closes"]):
