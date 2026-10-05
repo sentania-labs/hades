@@ -355,6 +355,25 @@ that failed reads against what the worker could reach before it started,
 and is attributed to the egress path or to the worker accordingly. An attempt
 with no allowlisted host is not wrapped for the probe and records nothing.
 
+The line is the worker's word, and the worker is untrusted (S4), so the
+supervisor believes it only so far. A marker line from an attempt that runs
+no probe (the policy's network mode or the contract's network is `none`) is
+ignored and logged, never parsed. For an attempt that does, the first marker
+line in its log decides: the wrapper writes its line before the harness can
+write anything, so a later line is never the wrapper's. That first line is
+sized before it is parsed: at most 64 KiB after the marker, nesting at most
+three levels deep (an object, its `hosts` array, the flat rows) and at most
+100 host rows, all well above what the wrapper writes (a row is a name, three
+small numbers and at most 200 characters of curl's message). A line over any
+cap, or not a JSON object with a `hosts` array, is rejected without being
+loaded, and the rejection is what the attempt records (`hosts` empty,
+`rejected` saying why, shown on the task page as one row), so no later line
+is parsed for that attempt either and the log offset still advances past it.
+Because the probe's network round trip now precedes the harness, a worker's
+run is at least that long even when the harness exits at once; a test that
+read the exit class in the tick that launched the worker polls for it instead
+(the `test_class_routing` cases on both tiers).
+
 Two destinations are denied explicitly, because a naive policy lets them
 through: cluster DNS is allowed on port 53 UDP and TCP to the cluster's DNS
 service and nothing else on that address, and the Kubernetes API service,

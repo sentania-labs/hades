@@ -90,7 +90,13 @@ from crucible.contracts.policy import RoutingPolicyV1, window_seconds
 from crucible.contracts.task_contract import TaskContractV1
 from crucible.contracts.wake import WakeReason
 from crucible.domain.command_timeout import effective_command_timeout_ms
-from crucible.domain.egress_probe import find_probe, unreachable_hosts
+from crucible.domain.egress_probe import (
+    PROBE_MARKER,
+    find_probe_line,
+    probe_expected,
+    rejected_record,
+    unreachable_hosts,
+)
 from crucible.domain.entities import (
     Attempt,
     AttemptMetrics,
@@ -3257,6 +3263,19 @@ class Supervisor:
         with self._uow_factory() as uow:
             return uow.attempts.get(attempt_id)
 
+    def _probe_expected(self, uow: UnitOfWork, attempt: Attempt) -> bool:
+        """hades #425: whether the launch wrapper ran the egress probe for this attempt,
+        by the rule the providers launch under: the execution's policy snapshot gives the
+        worker a network and the contract does not take it away. An attempt whose
+        execution or contract cannot be found is not believed either."""
+        execution = uow.executions.get(attempt.execution_id)
+        if execution is None:
+            return False
+        contract = uow.contracts.get(attempt.task_id, execution.contract_version)
+        if contract is None:
+            return False
+        return probe_expected(execution.policy_snapshot, contract.document)
+
     def _store_logs(self, attempt_id: str, chunks: tuple[LogChunk, ...]) -> int:
         with self._fenced() as uow:
             attempt = uow.attempts.get(attempt_id, for_update=True)
@@ -3264,6 +3283,9 @@ class Supervisor:
                 return 0
             offset = uow.logs.last_offset(attempt_id)
             stored = 0
+            # Whether this attempt runs the egress probe, looked up once and only when a
+            # chunk carries the marker (hades #425).
+            wanted: bool | None = None
             for chunk in chunks:
                 if not chunk.content:
                     continue
@@ -3273,22 +3295,43 @@ class Supervisor:
                 text = chunk.content.decode("utf-8", "replace")
                 cleaned = redact(text)
                 content = chunk.content if cleaned == text else cleaned.encode("utf-8")
-                if attempt.egress_probe is None:
+                if attempt.egress_probe is None and PROBE_MARKER in cleaned:
                     # hades #425: the launch wrapper's one probe line, kept on the attempt
-                    # the first time it is seen; the harness's later output never replaces it.
-                    probe = find_probe(cleaned)
-                    if probe is not None:
-                        attempt.egress_probe = {
-                            **probe,
-                            "recorded_at": self._clock.now().isoformat(),
-                        }
-                        unreachable = unreachable_hosts(probe)
-                        log.info(
-                            "egress probe: %d host(s) checked, unreachable: %s",
-                            len(probe["hosts"]),
-                            ", ".join(unreachable) or "none",
+                    # the first time it is seen; the harness's later output never replaces
+                    # it. The line is the worker's word (S4): it is read only when this
+                    # attempt runs the probe at all, its first marker line is the only one
+                    # read, and it is sized before it is parsed. A rejected line is
+                    # recorded as the rejection, so no later line is parsed either.
+                    if wanted is None:
+                        wanted = self._probe_expected(uow, attempt)
+                    if not wanted:
+                        log.warning(
+                            "egress probe line ignored: this attempt has no network, so "
+                            "no probe was run and the line is the harness's",
                             extra={"attempt_id": attempt_id},
                         )
+                    else:
+                        probe, rejection = find_probe_line(cleaned)
+                        recorded_at = self._clock.now().isoformat()
+                        if rejection is not None:
+                            attempt.egress_probe = {
+                                **rejected_record(rejection),
+                                "recorded_at": recorded_at,
+                            }
+                            log.warning(
+                                "egress probe line rejected: %s",
+                                rejection,
+                                extra={"attempt_id": attempt_id},
+                            )
+                        elif probe is not None:
+                            attempt.egress_probe = {**probe, "recorded_at": recorded_at}
+                            unreachable = unreachable_hosts(probe)
+                            log.info(
+                                "egress probe: %d host(s) checked, unreachable: %s",
+                                len(probe["hosts"]),
+                                ", ".join(unreachable) or "none",
+                                extra={"attempt_id": attempt_id},
+                            )
                 end = offset + len(content)
                 uow.logs.append(
                     LogChunkRecord(

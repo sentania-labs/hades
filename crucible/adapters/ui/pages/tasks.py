@@ -67,7 +67,8 @@ def _effective_words(settings: dict[str, Any]) -> str:
 
 def _egress_rows(view: Any) -> list[list[str]]:
     """hades #425: one row per attempt per probed host, `reachable` or why not; an
-    attempt whose probe named no host says so in one row."""
+    attempt whose probe named no host, or whose probe line was rejected, says so in one
+    row."""
     rows: list[list[str]] = []
     for execution in view.executions:
         for attempt in execution.attempts:
@@ -75,6 +76,11 @@ def _egress_rows(view: Any) -> list[list[str]]:
             if not probe:
                 continue
             hosts = probe.get("hosts") or []
+            if probe.get("rejected"):
+                # The worker's first marker line was not the wrapper's shape: nothing
+                # was read from it, and that is what the row says.
+                rows.append([attempt.id, "none", f"probe line rejected: {probe['rejected']}"])
+                continue
             if not hosts:
                 rows.append([attempt.id, "none", "no allowlisted host to probe"])
                 continue

@@ -33,22 +33,36 @@ from starlette.requests import Request
 
 from crucible.adapters.execution import k8sspec
 from crucible.adapters.execution.docker import LAUNCH_WRAPPER, DockerProvider
+from crucible.adapters.harness.script import ScriptHarnessAdapter
 from crucible.adapters.ui.pages import tasks as tasks_mod
 from crucible.application.errors import NotFoundError
 from crucible.application.queries import _attempt_summary
 from crucible.application.supervisor import Supervisor
 from crucible.contracts.api import AttemptSummary, AttemptView
 from crucible.domain.egress_probe import (
+    MAX_PROBE_BYTES,
+    MAX_PROBE_HOSTS,
     PROBE_MARKER,
+    REJECTED_NOT_A_PROBE,
+    REJECTED_NOT_JSON,
+    REJECTED_TOO_DEEP,
+    REJECTED_TOO_LONG,
+    REJECTED_TOO_MANY_ROWS,
+    check_shape,
     find_probe,
+    find_probe_line,
     host_words,
     normalise_probe,
     parse_probe_line,
+    probe_expected,
+    read_probe_line,
     unreachable_hosts,
 )
-from crucible.domain.entities import Attempt
-from crucible.domain.lifecycle import AttemptState, TaskState
+from crucible.domain.entities import Attempt, Execution, ExecutionRole, TaskContract
+from crucible.domain.exit_class import ExitClass
+from crucible.domain.lifecycle import AttemptState, ExecutionState, TaskState
 from crucible.ports.execution import CleanupPolicy, LogChunk
+from crucible.ports.harness import ExitInfo, LaunchContext
 from tests.unit.kubernetes_fixtures import build, pod_of, spec
 from tests.unit.test_credential_copy import StubClient, config
 from tests.unit.test_kubernetes_network_policy import allows
@@ -351,6 +365,57 @@ def test_a_missing_curl_is_reported_and_never_stops_the_harness(tmp_path: Path) 
     assert row["curl_exit"] == 127 and "curl" in row["detail"]
 
 
+def test_the_wrapped_scripted_quota_harness_still_classifies_as_quota_exhausted(
+    tmp_path: Path,
+) -> None:
+    """The round-two question (PR 431): the wrapped path and the exit class. The script
+    adapter's quota harness, run under the wrapper exactly as the Docker provider runs
+    it (probe first, then the harness as a direct child), exits 1 with its refusal on
+    stderr after the probe line, and the adapter classifies that exit as before. What
+    the wrapper changes is only when the exit happens: the probe's round trip comes
+    first, so the tick that launched the worker observes it still running."""
+    adapter = ScriptHarnessAdapter()
+    launch = adapter.build_launch(
+        LaunchContext(
+            attempt_id="01ATTEMPT0000000000000000A",
+            model="a-scripted-quota",
+            effort=None,
+            timeout_seconds=600,
+            identity_mount="/crucible/identity",
+            report_mount="/crucible/report",
+            repo_mount=str(tmp_path / "repo"),
+        )
+    )
+    (tmp_path / "repo").mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    curl = bin_dir / "curl"
+    curl.write_text(_FAKE_CURL)
+    curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
+    run = subprocess.run(
+        ["bash", "-o", "pipefail", "-c", LAUNCH_WRAPPER, "crucible-launch", *launch.argv],
+        cwd=launch.workdir,
+        env={
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "TMPDIR": str(tmp_path),
+            "CRUCIBLE_EGRESS_ALLOWLIST": "github.com",
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert run.returncode == 1, run.stderr
+    lines = run.stderr.splitlines()
+    assert lines[0].startswith(PROBE_MARKER) and lines[1] == '{"error":"scripted_quota_exhausted"}'
+    exit_info = ExitInfo(exit_code=run.returncode)
+    assert adapter.classify_exit(exit_info, run.stdout, run.stderr) is ExitClass.QUOTA_EXHAUSTED
+    assert adapter.provider_quota_exhausted(run.stdout, run.stderr) is True
+    # The wrapper's own stderr line does not read as the harness's refusal.
+    assert adapter.provider_quota_exhausted("", lines[0]) is False
+    assert (tmp_path / "repo" / "src" / "quota-checkpoint.txt").read_text() == "quota checkpoint\n"
+
+
 def test_the_wrapper_text_is_what_the_providers_hand_the_container() -> None:
     """Both providers pass the same wrapper; the probe sits before everything else in it."""
     assert LAUNCH_WRAPPER.index("egress_probe()") < LAUNCH_WRAPPER.index("CRUCIBLE_CODEX_CONFIG")
@@ -398,6 +463,107 @@ def test_normalise_drops_half_written_rows_and_derives_reachable_from_the_exit()
     }
     assert normalise_probe({"hosts": []}) == {"hosts": []}
     assert normalise_probe({}) is None
+
+
+def _no_loads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """`json.loads` replaced for the test: what it was handed, which must stay empty."""
+    called: list[str] = []
+
+    def fake(text: str, **kwargs: Any) -> Any:
+        called.append(text)
+        return {}
+
+    monkeypatch.setattr(json, "loads", fake)
+    return called
+
+
+def _row(host: str, detail: str = "") -> str:
+    return f'{{"host":"{host}","reachable":false,"curl_exit":28,"ms":5007,"detail":"{detail}"}}'
+
+
+def test_a_line_over_the_byte_cap_is_rejected_before_it_is_parsed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex P2 on PR 431: one marker line from the worker must never cost the shared
+    supervisor more than the caps. The length is checked first, and `json.loads` is
+    never reached for a line over it."""
+    rows = ",".join(_row(f"h{i}.example", "x" * 190) for i in range(300))
+    payload = f'{{"hosts":[{rows}]}}'
+    assert len(payload) > MAX_PROBE_BYTES
+    loads_called = _no_loads(monkeypatch)
+    assert read_probe_line(PROBE_MARKER + payload) == (None, REJECTED_TOO_LONG)
+    assert loads_called == []
+    # Right at the cap, the line is parsed.
+    exact = PROBE_MARKER + " " * (MAX_PROBE_BYTES - len('{"hosts":[]}')) + '{"hosts":[]}'
+    assert check_shape(exact[len(PROBE_MARKER) :]) is None
+
+
+def test_a_line_nested_too_deep_or_with_too_many_rows_is_rejected_before_it_is_parsed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loads_called = _no_loads(monkeypatch)
+    deep = '{"hosts":[{"host":"a","nested":{"deeper":1}}]}'
+    assert check_shape(deep) == REJECTED_TOO_DEEP
+    assert read_probe_line(PROBE_MARKER + deep) == (None, REJECTED_TOO_DEEP)
+    many = '{"hosts":[' + ",".join(_row(f"h{i}") for i in range(MAX_PROBE_HOSTS + 1)) + "]}"
+    assert len(many) < MAX_PROBE_BYTES
+    assert check_shape(many) == REJECTED_TOO_MANY_ROWS
+    assert read_probe_line(PROBE_MARKER + many) == (None, REJECTED_TOO_MANY_ROWS)
+    # Brackets inside strings are text, not nesting: a detail of "[[[{{{" is fine.
+    assert check_shape('{"hosts":[{"host":"a","detail":"[[[{{{\\"}}]}') is None
+    assert loads_called == []
+    # Exactly the cap fits.
+    full = '{"hosts":[' + ",".join(_row(f"h{i}") for i in range(MAX_PROBE_HOSTS)) + "]}"
+    assert check_shape(full) is None
+
+
+def test_scalar_rows_past_the_cap_are_rejected_after_parsing_and_rows_are_bounded() -> None:
+    """Rows that open no bracket slip past the scan; the parsed array is bounded too."""
+    scalars = '{"hosts":[' + ",".join("1" for _ in range(MAX_PROBE_HOSTS + 1)) + "]}"
+    assert check_shape(scalars) is None
+    assert read_probe_line(PROBE_MARKER + scalars) == (None, REJECTED_TOO_MANY_ROWS)
+    document = {"hosts": [{"host": f"h{i}"} for i in range(MAX_PROBE_HOSTS + 5)]}
+    normalised = normalise_probe(document)
+    assert normalised is not None and len(normalised["hosts"]) == MAX_PROBE_HOSTS
+    assert normalise_probe({"hosts": [{"host": "h" * 400}]}) == {
+        "hosts": [
+            {"host": "h" * 200, "reachable": False, "curl_exit": None, "ms": None, "detail": ""}
+        ]
+    }
+
+
+def test_a_marker_line_that_is_not_a_probe_document_says_why() -> None:
+    assert read_probe_line("crucible-egress-probe: not json") == (None, REJECTED_NOT_JSON)
+    assert read_probe_line('crucible-egress-probe: ["list"]') == (None, REJECTED_NOT_JSON)
+    assert read_probe_line('crucible-egress-probe: {"nope": 1}') == (None, REJECTED_NOT_A_PROBE)
+    assert read_probe_line("plain line") == (None, None)
+    assert read_probe_line('crucible-egress-probe: {"hosts":[]}') == ({"hosts": []}, None)
+
+
+def test_find_probe_line_lets_the_first_marker_line_decide() -> None:
+    """A rejected first line is the answer; a well-formed line after it is not read,
+    because the wrapper's line is always the first one."""
+    text = (
+        "crucible-egress-probe: not json\n"
+        'crucible-egress-probe: {"hosts":[{"host":"b","reachable":true,"curl_exit":0}]}\n'
+    )
+    assert find_probe_line(text) == (None, REJECTED_NOT_JSON)
+    assert find_probe(text) is None
+    assert find_probe_line("nothing\n") == (None, None)
+
+
+def test_probe_expected_follows_the_providers_network_rule() -> None:
+    assert probe_expected({"network": {"mode": "egress-proxy"}}, {"constraints": {}}) is True
+    assert probe_expected({}, {}) is True
+    assert probe_expected(None, None) is True
+    assert probe_expected({"network": {"mode": "none"}}, {}) is False
+    assert probe_expected({}, {"constraints": {"network": "none"}}) is False
+    assert (
+        probe_expected(
+            {"network": {"mode": "egress-proxy"}}, {"constraints": {"network": "policy"}}
+        )
+        is True
+    )
 
 
 def test_find_probe_takes_the_first_probe_line_in_a_run_of_lines() -> None:
@@ -463,12 +629,61 @@ class _Attempts:
         self.saved.append(attempt.egress_probe)
 
 
+def _execution(policy: dict[str, Any] | None = None) -> Execution:
+    return Execution(
+        id="execution",
+        task_id="task",
+        role=ExecutionRole.IMPLEMENT,
+        contract_version=1,
+        harness="script-harness",
+        model="a-scripted-quota",
+        effort=None,
+        provider="docker",
+        image="crucible-worker:test",
+        policy_snapshot=policy if policy is not None else {"network": {"mode": "egress-proxy"}},
+        state=ExecutionState.ACTIVE,
+        max_attempts=3,
+        retry_on=[],
+        timeout_seconds=600,
+        created_at=datetime(2026, 10, 5, 12, 0, tzinfo=UTC),
+    )
+
+
+def _contract(document: dict[str, Any] | None = None) -> TaskContract:
+    return TaskContract(
+        id="contract",
+        task_id="task",
+        version=1,
+        document=document if document is not None else {"constraints": {}},
+        sha256="0" * 64,
+        submitted_at=datetime(2026, 10, 5, 12, 0, tzinfo=UTC),
+    )
+
+
+_WITH_NETWORK = _execution()
+_PLAIN_CONTRACT = _contract()
+
+
 class _Uow:
-    def __init__(self, attempt: Attempt) -> None:
+    def __init__(
+        self,
+        attempt: Attempt,
+        *,
+        execution: Execution | None = _WITH_NETWORK,
+        contract: TaskContract | None = _PLAIN_CONTRACT,
+    ) -> None:
         self.attempts = _Attempts(attempt)
         self.logs = _Logs()
         self.heartbeats = SimpleNamespace(append=lambda *a, **k: None)
         self.committed = 0
+        self.lookups = 0
+
+        def get_execution(execution_id: str, **kwargs: Any) -> Execution | None:
+            self.lookups += 1
+            return execution
+
+        self.executions = SimpleNamespace(get=get_execution)
+        self.contracts = SimpleNamespace(get=lambda task_id, version: contract)
 
     def set_fenced_token(self, token: int) -> None:
         return None
@@ -541,9 +756,110 @@ def test_the_supervisor_keeps_the_first_probe_line_on_the_attempt() -> None:
 
 def test_a_log_without_the_line_records_nothing() -> None:
     attempt = _attempt()
-    supervisor = _supervisor(_Uow(attempt))
+    uow = _Uow(attempt)
+    supervisor = _supervisor(uow)
     supervisor._store_logs(attempt.id, (LogChunk("stdout", b"just work\n", line_sha256="a"),))
     assert attempt.egress_probe is None
+    # No marker, no lookup of what the attempt runs under.
+    assert uow.lookups == 0
+
+
+def _marker(payload: str) -> LogChunk:
+    return LogChunk("stderr", (PROBE_MARKER + payload + "\n").encode(), line_sha256="m")
+
+
+def test_an_oversized_marker_line_is_rejected_recorded_and_the_log_still_advances(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Codex P2 on PR 431: a hostile first line is rejected before `json.loads`, the
+    attempt records the rejection, the chunk is stored so the offset commits and the
+    pull is not retried, and a well-formed line after it is never read."""
+    attempt = _attempt()
+    uow = _Uow(attempt)
+    supervisor = _supervisor(uow)
+    loads_called = _no_loads(monkeypatch)
+    huge = '{"hosts":[' + ",".join(_row(f"h{i}", "x" * 190) for i in range(300)) + "]}"
+    assert len(huge) > MAX_PROBE_BYTES
+    with caplog.at_level("WARNING"):
+        stored = supervisor._store_logs(attempt.id, (_marker(huge),))
+    assert stored == 1 and len(uow.logs.appended) == 1
+    assert uow.logs.appended[0].offset_end == len(uow.logs.appended[0].content)
+    assert attempt.egress_probe == {
+        "hosts": [],
+        "rejected": REJECTED_TOO_LONG,
+        "recorded_at": "2026-10-05T12:01:00+00:00",
+    }
+    assert loads_called == []
+    assert any("egress probe line rejected" in r.message for r in caplog.records)
+    later = _marker('{"hosts":[{"host":"evil","reachable":true,"curl_exit":0}]}')
+    supervisor._store_logs(attempt.id, (later,))
+    assert attempt.egress_probe["rejected"] == REJECTED_TOO_LONG
+    assert loads_called == []
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        ('{"hosts":[{"host":"a","deeper":{"x":[1]}}]}', REJECTED_TOO_DEEP),
+        (
+            '{"hosts":[' + ",".join(_row(f"h{i}") for i in range(MAX_PROBE_HOSTS + 1)) + "]}",
+            REJECTED_TOO_MANY_ROWS,
+        ),
+        ("{not json", REJECTED_NOT_JSON),
+        ('{"other": true}', REJECTED_NOT_A_PROBE),
+    ],
+)
+def test_each_rejection_path_is_recorded_on_the_attempt(payload: str, reason: str) -> None:
+    attempt = _attempt()
+    supervisor = _supervisor(_Uow(attempt))
+    supervisor._store_logs(attempt.id, (_marker(payload),))
+    assert attempt.egress_probe is not None
+    assert attempt.egress_probe["rejected"] == reason and attempt.egress_probe["hosts"] == []
+
+
+def test_a_marker_line_from_an_attempt_with_no_network_is_ignored_and_never_parsed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No network, no wrapper probe, so the line can only be the harness's."""
+    loads_called = _no_loads(monkeypatch)
+    line = _marker('{"hosts":[{"host":"pypi.org","reachable":true,"curl_exit":0}]}')
+    for uow in (
+        _Uow(_attempt(), execution=_execution({"network": {"mode": "none"}})),
+        _Uow(_attempt(), contract=_contract({"constraints": {"network": "none"}})),
+        _Uow(_attempt(), execution=None),
+        _Uow(_attempt(), contract=None),
+    ):
+        supervisor = _supervisor(uow)
+        with caplog.at_level("WARNING"):
+            stored = supervisor._store_logs(uow.attempts.attempt.id, (line,))
+        assert stored == 1
+        assert uow.attempts.attempt.egress_probe is None
+        assert uow.lookups == 1
+    assert loads_called == []
+    assert any("egress probe line ignored" in r.message for r in caplog.records)
+
+
+def test_once_a_probe_is_recorded_no_later_marker_line_is_examined(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempt = _attempt()
+    attempt.egress_probe = {"hosts": [], "recorded_at": "2026-10-05T12:00:30+00:00"}
+    uow = _Uow(attempt)
+    supervisor = _supervisor(uow)
+    loads_called = _no_loads(monkeypatch)
+    line = _marker('{"hosts":[{"host":"evil","reachable":true,"curl_exit":0}]}')
+    supervisor._store_logs(attempt.id, (line, line))
+    assert attempt.egress_probe == {"hosts": [], "recorded_at": "2026-10-05T12:00:30+00:00"}
+    assert loads_called == [] and uow.lookups == 0
+
+
+def test_the_network_rule_is_looked_up_once_per_store_call() -> None:
+    attempt = _attempt()
+    uow = _Uow(attempt, execution=_execution({"network": {"mode": "none"}}))
+    supervisor = _supervisor(uow)
+    line = _marker('{"hosts":[]}')
+    supervisor._store_logs(attempt.id, (line, line, line))
+    assert uow.lookups == 1 and attempt.egress_probe is None
 
 
 # ----- the record reaches the API and the task page -------------------------------------
@@ -681,6 +997,20 @@ def test_the_section_is_absent_until_a_probe_was_recorded() -> None:
         ]
     )
     assert tasks_mod._egress_rows(empty) == [["A1", "none", "no allowlisted host to probe"]]
+    rejected = SimpleNamespace(
+        executions=[
+            SimpleNamespace(
+                attempts=[
+                    SimpleNamespace(
+                        id="A2", egress_probe={"hosts": [], "rejected": REJECTED_TOO_LONG}
+                    )
+                ]
+            )
+        ]
+    )
+    assert tasks_mod._egress_rows(rejected) == [
+        ["A2", "none", f"probe line rejected: {REJECTED_TOO_LONG}"]
+    ]
 
 
 @pytest.mark.skipif(not os.environ.get("CRUCIBLE_EGRESS_ALLOWLIST"), reason="not inside a worker")

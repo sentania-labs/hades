@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import subprocess
 
@@ -128,14 +129,31 @@ async def test_scripted_quota_reroutes_to_a_second_image_and_remote_branch(
         document["execution_request"].pop(field, None)
     task_id = submit_and_start(client, document)
 
-    await supervisor.tick()
-    midway = client.get(f"/v1/tasks/{task_id}").json()
-    first_events = client.get(f"/v1/tasks/{task_id}/events", params={"limit": 200}).json()["items"]
-    assert midway["executions"][0]["attempts"][0]["exit_class"] == "quota_exhausted"
-    assert midway["state"] == "scheduled", [
-        (event["kind"], event["payload"]) for event in first_events
-    ]
-    first, second = midway["executions"][0]["attempts"]
+    # The scripted quota harness exits at once, but the worker's run is no longer that
+    # short: the launch wrapper's egress probe (hades #425) makes one network round trip
+    # to github.com before the harness starts, so the tick that launched the worker
+    # observes it still running and the exit is classified in a later tick. Poll for
+    # the classified first attempt, as the kind sibling does, rather than reading it
+    # after one tick.
+    for _ in range(30):
+        await supervisor.tick()
+        midway = client.get(f"/v1/tasks/{task_id}").json()
+        attempts = midway["executions"][0]["attempts"]
+        if len(attempts) >= 2 and attempts[0].get("exit_class") == "quota_exhausted":
+            break
+        await asyncio.sleep(0.5)
+    else:
+        first_events = client.get(f"/v1/tasks/{task_id}/events", params={"limit": 200}).json()[
+            "items"
+        ]
+        raise AssertionError(
+            "the scripted quota attempt never rerouted: "
+            f"{[(event['kind'], event['payload']) for event in first_events]}"
+        )
+    # The reroute schedules the successor; since collection runs beside the tick (lab
+    # findings of 2026-09-29) the tick after it may already have launched it.
+    assert midway["state"] in ("scheduled", "running"), midway
+    first, second = attempts
     assert first["exit_class"] == "quota_exhausted"
     assert first["image"] == worker_image
     assert second["resume_from_remote"] is True
