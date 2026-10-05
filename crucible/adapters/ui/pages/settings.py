@@ -12,7 +12,7 @@ from crucible.adapters.api.deps import Ctx, UoW
 from crucible.adapters.ui.actions import register
 from crucible.adapters.ui.render import _page, _redirect
 from crucible.adapters.ui.session import _require
-from crucible.application.admin import delivery
+from crucible.application.admin import credentials, delivery
 from crucible.domain.entities import Principal, Role
 
 router = APIRouter(prefix="/ui", include_in_schema=False)
@@ -128,6 +128,49 @@ def _settings_rows(settings: Any) -> list[list[Any]]:
     return rows
 
 
+def _runtime_rows(ctx: Ctx, uow: UoW, principal: Principal) -> list[list[Any]]:
+    """Runtime settings in this part, including deployment values that are only seeds."""
+    rows: list[list[Any]] = []
+    settings: Any = ctx.settings
+    if ctx.admin is not None:
+        names = ctx.admin.harnesses.names()
+        for name in names if isinstance(names, (list, tuple)) else ():
+            adapter = ctx.admin.harnesses.get(name)
+            if adapter is not None and adapter.credential_spec() is not None:
+                value = credentials.mount_mode_value(ctx.admin, uow, name)
+                action: Any = "Administrator only"
+                if principal.role is Role.ADMIN:
+                    action = {
+                        "kind": "link",
+                        "href": "/ui/credentials",
+                        "label": "Edit on Credentials",
+                    }
+                rows.append([value.name, value.value, value.source, value.applies, action])
+    if settings is not None:
+        for name, seed in sorted(settings.harnesses.items()):
+            state = uow.harnesses.get(name)
+            saved = bool(state is not None and getattr(state, "enabled_decided", False))
+            rows.extend(
+                [
+                    [
+                        f"harnesses.{name}.enabled",
+                        state.enabled if saved and state is not None else seed.enabled,
+                        "saved" if saved else "environment",
+                        "immediately",
+                        {"kind": "link", "href": "/ui/harnesses", "label": "Edit on Harnesses"},
+                    ],
+                    [
+                        f"harnesses.{name}.reason",
+                        state.reason if saved and state is not None else seed.reason,
+                        "saved" if saved else "environment",
+                        "immediately",
+                        {"kind": "link", "href": "/ui/harnesses", "label": "Edit on Harnesses"},
+                    ],
+                ]
+            )
+    return rows
+
+
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     found = _require(request, ctx, uow)
@@ -143,6 +186,7 @@ def settings_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         "hidden": {"enabled": "false" if enabled else "true"},
     }
     rows = _settings_rows(ctx.settings)
+    runtime_rows = _runtime_rows(ctx, uow, principal)
     # Lead with what this deployment set; the defaults it left alone go behind a click
     # (crucible#115).
     chosen = [
@@ -156,12 +200,16 @@ def settings_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         active="/ui/settings",
         heading="Settings",
         intro=(
-            "Auto-merge changes immediately. Other settings below are "
-            "read when the service starts: change one in the settings file or the "
-            "environment and restart. What can change while running is on Routing, "
-            "Harnesses and Images."
+            "Runtime settings are saved inside Hades. Deployment values seed them only "
+            "until an administrator saves a value. Other deployment settings are read "
+            "when the service starts."
         ),
         sections=[
+            {
+                "title": "Runtime settings",
+                "columns": ["Setting", "Effective value", "Source", "Change applies", ""],
+                "rows": runtime_rows,
+            },
             {
                 "title": "Automatic squash merge",
                 "columns": ["Status", "Action"],
