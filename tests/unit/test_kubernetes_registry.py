@@ -467,15 +467,18 @@ async def test_a_slow_registry_ends_the_listing_and_its_crane_processes_first(
     # Tags list, then every resolve hangs. The same ordering as the real constants, at
     # test scale: the listing's bound falls before the endpoint's wait.
     monkeypatch.setenv("STUB_MODE", "sleep-resolve")
-    monkeypatch.setattr(kubernetes, "LIST_IMAGES_DEADLINE", 1.0)
-    monkeypatch.setattr(harnesses, "LISTING_WAIT", 5.0)
+    # Leave enough headroom for process startup on a loaded test worker. A one-second
+    # bound could expire after `ls` and before either digest process was recorded,
+    # which tested scheduler timing instead of the listing and cleanup contract.
+    monkeypatch.setattr(kubernetes, "LIST_IMAGES_DEADLINE", 5.0)
+    monkeypatch.setattr(harnesses, "LISTING_WAIT", 15.0)
     provider = _crane_provider(stub)
 
     started = time.monotonic()
     found = await harnesses._images(SimpleNamespace(providers=[provider]))  # type: ignore[arg-type]
 
     assert found == []
-    assert time.monotonic() - started < 5.0
+    assert time.monotonic() - started < 15.0
     calls = _calls(stub)
     assert [c["argv"][0] for c in calls].count("digest") == 2
     assert not [c["pid"] for c in calls if _alive(c["pid"])]
