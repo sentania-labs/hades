@@ -58,6 +58,17 @@ class Repo:
         return [row for row in self.rows if row.review_comment_id in ids]
 
 
+class Policies:
+    """hades #334: the kanban reads the CI budget from the task's policy; an unknown
+    policy means the default budget."""
+
+    def __init__(self, rows: list[Any] | None = None) -> None:
+        self.rows = rows or []
+
+    def get(self, name: str, version: int) -> Any | None:
+        return next((row for row in self.rows if row.name == name and row.version == version), None)
+
+
 def row(**values: object) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
@@ -71,8 +82,11 @@ def fake_uow() -> SimpleNamespace:
         title="Board",
         state=TaskState.AWAITING_CI_CERTIFICATION,
         contract_version=1,
+        policy_name="default",
+        policy_version=1,
         updated_at=NOW - timedelta(minutes=5),
         created_at=NOW - timedelta(hours=2),
+        closed_at=None,
     )
     contract = row(
         task_id="t1",
@@ -170,6 +184,7 @@ def fake_uow() -> SimpleNamespace:
         wakes=Repo([wake]),
         review_comments=Repo([comment]),
         dispositions=Repo([disposition]),
+        policies=Policies(),
     )
 
 
@@ -308,8 +323,11 @@ def test_board_handles_two_hundred_tasks_with_bounded_aggregate_reads() -> None:
                 title=template.title,
                 state=TaskState.SUBMITTED,
                 contract_version=1,
+                policy_name="default",
+                policy_version=1,
                 updated_at=template.updated_at,
                 created_at=template.created_at,
+                closed_at=None,
             )
             for index in range(200)
         ]

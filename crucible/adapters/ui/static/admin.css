@@ -45,6 +45,32 @@ details > summary { cursor: pointer; color: var(--accent); }
 .admin-steps li { margin: 3px 0; }
 .admin-nav-group { color: var(--ink-subtle); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; padding: 9px 4px 7px 12px; }
 @media (max-width: 700px) { .admin-main { padding: 12px; } .lat-header { padding: 9px 12px; } .admin-nav { padding: 0 8px; } .admin-field { grid-template-columns: 1fr; gap: 3px; } }
+/* hades #334: the Board's kanban. Columns are a horizontal strip that scrolls sideways;
+   at phone width one column is most of the screen and snaps into place, on a wide screen
+   several columns fit. Nothing is dragged. */
+.admin-kanban { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 8px; scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch; }
+.admin-kanban-column { flex: 0 0 min(82vw, 290px); min-width: 0; scroll-snap-align: start; background: var(--surface-sunken); border: 1px solid var(--line-soft); border-radius: var(--radius-lg); padding: 8px; }
+.admin-kanban-column--reserved { border-style: dashed; opacity: .7; }
+.admin-kanban-head { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; margin-bottom: 8px; }
+.admin-kanban-head h3 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-subtle); }
+.admin-kanban-count { font-size: 11px; color: var(--ink-muted); }
+.admin-kanban-parent { border-left: 2px solid var(--line); padding-left: 6px; margin: 0 0 8px; }
+.admin-kanban-parent-head { font: 11px/1.4 var(--font-mono); color: var(--ink-subtle); margin-bottom: 4px; }
+.admin-kanban-card { display: grid; gap: 3px; padding: 8px; margin-bottom: 8px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md); color: var(--ink); text-decoration: none; }
+.admin-kanban-card:last-child { margin-bottom: 0; }
+.admin-kanban-card:hover, .admin-kanban-card:focus-visible { border-color: var(--accent); }
+.admin-kanban-card--late { border-color: var(--bad); }
+.admin-kanban-card-title { font-weight: 600; font-size: 13px; overflow-wrap: anywhere; }
+.admin-kanban-card-id { font: 10px/1.4 var(--font-mono); color: var(--ink-subtle); }
+.admin-kanban-card-foot { display: flex; justify-content: space-between; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+.admin-kanban-age { font-size: 11px; color: var(--ink-muted); white-space: nowrap; }
+.admin-kanban-age--late { color: var(--bad-ink); font-weight: 700; }
+.admin-chip { display: inline-block; max-width: 100%; padding: 1px 7px; border-radius: var(--radius-pill); font-size: 11px; line-height: 1.5; background: var(--surface-sunken); color: var(--ink-muted); border: 1px solid var(--line); overflow-wrap: anywhere; }
+.admin-chip--worker { background: var(--accent-soft); color: var(--accent-ink); border-color: transparent; }
+.admin-chip--foundry { background: var(--ok-soft); color: var(--ok-ink); border-color: transparent; }
+.admin-chip--codex, .admin-chip--ci { background: var(--surface); color: var(--ink); }
+.admin-chip--operator { background: var(--warn-soft); color: var(--warn-ink); border-color: transparent; }
+.admin-chip--done { background: var(--ok-soft); color: var(--ok-ink); border-color: transparent; }
 .login-guidance { margin: 0 0 1rem; padding-left: 1.25rem; }
 .login-guidance li { margin-bottom: 0.4rem; }
 .login-url { display: block; overflow-wrap: anywhere; word-break: break-all; font: 11px/1.5 var(--font-mono); }
