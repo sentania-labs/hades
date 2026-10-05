@@ -94,7 +94,9 @@ async def submit(
         principal=principal,
         key=idempotency_key,
         body=body,
-        scope=str(request.url.path),
+        # Proposal mode changes the authorization semantics of an otherwise identical
+        # contract, so it is part of the idempotency identity.
+        scope=f"{request.url.path}?proposed={str(proposed).lower()}",
         produce=produce,
     )
 

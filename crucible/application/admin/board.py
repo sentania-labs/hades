@@ -556,19 +556,28 @@ def _kanban_groups(cards: list[dict[str, Any]], *, queued: bool = False) -> list
     ordered = (
         _queue_order(cards) if queued else sorted(cards, key=lambda card: card["age"]["entered_at"])
     )
+    groups: list[dict[str, Any]] = []
     grouped: dict[str | None, dict[str, Any]] = {}
     for card in ordered:
         parent = card["parent_external_id"]
-        group = grouped.setdefault(
-            parent,
-            {
+        # Queue order is stronger than parent nesting. Keep only adjacent cards under
+        # one parent there, so A, B, A remains A, B, A when rendered. Other columns
+        # retain their established global parent grouping.
+        group = (
+            None
+            if queued and (not groups or groups[-1]["parent_external_id"] != parent)
+            else grouped.get(parent)
+        )
+        if group is None:
+            group = {
                 "parent_external_id": parent,
                 "parent_task_id": card["parent_task_id"],
                 "tasks": [],
-            },
-        )
+            }
+            groups.append(group)
+            grouped[parent] = group
         group["tasks"].append(card)
-    return list(grouped.values())
+    return groups
 
 
 def _kanban(

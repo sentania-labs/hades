@@ -48,6 +48,7 @@ from crucible.contracts.api import StartRequest
 from crucible.domain.entities import Principal, Repository, Role, Task, Wake
 from crucible.domain.events import EventKind
 from crucible.domain.lifecycle import TaskState, is_allowed
+from crucible.ports.repository import IdempotencyKeyTakenError
 from tests.fixtures import REPOSITORY_URL, FakeClock, contract_document
 from tests.unit.admin_ui_fixtures import base_context
 from tests.unit.test_board import Policies, Repo
@@ -109,6 +110,26 @@ class _AllWakes(_Wakes):
         return [w for w in self.rows if w.principal_id == principal_id and w.acked_at is None]
 
 
+class _Idempotency:
+    def __init__(self) -> None:
+        self.rows: dict[tuple[str, str], tuple[str, int | None, dict[str, Any] | None]] = {}
+
+    def get(
+        self, principal_id: str, key: str
+    ) -> tuple[str, int | None, dict[str, Any] | None] | None:
+        return self.rows.get((principal_id, key))
+
+    def reserve(self, principal_id: str, key: str, *, request_sha256: str, now: Any) -> None:
+        identity = (principal_id, key)
+        if identity in self.rows:
+            raise IdempotencyKeyTakenError(key)
+        self.rows[identity] = (request_sha256, None, None)
+
+    def complete(self, principal_id: str, key: str, *, status: int, body: dict[str, Any]) -> None:
+        digest, _, _ = self.rows[(principal_id, key)]
+        self.rows[(principal_id, key)] = (digest, status, body)
+
+
 def _store() -> _Store:
     store = _Store(
         Repository(
@@ -131,6 +152,7 @@ def _store() -> _Store:
     for name in ("acceptance", "decisions", "review_reports", "claims"):
         setattr(store, name, _NoDecisions())
     store.principals = _Principals()  # type: ignore[attr-defined]
+    store.idempotency = _Idempotency()  # type: ignore[attr-defined]
     return store
 
 
@@ -469,6 +491,26 @@ def test_the_api_proposes_and_answers_each_way() -> None:
     ]
 
 
+@pytest.mark.parametrize("first_proposed", [False, True])
+def test_idempotency_key_is_bound_to_proposal_mode(first_proposed: bool) -> None:
+    store, clock = _store(), FakeClock(NOW)
+    body = contract_document()
+    headers = {"Idempotency-Key": "same-contract-different-mode"}
+    first_path = "/v1/tasks?proposed=true" if first_proposed else "/v1/tasks"
+    second_path = "/v1/tasks" if first_proposed else "/v1/tasks?proposed=true"
+
+    with _api(store, clock, ORCHESTRATOR) as client:
+        first = client.post(first_path, json=body, headers=headers)
+        second = client.post(second_path, json=body, headers=headers)
+
+    assert first.status_code == 201
+    assert first.json()["state"] == ("proposed" if first_proposed else "submitted")
+    assert second.status_code == 422
+    assert second.json()["type"] == "urn:crucible:problem:idempotency-key-reuse"
+    assert "idempotent-replayed" not in second.headers
+    assert len(store.tasks.rows) == 1
+
+
 def _ui(
     store: _Store, clock: FakeClock, principal: Principal, monkeypatch: pytest.MonkeyPatch
 ) -> TestClient:
@@ -612,6 +654,29 @@ def test_the_board_shows_the_batch_queued_in_the_selected_order() -> None:
     titles = re.findall(r'admin-kanban-card-title">([^<]+)<', column)
     assert titles == ["Proposal EX-B", "Proposal EX-C", "Proposal EX-A"]
     assert "Queue position 1, batch 1 of 3" in column
+
+
+def test_the_board_preserves_interleaved_queue_order_across_parent_groups() -> None:
+    store, clock = _store(), FakeClock(NOW)
+    tasks = {
+        name: _propose(store, clock, name)
+        for name in ("PARENT-A", "PARENT-B", "A-ONE", "B-ONE", "A-TWO")
+    }
+    for name, parent in (("A-ONE", "PARENT-A"), ("B-ONE", "PARENT-B"), ("A-TWO", "PARENT-A")):
+        contract = store.contracts.get(tasks[name].id, 1)
+        assert contract is not None
+        contract.document["parent_external_id"] = parent
+    selected = [tasks[name].id for name in ("A-ONE", "B-ONE", "A-TWO")]
+
+    approve_batch(store.uow(), clock, principal=OPERATOR, task_ids=selected, reason="batch")
+    queued = next(c for c in _board(store)["kanban"]["columns"] if c["key"] == "queued")
+
+    assert [group["parent_external_id"] for group in queued["parents"]] == [
+        "PARENT-A",
+        "PARENT-B",
+        "PARENT-A",
+    ]
+    assert [card["id"] for group in queued["parents"] for card in group["tasks"]] == selected
 
 
 def test_a_batch_is_all_or_nothing() -> None:
