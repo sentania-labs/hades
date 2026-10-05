@@ -169,6 +169,71 @@ class TestAC3LongTitle:
         assert len(title_problems) == 0
 
 
+# ---------- hades #440 review: truncate before checking keywords/mentions ------
+
+
+class TestTruncationBeforeTitleChecks:
+    """The publisher shortens a long title before checking it for closing keywords
+    and mentions (crucible/domain/publication.py validate_title). The checker must
+    decide on the same shortened candidate, or it refuses a title the publisher
+    would have accepted once truncated (PR #440 review)."""
+
+    def test_keyword_beyond_truncation_boundary_passes(self) -> None:
+        """A closing keyword that only appears after the publisher's truncation
+        point is never seen by the publisher, so the checker must not flag it."""
+        title = "A" * 66 + " fix #1"
+        report = _make_report(title)
+        problems = checker.check(report, criteria=None)
+        title_problems = _title_problems(problems)
+        assert title_problems == [], f"Unexpected title problems: {title_problems}"
+
+    def test_mention_beyond_truncation_boundary_passes(self) -> None:
+        title = "A" * 66 + " @alice"
+        report = _make_report(title)
+        problems = checker.check(report, criteria=None)
+        title_problems = _title_problems(problems)
+        assert title_problems == [], f"Unexpected title problems: {title_problems}"
+
+    def test_keyword_within_truncation_boundary_still_fails(self) -> None:
+        """A closing keyword that survives the publisher's truncation is still
+        refused: truncating must not become a way to smuggle one through."""
+        title = "fix #1 " + "A" * 70
+        report = _make_report(title)
+        problems = checker.check(report, criteria=None)
+        title_problems = _title_problems(problems)
+        assert any("closing keyword" in p for p in title_problems), (
+            f"Expected closing-keyword message in {title_problems}"
+        )
+
+    def test_mention_within_truncation_boundary_still_fails(self) -> None:
+        title = "@alice " + "A" * 70
+        report = _make_report(title)
+        problems = checker.check(report, criteria=None)
+        title_problems = _title_problems(problems)
+        assert any("at-mention" in p for p in title_problems), (
+            f"Expected at-mention message in {title_problems}"
+        )
+
+    def test_shorten_title_agrees_with_publication(self) -> None:
+        """The checker's copy of shorten_title must cut a long title exactly where
+        publication.py's shorten_title does, or the two disagree about what the
+        publisher actually sees."""
+        from crucible.domain.publication import shorten_title as pub_shorten_title  # noqa: PLC0415
+
+        titles = [
+            "A" * 66 + " fix #1",
+            "fix #1 " + "A" * 70,
+            "x" * 200,
+            "no spaces at all" + "y" * 60,
+            "short with a trailing word boundary near the cutoff point exactly here",
+        ]
+        for title in titles:
+            clean = " ".join(title.split())
+            assert checker.shorten_title(clean) == pub_shorten_title(clean), (
+                f"shorten_title drifted on {title!r}"
+            )
+
+
 # ---------- AC2: parity test - script regexes match publication.py regexes -----
 
 
