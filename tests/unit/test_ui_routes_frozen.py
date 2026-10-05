@@ -36,7 +36,10 @@ FROZEN_ROUTES = [
     ("POST", "/ui/actions/{action}"),
     ("POST", "/ui/sign-in"),
     ("POST", "/ui/sign-out"),
+    # hades #424: the operator's answers to proposed tasks, one at a time and as a batch.
+    ("POST", "/ui/tasks/proposals/approve"),
     ("POST", "/ui/tasks/{task_id}/decisions"),
+    ("POST", "/ui/tasks/{task_id}/proposal"),
 ]
 
 FROZEN_ACTIONS = [

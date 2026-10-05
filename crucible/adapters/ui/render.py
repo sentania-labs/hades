@@ -517,6 +517,8 @@ def _redirect(form: dict[str, str], message: str, *, kind: str = "ok") -> Redire
 # Task states in the words an operator uses (crucible#115). A state not named here is
 # shown as its own name with the underscores taken out.
 STATE_WORDS = {
+    "proposed": "Proposed: waiting for the operator",
+    "sent_back": "Sent back to the orchestrator",
     "blocked": "Blocked: needs a decision",
     "pre_pr_gates_failed": "Checks failed before the pull request",
     "publish_failed": "Publishing failed",

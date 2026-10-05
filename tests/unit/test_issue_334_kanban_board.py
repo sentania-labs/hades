@@ -106,11 +106,13 @@ def columns(document: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     }
 
 
-def test_columns_run_left_to_right_with_a_reserved_proposed_position() -> None:
+def test_columns_run_left_to_right_with_the_proposed_column_first() -> None:
     assert [name for _key, name in KANBAN_COLUMNS] == COLUMN_NAMES
-    assert KANBAN_COLUMNS[0][0] in RESERVED_COLUMNS
-    # The reserved column is a position, not a state: no state maps to it (hades #424).
-    assert "proposed" not in set(COLUMN_BY_STATE.values())
+    # hades #424 landed: the first position holds the proposed state and is not reserved.
+    assert KANBAN_COLUMNS[0][0] not in RESERVED_COLUMNS
+    assert [s for s, column in COLUMN_BY_STATE.items() if column == "proposed"] == [
+        TaskState.PROPOSED
+    ]
     # Every lifecycle state has a column, so no task can fall off the board.
     assert set(COLUMN_BY_STATE) == set(TaskState)
     assert all(COLUMN_BY_STATE[state] == "done" for state in TASK_TERMINAL | {TaskState.MERGED})
@@ -435,7 +437,7 @@ def test_page_renders_cards_that_link_to_the_task_page_in_sideways_columns() -> 
     headings = re.findall(r"<h3>([^<]+)</h3>", kanban)
     assert headings[: len(COLUMN_NAMES)] == COLUMN_NAMES
     assert 'data-column="proposed"' in kanban
-    assert "Reserved for the Proposed state (issue 424)" in kanban
+    assert "Waiting for the operator: approve, send back or reject." in kanban
     # One card per task, the whole card a link to the task page.
     assert kanban.count('<a class="admin-kanban-card') == 2
     assert 'href="/ui/tasks/t1"' in kanban

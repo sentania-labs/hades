@@ -67,8 +67,16 @@ CORRECTABLE_STATES = frozenset(
 # there answers Foundry's own judgement of the full diff, a needs_more_work or an
 # internal review finding; an external review or CI finding has its own state.
 READY_FOR_MERGE_REASONS = frozenset({"needs_more_work", "internal_review"})
+# hades #424: a proposal is amendable too, and amending one the operator sent back is how
+# the orchestrator proposes it again.
 AMENDABLE_STATES = frozenset(
-    {TaskState.SUBMITTED, TaskState.BLOCKED, TaskState.AWAITING_ACCEPTANCE}
+    {
+        TaskState.PROPOSED,
+        TaskState.SENT_BACK,
+        TaskState.SUBMITTED,
+        TaskState.BLOCKED,
+        TaskState.AWAITING_ACCEPTANCE,
+    }
 )
 PREVIOUS_BUNDLE_GONE = "previous_attempt_bundle_gone"
 PREVIOUS_BUNDLE_OTHER_PROVIDER = "previous_attempt_bundle_other_provider"
@@ -476,4 +484,14 @@ def amend_task(
             "reason": reason,
         },
     )
+    if task.state is TaskState.SENT_BACK:
+        move_task(
+            uow,
+            clock,
+            task,
+            TaskState.PROPOSED,
+            EventKind.TASK_PROPOSED,
+            principal=principal.name,
+            payload={"contract_version": stored.version, "again": True},
+        )
     return task

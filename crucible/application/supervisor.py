@@ -70,6 +70,7 @@ from crucible.application.transitions import (
     move_attempt,
     move_execution,
     move_task,
+    queue_key,
     record_event,
     record_rejected_transition,
 )
@@ -897,7 +898,10 @@ class Supervisor:
 
     def _materialize_scheduled(self) -> None:
         with self._fenced() as uow:
-            for task in uow.tasks.list_by_state(TaskState.SCHEDULED, for_update=True):
+            # hades #424: in the order the tasks entered the queue, so a batch approval's
+            # selection order is the order their attempts are created and launched.
+            queued = uow.tasks.list_by_state(TaskState.SCHEDULED, for_update=True)
+            for task in sorted(queued, key=lambda row: queue_key(uow, row.id)):
                 attempts = uow.attempts.list_for_task(task.id)
                 if any(a.state not in ATTEMPT_TERMINAL for a in attempts):
                     continue
@@ -1363,6 +1367,8 @@ class Supervisor:
                         repository,
                     )
                 )
+            # hades #424: launched in queue order, not in the order of the attempt ids.
+            out.sort(key=lambda item: queue_key(uow, item.task.id))
         return out
 
     async def _launch_pending(self) -> int:

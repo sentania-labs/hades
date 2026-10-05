@@ -162,3 +162,15 @@ def require_contract(uow: UnitOfWork, task: Task) -> TaskContract:
             "record; submit a new task for the work, or cancel or close this one (15)"
         )
     return stored
+
+
+def queue_key(uow: UnitOfWork, task_id: str) -> tuple[int, str]:
+    """Where a scheduled task stands in the queue: the event that last put it there.
+    A batch approval schedules its tasks in the selected order, one event after another,
+    so they are taken in that order; a task with no such event sorts first, by id."""
+    latest = 0
+    for kind in (EventKind.TASK_SCHEDULED, EventKind.TASK_RETRY_SCHEDULED):
+        event = uow.events.latest_for_task_kind(task_id, kind.value)
+        if event is not None and event.seq is not None:
+            latest = max(latest, int(event.seq))
+    return latest, task_id

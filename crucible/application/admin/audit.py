@@ -45,6 +45,10 @@ ADMIN_KINDS: frozenset[str] = frozenset(
         EventKind.GITHUB_APP_MANIFEST_STARTED.value,
         EventKind.GITHUB_EXTERNAL_URL_UPDATED.value,
         EventKind.COMMAND_TIMEOUT_UPDATED.value,
+        # hades #424: the operator's answers to a proposed task, each with its reason.
+        EventKind.TASK_APPROVED.value,
+        EventKind.TASK_SENT_BACK.value,
+        EventKind.TASK_PROPOSAL_REJECTED.value,
     }
 )
 

@@ -452,6 +452,40 @@ class PublishRetryRequest(StrictModel):
     reason: str = Field(min_length=1)
 
 
+# hades #424: the operator's answers to a proposed task. Each carries the reason that is
+# recorded on its audit event.
+class ApproveRequest(StrictModel):
+    reason: str = Field(min_length=1)
+    note: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Operator direction, appended verbatim to the contract's objective.",
+    )
+
+
+class SendBackRequest(StrictModel):
+    reason: str = Field(min_length=1)
+    note: str = Field(min_length=1, description="What the orchestrator receives as its wake.")
+
+
+class RejectProposalRequest(StrictModel):
+    reason: str = Field(min_length=1)
+
+
+class BatchApproveRequest(StrictModel):
+    task_ids: list[str] = Field(
+        min_length=1,
+        max_length=50,
+        description="Proposed tasks in the order selected; that order is the queue order.",
+    )
+    reason: str = Field(min_length=1)
+
+
+class BatchApprovalView(Response):
+    batch_id: str
+    tasks: list[TaskView]
+
+
 class PullRequestHeadView(Response):
     sha: str
     pushed_by: str
