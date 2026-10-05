@@ -95,24 +95,6 @@ data:
   CRUCIBLE_KUBERNETES__LOCAL_ENDPOINT_POD_LABELS: "{}"
   CRUCIBLE_KUBERNETES__LOCAL_ENDPOINT_PORT: "0"
 
-  # 12: all three subscription harnesses refresh their own token in place, so the mount
-  # mode is `rw-narrow` and the provider's init container copies the named auth files off
-  # the Secret's read-only projection into the attempt's own claim (C8a). No `path` here:
-  # on the cluster a harness credential is a Secret, not a directory.
-  CRUCIBLE_CREDENTIALS__CLAUDE_CODE__MOUNT_MODE: ro   # the setup token never refreshes (12); rw-narrow would override the adapter minimum
-  CRUCIBLE_CREDENTIALS__CODEX__MOUNT_MODE: rw-narrow
-  CRUCIBLE_CREDENTIALS__AGY__MOUNT_MODE: rw-narrow
-  CRUCIBLE_CREDENTIALS__HERMES__MOUNT_MODE: ro
-
-  # 25 and S1b: a harness ships disabled until its dedicated session and its daily-session
-  # compatibility are verified. These are the same gates compose.yaml carries.
-  CRUCIBLE_HARNESSES__CLAUDE_CODE__ENABLED: "true"
-  CRUCIBLE_HARNESSES__CLAUDE_CODE__REASON: "session_compatibility verified (S1b)"
-  CRUCIBLE_HARNESSES__CODEX__ENABLED: "false"
-  CRUCIBLE_HARNESSES__CODEX__REASON: "unverified: Crucible-side refresh not yet observed (S1b step 5)"
-  CRUCIBLE_HARNESSES__AGY__ENABLED: "true"
-  CRUCIBLE_HARNESSES__AGY__REASON: "session_compatibility verified (S1b steps 5 and 6, 2026-09-17)"
-
   # GitHub delivery (12, 23, ADR 0017). The App credential is the Secret
   # `crucible-github-app` in this namespace, which the service owns: the operator connects
   # the App from the GitHub page (its id and private key), and the service creates the

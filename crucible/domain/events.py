@@ -181,6 +181,7 @@ class EventKind(StrEnum):
     CREDENTIAL_REMOVED = "credential_removed"
     CREDENTIAL_REFRESH_REQUESTED = "credential_refresh_requested"
     CREDENTIAL_RETIRED_SHREDDED = "credential_retired_shredded"
+    CREDENTIAL_MOUNT_MODE_SET = "credential_mount_mode_set"
     IMAGE_PROMOTED = "image_promoted"
     GITHUB_CHECKED = "github_checked"
     ADMIN_REFUSED = "admin_refused"

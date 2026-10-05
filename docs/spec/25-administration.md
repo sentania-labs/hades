@@ -215,14 +215,29 @@ detail is a plain sentence that names the URL it used and what it proved, for ex
 includes the bearer. The key-paste transaction emits only
 the `credential_set` event even though it also updates the sanitized credential state.
 
+## Runtime settings
+
+A runtime setting has one declared name, seed, default and application boundary. A
+saved value is a `provider_settings` row with the administrator's reason. Its audit
+event records the principal, reason, prior source and value, and saved source and value.
+All runtime callers use the common resolver: saved wins, then an environment or file
+seed, then the application default. Settings shows the effective value, `saved`,
+`environment`, or `default` as its source, and when a change applies.
+
+`credentials.<harness>.mount_mode` is edited on Credentials and applies at the next
+launch. The three modes are `ro`, `rw-narrow`, and `renewer`; the harness declaration
+may forbid a mode. A running attempt keeps the mode captured when it launched. Harness
+enablement and its reason are edited only on Harnesses and apply immediately. Their old
+environment entries remain seeds for upgrade compatibility, not deployment controls.
+
 ## Harness enablement: a configured default, then the administrator's decision
 
 Enabling a harness is an administrator's decision the service stores (hades
 #174, ADR 0021). Two things feed it, each with its own reason string:
 
-1. **Configuration**, the starting value: the `[harnesses.<name>]` section
-   (`CRUCIBLE_HARNESSES__<NAME>__ENABLED` and `__REASON`). A harness whose
-   dedicated session is unverified ships off here with the reason (S1b).
+1. **Seed**, the starting value: the built-in `[harnesses.<name>]` value, or an
+   environment entry retained for upgrades. This is visible as a seed on Settings. It
+   is not a deployment setting.
 2. **The administrator's decision**: the harness's row, which `harnesses
    enable` and `harnesses disable` set through the admin API, the CLI and the
    Harnesses page. The row records that an administrator decided

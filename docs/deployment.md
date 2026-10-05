@@ -279,14 +279,15 @@ Once the api is reachable, sign in at `/ui` with that token and, for each harnes
 3. The harness stays `session_compatibility: unverified` until the daily-session
    compatibility test passes for it (21, S1b). A harness is not enabled for normal
    workers before that.
-4. **Harnesses**: enable the harness. The `CRUCIBLE_HARNESSES__*` entries in the
-   settings ConfigMap are only where each harness starts (Codex ships off, "unverified:
-   Crucible-side refresh not yet observed"). Enable and Disable on this page (or
+4. **Harnesses**: enable the harness. Enable and Disable on this page (or
    `crucible admin harnesses enable|disable NAME`, or the admin API) are the
    administrator's decision: stored by the service, audited, and in force for new tasks
    at once, with no ConfigMap edit and no restart. An unverified harness can be enabled;
    the page keeps its reason as a warning, and **Test** is how you prove it works (hades
    #174).
+   Choose credential mount mode on Credentials. It is stored and audited by Hades and
+   applies to the next launch. Neither harness enablement and reason nor credential
+   mount mode belongs in the deployment ConfigMap.
 5. **Images**: choose each harness's worker image. The page has one row per harness,
    with a pulldown of the images that carry that harness at a supported version
    (releases and `latest`); pick one and Promote. Promotion is per harness (the

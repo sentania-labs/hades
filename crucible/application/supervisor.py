@@ -66,6 +66,7 @@ from crucible.application.routing import (
     reserve,
     select_model,
 )
+from crucible.application.runtime_settings import resolve as resolve_runtime_setting
 from crucible.application.transitions import (
     move_attempt,
     move_execution,
@@ -1667,6 +1668,35 @@ class Supervisor:
                 if selected_harness
                 else None
             )
+            credential_sources = getattr(self, "_credential_sources", {})
+            seed_source = credential_sources.get(settings_harness)
+            settings_adapter = self._harnesses.get(settings_harness) if self._harnesses else None
+            declaration = settings_adapter.credential_spec() if settings_adapter else None
+            launch_mount_mode = (
+                MountMode.RO
+                if endpoint == "local" and selected_harness == "codex"
+                else MountMode(
+                    resolve_runtime_setting(
+                        route_uow,
+                        name=f"credentials.{settings_harness}.mount_mode",
+                        field="mount_mode",
+                        seed=(
+                            seed_source.mount_mode.value
+                            if seed_source is not None and seed_source.mount_mode is not None
+                            else None
+                        ),
+                        seed_source="environment",
+                        default=(
+                            MountMode.RENEWER.value
+                            if settings_harness == "codex"
+                            else declaration.minimum_mode.value
+                        ),
+                        applies="next launch",
+                    ).value
+                )
+                if declaration is not None
+                else None
+            )
             resume_bundle: dict[str, str] = {}
             interruption_retry = attempt.number > 1 and any(
                 prior.exit_class in {ExitClass.INFRASTRUCTURE, ExitClass.QUOTA_EXHAUSTED}
@@ -1805,6 +1835,7 @@ class Supervisor:
             command_timeout_ms=command_timeout_ms,
             harness_settings=harness_settings,
             effective_settings=dict(effective) if effective is not None else None,
+            credential_mode=launch_mount_mode.value if launch_mount_mode is not None else None,
             resume_bundle_path=resume_bundle.get("path"),
             resume_bundle_attempt_id=resume_bundle.get("attempt_id"),
             resume_bundle_head=resume_bundle.get("head"),
@@ -1822,6 +1853,10 @@ class Supervisor:
         credential_adapter = self._harnesses.get(credential_harness) if self._harnesses else None
         credential = credential_adapter.credential_spec() if credential_adapter else None
         source = self._credential_sources.get(credential_harness)
+        if source is not None and launch_mount_mode is not None:
+            source = replace(source, mount_mode=launch_mount_mode)
+        elif launch_mount_mode is not None:
+            source = CredentialSource(path="", mount_mode=launch_mount_mode)
         if credential_mounted is None:
             if credential is not None:
                 if source is not None and credential.held_by(source.path):
@@ -1960,7 +1995,25 @@ class Supervisor:
         if local_codex:
             credential = None
         if credential is not None:
-            source = self._credential_sources.get(execution.harness)
+            source = getattr(self, "_credential_sources", {}).get(execution.harness)
+            seed = source.mount_mode.value if source is not None and source.mount_mode else None
+            mode = resolve_runtime_setting(
+                uow,
+                name=f"credentials.{execution.harness}.mount_mode",
+                field="mount_mode",
+                seed=seed,
+                seed_source="environment",
+                default=(
+                    MountMode.RENEWER.value
+                    if execution.harness == "codex"
+                    else credential.minimum_mode.value
+                ),
+                applies="next launch",
+            )
+            source = CredentialSource(
+                path=source.path if source is not None else "",
+                mount_mode=MountMode(mode.value),
+            )
             if effective_mount_mode(credential, source) is MountMode.RW_NARROW and not getattr(
                 adapter, "parallel_attempts_safe", False
             ):

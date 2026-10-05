@@ -45,6 +45,7 @@ from crucible.application.harnesses import (
     record_launch_outcome,
     set_harness_enabled,
 )
+from crucible.application.runtime_settings import RuntimeValue, resolve, save_scalar
 from crucible.domain.events import EventKind
 from crucible.domain.exit_class import ExitClass
 from crucible.ports.execution import (
@@ -71,6 +72,115 @@ RETIRED_MARK = ".retired-"
 INCOMING_MARK = ".incoming-"
 SHRED_CHUNK = 1024 * 1024
 HERMES = "hermes"
+
+
+def mount_mode_setting(harness: str) -> str:
+    return f"credentials.{harness}.mount_mode"
+
+
+def mount_mode_value(ctx: AdminContext, uow: UnitOfWork, harness: str) -> RuntimeValue:
+    """The mount mode used by every runtime caller, with deployment input only a seed."""
+    spec = spec_for(ctx, harness)
+    source = ctx.credential_sources.get(harness)
+    seed = source.mount_mode.value if source is not None and source.mount_mode is not None else None
+    default = MountMode.RENEWER.value if harness == "codex" else spec.minimum_mode.value
+    value = resolve(
+        uow,
+        name=mount_mode_setting(harness),
+        field="mount_mode",
+        seed=seed,
+        seed_source="environment",
+        default=default,
+        applies="next launch",
+    )
+    try:
+        mode = MountMode(str(value.value))
+    except ValueError:
+        mode = MountMode(default)
+    return RuntimeValue(value.name, mode.value, value.source, value.applies, value.reason)
+
+
+def effective_source(ctx: AdminContext, uow: UnitOfWork, harness: str) -> CredentialSource:
+    original = ctx.credential_sources.get(harness)
+    return CredentialSource(
+        path=original.path if original is not None else "",
+        mount_mode=MountMode(mount_mode_value(ctx, uow, harness).value),
+    )
+
+
+def set_mount_mode(
+    ctx: AdminContext,
+    uow: UnitOfWork,
+    *,
+    principal: str,
+    harness: str,
+    mode: str,
+    reason: str | None,
+) -> dict[str, Any]:
+    reason = guard_mutation(
+        ctx,
+        uow,
+        reason,
+        principal=principal,
+        operation="credential mount mode",
+        reason_required=True,
+    )
+    spec = spec_for(ctx, harness)
+    try:
+        selected = MountMode(mode)
+    except ValueError as exc:
+        raise ContractValidationError(
+            "mount_mode must be ro, rw-narrow, or renewer",
+            errors=[{"path": "mount_mode", "message": "must be ro, rw-narrow, or renewer"}],
+        ) from exc
+    allowed = (
+        {MountMode.RENEWER, MountMode.RW_NARROW}
+        if spec.minimum_mode is MountMode.RENEWER
+        else {MountMode.RO, MountMode.RW_NARROW}
+        if spec.minimum_mode is MountMode.RO
+        else {MountMode.RW_NARROW}
+    )
+    if selected not in allowed:
+        detail = (
+            f"harness {harness!r} declares {spec.minimum_mode.value}; "
+            f"it does not support {selected.value}"
+        )
+        record_refusal(ctx, principal=principal, operation="credential mount mode", detail=detail)
+        raise ContractValidationError(
+            f"credential mount mode refused: {detail}",
+            errors=[{"path": "mount_mode", "message": detail}],
+        )
+    before = mount_mode_value(ctx, uow, harness)
+    save_scalar(
+        uow,
+        name=mount_mode_setting(harness),
+        field="mount_mode",
+        value=selected.value,
+        principal=principal,
+        reason=reason,
+        now=ctx.clock.now(),
+    )
+    admin_event(
+        uow,
+        ctx,
+        EventKind.CREDENTIAL_MOUNT_MODE_SET,
+        principal=principal,
+        reason=reason,
+        before={"mode": before.value, "source": before.source},
+        after={"mode": selected.value, "source": "saved", "applies": "next launch"},
+        harness=harness,
+    )
+    return mount_mode_view(ctx, uow, harness)
+
+
+def mount_mode_view(ctx: AdminContext, uow: UnitOfWork, harness: str) -> dict[str, Any]:
+    value = mount_mode_value(ctx, uow, harness)
+    return {
+        "mount_mode": value.value,
+        "mount_mode_source": value.source,
+        "mount_mode_applies": value.applies,
+        "mount_mode_reason": value.reason or None,
+    }
 
 
 class CredentialAdminError(ConflictError):
@@ -271,18 +381,19 @@ def state_view(
     adapter = adapter_for(ctx, harness)
     state = uow.harnesses.get(harness)
     spec = adapter.credential_spec()
+    source = effective_source(ctx, uow, harness) if spec is not None else None
     store = secret_store(ctx) if spec is not None else None
     if store is not None:
         view = _secret_state(
             store,
             spec,
-            ctx.credential_sources.get(harness),
+            source,
             state,
             harness,
             secret if secret is not None else read_secret(store, harness),
         )
     else:
-        view = credential_state(spec, ctx.credential_sources.get(harness), state).as_dict()
+        view = credential_state(spec, source, state).as_dict()
     if harness == HERMES:
         # The key is never echoed; whether one is set is all any surface says (12).
         view["key_set"] = any(
@@ -290,6 +401,7 @@ def state_view(
         )
     view.update(
         {
+            **(mount_mode_view(ctx, uow, harness) if spec is not None else {}),
             "session_compatibility": state.session_compatibility if state else "unverified",
             "refresh_requires_rw": state.refresh_requires_rw if state else None,
             "mount_mode_observed": state.mount_mode_observed if state else None,
@@ -747,10 +859,15 @@ async def _probe_async(
     adapter = adapter_for(ctx, harness)
     spec = adapter.credential_spec()
     source = (
-        ctx.credential_sources.get(harness)
+        effective_source(ctx, uow, harness)
         if secret_store(ctx) is not None or spec is None
         else source_for(ctx, harness)
     )
+    if spec is not None and source is not None:
+        source = CredentialSource(
+            path=source.path,
+            mount_mode=MountMode(mount_mode_value(ctx, uow, harness).value),
+        )
     provider = _probe_provider(ctx)
     image = await probe_image(ctx, uow, provider, harness)
     mode = effective_mount_mode(spec, source) if spec is not None else MountMode.RO
