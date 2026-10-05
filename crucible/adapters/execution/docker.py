@@ -233,13 +233,6 @@ feed() {
   for f in ${CRUCIBLE_STDIN_FILES:-}; do cat "$f"; printf '\n'; done
   if [ -n "${CRUCIBLE_PROMPT:-}" ]; then printf '%s\n' "$CRUCIBLE_PROMPT"; fi
 }
-run() {
-  if [ -n "${CRUCIBLE_STDIN_FILES:-}${CRUCIBLE_PROMPT:-}" ]; then
-    feed | "$@"
-  else
-    "$@" </dev/null
-  fi
-}
 watch_in_flight() {
   shown=0
   while :; do
@@ -260,12 +253,59 @@ if [ -n "${CRUCIBLE_IN_FLIGHT_FILE:-}" ]; then
   watch_in_flight </dev/null >/dev/null &
   watcher=$!
 fi
-if [ -n "${CRUCIBLE_TRANSCRIPT:-}" ]; then
-  run "$@" | tee "$CRUCIBLE_TRANSCRIPT"
+# Keep the harness a direct child, including when stdin is fed or stdout is teed.
+# A foreground pipeline defers Bash's TERM trap until the harness has exited.
+child=
+termination_requested=0
+interrupted=0
+forward_term() {
+  termination_requested=1
+  interrupted=1
+  if [ -n "$child" ]; then kill -TERM "$child" 2>/dev/null || :; fi
+}
+trap forward_term TERM
+wait_for() {
+  while :; do
+    interrupted=0
+    wait "$1"
+    result=$?
+    # A trapped signal interrupts wait. Reap the child after its cleanup finishes.
+    [ "$interrupted" -eq 0 ] && return "$result"
+  done
+}
+feeder=
+if [ -n "${CRUCIBLE_STDIN_FILES:-}${CRUCIBLE_PROMPT:-}" ]; then
+  exec {input}< <(feed)
+  feeder=$!
 else
-  run "$@"
+  exec {input}</dev/null
 fi
+transcriber=
+if [ -n "${CRUCIBLE_TRANSCRIPT:-}" ]; then
+  exec {output}> >(tee "$CRUCIBLE_TRANSCRIPT")
+  transcriber=$!
+else
+  exec {output}>&1
+fi
+"$@" <&"$input" >&"$output" &
+child=$!
+exec {input}<&-
+exec {output}>&-
+if [ "$termination_requested" -eq 1 ]; then kill -TERM "$child" 2>/dev/null || :; fi
+wait_for "$child"
 status=$?
+child=
+# Preserve pipefail ordering and drain the transcript, including cleanup output.
+if [ -n "$feeder" ]; then
+  wait_for "$feeder"
+  feed_status=$?
+  [ "$status" -ne 0 ] || status=$feed_status
+fi
+if [ -n "$transcriber" ]; then
+  wait_for "$transcriber"
+  tee_status=$?
+  [ "$tee_status" -eq 0 ] || status=$tee_status
+fi
 if [ -n "$watcher" ]; then kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null; fi
 exit "$status"
 """

@@ -244,7 +244,10 @@ never retry.
   attempt has allowlisted hosts: every name in `CRUCIBLE_EGRESS_ALLOWLIST` is tried
   at once with `curl` and one `crucible-egress-probe: {...}` line goes to stderr,
   which the supervisor records on the attempt as `egress_probe` (26, hades #425).
-  A host it cannot reach never stops the harness.
+  A host it cannot reach never stops the harness. The wrapper forwards SIGTERM
+  to the harness and waits for its cleanup within the container termination grace
+  period. It drains cleanup output into the transcript and preserves the harness
+  exit status, including when prompt input or command monitoring is enabled.
 - Crucible's launch wrapper is the sole transcript writer. The Hermes image wrapper
   inherits stdout and only enriches the usage record after the child exits.
 

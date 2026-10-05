@@ -17,9 +17,12 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
-from contextlib import contextmanager
+import sys
+import time
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -193,6 +196,88 @@ def _run_wrapper(
         timeout=60,
         check=False,
     )
+
+
+@pytest.mark.parametrize("prompt", [False, True])
+@pytest.mark.parametrize("transcript", [False, True])
+@pytest.mark.parametrize("monitor", [False, True])
+@pytest.mark.parametrize("cleanup_exit", [0, 23])
+def test_wrapped_harness_receives_term_and_finishes_cleanup(
+    tmp_path: Path, prompt: bool, transcript: bool, monitor: bool, cleanup_exit: int
+) -> None:
+    """Signal only PID 1's stand-in, as a Pod drain does, and wait for real cleanup."""
+    curl = tmp_path / "curl"
+    curl.write_text(_FAKE_CURL)
+    curl.chmod(0o755)
+    harness = tmp_path / "harness.py"
+    harness.write_text(
+        "import signal, sys, time\n"
+        "from pathlib import Path\n"
+        "def terminate(signum, frame):\n"
+        "    Path('terminated').touch()\n"
+        "    while not Path('release').exists(): time.sleep(0.01)\n"
+        "    print('cleanup finished', flush=True)\n"
+        "    sys.exit(int(sys.argv[1]))\n"
+        "signal.signal(signal.SIGTERM, terminate)\n"
+        "print('stdin=' + sys.stdin.read().strip(), flush=True)\n"
+        "Path('ready').touch()\n"
+        "while True: time.sleep(0.01)\n"
+    )
+    env = {
+        "PATH": f"{tmp_path}:/usr/bin:/bin",
+        "CRUCIBLE_EGRESS_ALLOWLIST": "pypi.org",
+    }
+    if prompt:
+        env["CRUCIBLE_PROMPT"] = "the prompt"
+    if transcript:
+        env["CRUCIBLE_TRANSCRIPT"] = str(tmp_path / "transcript")
+    if monitor:
+        env["CRUCIBLE_IN_FLIGHT_FILE"] = str(tmp_path / "commands")
+        (tmp_path / "commands").write_text('{"session_id": "active"}')
+    process = subprocess.Popen(
+        [
+            "bash",
+            "-o",
+            "pipefail",
+            "-c",
+            LAUNCH_WRAPPER,
+            "crucible-launch",
+            sys.executable,
+            str(harness),
+            str(cleanup_exit),
+        ],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+
+    def await_file(name: str) -> None:
+        deadline = time.monotonic() + 5
+        while not (tmp_path / name).exists():
+            assert process.poll() is None, "wrapper exited before harness cleanup"
+            assert time.monotonic() < deadline, f"harness never wrote {name}"
+            time.sleep(0.01)
+
+    try:
+        await_file("ready")
+        process.terminate()
+        await_file("terminated")
+        assert process.poll() is None, "wrapper must wait for cooperative cleanup"
+        (tmp_path / "release").touch()
+        stdout, stderr = process.communicate(timeout=5)
+        assert process.returncode == cleanup_exit, stderr
+        assert stdout == f"stdin={'the prompt' if prompt else ''}\ncleanup finished\n"
+        assert _probe_lines(stderr)[0]["hosts"][0]["reachable"] is True
+        if transcript:
+            assert (tmp_path / "transcript").read_text() == stdout
+    finally:
+        # Also clean up the harness if a regression leaves it orphaned.
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.communicate(timeout=5)
 
 
 def _probe_lines(stderr: str) -> list[dict[str, Any]]:
