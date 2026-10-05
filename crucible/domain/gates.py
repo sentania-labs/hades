@@ -591,7 +591,7 @@ def no_secrets(gi: GateInput) -> GateOutcome:
 
 # Editor and merge leftover name patterns (issue 362).
 EDITOR_LEFTOVERS_PATTERN: re.Pattern[str] = re.compile(
-    r"(?:\.bak|\.orig|\.rej|\~)$|\.swp|^\." + r"\#"
+    r"(?:\.bak|\.orig|\.rej|\~)$|\.swp|(?:^|/)\.\#"
 )
 
 
@@ -603,13 +603,26 @@ def _editor_leftover_path(path: str) -> bool:
     return bool(EDITOR_LEFTOVERS_PATTERN.search(path))
 
 
+def _diff_change_status(item: EvidenceItem) -> dict[str, str] | None:
+    """Return a mapping of path -> status from diff_paths ``changes``, or None."""
+    changes = item.payload.get("changes")
+    if not changes:
+        return None
+    result: dict[str, str] = {}
+    for c in changes:
+        if isinstance(c, dict) and "path" in c and "status" in c:
+            result[c["path"]] = c["status"]
+    return result if result else None
+
+
 def editor_leftovers(gi: GateInput) -> GateOutcome:
     """Fail when the diff adds editor or merge leftover files.
 
     Patterns: *.bak, *.orig, *.rej, *~, .*.swp, .#* and similar.
-    A leftover that exists on the base and is only edited or deleted
-    does not fail (diff_paths evidence carries only changed paths; if
-    a base file is edited, its new name is what appears here).
+    Only newly added files (status ``A``) are checked. A leftover that
+    exists on the base and is only edited or deleted does not fail.
+    When change-status information is unavailable the gate conservatively
+    falls back to all paths (the evidence did not include ``changes``).
 
     The failure always blocks so an advisory ``scope_contained`` gate
     still stops the task.
@@ -618,7 +631,16 @@ def editor_leftovers(gi: GateInput) -> GateOutcome:
     if item is None:
         return _missing("diff_paths")
     paths = [str(p) for p in item.payload.get("paths", [])]
-    leftovers = [p for p in paths if _editor_leftover_path(p)]
+
+    # Determine which paths were newly added (status "A").
+    change_status = _diff_change_status(item)
+    if change_status is not None:
+        added: set[str] = {p for p, s in change_status.items() if s == "A"}
+        leftovers = [p for p in paths if _editor_leftover_path(p) and p in added]
+    else:
+        # No change-status information: fall back to all paths.
+        leftovers = [p for p in paths if _editor_leftover_path(p)]
+
     if leftovers:
         return GateOutcome(
             GateResult.FAIL,

@@ -234,3 +234,115 @@ def test_swp_file_in_nested_dir() -> None:
     outcome = evaluate_gate(GateName.EDITOR_LEFTOVERS, gi)
     assert outcome.result is GateResult.FAIL
     assert ".config.py.swp" in outcome.detail
+
+
+# ---------------------------------------------------------------------------
+# Finding 2: nested .# files (01M46KK0RF1Q3WFG9BC5AF8TG3)
+# ---------------------------------------------------------------------------
+
+
+def test_nested_dot_hash_matches() -> None:
+    """A nested Emacs lock file matches the pattern."""
+    assert _pattern_matches("src/.#main.py")
+    assert _pattern_matches("foo/bar/.#lock")
+
+
+def test_nested_dot_hash_in_diff_fails_gate() -> None:
+    """A diff adding a nested .# file fails the gate."""
+    ev = _ev("diff_paths", {"paths": ["src/.#main.py", "src/main.py"]})
+    gi = _gi([ev])
+    outcome = evaluate_gate(GateName.EDITOR_LEFTOVERS, gi)
+    assert outcome.result is GateResult.FAIL
+    assert "src/.#main.py" in outcome.detail
+
+
+# ---------------------------------------------------------------------------
+# Finding 3: ignore pre-existing leftovers that are only modified (01M46KK0RJNGAXHPV8GCY5PA3V)
+# ---------------------------------------------------------------------------
+
+
+def test_modified_bak_passes_when_status_is_m() -> None:
+    """A pre-existing .bak file that is modified (not added) does not fail."""
+    ev = _ev(
+        "diff_paths",
+        {
+            "paths": ["src/ledger/app.py.bak"],
+            "changes": [
+                {"path": "src/ledger/app.py.bak", "status": "M", "blob": "b" * 40},
+            ],
+        },
+    )
+    gi = _gi([ev])
+    outcome = evaluate_gate(GateName.EDITOR_LEFTOVERS, gi)
+    assert outcome.result is GateResult.PASS
+
+
+def test_deleted_bak_passes_when_status_is_d() -> None:
+    """Deleting a pre-existing .bak file does not fail."""
+    ev = _ev(
+        "diff_paths",
+        {
+            "paths": ["src/ledger/app.py.bak"],
+            "changes": [
+                {"path": "src/ledger/app.py.bak", "status": "D", "blob": "0" * 40},
+            ],
+        },
+    )
+    gi = _gi([ev])
+    outcome = evaluate_gate(GateName.EDITOR_LEFTOVERS, gi)
+    assert outcome.result is GateResult.PASS
+
+
+def test_added_bak_fails_when_status_is_a() -> None:
+    """A newly added .bak file (status A) fails the gate."""
+    ev = _ev(
+        "diff_paths",
+        {
+            "paths": ["src/ledger/app.py.bak"],
+            "changes": [
+                {"path": "src/ledger/app.py.bak", "status": "A", "blob": "b" * 40},
+            ],
+        },
+    )
+    gi = _gi([ev])
+    outcome = evaluate_gate(GateName.EDITOR_LEFTOVERS, gi)
+    assert outcome.result is GateResult.FAIL
+    assert "src/ledger/app.py.bak" in outcome.detail
+
+
+def test_mixed_add_modify_preserves_additions() -> None:
+    """A mix of adds and modifications: only adds are flagged."""
+    ev = _ev(
+        "diff_paths",
+        {
+            "paths": [
+                "src/ledger/app.py.bak",  # added
+                "src/main.py.bak",  # modified (pre-existing)
+            ],
+            "changes": [
+                {"path": "src/ledger/app.py.bak", "status": "A", "blob": "b" * 40},
+                {"path": "src/main.py.bak", "status": "M", "blob": "b" * 40},
+            ],
+        },
+    )
+    gi = _gi([ev])
+    outcome = evaluate_gate(GateName.EDITOR_LEFTOVERS, gi)
+    assert outcome.result is GateResult.FAIL
+    # Only the added file should be in the reason
+    assert "src/ledger/app.py.bak" in outcome.detail
+    assert "src/main.py.bak" not in outcome.detail
+
+
+def test_without_changes_fallback_blocks_all() -> None:
+    """Without changes evidence, all leftover paths are flagged (conservative)."""
+    ev = _ev(
+        "diff_paths",
+        {
+            "paths": ["src/ledger/app.py.bak"],
+            # No "changes" key
+        },
+    )
+    gi = _gi([ev])
+    outcome = evaluate_gate(GateName.EDITOR_LEFTOVERS, gi)
+    assert outcome.result is GateResult.FAIL
+    assert "src/ledger/app.py.bak" in outcome.detail

@@ -30,14 +30,16 @@ When the diff adds a file whose name matches an editor or merge backup pattern, 
 gate fails with a reason listing every offending path. The gate sets `always_blocks`,
 so even an advisory ``scope_contained`` gate still stops the task.
 
-Patterns (matched anywhere in the file name, except ``.#`` which must prefix):
+Patterns (matched anywhere in the file name, except ``.#`` which must prefix a
+path component — either the start of the path or immediately after a `/`):
 
 - ``*.bak`` — Emacs backup files
 - ``*.orig`` — diff ``-p`` backup files
 - ``*.rej`` — rejected hunks from ``patch -p``
 - ``*~`` — Vim trailing-tilde backups
 - ``.*.swp`` or ``*/*.swp`` — Vim swap files
-- ``.#*`` — Emacs undo files
+- ``.#*`` — Emacs undo/lock files (e.g. ``src/.#main.py``)
 
-The check examines the ``diff_paths`` evidence. Files that already exist on the base
-ref and are only edited or deleted are not flagged.
+Only newly added files (diff status ``A``) are checked. A leftover that exists on
+the base ref and is only edited or deleted is not flagged.  When diff change-status
+information is unavailable the gate conservatively checks all changed paths.
