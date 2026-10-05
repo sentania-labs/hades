@@ -23,8 +23,7 @@ from crucible.ports.repository import UnitOfWork
 QUALITY_DAYS = 14
 
 # hades #334: the kanban's columns, left to right, keyed for the template and the admin API.
-# The first position is reserved for the Proposed state of hades #424 and holds no state
-# until that issue lands; nothing here implements it.
+# The first holds the proposals of hades #424, waiting for the operator's answer.
 KANBAN_COLUMNS: tuple[tuple[str, str], ...] = (
     ("proposed", "Proposed"),
     ("queued", "Queued"),
@@ -36,8 +35,11 @@ KANBAN_COLUMNS: tuple[tuple[str, str], ...] = (
     ("blocked", "Blocked or failed"),
     ("done", "Done in the last 24 hours"),
 )
-RESERVED_COLUMNS: frozenset[str] = frozenset({"proposed"})
-RESERVED_NOTES = {"proposed": "Reserved for the Proposed state (issue 424). Not in use yet."}
+RESERVED_COLUMNS: frozenset[str] = frozenset()
+COLUMN_NOTES = {
+    "proposed": "Waiting for the operator: approve, send back or reject. Open a card to answer it.",
+    "queued": "In queue order: the first card starts first.",
+}
 # A card in Awaiting Foundry or Awaiting Codex colours after this long; one in Awaiting CI
 # colours after the policy's CI budget (`ci_certification.wait_timeout_hours`).
 ATTENTION_MINUTES = 30
@@ -45,6 +47,9 @@ DONE_HOURS = 24
 
 _C = TaskState
 COLUMN_BY_STATE: dict[TaskState, str] = {
+    _C.PROPOSED: "proposed",
+    # The orchestrator holds a proposal the operator sent back, until it amends it.
+    _C.SENT_BACK: "foundry",
     _C.SUBMITTED: "queued",
     _C.SCHEDULED: "queued",
     _C.AWAITING_QUOTA: "queued",
@@ -75,6 +80,9 @@ COLUMN_BY_STATE: dict[TaskState, str] = {
     _C.REJECTED: "done",
 }
 
+# The states a queued card has a place in the queue in: the supervisor takes these.
+QUEUED_STATES: frozenset[TaskState] = frozenset({_C.SCHEDULED, _C.AWAITING_QUOTA})
+
 # The operator decides these from the task page or the API; the other blocked states
 # carry a wake the operator reads on the Wakes page.
 OPERATOR_DECISION_STATES: frozenset[TaskState] = frozenset(
@@ -85,6 +93,10 @@ OPERATOR_DECISION_STATES: frozenset[TaskState] = frozenset(
 # the event stream is the record of when a card entered a column. A state with no event
 # of its own (release candidate, released) falls back to the task's `updated_at`.
 STATE_BY_ENTRY_EVENT: dict[str, TaskState] = {
+    EventKind.TASK_PROPOSED.value: _C.PROPOSED,
+    EventKind.TASK_APPROVED.value: _C.SUBMITTED,
+    EventKind.TASK_SENT_BACK.value: _C.SENT_BACK,
+    EventKind.TASK_PROPOSAL_REJECTED.value: _C.REJECTED,
     EventKind.TASK_SUBMITTED.value: _C.SUBMITTED,
     EventKind.TASK_SCHEDULED.value: _C.SCHEDULED,
     EventKind.TASK_RETRY_SCHEDULED.value: _C.SCHEDULED,
@@ -134,6 +146,7 @@ GROUPS = (
 )
 
 GROUP_BY_STATE = {
+    TaskState.SENT_BACK: GROUPS[3],
     TaskState.AWAITING_INTERNAL_REVIEW: GROUPS[1],
     TaskState.AWAITING_ACCEPTANCE: GROUPS[2],
     TaskState.EXTERNAL_FEEDBACK_RECEIVED: GROUPS[3],
@@ -424,6 +437,8 @@ def kanban_holder(
             "label": "Operator",
             "detail": f"{detail}: {waiting_line(wake, state)}",
         }
+    if column == "proposed":
+        return {"kind": "operator", "label": "Operator", "detail": "approve, send back or reject"}
     if column == "done":
         return {"kind": "done", "label": DONE_WORDS.get(state, "Done"), "detail": ""}
     detail = "merge" if column == "merge" else _state_words(state)
@@ -490,22 +505,79 @@ def kanban_age(
     }
 
 
-def _kanban_groups(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Cards under their parent, oldest first; the list view's nesting, inside a column."""
-    ordered = sorted(cards, key=lambda card: card["age"]["entered_at"])
+QUEUE_EVENTS = frozenset({EventKind.TASK_SCHEDULED.value, EventKind.TASK_RETRY_SCHEDULED.value})
+
+
+def _queue_seqs(events: list[Any]) -> dict[str, int]:
+    """Per task, the event that last put it in the queue. The supervisor takes scheduled
+    tasks in this order (`queue_key`), so a batch approval shows in its selected order."""
+    seqs: dict[str, int] = {}
+    for event in events:
+        if event.kind in QUEUE_EVENTS and event.task_id:
+            seqs[event.task_id] = max(seqs.get(event.task_id, 0), int(event.seq or 0))
+    return seqs
+
+
+def _approval_batches(events: list[Any]) -> dict[str, dict[str, Any]]:
+    """Per task, the batch its latest approval was part of (hades #424)."""
+    batches: dict[str, dict[str, Any]] = {}
+    for event in events:
+        if event.kind == EventKind.TASK_APPROVED.value and event.task_id:
+            batch = (event.payload or {}).get("batch")
+            if isinstance(batch, dict):
+                batches[event.task_id] = batch
+            else:
+                batches.pop(event.task_id, None)
+    return batches
+
+
+def _queue_order(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The Queued column in queue order: scheduled cards by the event that queued them,
+    then cards not started yet, oldest first. Each scheduled card gets its position."""
+    ordered = sorted(
+        cards,
+        key=lambda card: (
+            card["queue"]["seq"] is None,
+            card["queue"]["seq"] or 0,
+            card["age"]["entered_at"],
+        ),
+    )
+    position = 0
+    for card in ordered:
+        if card["queue"]["seq"] is not None:
+            position += 1
+            card["queue"]["position"] = position
+    return ordered
+
+
+def _kanban_groups(cards: list[dict[str, Any]], *, queued: bool = False) -> list[dict[str, Any]]:
+    """Cards under their parent, oldest first (the Queued column in queue order); the list
+    view's nesting, inside a column."""
+    ordered = (
+        _queue_order(cards) if queued else sorted(cards, key=lambda card: card["age"]["entered_at"])
+    )
+    groups: list[dict[str, Any]] = []
     grouped: dict[str | None, dict[str, Any]] = {}
     for card in ordered:
         parent = card["parent_external_id"]
-        group = grouped.setdefault(
-            parent,
-            {
+        # Queue order is stronger than parent nesting. Keep only adjacent cards under
+        # one parent there, so A, B, A remains A, B, A when rendered. Other columns
+        # retain their established global parent grouping.
+        group = (
+            None
+            if queued and (not groups or groups[-1]["parent_external_id"] != parent)
+            else grouped.get(parent)
+        )
+        if group is None:
+            group = {
                 "parent_external_id": parent,
                 "parent_task_id": card["parent_task_id"],
                 "tasks": [],
-            },
-        )
+            }
+            groups.append(group)
+            grouped[parent] = group
         group["tasks"].append(card)
-    return list(grouped.values())
+    return groups
 
 
 def _kanban(
@@ -520,6 +592,8 @@ def _kanban(
     events: list[Any],
 ) -> dict[str, Any]:
     entries = _column_entries(events)
+    queue_seqs = _queue_seqs(events)
+    batches = _approval_batches(events)
     task_by_external_id = {task.external_id: task for task in tasks}
     done_cutoff = now - timedelta(hours=DONE_HOURS)
     budgets: dict[tuple[str, int], int] = {}
@@ -545,6 +619,11 @@ def _kanban(
                 "parent_task_id": parent.id if parent else None,
                 "holder": kanban_holder(column, task.state, attempt, wake_by_task.get(task.id)),
                 "age": kanban_age(column, entered_at, now, ci_budget_seconds=budget),
+                "queue": {
+                    "seq": queue_seqs.get(task.id) if task.state in QUEUED_STATES else None,
+                    "position": None,
+                    "batch": batches.get(task.id) if column == "queued" else None,
+                },
             }
         )
     return {
@@ -553,8 +632,8 @@ def _kanban(
                 "key": key,
                 "name": name,
                 "reserved": key in RESERVED_COLUMNS,
-                "note": RESERVED_NOTES.get(key),
-                "parents": _kanban_groups(cards[key]),
+                "note": COLUMN_NOTES.get(key),
+                "parents": _kanban_groups(cards[key], queued=key == "queued"),
             }
             for key, name in KANBAN_COLUMNS
         ],

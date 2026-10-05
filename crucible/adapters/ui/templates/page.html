@@ -29,12 +29,15 @@
     {% for name, value in (item.hidden or {}).items() %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
     {% if item.select %}<select class="lat-select" name="{{ item.select.name }}" aria-label="{{ item.select.label or item.select.name }}">{% for value, label in item.select.options %}<option value="{{ value }}" {% if value == item.select.selected %}selected{% endif %}>{{ safe_value("option", label) }}</option>{% endfor %}</select>{% endif %}
     {% if item.reason == "optional" %}<input class="lat-input" name="reason" placeholder="Reason (optional)" aria-label="Reason (optional)">{% elif item.reason %}<input class="lat-input" name="reason" placeholder="Reason (required)" aria-label="Reason" required>{% endif %}
+    {% if item.note %}<textarea class="lat-textarea" rows="2" name="note" placeholder="{{ item.note }}" aria-label="{{ item.note }}" required></textarea>{% endif %}
     <button class="lat-btn {% if item.danger %}lat-btn--danger{% elif item.primary %}lat-btn--primary{% else %}lat-btn--ghost{% endif %}" type="submit">{{ item.label }}</button>
   </form>
 {%- endmacro %}
 {% macro render_cell(cell, column) -%}
   {% if cell is mapping and cell.kind == "actions" %}<div class="admin-actions">{% for item in cell["items"] %}{% if item.kind == "link" %}<a class="lat-btn lat-btn--ghost" href="{{ item.href }}">{{ item.label }}</a>{% else %}{{ render_row_form(item) }}{% endif %}{% endfor %}</div>
   {% elif cell is mapping and cell.kind == "form" %}{{ render_row_form(cell) }}
+  {% elif cell is mapping and cell.kind == "prose" %}<div class="admin-prose">{{ safe_value(column, cell.value) }}</div>
+  {% elif cell is mapping and cell.kind == "links" %}{% if cell["items"] %}<ul class="admin-values">{% for link in cell["items"] %}<li>{% if link.href %}<a href="{{ link.href }}" rel="noopener noreferrer" target="_blank">{{ safe_value("label", link.label) }}</a>{% else %}{{ safe_value("label", link.label) }}{% endif %}</li>{% endfor %}</ul>{% else %}<span class="admin-empty">none</span>{% endif %}
   {% elif cell is mapping and cell.kind == "more" %}{% if cell.value %}<details><summary>{{ cell.label or "Show" }}</summary>{{ render_panel(panel_from_cell(cell.value)) }}</details>{% endif %}
   {% elif cell is mapping and cell.kind == "link" %}<a href="{{ cell.href }}">{{ safe_value("label", cell.label) }}</a>
   {% elif cell is mapping and cell.kind == "status" %}<span class="lat-badge lat-badge--{{ cell.tone or 'accent' }}">{{ safe_value("status", cell.value) }}</span>{% if cell.hint %}<div class="admin-hint">{{ safe_value("hint", cell.hint) }}</div>{% endif %}
@@ -49,6 +52,7 @@
       <a class="admin-kanban-card{% if card.age.late %} admin-kanban-card--late{% endif %}" href="{{ card.href }}">
         <span class="admin-kanban-card-title">{{ safe_value("title", card.title) }}</span>
         <span class="admin-kanban-card-id">{{ safe_value("external_id", card.external_id) }}</span>
+        {% if card.queue is defined and card.queue.position %}<span class="admin-kanban-queue">Queue position {{ card.queue.position }}{% if card.queue.batch %}, batch {{ card.queue.batch.position }} of {{ card.queue.batch.of }}{% endif %}</span>{% endif %}
         <span class="admin-kanban-card-foot">
           <span class="admin-chip admin-chip--{{ card.holder.kind }}"{% if card.holder.detail %} title="{{ safe_value("detail", card.holder.detail) }}"{% endif %}>{{ safe_value("holder", card.holder.label) }}</span>
           <span class="admin-kanban-age{% if card.age.late %} admin-kanban-age--late{% endif %}" title="In {{ column.name }} since {{ card.age.entered_at }}">{{ card.age.label }}</span>

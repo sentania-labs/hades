@@ -54,6 +54,9 @@ class WakeReason(StrEnum):
     # 07 and 25: a launch refused because the harness is unknown, disabled, or its image
     # carries a version outside the adapter's tested range.
     HARNESS_UNAVAILABLE = "harness_unavailable"
+    # hades #424: the operator sent a proposed task back with a note, or rejected it.
+    SENT_BACK = "sent_back"
+    PROPOSAL_REJECTED = "proposal_rejected"
 
 
 class WakeTask(StrictModel):

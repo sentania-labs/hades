@@ -11,9 +11,10 @@ without Foundry.
 
 The read-only Board is next to Tasks in the administration navigation. It leads
 with a kanban (hades #334): one column per lifecycle stage, left to right,
-Queued, Running, Awaiting Foundry, Awaiting Codex, Awaiting CI, Ready to merge,
-Blocked or failed, and Done in the last 24 hours, with one position before Queued
-reserved for the Proposed state of hades #424 and empty until that lands. Every
+Proposed, Queued, Running, Awaiting Foundry, Awaiting Codex, Awaiting CI, Ready to
+merge, Blocked or failed, and Done in the last 24 hours. Proposed holds the tasks the
+orchestrator proposed (hades #424), with the operator as their holder; a proposal the
+operator sent back waits in Awaiting Foundry until the orchestrator amends it. Every
 open task is one card, in the column for its state: the title, the external ID
 small, a chip for who holds the ball (the worker with its harness and model,
 Foundry, Codex, CI, the operator for a wake or a decision, or Hades between
@@ -28,6 +29,24 @@ a projection over the task, event, wake and policy tables with no table of its
 own. Child tasks stay nested under their parent external ID inside the column,
 and the whole card links to the task page. The columns are a strip that scrolls
 sideways, one column to a phone screen.
+
+Queued is in queue order, the order the supervisor takes the tasks in: each
+scheduled card shows its queue position and, when it was approved in a batch, its
+place in the batch. Under the kanban, "Approve proposed tasks together" lists every
+proposal with an order selector: the operator numbers the ones to approve, 1 first,
+gives a reason, and approves them in one action. The numbers are the queue order;
+they are recorded on each approval, and the tasks appear in Queued in that order. A
+number given twice is refused rather than guessed between. Nothing is dragged.
+
+The Tasks page leads with the same proposals: a list, the same batch form, and one
+section per proposal with its contract in words (title, objective, acceptance
+criteria, required verification, context links, repository, who proposed it and
+when) and the operator's four answers, each needing a reason: Approve, Approve with
+note (the note is appended verbatim to the objective), Send back (the note is the
+orchestrator's wake), and Reject. The task page of a proposed or sent-back task shows
+the same contract, and the answers while it is proposed. The answers are open to
+operator and admin principals; an observer reads the contract only. Each answer is
+listed on the Audit page with its reason.
 
 Under the kanban, the earlier list is still there behind "Show the task list":
 every non-terminal task as a table row, grouped by what it waits on and then by

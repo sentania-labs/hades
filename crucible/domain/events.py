@@ -17,6 +17,11 @@ PRINCIPAL_WORKER = "worker"
 class EventKind(StrEnum):
     # task
     TASK_SUBMITTED = "task_submitted"
+    # hades #424: a proposal and the operator's answers to it.
+    TASK_PROPOSED = "task_proposed"
+    TASK_APPROVED = "task_approved"
+    TASK_SENT_BACK = "task_sent_back"
+    TASK_PROPOSAL_REJECTED = "task_proposal_rejected"
     TASK_SCHEDULED = "task_scheduled"
     TASK_RUNNING = "task_running"
     TASK_REPORTED = "task_reported"

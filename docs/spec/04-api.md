@@ -44,11 +44,16 @@ also carries a signed-session CSRF value. Sign-out clears the cookie.
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/tasks` | Submit a task contract (body: `TaskContractV1`). Validates, persists, returns the task in `submitted`. Does not launch. |
+| POST | `/tasks?proposed=true` | Propose a task contract (hades #424). The same body and the same validation as a submission, but the task is stored in `proposed`, which is not authorized: `start` refuses it (409) and the supervisor never schedules it. Only an operator's answer moves it on. |
+| POST | `/tasks/{id}/approve` | Operator or admin only, in `proposed`. Body: `reason` (required, recorded on the audit event) and an optional `note`. Moves the task to `submitted` (event `task_approved`) and starts it as `start` does, under the policy its contract names, which must not be retired. A `note` is appended verbatim to the contract's objective, after a blank line and `Operator direction:`, as a new contract version; the event carries the same note. |
+| POST | `/tasks/approvals` | Operator or admin only. Body: `task_ids` (proposed tasks, in the order the operator selected them) and `reason`. Approves them in one transaction, in that order, all or none. Each `task_approved` event records `batch` with its `id`, the task's `position`, `of`, and the whole `order` by external ID. The tasks are scheduled in that order, and the supervisor takes scheduled tasks in the order they were queued, so the selection order is the queue order. Returns `batch_id` and the tasks. |
+| POST | `/tasks/{id}/send-back` | Operator or admin only, in `proposed`. Body: `reason` and `note` (both required). Moves the task to `sent_back` (event `task_sent_back`) and wakes the task's orchestrator with reason `sent_back`, whose summary is the note verbatim. An `amend` in `sent_back` proposes the task again. |
+| POST | `/tasks/{id}/reject` | Operator or admin only, in `proposed`. Body: `reason`. Moves the task to `rejected` (event `task_proposal_rejected`) and wakes the orchestrator with reason `proposal_rejected`. A task anywhere else is not rejected through this endpoint. |
 | GET | `/tasks` | List with filters: `state`, `project`, `repository`, `external_id`, `updated_since`. |
 | GET | `/tasks/{id}` | Full task view: contract versions, executions, latest attempt summary, gate summary, PR summary, open escalations, and `delivery`, the task's paper trail: the work branch, the head Crucible pushed and when, the PR number, link and state, and once merged the merge commit SHA, who merged and when (hades FDY-0143). |
 | POST | `/tasks/{id}/start` | Move to `scheduled`; body names harness, model, image, provider, policy version, and optional overrides. This is Foundry's dispatch decision. Overrides create an amendment (05); until the amendment path exists (C2) the body must agree with the contract. |
 | POST | `/tasks/{id}/cancel` | Request cancellation; body carries reason and the deciding principal's verbatim words. The API writes the task state and enqueues termination for the supervisor. |
-| POST | `/tasks/{id}/amend` | Attach a new contract version; allowed only in `submitted`, `blocked`, or `awaiting_acceptance`. |
+| POST | `/tasks/{id}/amend` | Attach a new contract version; allowed only in `proposed`, `sent_back`, `submitted`, `blocked`, or `awaiting_acceptance`. An amendment in `sent_back` moves the task back to `proposed` (hades #424). |
 | POST | `/tasks/{id}/review` | Request the internal non-author review of the current collected head. Body either names an execution request for a Crucible `review` execution, or carries an uploaded `ReviewReportV1` produced by the orchestrator through its own harness. Allowed in `awaiting_internal_review`. The API records the request; the supervisor creates the review execution, or turns the uploaded report into evidence and resolves the gate, on its next tick, so clients poll the task rather than read the outcome from the response. The reviewer identity recorded is the authenticated caller's (or the review attempt's), never the one the document names. |
 | POST | `/tasks/{id}/accept` | Record an `AcceptanceResult` (accepted, rejected, needs_more_work) with reasoning for the current collected head. Orchestrator role only. |
 | POST | `/tasks/{id}/republish` | In `publish_failed`, manually retry publication with a reason. The same accepted head and sealed bundle resume at the failed step. Policy `limits.publish_retry_max` caps retries and the wake reports the cap. Orchestrator or operator role. |
@@ -61,6 +66,11 @@ also carries a signed-session CSRF value. Sign-out clears the cookie.
 | GET | `/tasks/{id}/events` | Ordered events for the task and its children. |
 | GET | `/tasks/{id}/pull-request` | The PR record with head history, the external review cycles and their completed components, external reviews, comments, dispositions, the observed reactions, whether reactions are observable at all, and CI certifications. |
 | GET | `/events` | Global feed, `?cursor=&kind=&since=`. |
+
+The operator's answers to a proposal (`approve`, `approvals`, `send-back`,
+`reject`) are each one event with the operator as principal and the reason in its
+payload; they are listed on the Audit page. An orchestrator principal, including
+the one that proposed the task, gets 403 from all four.
 
 The task mutations `cancel`, `accept`, `review`, `dispositions`, `corrections`,
 `ci-decision`, `head-decision`, `decisions`, `amend`, and `close` return 403
