@@ -250,11 +250,13 @@ COMMAND_OVERRUN_SECONDS = 60
 # Issue 278: a worker that starts the same command this many times in a row, with no
 # other command and no file edit between, is in a loop (`/bin/bash -lc wait`, an empty
 # command) and is ended as a stall on the next tick, not at stall_fail_seconds. The
-# accepted bound is 5 to 10.
+# accepted bound is 5 to 10. An edit is one the log shows or one the supervisor's own
+# workspace check verifies, so a command that edits through the shell is iteration.
 COMMAND_LOOP_REPEATS = 8
 # Issue 278: a worker on a local endpoint whose turn has begun and that has made no tool
 # call this long after is ended as a `no_activity` stall. Counted from the harness's own
-# first event, so the preparer and the image pull are not in it.
+# event that the model is working on the turn (Codex's `turn.started`), so the preparer,
+# the image pull and the harness's own start are not in it.
 LOCAL_FIRST_RESPONSE_SECONDS = 300
 # How much of a repeated command a stall reason quotes.
 LOOP_COMMAND_QUOTE = 200
@@ -3797,8 +3799,23 @@ class Supervisor:
             changed = await self._workspace_changed(attempt, provider, handle)
             if changed:
                 await self._db(partial(self._record_workspace_activity, attempt.id))
+                self._note_workspace_edit(attempt.id)
             await self._note_running_commands(attempt)
             early = await self._db(partial(self._early_stall, attempt.id))
+            # A loop verdict is checked against the workspace first. A provider whose
+            # workspace is probed no more often than a command renews activity
+            # (Kubernetes) can have many repeats of an editing command between two
+            # probes; one more probe now, past the throttle, says whether the repeats
+            # were iteration. It costs one exec, once per verdict.
+            if (
+                early is not None
+                and early.shape != STALL_NO_ACTIVITY
+                and not changed
+                and await self._workspace_changed(attempt, provider, handle, force=True)
+            ):
+                await self._db(partial(self._record_workspace_activity, attempt.id))
+                self._note_workspace_edit(attempt.id)
+                early = await self._db(partial(self._early_stall, attempt.id))
             if early is not None:
                 await provider.terminate(handle, "drain")
                 await self._db(
@@ -4333,12 +4350,13 @@ class Supervisor:
             )
 
     async def _workspace_changed(
-        self, attempt: Attempt, provider: ExecutionProvider, handle: Handle
+        self, attempt: Attempt, provider: ExecutionProvider, handle: Handle, *, force: bool = False
     ) -> bool:
         """Whether the worker's files moved since the last look. A local workspace is
         walked here every tick. A provider whose workspace is not local (Kubernetes)
         answers through its activity probe instead (FDY-0140), asked no more often than
-        a command in flight renews activity, since each ask is an exec into the Pod."""
+        a command in flight renews activity, since each ask is an exec into the Pod,
+        unless `force` (issue 278: a loop verdict asks once more before it stands)."""
         probe = getattr(provider, "activity", None)
         if probe is None:
             current: tuple[int, int, int] | None = await self._db(
@@ -4347,7 +4365,7 @@ class Supervisor:
         else:
             now = self._clock.now()
             asked = self._activity_asked.get(attempt.id)
-            if asked is not None:
+            if asked is not None and not force:
                 refresh = self._activity_refresh.get(attempt.id)
                 if refresh is None:
                     refresh = await self._db(partial(self._activity_refresh_seconds, attempt))
@@ -4374,6 +4392,14 @@ class Supervisor:
             int(limits.get("stall_warn_seconds", 300)),
             int(limits.get("stall_fail_seconds", 1800)),
         )
+
+    def _note_workspace_edit(self, attempt_id: str) -> None:
+        """Issue 278: a verified workspace change ends the tracker's run of repeated
+        commands, as an edit in the log does. Only a tracker that counts them hears it."""
+        watch = self._command_watches.get(attempt_id)
+        tracker = watch.tracker if watch is not None else None
+        if isinstance(tracker, CommandLoopTracker):
+            tracker.workspace_changed()
 
     def _record_workspace_activity(self, attempt_id: str) -> None:
         with self._fenced() as uow:

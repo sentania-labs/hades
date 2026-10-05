@@ -291,8 +291,11 @@ class CodexAdapter:
 # `command_execution` is counted for loops too; a `file_change` is the model editing,
 # which ends any run of repeats, since a command repeated around edits is iteration.
 _TOOL_ITEMS = frozenset({"command_execution", "file_change", "mcp_tool_call", "web_search"})
-# The events `codex exec --json` writes once the turn has begun.
-_TURN_BEGINS = frozenset({"thread.started", "turn.started"})
+# The event `codex exec --json` writes once the model is working on the turn. It is not
+# `thread.started`: the pinned transcript (codex-0.156.0-session-polled.jsonl) writes
+# that first, when the thread is created, and whatever the CLI does between the two
+# (its own setup, a request that hangs) is not the model's time.
+_TURN_BEGINS = frozenset({"turn.started"})
 
 
 class CommandTracker(base.LineTracker):
@@ -300,7 +303,10 @@ class CommandTracker(base.LineTracker):
     completed. Only commands count: other items (a todo list) stay open for a turn.
 
     Issue 278: also the run of identical commands the log ends with, whether the turn
-    has begun and whether the model has called any tool (a CommandLoopTracker)."""
+    has begun and whether the model has called any tool (a CommandLoopTracker). The run
+    ends at a `file_change` item, and when the supervisor says the workspace changed
+    (`workspace_changed`): a command that edits through the shell, a script that fixes
+    one failure per call, shows only `command_execution` items, and is iteration too."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -349,6 +355,11 @@ class CommandTracker(base.LineTracker):
             self._repeats += 1
         else:
             self._last_command, self._repeats = command, 1
+
+    def workspace_changed(self) -> None:
+        """The supervisor saw the worker's files move: the run of repeats ends here, as
+        it does at a `file_change` item. The next command starts a new run."""
+        self._last_command, self._repeats = None, 0
 
     @property
     def running(self) -> tuple[tuple[str, str], ...]:

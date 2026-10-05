@@ -330,20 +330,30 @@ reads it on every tick, after the tracker is fed, and ends the attempt as a stal
 
 - the same command has started 8 times in a row (the accepted bound is 5 to 10),
   with no other command and no file edit between: a loop, on any route. A command
-  repeated around edits is iteration and does not count;
+  repeated around edits is iteration and does not count. An edit is one the log
+  shows or one the supervisor's own workspace check verifies (the fingerprint walk
+  or the activity probe of 10), since a command that edits through the shell, a
+  script that fixes one failure per call, shows the log only commands: the
+  supervisor tells the tracker (`workspace_changed`) and the run starts over. On a
+  provider whose probe is throttled (Kubernetes asks no more often than a command
+  renews activity), a loop verdict asks the probe once more, past the throttle,
+  before the attempt is ended, so repeats between two probes are not mistaken for
+  a loop;
 - the attempt runs on a local endpoint, its turn began 300 seconds ago, and the
   model has made no tool call: `no_activity`. The clock starts at the stored log
-  chunk where the tracker first saw the turn begin, so the preparer, the image
-  pull and the harness's start are not in it.
+  chunk where the tracker first saw the model working on the turn, so the
+  preparer, the image pull and the harness's own start are not in it.
 
 Only Codex's tracker says this today. It counts each `command_execution` item once,
 at `item.started` (or at `item.completed` for one that never started), and resets
-on a `file_change` item; `thread.started` and `turn.started` begin the turn, and a
-`command_execution`, `file_change`, `mcp_tool_call` or `web_search` item is a tool
-call. It reads the `codex exec --json` stream, which is what the local route
-launches; the subscription route's app-server host writes its events to the report
-transcript and not to the log, so there only the time-based limits apply. Every
-other harness keeps the time-based stall limits alone.
+on a `file_change` item or a verified workspace change; `turn.started` begins the
+turn (`thread.started` comes before it, when the thread is created, and whatever
+the CLI does between the two is not the model's time), and a `command_execution`,
+`file_change`, `mcp_tool_call` or `web_search` item is a tool call. It reads the
+`codex exec --json` stream, which is what the local route launches; the
+subscription route's app-server host writes its events to the report transcript
+and not to the log, so there only the time-based limits apply. Every other harness
+keeps the time-based stall limits alone.
 
 ### Codex on the local gateway (FDY-0149, issue #249)
 

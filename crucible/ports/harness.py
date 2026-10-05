@@ -390,11 +390,17 @@ class CommandLoopTracker(CommandTracker, Protocol):
 
     `repeated` is the last command started and how many times in a row it has started,
     with no other command and no file edit between; `responding` is whether the
-    harness's turn has begun (so the preparer's time is not counted); `tool_called` is
-    whether the model has made any tool call yet."""
+    model is working on the harness's turn (so neither the preparer's time nor the
+    harness's own start is counted); `tool_called` is whether the model has made any
+    tool call yet. `workspace_changed` is the supervisor telling the tracker it saw the
+    worker's files move (its fingerprint or its activity probe), which ends the run of
+    repeats as an edit in the log does: a command that edits through the shell shows
+    the log no edit, and repeating it is iteration, not a loop."""
 
     @property
     def repeated(self) -> tuple[str, int] | None: ...
+
+    def workspace_changed(self) -> None: ...
 
     @property
     def responding(self) -> bool: ...

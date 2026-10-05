@@ -385,6 +385,84 @@ async def test_a_command_repeated_around_edits_is_iteration_not_a_loop(
     assert await run.until_stopped(600) is None
 
 
+async def test_a_command_that_edits_through_the_shell_is_iteration_until_it_stops_editing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A script that fixes one failure per call shows the log only `command_execution`
+    items; the supervisor's own workspace check verifies the edits. Once the edits stop,
+    the same command repeated is a loop again, counted from the last edit."""
+    timeline: Timeline = [(5, turn_begins())]
+    for n in range(30):
+        timeline.append((15 + 5 * n, command(f"item_{n}", "/bin/bash -lc ./fix-next.sh")))
+    run = run_for(monkeypatch, timeline)
+    edits_until = START + timedelta(seconds=100)
+
+    async def files_moved(*_args: object, **_kwargs: object) -> bool:
+        return run.clock.now() <= edits_until
+
+    monkeypatch.setattr(run.supervisor, "_workspace_changed", files_moved)
+
+    stopped = await run.until_stopped(600)
+
+    # 18 calls while editing. The reset on the tick that verifies the last edit ends
+    # the run before that tick's chunk is fed, so the call in it starts the new run;
+    # the loop is the 8th call from there, not at 1800 and not before the edits stop.
+    assert stopped is not None and 100 + 5 * (COMMAND_LOOP_REPEATS - 1) <= stopped <= 160
+    assert run.store.attempt.stall_shape == STALL_LOOP_COMMAND
+    assert run.store.attempt.termination_detail is not None
+    assert "./fix-next.sh" in run.store.attempt.termination_detail
+    assert f"{COMMAND_LOOP_REPEATS} times in a row" in run.store.attempt.termination_detail
+
+
+async def test_a_loop_verdict_asks_the_throttled_probe_once_more_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a provider whose workspace is probed no more often than a command renews
+    activity, the repeats between two probes may be edits; the verdict asks once more,
+    past the throttle, and stands only when the files did not move."""
+    run = run_for(monkeypatch, loop_of("/bin/bash -lc ./fix-next.sh", 30, every=5))
+    asked: list[bool] = []
+    moved = True
+
+    async def throttled(*_args: object, force: bool = False) -> bool:
+        asked.append(force)
+        return force and moved
+
+    monkeypatch.setattr(run.supervisor, "_workspace_changed", throttled)
+
+    assert await run.until_stopped(100) is None
+    assert asked.count(True) >= 1
+    assert asked.count(True) < asked.count(False)
+    assert run.store.attempt.stall_shape is None
+
+    moved = False
+    stopped = await run.until_stopped(600)
+
+    assert stopped is not None
+    assert run.store.attempt.stall_shape == STALL_LOOP_COMMAND
+
+
+async def test_a_forced_workspace_check_asks_the_probe_past_the_throttle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = run_for(monkeypatch, [])
+    fingerprints = iter([(1, 1, 1), (2, 2, 2), (3, 3, 3)])
+    probe = AsyncMock(side_effect=lambda *_args: next(fingerprints))
+    run.provider.activity = probe
+    attempt, handle = run.store.attempt, SimpleNamespace(ref="worker-278")
+    changed = Supervisor._workspace_changed.__get__(run.supervisor)
+
+    assert await changed(attempt, run.provider, handle) is False
+    run.clock.advance(TICK)
+    assert await changed(attempt, run.provider, handle) is False
+    assert probe.await_count == 1
+    assert await changed(attempt, run.provider, handle, force=True) is True
+    assert probe.await_count == 2
+    run.clock.advance(TICK)
+    assert await changed(attempt, run.provider, handle) is False
+    assert probe.await_count == 2
+
+
 async def test_alternating_commands_are_not_identical_consecutive_commands(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -445,6 +523,26 @@ async def test_a_local_worker_with_no_tool_call_is_stopped_as_no_activity(
     assert "no tool call" in attempt.termination_detail
     (stalled,) = run.store.events_of(EventKind.WORKER_STALLED)
     assert stalled.payload["stall_shape"] == STALL_NO_ACTIVITY
+
+
+async def test_the_first_response_clock_starts_at_turn_started_not_thread_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pinned transcript writes `thread.started` before `turn.started`: the thread
+    exists, the model is not yet working. A slow start between the two is not counted."""
+    thread, turn = 10, 400
+    timeline: Timeline = [
+        (thread, [line({"type": "thread.started", "thread_id": "t-278"})]),
+        (turn, [line({"type": "turn.started"})]),
+        (turn + 30, message("item_0", "Let me think.")),
+    ]
+    run = run_for(monkeypatch, timeline, endpoint="local")
+
+    stopped = await run.until_stopped(1800)
+
+    assert stopped is not None
+    assert turn + LOCAL_FIRST_RESPONSE_SECONDS <= stopped < turn + LOCAL_FIRST_RESPONSE_SECONDS + 60
+    assert run.store.attempt.stall_shape == STALL_NO_ACTIVITY
 
 
 async def test_the_first_response_deadline_is_for_the_local_route_only(
@@ -539,6 +637,23 @@ def test_the_codex_tracker_counts_identical_consecutive_commands() -> None:
     tracker.feed("stdout", "".join(command("item_11", "/bin/bash -lc wait")))
     assert repeats(tracker) == ("/bin/bash -lc wait", 1)
     assert tracker.running == ()
+    # The supervisor's verified workspace change ends the run as the edit item does.
+    tracker.feed("stdout", "".join(command("item_12", "/bin/bash -lc wait")))
+    assert repeats(tracker) == ("/bin/bash -lc wait", 2)
+    tracker.workspace_changed()
+    assert repeats(tracker) is None
+    tracker.feed("stdout", "".join(command("item_13", "/bin/bash -lc wait")))
+    assert repeats(tracker) == ("/bin/bash -lc wait", 1)
+    assert flags(tracker) == (True, True)
+
+
+def test_the_codex_tracker_is_responding_from_turn_started_only() -> None:
+    tracker = CodexAdapter().command_tracker()
+    assert isinstance(tracker, CommandLoopTracker)
+    tracker.feed("stdout", line({"type": "thread.started", "thread_id": "t-278"}))
+    assert flags(tracker) == (False, False)
+    tracker.feed("stdout", line({"type": "turn.started"}))
+    assert flags(tracker) == (True, False)
 
 
 def test_degenerate_stall_rules() -> None:
