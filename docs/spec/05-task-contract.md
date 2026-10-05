@@ -175,7 +175,11 @@ recorded only after the correction attempt succeeds.
   names one of them as a word (`docker compose up`, `/usr/bin/kubectl`,
   `sudo kind create cluster`) or runs a `make` target with one as a component
   of its name (`make deploy-kind`, `make e2e-kind`), with a reason naming the
-  program. The tiers that need them are CI's (CONTRIBUTING.md).
+  program. Literal command strings passed to shell `-c` options (including
+  combined options such as `bash -lc`) are inspected through nested wrappers.
+  Ordinary quoted arguments are not reinterpreted as commands. This static
+  check does not evaluate variables or read script files or Makefile recipes.
+  The tiers that need them are CI's (CONTRIBUTING.md).
 - `policy` exists and is not retired; `lifecycle.max_attempts` within it.
 - `execution_request` names no model, harness, or image. At submit the
   advisory check is that the routing policy has at least one selectable

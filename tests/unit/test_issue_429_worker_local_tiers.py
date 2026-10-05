@@ -86,6 +86,16 @@ def test_contributing_shares_the_identity_sentence() -> None:
         ("sudo kind create cluster", "kind"),
         ("kubectl apply -f deploy/", "kubectl"),
         ("make manifests; kubectl get pods", "kubectl"),
+        ("sh -c 'docker ps'", "docker"),
+        ("/bin/bash -lc 'kind create cluster'", "kind"),
+        ("env FOO=1 dash -ec 'kubectl get pods'", "kubectl"),
+        ("bash -o pipefail -c 'make deploy-kind'", "kind"),
+        ("zsh --command 'docker compose ps'", "docker"),
+        ("sh -c 'true;docker ps'", "docker"),
+        ("sh -c 'true&&kubectl get pods'", "kubectl"),
+        ("sh -c '(kind get clusters)'", "kind"),
+        ("sh -c 'sh -c \"/usr/bin/docker ps\"'", "docker"),
+        ("sh -c 'bash -lc \"make e2e-kind\"'", "kind"),
     ],
 )
 def test_a_required_check_that_needs_an_absent_program_is_refused(
@@ -113,6 +123,14 @@ def test_a_required_check_that_needs_an_absent_program_is_refused(
         "make e2e",
         "grep --kind=x README.md",
         "make KIND_DUMP_SECONDS=10 test-unit",
+        "sh -c 'make lint && make test-unit'",
+        "bash -o pipefail -lc 'make scan'",
+        "sh -c 'sh -c \"make test-unit\"'",
+        "printf '%s' 'docker ps'",
+        "sh -c 'printf \"docker ps\"'",
+        "bash --rcfile config -c 'make lint'",
+        "sh -c",
+        "sh ./check.sh -c 'docker ps'",
     ],
 )
 def test_worker_local_checks_are_accepted(command: str) -> None:

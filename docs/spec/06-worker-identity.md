@@ -63,7 +63,8 @@ the worker is told what to do, not how Crucible checks it. In order:
    sentence CONTRIBUTING.md shares, "Docker, kind and kubectl are absent in a
    worker and are CI's; a missing one is expected and is not a reason to stop."
    (hades #429). The two do not meet: a contract whose required check needs
-   `docker`, `kind` or `kubectl` is refused at validation (05), so the first line
+   `docker`, `kind` or `kubectl`, including inside literal shell `-c` command
+   strings, is refused at validation (05), so the first line
    is about `uv` or `gitleaks`, and the second is for the worker that reads a
    project's instructions to run the kind tier or build an image (ADR 0020).
 8. **Report.** Write `/crucible/report/report.yaml` against

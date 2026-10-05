@@ -111,7 +111,22 @@ class AcceptanceCriterion(StrictModel):
 # (the compose smoke, e2e, e2e-kind, image builds and digests) are CI's.
 WORKER_ABSENT_PROGRAMS: tuple[str, ...] = ("docker", "kind", "kubectl")
 
-_SHELL_SEPARATORS = frozenset({"&&", "||", ";", "|", "&"})
+_SHELL_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "(", ")"})
+_SHELL_PROGRAMS = frozenset({"sh", "bash", "dash", "ash", "ksh", "zsh"})
+
+
+def _shell_command(words: list[str]) -> str | None:
+    """Find the literal command argument of a shell's -c option."""
+    index = 0
+    while index < len(words):
+        option = words[index]
+        if option == "--" or not option.startswith("-"):
+            return None
+        if option == "--command" or (not option.startswith("--") and "c" in option[1:]):
+            return words[index + 1] if index + 1 < len(words) else None
+        # These options consume an argument before the next shell option.
+        index += 2 if option in {"-o", "-O", "--rcfile", "--init-file"} else 1
+    return None
 
 
 def _program_name(word: str) -> str:
@@ -128,24 +143,36 @@ def worker_absent_program(command: str) -> str | None:
     the programs (`docker compose up`, `kubectl apply`, `sudo kind create cluster`),
     and a `make` target whose name carries one as a component (`make deploy-kind`,
     `make e2e-kind`), since a target named for kind runs kind. Flags, assignments and
-    paths are not programs: `pytest tests/unit/test_kind.py` and `--kind=x` pass."""
-    try:
-        words = shlex.split(command, comments=False, posix=True)
-    except ValueError:
-        words = command.split()
-    after_make = False
-    for word in words:
-        if word in _SHELL_SEPARATORS:
-            after_make = False
-            continue
-        name = _program_name(word)
-        if name in WORKER_ABSENT_PROGRAMS:
-            return name
-        if after_make and not word.startswith("-") and "=" not in word:
-            for part in word.replace("_", "-").split("-"):
-                if part in WORKER_ABSENT_PROGRAMS:
-                    return part
-        after_make = after_make or name == "make"
+    paths are not programs: `pytest tests/unit/test_kind.py` and `--kind=x` pass.
+    Literal shell -c command strings are inspected at each nesting level; ordinary
+    quoted arguments remain data. This does not resolve variables or script files."""
+    pending = [command]
+    while pending:
+        source = pending.pop()
+        try:
+            lexer = shlex.shlex(source, posix=True, punctuation_chars=";&|()")
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            words = list(lexer)
+        except ValueError:
+            words = source.split()
+        after_make = False
+        for index, word in enumerate(words):
+            if word in _SHELL_SEPARATORS:
+                after_make = False
+                continue
+            name = _program_name(word)
+            if name in WORKER_ABSENT_PROGRAMS:
+                return name
+            if name in _SHELL_PROGRAMS:
+                nested = _shell_command(words[index + 1 :])
+                if nested is not None:
+                    pending.append(nested)
+            if after_make and not word.startswith("-") and "=" not in word:
+                for part in word.replace("_", "-").split("-"):
+                    if part in WORKER_ABSENT_PROGRAMS:
+                        return part
+            after_make = after_make or name == "make"
     return None
 
 
