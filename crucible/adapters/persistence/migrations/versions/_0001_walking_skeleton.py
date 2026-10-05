@@ -117,6 +117,7 @@ DEFAULT_POLICY = {
             "scope_contained",
             "no_injected_files",
             "no_secrets",
+            "editor_leftovers",
             "verification_ran",
             "run_evidence_present",
             "criteria_mapped",
