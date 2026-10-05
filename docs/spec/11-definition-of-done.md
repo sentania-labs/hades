@@ -8,6 +8,7 @@ A missing or incomplete section fails `report_present`, naming `self_review`.
 When every blocking gate passes and the report is complete, Hades records acceptance
 and publishes without an orchestrator review or acceptance call, for first attempts
 and corrections alike. Publication sends one informational `published, PR #N` wake.
+An advisory gate failure still requires an orchestrator review before automatic acceptance.
 The orchestrator can still cancel or attach a correction after publication. The
 review-report endpoint records operator out-of-band adversarial findings against
 the PR; a correction can be attached on the operator's word. It is not a gate.
@@ -143,8 +144,8 @@ Each pre-PR gate is **blocking** or **advisory** (ADR 0024, the operator's
 decision of 2026-09-29). A failed blocking gate sends the task to
 `pre_pr_gates_failed`. A failed advisory gate is recorded with its detail and
 listed "for the reviewer" in the task view, the gate list, the admin UI's
-Tasks page and the wake, and the task goes on to automatic acceptance and
-publication when every blocking gate passes. The policy's
+Tasks page and the wake. The task waits for an orchestrator review before automatic
+acceptance and publication. The policy's
 `gates.advisory` decides (05b); the default is below, and
 `report_present` and `no_secrets` always block, and `commit_policy`
 is always advisory.

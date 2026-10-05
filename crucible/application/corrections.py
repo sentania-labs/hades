@@ -55,6 +55,7 @@ CORRECTABLE_STATES = frozenset(
         TaskState.EXTERNAL_FEEDBACK_RECEIVED,
         TaskState.AWAITING_EXTERNAL_REVIEW,
         TaskState.AWAITING_CI_CERTIFICATION,
+        TaskState.PUBLISHING,
         TaskState.PUBLISH_FAILED,
         TaskState.CI_CERTIFICATION_FAILED,
         TaskState.BLOCKED,

@@ -9,11 +9,11 @@ breaks every caller at once instead of breaking the release alone.
 Stdlib only, on purpose: the compose-smoke job has a Docker daemon but no uv.
 
 It drives one task for an `artifacts` deliverable through the fake provider:
-submit, start, wait for awaiting_internal_review, assert no gate is failing,
-record a non-author internal review, wait for awaiting_acceptance, accept, wait
-for accepted. Any non-2xx response stops the run with the method, the URL, the
-HTTP status and the response body, because a traceback out of a JSON parser
-says nothing about what the server refused.
+submit, start, wait for automatic acceptance, and assert no gate is failing.
+Artifacts need no GitHub delivery, so `accepted` is the terminal compose state.
+Any non-2xx response stops the run with the method, the URL, the HTTP status and
+the response body, because a traceback out of a JSON parser says nothing about
+what the server refused.
 """
 
 from __future__ import annotations
@@ -182,7 +182,7 @@ def task_contract(external_id: str) -> dict[str, Any]:
         "objective": "Prove the compose stack boots and runs a task end to end.",
         "context": [],
         "project_instructions": [],
-        "acceptance_criteria": [{"id": "AC1", "text": "The task reaches awaiting_acceptance."}],
+        "acceptance_criteria": [{"id": "AC1", "text": "The task reaches accepted."}],
         "required_verification": [
             {"id": "V1", "command": "make lint", "expect_exit": 0},
             {"id": "V2", "command": "make test", "expect_exit": 0},
@@ -446,43 +446,13 @@ def smoke(
     )
     log("started")
 
-    task = await_state(base_url, token, task_id, "awaiting_internal_review")
+    task = await_state(base_url, token, task_id, "accepted")
     where = f"GET /v1/tasks/{task_id}"
     summary = field(task, "gate_summary", where)
     log(f"gate summary: {json.dumps(summary, indent=2)}")
     failing = field(summary, "failing", f"{where} (gate_summary)")
     if failing:
         raise SmokeError(f"gates failed on the collected head: {json.dumps(failing)}")
-
-    request(
-        "POST",
-        f"{base_url}/v1/tasks/{task_id}/review",
-        token=token,
-        body={
-            "report": {
-                "schema_version": "1.0",
-                "task_external_id": external_id,
-                "reviewed_head_sha": field(task, "head_sha", where),
-                "reviewer": {"kind": "orchestrator", "principal": principal},
-                "verdict": "approve",
-                "findings": [],
-                "summary": "Compose smoke non-author review.",
-            }
-        },
-    )
-    log("internal review recorded")
-    await_state(base_url, token, task_id, "awaiting_acceptance")
-
-    request(
-        "POST",
-        f"{base_url}/v1/tasks/{task_id}/accept",
-        token=token,
-        body={
-            "verdict": "accepted",
-            "reasoning": "Compose smoke: the gates passed and the review is recorded.",
-        },
-    )
-    await_state(base_url, token, task_id, "accepted")
 
     wakes = request("GET", f"{base_url}/v1/wakes", token=token)
     log("wakes waiting for poll:")

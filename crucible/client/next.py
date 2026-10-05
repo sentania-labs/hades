@@ -71,6 +71,7 @@ CORRECTABLE = frozenset(
         "external_feedback_received",
         "awaiting_external_review",
         "awaiting_ci_certification",
+        "publishing",
         "publish_failed",
         "ci_certification_failed",
         "blocked",

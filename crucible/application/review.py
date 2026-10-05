@@ -251,7 +251,8 @@ def request_review(
             reviewer_principal_id=principal.id,
             principal_name=principal.name,
         )
-        # The report records adversarial findings; it does not gate or move the task.
+        # Most reports are out-of-band findings and do not move the task. A report on a
+        # head held for advisory failures lets the next gate tick approve that exception.
         return task
     if task.state is not TaskState.AWAITING_INTERNAL_REVIEW:
         raise TransitionNotAllowedError("upload an out-of-band ReviewReportV1 for this PR")

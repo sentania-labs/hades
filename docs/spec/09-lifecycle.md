@@ -8,6 +8,7 @@ A missing or incomplete section fails `report_present`, naming `self_review`.
 When every blocking gate passes and the report is complete, Hades records acceptance
 and publishes without an orchestrator review or acceptance call, for first attempts
 and corrections alike. Publication sends one informational `published, PR #N` wake.
+An advisory gate failure still requires an orchestrator review before automatic acceptance.
 The orchestrator can still cancel or attach a correction after publication. The
 review-report endpoint records operator out-of-band adversarial findings against
 the PR; a correction can be attached on the operator's word. It is not a gate.
@@ -38,7 +39,8 @@ awaiting_quota --cancel--> cancelled
 blocked --decision--> scheduled
 
 reported --a blocking pre-PR gate fails, including a missing self_review--> pre_pr_gates_failed --wake-->
-reported --every blocking gate passes and the report carries self_review--> gates_passed
+reported --every gate passes and the report carries self_review--> gates_passed
+reported --only advisory gates fail--> awaiting_internal_review --review recorded--> gates_passed
 gates_passed --Hades records acceptance, artifacts deliverable--> accepted
 gates_passed --Hades records acceptance, branch or pull_request deliverable--> publishing
 

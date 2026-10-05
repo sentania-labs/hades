@@ -121,6 +121,7 @@ def _collected(
     correction: bool = False,
     missing_review: bool = False,
     failed_check: bool = False,
+    advisory_failed: bool = False,
 ) -> tuple[_SelfReviewStore, Any, _GitHub, _Publisher]:
     store = _SelfReviewStore()
     clock = FakeClock(NOW)
@@ -149,7 +150,7 @@ def _collected(
     # review and attempted to make report_present advisory.
     execution.policy_snapshot["gates"] = {
         "pre_pr": sorted(PRE_PR_GATES),
-        "advisory": ["report_present"],
+        "advisory": ["report_present", "scope_contained"],
     }
     execution.policy_snapshot["internal_review"] = {"required": True, "executor": "orchestrator"}
     execution.policy_snapshot["external_review"].update(
@@ -178,7 +179,11 @@ def _collected(
         report=report,
         report_raw=None,
         blocked_md=None,
-        diff_paths=("src/ledger/change.py",),
+        diff_paths=(
+            ("infrastructure/outside-the-contract.txt",)
+            if advisory_failed
+            else ("src/ledger/change.py",)
+        ),
         diff_text="+return 409\n",
         bundle=BranchBundle(
             head_sha=NEW_HEAD,
@@ -277,6 +282,63 @@ def test_self_review_cannot_bypass_a_failed_blocking_gate(tmp_path: Path) -> Non
     supervisor._evaluate_pending_gates()
     assert _task(store).state is TaskState.PRE_PR_GATES_FAILED
     assert store.acceptance.rows == []
+    assert asyncio.run(supervisor.delivery.publish()) == 0
+    assert publisher.pushes == []
+
+
+def test_advisory_failure_requires_orchestrator_review_before_publication(
+    tmp_path: Path,
+) -> None:
+    store, supervisor, github, publisher = _collected(tmp_path, advisory_failed=True)
+    task = _task(store)
+    supervisor._evaluate_pending_gates()
+    assert task.state is TaskState.AWAITING_INTERNAL_REVIEW
+    assert store.acceptance.rows == []
+    assert asyncio.run(supervisor.delivery.publish()) == 0
+    assert publisher.pushes == []
+
+    request_review(
+        store.uow(),
+        FakeClock(NOW),
+        principal=_principal(),
+        task_id=TASK_ID,
+        request=ReviewRequest(
+            report={
+                "schema_version": "1.0",
+                "task_external_id": task.external_id,
+                "reviewed_head_sha": task.head_sha,
+                "reviewer": {"kind": "orchestrator", "principal": _principal().name},
+                "summary": "The scope exception is approved.",
+                "verdict": "approve",
+                "findings": [],
+            }
+        ),
+    )
+    supervisor._evaluate_pending_gates()
+    task = _task(store)
+    assert task.state is TaskState.PUBLISHING
+    assert len(store.acceptance.rows) == 1
+    assert asyncio.run(supervisor.delivery.publish()) == 1
+    task = _task(store)
+    assert task.state is TaskState.AWAITING_EXTERNAL_REVIEW
+    assert publisher.pushes == [NEW_HEAD]
+    assert github.posted == ["@codex review"]
+
+
+def test_correction_from_held_publishing_stops_delivery_and_schedules_work(
+    tmp_path: Path,
+) -> None:
+    store = _SelfReviewStore()
+    task = _task(store)
+    task.state = TaskState.PUBLISHING
+    clock = FakeClock(NOW)
+    github = _GitHub()
+    publisher = _Publisher()
+    supervisor = _supervisor(store, clock, tmp_path, github, publisher)
+
+    _attach(store, _correction(), clock)
+
+    assert task.state is TaskState.SCHEDULED
     assert asyncio.run(supervisor.delivery.publish()) == 0
     assert publisher.pushes == []
 

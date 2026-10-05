@@ -17,7 +17,8 @@ The project is Hades (the package, CLIs and images still say `crucible`).
    main names no required check. The worker's required report self-review
    covers documentation, every acceptance criterion with evidence, and anything
    knowingly left out and why. Passing blocking gates and a complete report
-   let Hades record acceptance and publish. Codex reviews every PR once,
+   let Hades record acceptance and publish. An advisory gate failure still requires an
+   orchestrator review before automatic acceptance. Codex reviews every PR once,
    automatically, and its findings get
    a disposition (fix, or an explanation) before merge; Codex is not
    re-requested after a fix. Hades squash-merges the certified head; there is no
