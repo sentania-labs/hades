@@ -386,7 +386,7 @@ def test_a_missing_curl_is_reported_and_never_stops_the_harness(tmp_path: Path) 
     rather than failing the launch, and the harness runs."""
     bin_dir = tmp_path / "nocurl"
     bin_dir.mkdir()
-    for tool in ("sh", "mktemp", "tr", "head", "cat", "rm"):
+    for tool in ("sh", "mktemp", "tr", "head", "cat", "rm", "python3"):
         found = shutil.which(tool)
         assert found, tool
         (bin_dir / tool).symlink_to(found)
@@ -409,6 +409,19 @@ def test_a_missing_curl_is_reported_and_never_stops_the_harness(tmp_path: Path) 
     (row,) = probe["hosts"]
     assert row["host"] == "pypi.org" and row["reachable"] is False
     assert row["curl_exit"] == 127 and "curl" in row["detail"]
+
+
+def test_the_wrapper_marker_is_ascii_when_curl_writes_non_utf8(tmp_path: Path) -> None:
+    curl = r"""#!/bin/sh
+printf '\374 Gr\303\274nde' >&2
+exit 7
+"""
+    run = _run_wrapper(tmp_path, "odd.example", "true", curl=curl)
+    assert run.returncode == 0
+    marker = next(line for line in run.stderr.splitlines() if line.startswith(PROBE_MARKER))
+    marker.encode("ascii")
+    (probe,) = _probe_lines(run.stderr)
+    assert probe["hosts"][0]["detail"] == "? Gr\u00fcnde"
 
 
 def test_the_wrapped_scripted_quota_harness_still_classifies_as_quota_exhausted(
@@ -798,6 +811,34 @@ def test_the_supervisor_keeps_the_first_probe_line_on_the_attempt() -> None:
     later = 'crucible-egress-probe: {"hosts":[{"host":"evil","reachable":true,"curl_exit":0}]}\n'
     supervisor._store_logs(attempt.id, (LogChunk("stdout", later.encode(), line_sha256="c"),))
     assert [row["host"] for row in attempt.egress_probe["hosts"]] == ["github.com", "pypi.org"]
+
+
+def test_kind_log_shape_records_ascii_probe_and_replaces_invalid_worker_bytes() -> None:
+    """The real pods/log stream is timestamp-prefixed and may contain arbitrary worker
+    bytes. Its marker still lands on the attempt, and stored logs remain valid UTF-8."""
+    attempt = _attempt()
+    uow = _Uow(attempt)
+    supervisor = _supervisor(uow)
+    raw = (
+        b"2026-10-05T12:00:01.123456789Z crucible-egress-probe: "
+        b'{"hosts":[{"host":"github.com","reachable":true,"curl_exit":0,'
+        b'"ms":12,"detail":""}]}\n'
+        b"2026-10-05T12:00:02.123456789Z publisher byte: \xfc\n"
+    )
+
+    assert supervisor._store_logs(attempt.id, (LogChunk("stdout", raw, line_sha256="kind"),)) == 1
+    assert attempt.egress_probe is not None
+    assert attempt.egress_probe["hosts"] == [
+        {
+            "host": "github.com",
+            "reachable": True,
+            "curl_exit": 0,
+            "ms": 12,
+            "detail": "",
+        }
+    ]
+    stored = uow.logs.appended[0].content
+    assert "publisher byte: \ufffd" in stored.decode("utf-8")
 
 
 def test_a_log_without_the_line_records_nothing() -> None:

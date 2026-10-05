@@ -30,6 +30,8 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from crucible.domain.time import parse_rfc3339
+
 PROBE_MARKER = "crucible-egress-probe: "
 
 # A host the wrapper could connect to on 443: curl reached the far end and HTTP answered
@@ -110,6 +112,19 @@ def read_probe_line(line: str) -> tuple[dict[str, Any] | None, str | None]:
     Only a line that starts with the marker counts: a harness that echoes the marker in
     the middle of its own output is not the wrapper speaking."""
     text = line.strip()
+    # Kubernetes pods/log prefixes every line with an RFC 3339 timestamp. The normal
+    # provider chunker removes it, but accepting the raw shape here makes recording
+    # independent of which log boundary supplied the line. Only a parseable timestamp
+    # immediately followed by the marker is removed, so a harness mentioning the
+    # marker later in ordinary output still does not count.
+    prefix, separator, rest = text.partition(" ")
+    if separator and rest.startswith(PROBE_MARKER):
+        try:
+            parse_rfc3339(prefix)
+        except ValueError:
+            pass
+        else:
+            text = rest
     if not text.startswith(PROBE_MARKER):
         return None, None
     payload = text[len(PROBE_MARKER) :]

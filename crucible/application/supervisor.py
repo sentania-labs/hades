@@ -3420,7 +3420,9 @@ class Supervisor:
                 # what the daemon's stream is compared against on the next pull.
                 text = chunk.content.decode("utf-8", "replace")
                 cleaned = redact(text)
-                content = chunk.content if cleaned == text else cleaned.encode("utf-8")
+                # A container may write arbitrary bytes. Always store the decoded and
+                # redacted form so every downstream log reader receives valid UTF-8.
+                content = cleaned.encode("utf-8")
                 if attempt.egress_probe is None and PROBE_MARKER in cleaned:
                     # hades #425: the launch wrapper's one probe line, kept on the attempt
                     # the first time it is seen; the harness's later output never replaces

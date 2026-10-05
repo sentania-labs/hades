@@ -180,6 +180,23 @@ WORKER_UID = 1000
 # the supervisor records on the attempt. A host it cannot reach is reported, never a
 # reason not to start; a `host:port` entry is a local endpoint and is left alone.
 LAUNCH_WRAPPER = r"""set -u
+ascii_probe_row() {
+  python3 - "$@" <<'PY'
+import json
+import sys
+
+detail = sys.argv[5].encode("utf-8", "replace").decode("utf-8")
+detail = detail.replace("\n", " ").replace("\r", " ").replace("\t", " ")
+row = {
+    "host": sys.argv[1],
+    "reachable": sys.argv[2] == "true",
+    "curl_exit": int(sys.argv[3]),
+    "ms": int(sys.argv[4]),
+    "detail": detail,
+}
+print(json.dumps(row, ensure_ascii=True, separators=(",", ":")))
+PY
+}
 egress_probe() {
   list=${CRUCIBLE_EGRESS_ALLOWLIST:-}
   [ -n "$list" ] || return 0
@@ -197,8 +214,11 @@ egress_probe() {
       ms=$(( (now - start) / 1000 ))
       [ "$ms" -ge 0 ] || ms=0
       case "$code" in 0|35|52) reachable=true;; *) reachable=false;; esac
-      detail=$(printf '%s' "$detail" | tr -d '"\\' | tr '\n\r\t' '   ' | head -c 200)
-      printf '{"host":"%s","reachable":%s,"curl_exit":%s,"ms":%s,"detail":"%s"}' \
+      detail=$(printf '%s' "$detail" | head -c 200)
+      # Curl's diagnostics are not guaranteed to be UTF-8. Python decodes any bad
+      # bytes with replacement and json.dumps' default ensure_ascii=True keeps the
+      # marker itself ASCII-only, valid JSON, and one line for pods/log.
+      ascii_probe_row \
         "$host" "$reachable" "$code" "$ms" "$detail" > "$dir/$i"
     ) &
   done
