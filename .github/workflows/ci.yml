@@ -114,9 +114,10 @@ jobs:
   # The worker images (13, C11): the worker image carrying Claude Code, Codex, AGY and
   # Hermes, and the script-harness image, built from the pinned inputs with the same
   # script as `make images`. The job fails when any tag, harness version or OCI digest
-  # differs from images/manifest.env: reproducibility is the contract, and this is where
-  # it is proved on a machine the author does not control. GitHub-hosted, because it
-  # needs a Docker daemon and buildx (github-ci skill).
+  # differs from images/manifest.env (on a branch, a difference in digests alone is
+  # handed to a separate workflow to commit; see below): reproducibility is the
+  # contract, and this is where it is proved on a machine the author does not
+  # control. GitHub-hosted, because it needs a Docker daemon and buildx (github-ci skill).
   #
   # Branch pushes import the BuildKit layer cache the last push to main exported, so
   # the job takes minutes. The digest is always computed from what the
@@ -128,11 +129,29 @@ jobs:
   # match. A branch can force the same from-scratch proof early with workflow_dispatch
   # (114), for a change that touches a fetch or install step and should not wait for
   # main to find out a network step no longer reproduces.
+  #
+  # CI owns the *_DIGEST lines (FDY-0310, the operator's decision 2026-10-04). On a
+  # branch, a build that reproduces every tag and harness version but not a digest
+  # passes, and uploads the built digest lines as the images-digests artifact. This job
+  # keeps the read-only token: it runs the branch's own Makefile, images.sh and
+  # digest_commit.py, so a write token here could be read by branch code (the Codex
+  # finding on PR 420). The commit is made by .github/workflows/images-digest.yml, which
+  # workflow_run starts from the default branch once this run completes: it runs only
+  # the default branch's digest_commit.py, re-validates the artifact against the
+  # branch's manifest, commits the digest lines as github-actions[bot], pushes, and
+  # dispatches this workflow on the new head. A tag or harness version that differs
+  # still fails here. Main never writes back (it fails as before), this workflow never
+  # runs on a tag, the release's images-check never writes back, and a head that is the
+  # bot's own digest commit never writes back again, so a digest that does not
+  # reproduce twice fails instead of looping.
   images:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # The workflow's read-only token and nothing more: every step runs branch code.
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
       - name: decide whether this run builds from scratch
         id: no_cache
         env:
@@ -155,10 +174,50 @@ jobs:
           path: ${{ runner.temp }}/buildkit-cache
           key: worker-images-${{ hashFiles('images/**') }}
           restore-keys: worker-images-
+      - name: decide whether this run may commit corrected digests
+        id: writeback
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if python3 tools/images/digest_commit.py may-commit --event "$EVENT" --ref "$REF" \
+              --default-branch "$DEFAULT_BRANCH" --head-message "$(git log -1 --format=%B)"; then
+            echo "value=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=" >> "$GITHUB_OUTPUT"
+          fi
       - name: build both images and compare with images/manifest.env
         env:
           NO_CACHE: ${{ steps.no_cache.outputs.value }}
-        run: make images-check CACHE_DIR="$RUNNER_TEMP/buildkit-cache" NO_CACHE="$NO_CACHE"
+          DIGEST_WRITEBACK: ${{ steps.writeback.outputs.value }}
+        run: >-
+          make images-check CACHE_DIR="$RUNNER_TEMP/buildkit-cache" NO_CACHE="$NO_CACHE"
+          DIGEST_WRITEBACK="$DIGEST_WRITEBACK"
+      # The handoff to images-digest.yml: only the digest lines, as data. That workflow
+      # trusts nothing in it and checks it against the branch's manifest again.
+      - name: hand the built digests to the digest commit
+        id: digests
+        if: steps.writeback.outputs.value == '1'
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- images/manifest.env; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 tools/images/digest_commit.py extract images/manifest.env \
+            "$RUNNER_TEMP/images-digests/digests.env"
+          cat "$RUNNER_TEMP/images-digests/digests.env"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+      - name: upload the built digests
+        if: steps.digests.outputs.changed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: images-digests
+          path: ${{ runner.temp }}/images-digests/digests.env
+          if-no-files-found: error
+          retention-days: 1
       - name: keep the layer cache for branches
         if: github.ref == 'refs/heads/main'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

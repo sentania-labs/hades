@@ -1,0 +1,131 @@
+# CI owns the *_DIGEST lines of images/manifest.env (FDY-0310, the operator's decision
+# 2026-10-04; docs/spec/13-local-operation.md). This is the privileged half of the
+# images job: when the job on a branch built every tag and harness version the manifest
+# declares but a different digest, it passed and uploaded the built digest lines as the
+# images-digests artifact. This workflow commits them to the branch as
+# github-actions[bot], pushes, and dispatches CI on the new head (a push made with the
+# workflow token starts no run by itself).
+#
+# Why a separate workflow (the Codex finding on PR 420): the images job runs the
+# branch's own Makefile, images.sh and digest_commit.py, so a write token in that job
+# could be read by branch code before any digest-only guard. workflow_run always runs
+# the copy of this file on the default branch, in the default branch's context, so no
+# branch can change what runs here. This job never imports or executes a file from the
+# branch: the branch checkout is data (its manifest, and the git history to commit on),
+# the script is the default branch's tools/images/digest_commit.py, checked out by ref,
+# and the artifact is untrusted input that the script re-validates against the branch's
+# manifest on its own (exactly the manifest's digest keys, sha256 values only, and a
+# result that differs from the manifest in digest values alone).
+#
+# Never on main, a tag, a pull_request run or a fork; never when the head is the bot's
+# own digest commit, so a digest that does not reproduce twice fails CI instead of
+# looping. Every event field below reaches a shell only through env, never interpolated.
+name: images-digest
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+
+# One digest commit per branch at a time; a newer CI completion supersedes an older one.
+concurrency:
+  group: images-digest-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  commit:
+    if: >-
+      github.event.workflow_run.conclusion != 'cancelled' &&
+      (github.event.workflow_run.event == 'push' ||
+       github.event.workflow_run.event == 'workflow_dispatch') &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_branch != github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # push the digest commit to the branch
+      actions: write # read the artifact; dispatch CI on the digest commit
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      EVENT: ${{ github.event.workflow_run.event }}
+      BRANCH: ${{ github.event.workflow_run.head_branch }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      HEAD_MESSAGE: ${{ github.event.workflow_run.head_commit.message }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      TRUSTED: ${{ github.workspace }}/trusted
+      CHECKOUT: ${{ github.workspace }}/branch
+      ARTIFACT_DIR: ${{ github.workspace }}/images-digests
+    steps:
+      # The only code this job runs: the default branch's script, by ref.
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: trusted
+          sparse-checkout: tools/images/digest_commit.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: decide whether this run may commit corrected digests
+        id: allowed
+        run: |
+          set -euo pipefail
+          if python3 "$TRUSTED/tools/images/digest_commit.py" may-commit --event "$EVENT" \
+              --ref "refs/heads/$BRANCH" --default-branch "$DEFAULT_BRANCH" \
+              --head-message "$HEAD_MESSAGE"; then
+            echo "value=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=" >> "$GITHUB_OUTPUT"
+          fi
+      - name: download the built digests, if the images job uploaded any
+        id: artifact
+        if: steps.allowed.outputs.value == '1'
+        run: |
+          set -euo pipefail
+          found=$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID/artifacts" \
+            --jq '[.artifacts[] | select(.name == "images-digests" and (.expired | not))] | length')
+          if [ "$found" = 0 ]; then
+            echo "images-digest: run $RUN_ID built the digests the manifest records"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh run download "$RUN_ID" --repo "$REPOSITORY" --name images-digests --dir "$ARTIFACT_DIR"
+          echo "present=true" >> "$GITHUB_OUTPUT"
+      # Data only: the exact commit CI built, without the token in its git config.
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        if: steps.artifact.outputs.present == 'true'
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          path: branch
+          persist-credentials: false
+      - name: commit the corrected digests to the branch
+        id: commit
+        if: steps.artifact.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          remote=$(git ls-remote \
+            "https://x-access-token:${GH_TOKEN}@github.com/${REPOSITORY}.git" "refs/heads/$BRANCH" | cut -f1)
+          if [ "$remote" != "$HEAD_SHA" ]; then
+            echo "images-digest: $BRANCH moved past $HEAD_SHA; its own CI run decides"
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Re-validates the artifact against the branch's manifest; refuses anything
+          # but a change to its digest values.
+          python3 "$TRUSTED/tools/images/digest_commit.py" commit-artifact \
+            --repository "$CHECKOUT" --artifact-dir "$ARTIFACT_DIR"
+          if [ "$(git -C "$CHECKOUT" rev-parse HEAD)" = "$HEAD_SHA" ]; then
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git -C "$CHECKOUT" show --stat HEAD
+          # Not forced: a branch that moved meanwhile rejects the push and fails the job.
+          git -C "$CHECKOUT" push "https://x-access-token:${GH_TOKEN}@github.com/${REPOSITORY}.git" \
+            "HEAD:refs/heads/$BRANCH"
+          echo "committed=true" >> "$GITHUB_OUTPUT"
+      - name: run CI on the digest commit
+        if: steps.commit.outputs.committed == 'true'
+        run: gh workflow run ci.yml --repo "$REPOSITORY" --ref "$BRANCH"
