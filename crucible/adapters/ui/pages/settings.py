@@ -12,7 +12,7 @@ from crucible.adapters.api.deps import Ctx, UoW
 from crucible.adapters.ui.actions import register
 from crucible.adapters.ui.render import _page, _redirect
 from crucible.adapters.ui.session import _require
-from crucible.application.admin import credentials, delivery
+from crucible.application.admin import credentials, delivery, kubernetes
 from crucible.domain.entities import Principal, Role
 
 router = APIRouter(prefix="/ui", include_in_schema=False)
@@ -134,6 +134,16 @@ def _runtime_rows(ctx: Ctx, uow: UoW, principal: Principal) -> list[list[Any]]:
     rows: list[list[Any]] = []
     settings: Any = ctx.settings
     if ctx.admin is not None:
+        timeouts = kubernetes.timeouts_view(ctx.admin, uow)
+        rows.append(
+            [
+                "kubernetes.timeouts.api_retry_seconds",
+                timeouts["document"]["api_retry_seconds"],
+                timeouts["api_retry_seconds_source"],
+                timeouts["api_retry_seconds_applies"],
+                {"kind": "link", "href": "/ui/routing", "label": "Edit on Routing"},
+            ]
+        )
         names = ctx.admin.harnesses.names()
         for name in names if isinstance(names, (list, tuple)) else ():
             adapter = ctx.admin.harnesses.get(name)

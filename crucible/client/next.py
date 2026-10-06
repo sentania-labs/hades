@@ -602,15 +602,22 @@ def kubernetes_egress_actions(document: Any, prefix: Sequence[str]) -> list[dict
 
 
 def kubernetes_timeouts_actions(document: Any, prefix: Sequence[str]) -> list[dict[str, Any]]:
-    """One action: replace the short-role timeout, prefilled with the value in force."""
+    """Update the timeouts, prefilled with the values in force."""
     if not isinstance(document, dict) or not isinstance(document.get("document"), dict):
         return []
     current = document["document"].get("role_timeout_seconds", "")
+    retry = document["document"].get("api_retry_seconds", 60)
     return [
         action(
             "set-timeouts",
-            "replace the short roles' timeout, counted from their Pod Running",
-            [*prefix, "kubernetes", "set-timeouts", f"--role-seconds={current}"],
+            "update the short-role timeout and pre-launch API retry budget",
+            [
+                *prefix,
+                "kubernetes",
+                "set-timeouts",
+                f"--role-seconds={current}",
+                f"--api-retry-seconds={retry}",
+            ],
             optional=OPTIONAL_REASON,
             roles=(ADMIN,),
         )

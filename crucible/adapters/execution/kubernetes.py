@@ -87,7 +87,11 @@ from crucible.domain.command_timeout import effective_command_timeout_ms
 from crucible.domain.exit_class import ExitClass
 from crucible.domain.ids import new_id
 from crucible.domain.infrastructure import START_FAILURES
-from crucible.domain.role_timeouts import DEFAULT_ROLE_TIMEOUT_SECONDS, parse_role_timeouts
+from crucible.domain.role_timeouts import (
+    DEFAULT_API_RETRY_SECONDS,
+    DEFAULT_ROLE_TIMEOUT_SECONDS,
+    parse_role_timeouts,
+)
 from crucible.domain.secrets import redact
 from crucible.domain.time import parse_rfc3339
 from crucible.ports.execution import (
@@ -375,7 +379,7 @@ class KubernetesConfig:
     short_role_pods: int = 1
     poll_interval_seconds: float = 2.0
     api_timeout_seconds: float = 30.0
-    api_retry_seconds: float = 60.0
+    api_retry_seconds: float = DEFAULT_API_RETRY_SECONDS
     # The cluster's DNS service address. 26 allows port 53 on this address and nothing
     # else on it; every other destination inside the cluster stays denied.
     cluster_dns_ip: str = "10.96.0.10"
@@ -649,6 +653,7 @@ class KubernetesProvider:
         self._timeouts_source = timeouts_source
         self._credential_dead = credential_dead or (lambda: False)
         self._file_role_timeout = config.role_timeout_seconds
+        self._file_api_retry = config.api_retry_seconds
         self._settings_read_at: float | None = None
         self._file_egress = config.egress
         # Injected so the unit tier resolves without a network and the e2e tier can
@@ -934,14 +939,24 @@ class KubernetesProvider:
         """Take the `kubernetes.timeouts` document (None: the settings file's value).
         A timeout is not a rule a canary proves, so the readiness probe stands."""
         seconds = self._file_role_timeout
+        api_retry = self._file_api_retry
         if document is not None:
             try:
-                seconds = parse_role_timeouts(document)["role_timeout_seconds"]
+                checked = parse_role_timeouts(document)
+                seconds = checked["role_timeout_seconds"]
+                api_retry = checked.get("api_retry_seconds", api_retry)
             except ValueError as exc:
                 log.error("the kubernetes.timeouts setting is refused: %s", exc)
                 return
-        if seconds != self.config.role_timeout_seconds:
-            self.config = replace(self.config, role_timeout_seconds=seconds)
+        if (
+            seconds != self.config.role_timeout_seconds
+            or api_retry != self.config.api_retry_seconds
+        ):
+            self.config = replace(
+                self.config,
+                role_timeout_seconds=seconds,
+                api_retry_seconds=api_retry,
+            )
 
     @staticmethod
     def _probe_is_settled(probe: NamespaceProbe) -> bool:
