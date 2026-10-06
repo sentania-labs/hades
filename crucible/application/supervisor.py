@@ -4517,9 +4517,20 @@ class Supervisor:
         outcome = await local_push(self._workspace_for(attempt), spec) if local_push else None
         if outcome is None:
             repository_url = spec.repository_url
-            required = provider_name == "docker" and not (
-                repository_url.startswith("/") or repository_url.startswith("file://")
-            )
+            local_origin = repository_url.startswith("/") or repository_url.startswith("file://")
+            if local_push is None and local_origin:
+                await self._db(
+                    partial(
+                        self._finish_deferred_quota,
+                        attempt_id,
+                        False,
+                        f"local-origin quota checkpoints are Docker-only; provider "
+                        f"{provider_name} did not push a checkpoint",
+                        checkpoint_skipped=True,
+                    )
+                )
+                return
+            required = provider_name == "docker" and not (local_origin)
             outcome = await self.delivery.push_quota_checkpoint(attempt_id, required=required)
             if outcome is None:
                 # GitHub's rate limit: the checkpoint stays pending and a later tick pushes
@@ -4551,7 +4562,14 @@ class Supervisor:
                 and not self._quota_checkpoint_has_disposition(uow, attempt)
             )
 
-    def _finish_deferred_quota(self, attempt_id: str, pushed: bool, detail: str) -> None:
+    def _finish_deferred_quota(
+        self,
+        attempt_id: str,
+        pushed: bool,
+        detail: str,
+        *,
+        checkpoint_skipped: bool = False,
+    ) -> None:
         with self._fenced() as uow:
             attempt = uow.attempts.get(attempt_id, for_update=True)
             assert attempt is not None
@@ -4568,6 +4586,14 @@ class Supervisor:
                 execution.resume_from_remote = True
                 uow.executions.save(execution)
                 self._handle_quota_exit(uow, task, execution, attempt)
+            elif checkpoint_skipped:
+                self._handle_quota_exit(
+                    uow,
+                    task,
+                    execution,
+                    attempt,
+                    checkpoint_skip_detail=detail[:1000],
+                )
             else:
                 bundle_path = f"{attempt.workspace_path}/output/work_branch.bundle"
                 record_event(
@@ -6086,6 +6112,7 @@ class Supervisor:
         *,
         source: str = "worker",
         pool_mark: tuple[PoolExhaustion, bool] | None = None,
+        checkpoint_skip_detail: str | None = None,
     ) -> None:
         # hades #378: one wake per refusal names the pool and its reset. A task that
         # ends or waits says it in the wake it raises anyway; a reroute, which raised
@@ -6186,6 +6213,14 @@ class Supervisor:
                         else "launch reservation found the selected pool unavailable"
                     ),
                     "source": source,
+                    **(
+                        {
+                            "checkpoint_push": "skipped",
+                            "checkpoint_detail": checkpoint_skip_detail,
+                        }
+                        if checkpoint_skip_detail is not None
+                        else {}
+                    ),
                     **({"wip_commit_sha": task.head_sha} if source == "worker" else {}),
                     "ordered_candidates": list(selection.candidates),
                 },

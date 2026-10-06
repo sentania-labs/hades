@@ -15,6 +15,11 @@ every provider implements; this document is the Kubernetes provider's
 mechanics, in the same order as 08's Docker section, plus what the cluster
 must guarantee before a worker runs there.
 
+Local-origin quota checkpoints are Docker-only. A Kubernetes worker cannot
+reach an origin that is a path on the supervisor host, so the supervisor
+records that the checkpoint was skipped and reroutes from the base instead.
+GitHub-origin quota checkpoints continue through the delivery publisher.
+
 ## Why a second provider, and why now
 
 The operator cannot use Crucible for real work until workers are sandboxed

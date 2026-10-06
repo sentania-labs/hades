@@ -88,6 +88,9 @@
     {% if section.pager %}<nav class="admin-pager" aria-label="Pages"><span class="admin-hint">{{ section.pager.summary }}</span>{% for link in section.pager.links %} <a class="lat-btn lat-btn--ghost" href="{{ link.href }}">{{ link.label }}</a>{% endfor %}</nav>{% endif %}
     {% if section.panel is defined %}{{ render_panel(section.panel) }}{% endif %}
     {% if section.text is defined %}<pre class="lat-code admin-output">{{ section.text }}</pre>{% endif %}
+    {% if section.details %}<details class="admin-details"><summary>{{ section.details_label or "Details" }}</summary>
+      {% for detail in section.details %}<div class="admin-detail"><h3>{{ detail.title }}</h3>{{ render_section_body(detail) }}</div>{% endfor %}
+    </details>{% endif %}
 {%- endmacro %}
 {% block content %}
 <div class="admin-title"><div><h1>{{ heading }}</h1><p>{{ intro }}</p></div>{% if badge %}<span class="lat-badge lat-badge--{{ badge_kind }}">{{ badge }}</span>{% endif %}</div>
