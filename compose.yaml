@@ -218,9 +218,10 @@ services:
       - crucible-artifacts:/var/lib/crucible/artifacts
       # The credential root (12, 25), on this container only. Ordinary workers receive
       # per-attempt copies. A login container receives one named-volume subpath and no
-      # workspace. The GitHub App files remain a separate read-only host mount. The
-      # harness volume starts empty, so a fresh deployment needs no host directories.
-      - ${CRUCIBLE_CREDENTIAL_ROOT:-./var/credentials}/github:/var/lib/crucible/credentials/github:ro
+      # workspace. The GitHub App credential directory is a writable host mount so that
+      # Connect GitHub can write app.pem and webhook.secret. The harness volume starts
+      # empty, so a fresh deployment needs no host directories.
+      - ${CRUCIBLE_CREDENTIAL_ROOT:-./var/credentials}/github:/var/lib/crucible/credentials/github
       - crucible-credentials:/var/lib/crucible/credentials
       - crucible-egress:/var/lib/crucible/egress
     ports:

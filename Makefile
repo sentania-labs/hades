@@ -209,6 +209,8 @@ scan-history: ## commits in SCAN_RANGE (default origin/main..HEAD)
 
 smoke: ## drive one task end to end through a running stack; `make up` first
 	@test -f .env || cp .env.example .env
+	@docker compose exec -T crucible sh -c "touch /var/lib/crucible/credentials/github/.write-test && rm -f /var/lib/crucible/credentials/github/.write-test" \
+	  || { echo "smoke: github credential directory is not writable"; exit 2; }
 	COMPOSE="$(COMPOSE)" $(if $(CRUCIBLE_IMAGE),CRUCIBLE_IMAGE="$(CRUCIBLE_IMAGE)") \
 	  python3 tools/smoke/compose_smoke.py
 
