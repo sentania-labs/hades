@@ -19,7 +19,7 @@
 .admin-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .admin-table th, .admin-table td { border-bottom: 1px solid var(--line-soft); padding: 7px 8px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
 .admin-table td:first-child { overflow-wrap: normal; white-space: nowrap; }
-.admin-table th { color: var(--ink-subtle); text-transform: uppercase; letter-spacing: .04em; font-size: 10px; }
+.admin-table th { overflow-wrap: normal; color: var(--ink-subtle); text-transform: uppercase; letter-spacing: .04em; font-size: 10px; }
 .admin-table code { font: 11px/1.4 var(--font-mono); }
 .admin-fields { display: grid; gap: 0; margin: 0; }
 .admin-field { display: grid; grid-template-columns: minmax(10rem, 16rem) minmax(0, 1fr); gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--line-soft); min-width: 0; }
