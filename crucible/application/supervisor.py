@@ -1046,19 +1046,22 @@ class Supervisor:
             offered = await asyncio.to_thread(admin_gateway.fetch_models, endpoint, bearer)
         except (admin_gateway.GatewayError, TimeoutError):
             return
-        await self._db(partial(self._disable_unoffered_gateway_models, offered))
+        await self._db(partial(self._disable_unoffered_gateway_models, endpoint, offered))
 
     def _gateway_endpoint(self) -> str | None:
         with self._fenced() as uow:
             endpoint, _source = admin_routing.gateway_url(uow)
             return endpoint
 
-    def _disable_unoffered_gateway_models(self, offered: Sequence[str]) -> None:
+    def _disable_unoffered_gateway_models(self, endpoint: str, offered: Sequence[str]) -> None:
         ctx = self._admin_context
         if ctx is None:
             return
         offered_set = set(offered)
         with self._fenced() as uow:
+            active_endpoint, _source = admin_routing.gateway_url(uow)
+            if active_endpoint != endpoint:
+                return
             try:
                 policy, routing = admin_routing.active_documents(uow)
             except NotFoundError:

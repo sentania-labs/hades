@@ -99,6 +99,7 @@ def test_successful_listing_disables_hermes_and_codex_routes_and_records_time(
     policy = SimpleNamespace(name="default-software", version=5, document={})
     route = SimpleNamespace(name="route", version=4, document=document)
     published: list[dict[str, Any]] = []
+    monkeypatch.setattr(routing, "gateway_url", lambda _uow: (LOCAL_URL, "routing"))
     monkeypatch.setattr(routing, "active_documents", lambda _uow: (policy, route))
 
     def publish(*args: Any, **kwargs: Any) -> tuple[int, int]:
@@ -107,7 +108,7 @@ def test_successful_listing_disables_hermes_and_codex_routes_and_records_time(
 
     monkeypatch.setattr(routing, "publish_routing", publish)
 
-    _supervisor(uow, ctx)._disable_unoffered_gateway_models(["model-b"])
+    _supervisor(uow, ctx)._disable_unoffered_gateway_models(LOCAL_URL, ["model-b"])
 
     saved = published[0]["routing_document"]
     assert [(row["id"], row["enabled"]) for row in saved["models"]] == [
@@ -149,6 +150,7 @@ def test_listing_error_or_timeout_does_not_publish(
 def test_returning_model_never_enables_a_disabled_route(monkeypatch: pytest.MonkeyPatch) -> None:
     uow, ctx = _Uow(), _context()
     route = SimpleNamespace(name="route", version=4, document=_document(enabled=False))
+    monkeypatch.setattr(routing, "gateway_url", lambda _uow: (LOCAL_URL, "routing"))
     monkeypatch.setattr(
         routing,
         "active_documents",
@@ -157,7 +159,7 @@ def test_returning_model_never_enables_a_disabled_route(monkeypatch: pytest.Monk
     publish = Mock()
     monkeypatch.setattr(routing, "publish_routing", publish)
 
-    _supervisor(uow, ctx)._disable_unoffered_gateway_models(["model-a"])
+    _supervisor(uow, ctx)._disable_unoffered_gateway_models(LOCAL_URL, ["model-a"])
 
     publish.assert_not_called()
     assert all(row["enabled"] is False for row in route.document["models"])
@@ -186,3 +188,98 @@ def test_restored_model_returns_to_gateway_view_unticked_and_stale_models_stay_h
     assert [row["id"] for row in view["models"]] == ["model-a"]
     assert view["models"][0]["enabled"] is False
     assert view["models"][0]["codex_enabled"] is False
+
+
+def _listing_supervisor(monkeypatch: pytest.MonkeyPatch) -> tuple[Supervisor, _Uow, Mock]:
+    uow = _Uow()
+    supervisor = _supervisor(uow, _context())
+
+    async def db(call: Any) -> Any:
+        return call()
+
+    supervisor._db = db  # type: ignore[assignment]
+    monkeypatch.setattr(routing, "gateway_url", lambda _uow: (LOCAL_URL, "routing"))
+    monkeypatch.setattr(credentials, "read_api_key", lambda *_args: "key-a")
+    route = SimpleNamespace(name="route", version=4, document=_document())
+    monkeypatch.setattr(
+        routing, "active_documents", lambda _uow: (SimpleNamespace(version=5), route)
+    )
+    publish = Mock(return_value=(6, 5))
+    monkeypatch.setattr(routing, "publish_routing", publish)
+    return supervisor, uow, publish
+
+
+@pytest.mark.parametrize("replacement", ["http://gateway-b.internal:4000/v1", None])
+def test_endpoint_changed_during_listing_does_not_publish(
+    monkeypatch: pytest.MonkeyPatch, replacement: str | None
+) -> None:
+    supervisor, uow, publish = _listing_supervisor(monkeypatch)
+
+    def fetch(endpoint: str, bearer: str) -> list[str]:
+        assert endpoint == LOCAL_URL
+        monkeypatch.setattr(routing, "gateway_url", lambda _uow: (replacement, "saved"))
+        return []
+
+    monkeypatch.setattr(gateway, "fetch_models", fetch)
+    asyncio.run(supervisor._check_gateway_models())
+
+    publish.assert_not_called()
+    assert uow.events.rows == [] and uow.commits == 0
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"broken JSON",
+        b"{}",
+        b"[]",
+        b'{"data": null}',
+        b'{"data": {}}',
+        b'{"data": [{}]}',
+        b'{"data": ["model-a"]}',
+        b'{"data": [{"id": 1}]}',
+        b'{"data": [{"id": " "}]}',
+        b'{"data": [{"id": "model-b"}, {}]}',
+        b'{"data": [{"id": "\xff"}]}',
+    ],
+)
+def test_malformed_success_response_does_not_publish(
+    monkeypatch: pytest.MonkeyPatch, body: bytes
+) -> None:
+    supervisor, uow, publish = _listing_supervisor(monkeypatch)
+    monkeypatch.setattr(credentials, "_http_get", lambda *_args, **_kwargs: (200, body))
+
+    asyncio.run(supervisor._check_gateway_models())
+
+    publish.assert_not_called()
+    assert uow.events.rows == [] and uow.commits == 0
+
+
+def test_valid_empty_listing_disables_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    supervisor, uow, publish = _listing_supervisor(monkeypatch)
+    monkeypatch.setattr(credentials, "_http_get", lambda *_args, **_kwargs: (200, b'{"data": []}'))
+
+    asyncio.run(supervisor._check_gateway_models())
+
+    publish.assert_called_once()
+    assert all(not row["enabled"] for row in publish.call_args.kwargs["routing_document"]["models"])
+    assert uow.commits == 1
+
+
+@pytest.mark.parametrize("response", [(503, b"unavailable"), (200, b"invalid")])
+def test_failed_listing_keeps_configured_gateway_rows(
+    monkeypatch: pytest.MonkeyPatch, response: tuple[int, bytes]
+) -> None:
+    monkeypatch.setattr(gateway, "gateway_url", lambda _uow: (LOCAL_URL, "routing"))
+    monkeypatch.setattr(gateway, "_local_entries", lambda _uow: (_document()["models"], {}))
+    monkeypatch.setattr(credentials, "read_api_key", lambda *_args: "key-a")
+    monkeypatch.setattr(credentials, "_http_get", lambda *_args, **_kwargs: response)
+
+    view = asyncio.run(gateway.models_view(_context(), cast(Any, object())))
+
+    assert view["reachable"] is False
+    assert view["error"]
+    assert [row["id"] for row in view["models"]] == ["model-a"]
+    assert view["models"][0]["offered"] is None
+    assert view["models"][0]["enabled"] is True
+    assert view["models"][0]["codex_enabled"] is True
