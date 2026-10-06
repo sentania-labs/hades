@@ -7,8 +7,8 @@ against ``last_launch_at`` (which moves on every launch) was not enough because
 so the credential-state check can use it to tell whether a later success cleared
 the failure.
 
-Revision ID: 0044_successful_launch_time
-Revises: 0043_proposed_tasks
+Revision ID: 0047_successful_launch_time
+Revises: 0047_attempt_egress_probe
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0044_successful_launch_time"
-down_revision = "0043_proposed_tasks"
+revision = "0047_successful_launch_time"
+down_revision = "0047_attempt_egress_probe"
 branch_labels = None
 depends_on = None
 
