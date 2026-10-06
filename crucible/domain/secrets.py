@@ -135,7 +135,9 @@ def secret_pattern_expressions() -> tuple[str, ...]:
 
 def named_secret_pattern_expressions() -> tuple[tuple[str, str], ...]:
     """Return rule names with the canonical expressions for trusted shell scanners."""
-    return tuple(zip((name for name, _pattern in _PATTERNS), secret_pattern_expressions()))
+    return tuple(
+        zip((name for name, _pattern in _PATTERNS), secret_pattern_expressions(), strict=True)
+    )
 
 
 def _walk(value: object, path: str) -> Iterator[SecretMatch]:

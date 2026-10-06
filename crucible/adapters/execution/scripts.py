@@ -458,8 +458,10 @@ scan_added() {{
     if [ -n "$MATCH" ]; then
       FIRST=$(printf '%s' "$MATCH" | cut -c1-3)
       LAST=$(printf '%s' "$MATCH" | rev | cut -c1-3 | rev)
-      printf 'previous attempt added secret pattern: path=%s rule=%s excerpt=%s...%s; correction required\n' \
-        "$SECRET_PATH" "$SECRET_RULE" "$FIRST" "$LAST" >&2
+      printf '%s\n' \
+        "previous attempt added secret pattern: path=$SECRET_PATH rule=$SECRET_RULE "\
+"excerpt=$FIRST...$LAST; correction required" \
+        >&2
     fi
   done
 }}

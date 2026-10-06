@@ -27,8 +27,8 @@ from typing import IO, Any
 import yaml
 
 from crucible.adapters.execution import scripts
-from crucible.adapters.execution.workspace import harness_private_path
 from crucible.adapters.execution.injected_collection import classify_collected, nul_fields
+from crucible.adapters.execution.workspace import harness_private_path
 from crucible.contracts.evidence import REVIEW_DIFF_NAME, REVIEW_DIFF_TYPE
 from crucible.domain.secrets import SecretMatch, match_text, scan_chunks
 from crucible.ports.execution import (

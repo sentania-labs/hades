@@ -26,7 +26,7 @@ from crucible.adapters.execution.kubernetes import CollectionFailedError
 from crucible.adapters.execution.scripts import CHANGED_BLOBS_DIR, collector_script
 from crucible.application.evidence import _scanner_findings
 from crucible.domain.gates import GateResult, no_secrets
-from crucible.domain.secrets import SCAN_OVERLAP, SecretMatch, scan_chunks, scan_text
+from crucible.domain.secrets import SCAN_OVERLAP, scan_chunks, scan_text
 from crucible.ports.execution import WORK_MOUNT, CollectedOutputs, LaunchSpec, ObservationState
 from tests.collector_tools import collector_env
 from tests.unit.kubernetes_fixtures import build, spec

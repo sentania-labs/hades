@@ -26,7 +26,7 @@ from crucible.domain.entities import Artifact, Attempt, EvidenceRecord, Task
 from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
 from crucible.domain.gates import injected_name
 from crucible.domain.ids import new_id
-from crucible.domain.secrets import find_secrets, match_text, redact, scan_text
+from crucible.domain.secrets import find_secrets, match_text, redact
 from crucible.ports.artifacts import ArtifactStore, SecretInArtifactError
 from crucible.ports.clock import Clock
 from crucible.ports.execution import (
