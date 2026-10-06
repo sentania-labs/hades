@@ -33,7 +33,7 @@ proposed --reject (operator)--> rejected --wake proposal_rejected-->
 {proposed, sent_back} --cancel--> cancelled
 submitted --start--> scheduled --launch--> running
 running --attempt collected--> reported          (every exit class, see below)
-running --attempt blocked--> blocked
+running --attempt blocked--> blocked        (probe attempt_exited with never_started lets a correction attach on gate_proves_nothing, hades #412)
 running --attempt retry--> scheduled              (policy permitted a new attempt)
 running --attempt quota_exhausted, another candidate in the tier--> scheduled     (reroute, 16: WIP committed, pool marked, reroute count +1)
 running --attempt quota_exhausted, no candidate, wait within cap--> awaiting_quota --wake (informational)-->

@@ -2773,7 +2773,11 @@ class Supervisor:
                     for row, check in zip(rows, checks, strict=True)
                 ):
                     reason = "gate_proves_nothing"
-                    detail = "; ".join(f"{row.id} passes on the unchanged repo" for row in rows)
+                    detail = "; ".join(
+                        f"{row.id} passes on the unchanged repo (add a check that fails, "
+                        "for example a new test file)"
+                        for row in rows
+                    )
             by_id = {row.id: row for row in rows or ()}
             for check in checks:
                 row = by_id.get(check["id"])
@@ -2807,6 +2811,18 @@ class Supervisor:
                 )
                 move_attempt(
                     uow, self._clock, attempt, AttemptState.BLOCKED, EventKind.ATTEMPT_BLOCKED
+                )
+                # hades #412: emit attempt_exited with never_started so that a correction
+                # on a probe-blocked task passes _unpublished_bundle_problem (#346 exemption)
+                record_event(
+                    uow,
+                    self._clock,
+                    EventKind.ATTEMPT_EXITED,
+                    principal=PRINCIPAL_CRUCIBLE,
+                    task_id=task.id,
+                    execution_id=attempt.execution_id,
+                    attempt_id=attempt.id,
+                    payload={"exit_class": ExitClass.BLOCKED.value, "never_started": True},
                 )
                 self._release_checkout_leases(uow, attempt)
                 move_task(
