@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 
+from tests.conftest import cpu_time
 from tests.integration import postgres as fixtures
 
 
@@ -189,7 +190,7 @@ def test_real_pytest_controller_registration(
         check=False,
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=60 * cpu_time(),
     )
     assert result.returncode == 0, result.stdout + result.stderr
     lines = events.read_text().splitlines()

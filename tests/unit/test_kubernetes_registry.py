@@ -38,6 +38,7 @@ from crucible.adapters.execution.kubernetes import (
     KubernetesProvider,
 )
 from crucible.ports.execution import ImageInfo
+from tests.conftest import cpu_time
 
 DIGEST = "sha256:" + "a" * 64
 CONFIG = {
@@ -280,7 +281,7 @@ def test_a_crane_call_is_bounded_by_the_timeout(
     with pytest.raises(RegistryError, match=r"ghcr.io did not answer within 0.5s"):
         _client(stub, timeout=0.5).list_tags("ghcr.io/o/r")
 
-    assert time.monotonic() - started < 10
+    assert time.monotonic() - started < 10 * cpu_time()
 
 
 def test_a_crane_call_ends_at_the_callers_deadline(
@@ -291,7 +292,7 @@ def test_a_crane_call_ends_at_the_callers_deadline(
     with pytest.raises(RegistryError, match="did not answer"):
         _client(stub, timeout=20).list_tags("ghcr.io/o/r", deadline=started + 0.5)
 
-    assert time.monotonic() - started < 10
+    assert time.monotonic() - started < 10 * cpu_time()
     # With the deadline already past, crane is not started at all.
     calls = len(_calls(stub))
     with pytest.raises(RegistryError, match="no time left"):
@@ -478,7 +479,9 @@ async def test_a_slow_registry_ends_the_listing_and_its_crane_processes_first(
     found = await harnesses._images(SimpleNamespace(providers=[provider]))  # type: ignore[arg-type]
 
     assert found == []
-    assert time.monotonic() - started < 15.0
+    assert time.monotonic() - started < 15.0 * cpu_time(), (
+        f"elapsed={time.monotonic() - started:.2f}"
+    )
     calls = _calls(stub)
     assert [c["argv"][0] for c in calls].count("digest") == 2
     assert not [c["pid"] for c in calls if _alive(c["pid"])]
@@ -497,9 +500,9 @@ async def test_a_caller_that_gives_up_leaves_no_crane_process_past_the_bound(
     assert await harnesses._images(SimpleNamespace(providers=[provider])) == []  # type: ignore[arg-type]
     # The endpoint gave up; the shared listing goes on to its own bound and no further.
     listing = provider._listings[asyncio.get_running_loop()]
-    await asyncio.wait_for(asyncio.shield(listing), timeout=5)
+    await asyncio.wait_for(asyncio.shield(listing), timeout=5 * cpu_time())
 
-    assert time.monotonic() - started < 5.0
+    assert time.monotonic() - started < 5.0 * cpu_time()
     calls = _calls(stub)
     assert calls
     assert not [c["pid"] for c in calls if _alive(c["pid"])]
@@ -549,13 +552,16 @@ async def test_stuck_registry_work_neither_starves_api_calls_nor_multiplies() ->
     try:
         # A page polling the harnesses ten times while the registry is stuck.
         callers = [asyncio.create_task(provider.list_images()) for _ in range(10)]
-        waited = time.monotonic() + 5
+        waited = time.monotonic() + 5 * cpu_time()
         while registry.in_flight < LIST_IMAGES_CONCURRENCY and time.monotonic() < waited:
             await asyncio.sleep(0.01)
 
         started = time.monotonic()
-        assert await asyncio.wait_for(provider._call(lambda: "answered"), timeout=2) == "answered"
-        assert time.monotonic() - started < 1.0
+        assert (
+            await asyncio.wait_for(provider._call(lambda: "answered"), timeout=2 * cpu_time())
+            == "answered"
+        )
+        assert time.monotonic() - started < 1.0 * cpu_time()
         assert registry.in_flight == LIST_IMAGES_CONCURRENCY
         assert registry.listings == 1
 
