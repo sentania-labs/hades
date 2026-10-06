@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 from crucible.application.admin.context import AdminContext
 from crucible.application.admin.github import rebind_repositories
 from crucible.domain.entities import Event, Repository
@@ -64,10 +66,22 @@ def _repository(name: str, url: str, installation_id: int) -> Repository:
     )
 
 
-def test_installing_replacement_rebinds_visible_repositories_and_audits_each() -> None:
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/octo/one.git",
+        "https://github.com/octo/one",
+        "https://github.com/OCTO/ONE.git/",
+        "git@github.com:octo/one.git",
+        "git@github.com:OCTO/ONE",
+        "ssh://git@github.com/octo/one.git",
+        "ssh://git@github.com:22/octo/one.git",
+    ],
+)
+def test_installing_replacement_rebinds_visible_repositories_and_audits_each(url: str) -> None:
     repositories = _Repositories(
         [
-            _repository("one", "https://github.com/octo/one.git", 1),
+            _repository("one", url, 1),
             _repository("two", "https://github.com/octo/two", 2),
         ]
     )
@@ -87,6 +101,7 @@ def test_installing_replacement_rebinds_visible_repositories_and_audits_each() -
     assert result == {"rebound": ["one", "two"], "unavailable": []}
     assert repositories.rows["one"].installation_id == 101
     assert repositories.rows["two"].installation_id == 202
+    assert repositories.rows["one"].url == url
     assert [event.kind for event in events.rows] == [
         EventKind.REPOSITORY_REBOUND.value,
         EventKind.REPOSITORY_REBOUND.value,
@@ -96,8 +111,17 @@ def test_installing_replacement_rebinds_visible_repositories_and_audits_each() -
     assert events.rows[0].payload["after"]["installation_id"] == 101
 
 
-def test_repository_hidden_from_new_app_is_named_and_left_unchanged() -> None:
-    hidden = _repository("hidden-repository", "https://github.com/octo/hidden", 77)
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/octo/hidden",
+        "git@github.com:octo/hidden.git",
+        "git@elsewhere.example:octo/one.git",
+        "https://elsewhere.example/octo/one",
+    ],
+)
+def test_repository_hidden_from_new_app_is_named_and_left_unchanged(url: str) -> None:
+    hidden = _repository("hidden-repository", url, 77)
     repositories = _Repositories([hidden])
     events = _Events()
     uow = cast(UnitOfWork, SimpleNamespace(repositories=repositories, events=events))
