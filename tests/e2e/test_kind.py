@@ -1696,18 +1696,22 @@ def _captured_flow(harness: str) -> LoginFlow:
     )
 
 
-def _ui_sign_in(browser: TestClient, token: str) -> str:
+def _ui_sign_in(browser: TestClient, token: str, landing: str = "/ui") -> str:
+    """Sign in and return the session's CSRF token, read from `landing`. The status page
+    at /ui needs the administrative surface, which `_kind_app` does not configure, so a
+    test on that app names a page it does serve (hades #425)."""
     form = browser.get("/ui/sign-in")
     nonce = re.search(r'name="csrf" value="([a-f0-9]+)"', form.text)
     assert nonce is not None, form.text
     signed = browser.post(
         "/ui/sign-in",
-        data={"csrf": nonce.group(1), "token": token, "next": "/ui"},
+        data={"csrf": nonce.group(1), "token": token, "next": landing},
         follow_redirects=False,
     )
     assert signed.status_code == 303, signed.text
-    csrf = re.search(r'name="csrf" value="([a-f0-9]+)"', browser.get("/ui").text)
-    assert csrf is not None
+    page = browser.get(landing)
+    csrf = re.search(r'name="csrf" value="([a-f0-9]+)"', page.text)
+    assert csrf is not None, page.text
     return csrf.group(1)
 
 
@@ -2137,7 +2141,7 @@ async def test_hades_425_a_worker_reaches_an_allowlisted_host_and_the_probe_reco
         assert recorded["hosts"][0]["reachable"] is True, recorded
         assert recorded["recorded_at"], recorded
     with TestClient(app) as browser:
-        _ui_sign_in(browser, tokens["operator"])
+        _ui_sign_in(browser, tokens["operator"], landing=f"/ui/tasks/{task}")
         page = browser.get(f"/ui/tasks/{task}")
         assert page.status_code == 200, page.text
         assert "Egress" in page.text and "github.com" in page.text, page.text
@@ -2794,7 +2798,9 @@ async def test_fdy_0133_a_task_in_publishing_is_pushed_by_the_kubernetes_publish
         with pytest.raises(KubernetesApiError) as gone:
             client_api.get("secrets", secrets[0]["metadata"]["name"])
         assert gone.value.status == 404
-        log = (bare.parent / "push-host.log").read_text(encoding="utf-8")
+        # hades #425: the worker's egress probe speaks TLS to the stubbed github.com, which
+        # is this plain-HTTP push host, so the log holds a raw ClientHello beside the lines.
+        log = (bare.parent / "push-host.log").read_bytes().decode("utf-8", errors="replace")
         assert f"POST /git/{name}.git/git-receive-pack 200 OK" in log, log
         await supervisor.stop()
 
