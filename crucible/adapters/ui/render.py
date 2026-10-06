@@ -26,18 +26,18 @@ templates = Jinja2Templates(directory=str(ROOT / "templates"))
 static = StaticFiles(directory=str(ROOT / "static"))
 
 
-# Grouped so the operator's path reads in order (crucible#115): what to set up, the work
+# Grouped so the operator's path reads in order (crucible#115, #169): what to set up, the work
 # running, then administration. An entry with no link is a group's label.
 NAV = (
     ("/ui", "Status"),
     ("", "Set up"),
-    ("/ui/harnesses", "Harnesses"),
-    ("/ui/credentials", "Credentials"),
     ("/ui/gateway", "Local gateway"),
     ("/ui/images", "Images"),
-    ("/ui/routing", "Routing"),
-    ("/ui/repositories", "Repositories"),
+    ("/ui/credentials", "Credentials"),
     ("/ui/github", "GitHub"),
+    ("/ui/harnesses", "Harnesses"),
+    ("/ui/repositories", "Repositories"),
+    ("/ui/routing", "Routing"),
     ("", "Work"),
     ("/ui/tasks", "Tasks"),
     ("/ui/board", "Board"),
