@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+import argparse
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
 from crucible.adapters.harness.registry import default_registry
+from crucible.adapters.ui.pages.settings import _runtime_rows
 from crucible.application.admin.context import AdminContext
 from crucible.application.admin.kubernetes import save_timeouts, timeouts_view
 from crucible.application.errors import ContractValidationError
+from crucible.cli import admin
+from crucible.client.next import kubernetes_timeouts_actions
 from crucible.domain import role_timeouts
-from crucible.domain.entities import ProviderSetting
+from crucible.domain.entities import ProviderSetting, Role
 from tests.fixtures import FakeClock
 from tests.unit.kubernetes_fixtures import build
 
@@ -91,3 +97,59 @@ def test_retry_budget_refuses_values_outside_its_bounded_integer_contract(value:
             reason="try a bad budget",
         )
     assert uow.provider_settings.rows == {}
+
+
+@pytest.mark.parametrize("remote", [False, True])
+@pytest.mark.parametrize("retry", [None, 17])
+def test_cli_forwards_retry_budget_and_preserves_omitted_value(
+    remote: bool, retry: int | None
+) -> None:
+
+    argv = ["kubernetes", "set-timeouts", "--role-seconds", "120", "--reason", "fit outage window"]
+    if retry is not None:
+        argv += ["--api-retry-seconds", str(retry)]
+    args = admin.build_parser(argparse.ArgumentParser()).parse_args(argv)
+    expected = {"role_timeout_seconds": 120}
+    if retry is not None:
+        expected["api_retry_seconds"] = retry
+    if remote:
+        api = Mock()
+        admin._remote(args, api)
+        api.call.assert_called_once_with(
+            "POST", "/v1/admin/kubernetes/timeouts", {"reason": "fit outage window", **expected}
+        )
+    else:
+        ctx, uow = _context()
+        save_timeouts(
+            ctx, uow, principal="admin", document={"api_retry_seconds": 33}, reason="seed"
+        )
+        uow.commit = Mock()
+        wiring: Any = SimpleNamespace(
+            admin=ctx, ctx=SimpleNamespace(uow_factory=lambda: nullcontext(uow))
+        )
+        result = admin._local(args, wiring)
+        assert result["document"] == {"role_timeout_seconds": 120, "api_retry_seconds": retry or 33}
+        uow.commit.assert_called_once_with()
+
+
+def test_generated_timeout_action_includes_current_retry_budget() -> None:
+
+    actions = kubernetes_timeouts_actions(
+        {"document": {"role_timeout_seconds": 120, "api_retry_seconds": 17}}, ["crucible-admin"]
+    )
+    args = admin.build_parser(argparse.ArgumentParser()).parse_args(actions[0]["command"][1:])
+    assert args.api_retry_seconds == 17
+
+
+def test_settings_page_lists_retry_value_source_and_next_launch() -> None:
+    ctx, uow = _context()
+    page_ctx: Any = SimpleNamespace(admin=ctx, settings=None)
+    principal: Any = SimpleNamespace(role=Role.ADMIN)
+    for saved in (False, True):
+        if saved:
+            save_timeouts(
+                ctx, uow, principal="admin", document={"api_retry_seconds": 17}, reason="fit"
+            )
+        rows = _runtime_rows(page_ctx, uow, principal)
+        row = next(row for row in rows if row[0] == "kubernetes.timeouts.api_retry_seconds")
+        assert row[1:4] == [17 if saved else 60, "saved" if saved else "default", "next launch"]
