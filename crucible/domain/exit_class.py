@@ -25,6 +25,7 @@ BLOCKED_REASONS: frozenset[str] = frozenset(
 class ExitClass(StrEnum):
     COMPLETED = "completed"
     COMPLETED_WITHOUT_REPORT = "completed_without_report"
+    ENDED_BY_BUDGET = "ended_by_budget"
     # The harness exited while its own tooling reported a command still running (issue
     # 128): never a clean completion, whatever the exit code and the report say.
     INCOMPLETE = "incomplete"
@@ -87,7 +88,7 @@ def loop_shape(command: str) -> str:
 # The classes that say the harness finished its turn cleanly. A zero exit code alone
 # is not enough: an `incomplete` attempt exits 0 too (issue 128).
 CLEAN_EXIT_CLASSES: frozenset[ExitClass] = frozenset(
-    {ExitClass.COMPLETED, ExitClass.COMPLETED_WITHOUT_REPORT}
+    {ExitClass.COMPLETED, ExitClass.COMPLETED_WITHOUT_REPORT, ExitClass.ENDED_BY_BUDGET}
 )
 
 
@@ -120,7 +121,9 @@ def classify_exit(
         # reasons, and it is never retried.
         return ExitClass.BLOCKED
     if exit_code == 0:
-        return ExitClass.COMPLETED if report_present else ExitClass.COMPLETED_WITHOUT_REPORT
+        # #498: the report is advisory. A clean harness end is completed regardless of
+        # whether the worker also wrote paperwork.
+        return ExitClass.COMPLETED
     if exit_code == EXIT_CODE_BLOCKED:
         # exit 75 without blocked.md is a plain failure (07)
         return ExitClass.CRASHED

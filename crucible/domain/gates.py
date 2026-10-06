@@ -84,8 +84,8 @@ PRE_PR_GATES: frozenset[str] = frozenset(
         GateName.INTERNAL_REVIEW_RECORDED,
     }
 )
-# These gates always run, even when a stored policy omits them. Commit authorship is
-# advisory (FDY-0143); the complete report and self-review block publication (#402).
+# These gates always run, even when a stored policy omits them. Both are advisory:
+# paperwork describes work but never decides whether the work may publish (#498).
 ENFORCED_PRE_PR_GATES: frozenset[str] = frozenset({GateName.COMMIT_POLICY, GateName.REPORT_PRESENT})
 
 # ADR 0024, the operator on 2026-09-29: "We need to let the review be our enforcement
@@ -98,12 +98,12 @@ DEFAULT_ADVISORY_GATES: frozenset[str] = frozenset(
         GateName.RUN_EVIDENCE_PRESENT,
     }
 )
-# The complete report, including self-review, is required for acceptance. A secret, once pushed,
-# cannot be taken back, so no policy may send one to the reviewer instead of stopping.
-ALWAYS_BLOCKING_GATES: frozenset[str] = frozenset({GateName.REPORT_PRESENT, GateName.NO_SECRETS})
+# A secret, once pushed, cannot be taken back, so no policy may send one to the reviewer
+# instead of stopping. A worker report is always advisory (#498).
+ALWAYS_BLOCKING_GATES: frozenset[str] = frozenset({GateName.NO_SECRETS})
 # FDY-0143: the commit author is for the reviewer and the trailer is not checked at all,
 # so no policy can make commit_policy stop a task.
-ALWAYS_ADVISORY_GATES: frozenset[str] = frozenset({GateName.COMMIT_POLICY})
+ALWAYS_ADVISORY_GATES: frozenset[str] = frozenset({GateName.COMMIT_POLICY, GateName.REPORT_PRESENT})
 
 
 class GateClass(StrEnum):
@@ -306,11 +306,11 @@ def _parse_problems(errors: list[dict[str, Any]], shown: int = 3) -> str:
 
 
 def report_present(gi: GateInput) -> GateOutcome:
-    """A complete report including the worker self-review is required to publish."""
+    """Describe the worker report for the reviewer; it is never a work gate (#498)."""
     item = gi.one("artifact_present", role="completion_claim")
     if item is None:
         missing = _missing("artifact_present", role="completion_claim")
-        return GateOutcome(missing.result, missing.detail, always_blocks=True)
+        return GateOutcome(missing.result, "the worker wrote no report.yaml")
     notes = _claim_notes(item.payload)
     if not item.payload.get("parsed_ok"):
         errors = [e for e in item.payload.get("parse_errors") or [] if isinstance(e, dict)]
@@ -323,14 +323,12 @@ def report_present(gi: GateInput) -> GateOutcome:
             + _parse_problems(errors)
             + notes,
             (item.id,),
-            always_blocks=True,
         )
     if item.payload.get("self_review_checked") is not True:
         return GateOutcome(
             GateResult.FAIL,
             "the report has no validated self_review section; write self_review and rerun",
             (item.id,),
-            always_blocks=True,
         )
     return GateOutcome(GateResult.PASS, "CompletionClaimV1 parsed" + notes, (item.id,))
 
@@ -341,7 +339,8 @@ def exit_clean(gi: GateInput) -> GateOutcome:
         return _missing("exit_info")
     code = item.payload.get("exit_code")
     # Issue 128: an `incomplete` attempt exits 0 too, so the class must also be clean.
-    if code == 0 and item.payload.get("exit_class") in CLEAN_EXIT_CLASSES:
+    exit_class = item.payload.get("exit_class")
+    if (code == 0 and exit_class in CLEAN_EXIT_CLASSES) or exit_class == "ended_by_budget":
         return GateOutcome(GateResult.PASS, "the worker exited 0 and completed", (item.id,))
     return GateOutcome(
         GateResult.FAIL,

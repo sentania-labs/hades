@@ -12,7 +12,10 @@ from crucible.adapters.harness import base
 from crucible.adapters.harness.hermes import HermesAdapter
 from crucible.domain.exit_class import ExitClass, classify_exit
 from crucible.domain.harness_concurrency import HARNESS_CONCURRENCY
-from crucible.domain.harness_settings import DEFAULT_QWEN_CONTEXT_LENGTH
+from crucible.domain.harness_settings import (
+    DEFAULT_QWEN_CONTEXT_LENGTH,
+    hermes_run_limits,
+)
 from crucible.domain.infrastructure import Interruption
 from crucible.ports.harness import (
     AdapterLaunch,
@@ -91,9 +94,11 @@ class QwenCodeAdapter:
             raise ValueError("Qwen Code requires a configured local endpoint")
         credential = self.credential_spec()
         assert credential is not None
+        limits = hermes_run_limits(ctx.harness_settings)
         return AdapterLaunch(
             argv=(
                 "/usr/local/bin/crucible-qwen-code",
+                "--safe-mode",
                 "--yolo",
                 "--auth-type",
                 "openai",
@@ -103,6 +108,8 @@ class QwenCodeAdapter:
                 "stream-json",
                 "--max-session-turns",
                 "300",
+                "--allowed-tools",
+                "read_file,read_many_files,write_file,replace,glob,search_file_content,run_shell_command",
                 base.POINTER_PROMPT,
             ),
             env={
@@ -111,6 +118,8 @@ class QwenCodeAdapter:
                 "OPENAI_API_KEY": "local-no-auth",
                 "CRUCIBLE_QWEN_IDENTITY": f"{ctx.identity_mount}/IDENTITY.md",
                 "CRUCIBLE_QWEN_CONTEXT_LENGTH": str(context_length(ctx.harness_settings)),
+                "CRUCIBLE_QWEN_MAX_OUTPUT_TOKENS": str(limits.max_output_tokens),
+                "CRUCIBLE_QWEN_REPORT_DIR": ctx.report_mount,
             },
             env_from_files=credential.env_from_files() if ctx.credential_mounted else {},
             transcript_path=f"{ctx.report_mount}/{base.TRANSCRIPT_NAME}",

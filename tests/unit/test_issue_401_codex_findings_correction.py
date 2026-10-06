@@ -258,9 +258,11 @@ def test_duplicate_finding_ids_are_rejected_with_ids_named(
         CollectedOutputs(report=_report(reported), report_raw=None, blocked_md=None),
     )
     claim = uow.claims.get(pending.attempt.id)
-    assert not claim.parsed_ok
-    assert any("duplicate ids: finding-1" in error["msg"] for error in claim.parse_errors)
-    assert pending.attempt.state is AttemptState.FAILED
+    assert claim.parsed_ok
+    worker = claim.document["worker_report"]
+    assert not worker["parsed"]
+    assert any("duplicate ids: finding-1" in error["msg"] for error in worker["parse_errors"])
+    assert pending.attempt.state is AttemptState.FAILED  # no collected commit in this fixture
     assert dispositions == []
 
 

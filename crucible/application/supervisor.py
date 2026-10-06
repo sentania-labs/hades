@@ -43,6 +43,7 @@ from crucible.application.checkout import (
     checkout_token_for,
     release_checkout_token,
 )
+from crucible.application.completion_record import compose_completion_record
 from crucible.application.decisions import (
     DEFAULT_ESCALATION_STALE_HOURS,
     open_escalation,
@@ -5407,6 +5408,7 @@ class Supervisor:
                 )
             completed: CompletedClaim | None = None
             claim = None
+            errors: list[dict[str, Any]] = []
             expected_findings: set[str] = set()
             if outputs.report is not None and not cancelled:
                 # hades #215: Crucible's own facts in place of the worker's, then parse.
@@ -5461,17 +5463,6 @@ class Supervisor:
                         for m in secret_hits
                     ]
                     claim_ok = False
-                    document: dict[str, Any] = {"redacted": True}
-                else:
-                    document = completed.document
-                uow.claims.put(
-                    CompletionClaimRecord(
-                        attempt_id=attempt.id,
-                        document=document,
-                        parsed_ok=claim_ok,
-                        parse_errors=errors,
-                    )
-                )
                 record_event(
                     uow,
                     self._clock,
@@ -5523,8 +5514,6 @@ class Supervisor:
             )
             uow.leases.release_attempt_lease(attempt.id)
             claim_document = outputs.report if (outputs.report and not cancelled) else None
-            stored_claim = uow.claims.get(attempt.id) if claim_document else None
-            errors = list(stored_claim.parse_errors) if stored_claim else []
             head = record_collection_evidence(
                 uow,
                 self._clock,
@@ -5538,6 +5527,27 @@ class Supervisor:
                 parsed_report=parsed,
                 completed=completed,
                 unparsed_errors=unparsed_errors,
+            )
+            composed = compose_completion_record(
+                uow,
+                task=task,
+                contract=stored.document if stored is not None else {},
+                outputs=outputs,
+                worker_report=(
+                    outputs.report
+                    if outputs.report is not None and not find_secrets(outputs.report)
+                    else None
+                ),
+                worker_report_parsed=claim_ok,
+                worker_report_errors=errors or (unparsed_errors or []),
+            )
+            uow.claims.put(
+                CompletionClaimRecord(
+                    attempt_id=attempt.id,
+                    document=composed,
+                    parsed_ok=True,
+                    parse_errors=[],
+                )
             )
             # hades #360: a correction ended by a merge never reaches the PR, so its head
             # is evidence on the attempt and not the merged task's head.
@@ -5566,15 +5576,16 @@ class Supervisor:
                             detail={"lines": recorded},
                         )
                     )
+            work_returned = outputs.bundle is not None and outputs.bundle.commits > 0
             self._classify_and_finish(
                 uow,
                 attempt,
                 blocked_text,
                 blocked_reason=blocked_reason,
-                claim_ok=claim_ok,
+                claim_ok=claim_ok or work_returned,
                 defer_quota=defer_quota,
                 turn_cap_reached=parsed is not None and parsed.limit_reached is not None,
-                has_commits=outputs.bundle is not None and outputs.bundle.commits > 0,
+                has_commits=work_returned,
                 pool_mark=pool_mark,
             )
             # A valid report from a failed or locally capped attempt is evidence,
@@ -6407,7 +6418,13 @@ class Supervisor:
         local_cap = self._local_cap(uow, execution, attempt, exit_class, turn_cap_reached)
         # 10: the checkout lease is released on a terminal attempt state.
         self._release_checkout_leases(uow, attempt)
-        if local_cap is not None:
+        if local_cap is not None and has_commits:
+            attempt.exit_class = ExitClass.ENDED_BY_BUDGET
+            exit_class = attempt.exit_class
+            move_attempt(
+                uow, self._clock, attempt, AttemptState.SUCCEEDED, EventKind.ATTEMPT_SUCCEEDED
+            )
+        elif local_cap is not None:
             move_attempt(
                 uow,
                 self._clock,
@@ -6432,9 +6449,6 @@ class Supervisor:
                 payload={"blocked_reason": blocked_reason} if blocked_reason else None,
             )
         else:
-            if exit_class is ExitClass.COMPLETED and not claim_ok:
-                attempt.exit_class = ExitClass.COMPLETED_WITHOUT_REPORT
-                exit_class = attempt.exit_class
             move_attempt(
                 uow,
                 self._clock,

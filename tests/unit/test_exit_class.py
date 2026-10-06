@@ -10,10 +10,10 @@ def test_exit_zero_with_report_is_completed() -> None:
     )
 
 
-def test_exit_zero_without_report_is_never_success() -> None:
+def test_exit_zero_without_report_is_clean_completion() -> None:
     assert (
         classify_exit(exit_code=0, report_present=False, blocked_present=False)
-        is ExitClass.COMPLETED_WITHOUT_REPORT
+        is ExitClass.COMPLETED
     )
 
 

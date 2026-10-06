@@ -272,7 +272,10 @@ def evaluate_and_advance(
             for_reviewer=summary["for_reviewer"],
         )
         return outcomes
-    if summary["for_reviewer"] and not reviewed_advisories:
+    # #498: report paperwork remains visible in for_reviewer but cannot interpose an
+    # orchestrator decision between passing work gates and publication.
+    review_items = [item for item in summary["for_reviewer"] if item["gate"] != "report_present"]
+    if review_items and not reviewed_advisories:
         if task.state is TaskState.REPORTED:
             move_task(
                 uow,
@@ -296,7 +299,7 @@ def evaluate_and_advance(
                 summary=(
                     f"the blocking gates pass on {task.head_sha}; "
                     "an orchestrator review is required for advisory gate failures."
-                    + reviewer_note(summary["for_reviewer"])
+                    + reviewer_note(review_items)
                 ),
                 task=task,
                 attempt_id=attempt.id,
@@ -304,7 +307,7 @@ def evaluate_and_advance(
                     "review": f"/v1/tasks/{task.id}/review",
                     "gates": f"/v1/attempts/{attempt.id}/gates",
                 },
-                for_reviewer=summary["for_reviewer"],
+                for_reviewer=review_items,
             )
         return outcomes
     move_task(

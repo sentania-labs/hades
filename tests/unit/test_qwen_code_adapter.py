@@ -65,6 +65,7 @@ def test_launch_and_shared_read_only_credential() -> None:
     launch = ADAPTER.build_launch(context(credential_mounted=True))
     assert launch.argv == (
         "/usr/local/bin/crucible-qwen-code",
+        "--safe-mode",
         "--yolo",
         "--auth-type",
         "openai",
@@ -74,6 +75,8 @@ def test_launch_and_shared_read_only_credential() -> None:
         "stream-json",
         "--max-session-turns",
         "300",
+        "--allowed-tools",
+        "read_file,read_many_files,write_file,replace,glob,search_file_content,run_shell_command",
         base.POINTER_PROMPT,
     )
     assert launch.env["OPENAI_BASE_URL"] == "https://gateway.example/v1"
@@ -120,18 +123,29 @@ def test_settings_and_identity_are_written_before_exec(
 
     def execute(binary: str, argv: list[str]) -> None:
         settings = json.loads((tmp_path / ".qwen/settings.json").read_text())
-        assert settings["model"] == {
-            "maxToolCallsPerTurn": 0,
-            "generationConfig": {"contextWindowSize": 65536},
-        }
+        assert settings["model"]["maxToolCallsPerTurn"] == 0
+        generation = settings["model"]["generationConfig"]
+        assert generation["contextWindowSize"] == 65536
+        assert generation["samplingParams"]["max_tokens"] == 32000
+        assert generation["extra_body"]["chat_template_kwargs"] == {"enable_thinking": False}
+        assert all(value is False for value in settings["memory"].values())
         assert not settings["tools"]["shell"]["enableInteractiveShell"]
         assert binary == "/usr/local/bin/qwen"
         assert argv[-1].startswith(identity.read_text())
         assert argv[-1].endswith(base.POINTER_PROMPT)
         called.append(binary)
 
-    monkeypatch.setattr(module.os, "execv", execute)
-    module.main()
+    monkeypatch.setenv("CRUCIBLE_QWEN_REPORT_DIR", str(tmp_path / "report"))
+
+    def run(argv: list[str], check: bool, **kwargs: Any) -> SimpleNamespace:
+        if argv[0] == "git":
+            return SimpleNamespace(returncode=0, stdout="")
+        execute(argv[0], argv)
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    with pytest.raises(SystemExit, match="0"):
+        module.main()
     assert called == ["/usr/local/bin/qwen"]
 
 
@@ -204,12 +218,12 @@ def test_tracker_pairs_tool_calls_across_chunks() -> None:
 @pytest.mark.parametrize(
     ("code", "blocked", "text", "expected"),
     [
-        (0, False, "", ExitClass.COMPLETED_WITHOUT_REPORT),
+        (0, False, "", ExitClass.COMPLETED),
         (75, True, "", ExitClass.BLOCKED),
         (75, False, "", ExitClass.CRASHED),
         (1, False, "400: maximum context length is 131072 tokens", ExitClass.PROVIDER_ERROR),
         (1, False, "429 quota exceeded", ExitClass.QUOTA_EXHAUSTED),
-        (0, False, "tool output mentions 400", ExitClass.COMPLETED_WITHOUT_REPORT),
+        (0, False, "tool output mentions 400", ExitClass.COMPLETED),
     ],
 )
 def test_exit_classes(code: int, blocked: bool, text: str, expected: ExitClass) -> None:
