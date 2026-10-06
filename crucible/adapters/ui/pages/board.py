@@ -3,16 +3,17 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, Request
+from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.adapters.ui.pages.proposals import batch_section
 from crucible.adapters.ui.render import _page, _state_words
 from crucible.adapters.ui.session import _require
 from crucible.application.admin.board import board_view
 
-router = APIRouter(prefix="/ui", include_in_schema=False)
+router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
 
 
 def _link(href: str, label: str) -> dict[str, str]:

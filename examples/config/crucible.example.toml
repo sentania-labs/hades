@@ -146,6 +146,7 @@ path = "/var/lib/crucible/credentials/hermes"        # api-key, written mode 600
 credential_retention_hours = 24
 probe_timeout_seconds = 120
 login_timeout_seconds = 900    # Codex's device code lasts 15 minutes; AGY's 60 seconds
+status_cache_ttl_seconds = 60  # supervisor refresh interval for registry and provider status
 proxy_config_path = "/var/lib/crucible/egress/squid.conf"
 proxy_subnet = "10.88.0.0/24"
 

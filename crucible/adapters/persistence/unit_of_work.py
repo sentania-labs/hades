@@ -4,7 +4,7 @@ token with SET LOCAL at the start of every transaction, never per connection (14
 from __future__ import annotations
 
 import gzip
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
 from typing import Any
@@ -439,6 +439,27 @@ class Tasks:
             stmt = stmt.with_for_update()
         return [self._to_entity(r) for r in self._s.scalars(stmt).all()]
 
+    def count_by_state(
+        self,
+        *,
+        principal_id: str | None = None,
+        principal_ids: Sequence[str] | None = None,
+    ) -> Mapping[TaskState, int]:
+        stmt = select(TaskRow.state, func.count()).group_by(TaskRow.state)
+        if principal_id is not None:
+            stmt = stmt.where(TaskRow.principal_id == principal_id)
+        if principal_ids is not None:
+            stmt = stmt.where(TaskRow.principal_id.in_(principal_ids))
+        return {TaskState(state): count for state, count in self._s.execute(stmt)}
+
+    def list_in_states(
+        self, states: Sequence[TaskState], *, principal_id: str | None = None
+    ) -> Sequence[Task]:
+        stmt = select(TaskRow).where(TaskRow.state.in_([state.value for state in states]))
+        if principal_id is not None:
+            stmt = stmt.where(TaskRow.principal_id == principal_id)
+        return [self._to_entity(row) for row in self._s.scalars(stmt.order_by(TaskRow.id)).all()]
+
     def search(
         self,
         *,
@@ -807,6 +828,53 @@ class Attempts:
             stmt = stmt.with_for_update()
         return [self._to_entity(r) for r in self._s.scalars(stmt).all()]
 
+    def worker_rows(self, *, principal_id: str | None = None) -> Sequence[Mapping[str, Any]]:
+        states = [
+            AttemptState.PREPARING,
+            AttemptState.LAUNCHING,
+            AttemptState.RUNNING,
+            AttemptState.TERMINATING,
+        ]
+        stmt = (
+            select(AttemptRow, ExecutionRow, TaskRow)
+            .join(ExecutionRow, ExecutionRow.id == AttemptRow.execution_id)
+            .join(TaskRow, TaskRow.id == AttemptRow.task_id)
+            .where(
+                AttemptRow.state.in_([state.value for state in states]),
+                AttemptRow.unsupervised.is_(False),
+            )
+            .order_by(AttemptRow.id)
+        )
+        if principal_id is not None:
+            stmt = stmt.where(TaskRow.principal_id == principal_id)
+        return [
+            {
+                "attempt": self._to_entity(attempt),
+                "execution": Executions._to_entity(execution),
+                "task": Tasks._to_entity(task),
+            }
+            for attempt, execution, task in self._s.execute(stmt)
+        ]
+
+    def concurrency_by_harness(self) -> Mapping[str, int]:
+        states = [
+            AttemptState.PREPARING,
+            AttemptState.LAUNCHING,
+            AttemptState.RUNNING,
+            AttemptState.TERMINATING,
+            AttemptState.EXITED,
+        ]
+        stmt = (
+            select(ExecutionRow.harness, func.count())
+            .join(AttemptRow, AttemptRow.execution_id == ExecutionRow.id)
+            .where(
+                AttemptRow.state.in_([state.value for state in states]),
+                AttemptRow.unsupervised.is_(False),
+            )
+            .group_by(ExecutionRow.harness)
+        )
+        return {harness: int(count) for harness, count in self._s.execute(stmt)}
+
     def list_cleaned_unreleased(self, retention_kind: str, *, limit: int) -> Sequence[Attempt]:
         released = select(RetentionActionRow.subject).where(
             RetentionActionRow.kind == retention_kind
@@ -933,6 +1001,22 @@ class Events:
             .limit(1)
         ).first()
         return self._to_entity(row) if row else None
+
+    def latest_for_tasks_kinds(
+        self, task_ids: Sequence[str], kinds: Sequence[str]
+    ) -> Mapping[tuple[str, str], Event]:
+        if not task_ids or not kinds:
+            return {}
+        latest = (
+            select(EventRow.task_id, EventRow.kind, func.max(EventRow.seq).label("seq"))
+            .where(EventRow.task_id.in_(task_ids), EventRow.kind.in_(kinds))
+            .group_by(EventRow.task_id, EventRow.kind)
+            .subquery()
+        )
+        rows = self._s.scalars(select(EventRow).join(latest, EventRow.seq == latest.c.seq)).all()
+        return {
+            (row.task_id, row.kind): self._to_entity(row) for row in rows if row.task_id is not None
+        }
 
     def list_for_task(self, task_id: str, *, after_seq: int, limit: int) -> Sequence[Event]:
         rows = self._s.scalars(

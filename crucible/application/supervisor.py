@@ -35,6 +35,8 @@ from crucible.application.admin import credentials as admin_credentials
 from crucible.application.admin import gateway as admin_gateway
 from crucible.application.admin import routing as admin_routing
 from crucible.application.admin.context import AdminContext
+from crucible.application.admin.harnesses import refresh_images
+from crucible.application.admin.providers import refresh_providers_status
 from crucible.application.checkout import (
     CheckoutRefusedError,
     checkout_token_for,
@@ -954,6 +956,7 @@ class Supervisor:
         if not held:
             return result
         try:
+            await self._refresh_admin_status()
             await self._check_gateway_models()
             result.orphans = await self._reconcile_provider_handles()
             await self._resume_quota_checkpoints()
@@ -1007,6 +1010,16 @@ class Supervisor:
             raise
         result.duration_ms = int((time.monotonic() - started) * 1000)
         return result
+
+    async def _refresh_admin_status(self) -> None:
+        """Refresh expensive admin reads at most once per configured TTL."""
+        ctx = self._admin_context
+        if ctx is None or not ctx.status_cache.due(ctx.status_cache_ttl_seconds):
+            return
+        images, providers = await asyncio.gather(refresh_images(ctx), refresh_providers_status(ctx))
+        ctx.status_cache.images = images
+        ctx.status_cache.providers = providers
+        ctx.status_cache.refreshed_at = time.monotonic()
 
     def _record_failure(self, summary: str) -> None:
         try:

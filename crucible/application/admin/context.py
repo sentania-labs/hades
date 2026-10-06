@@ -7,6 +7,7 @@ operations (the operator's decision of 2026-09-25, crucible#117)."""
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -39,6 +40,18 @@ class GitHubAppInfo:
 
 
 @dataclass(slots=True)
+class ProviderStatusCache:
+    """Process-local snapshot written by the supervisor and read by admin requests."""
+
+    images: list[tuple[str, Any]] = field(default_factory=list)
+    providers: list[dict[str, Any]] = field(default_factory=list)
+    refreshed_at: float | None = None
+
+    def due(self, ttl_seconds: float) -> bool:
+        return self.refreshed_at is None or time.monotonic() - self.refreshed_at >= ttl_seconds
+
+
+@dataclass(slots=True)
 class AdminContext:
     uow_factory: UnitOfWorkFactory
     clock: Clock
@@ -57,6 +70,9 @@ class AdminContext:
     credential_retention_hours: int = 24
     probe_timeout_seconds: int = 120
     login_timeout_seconds: int = 900
+    status_cache_ttl_seconds: float = 60.0
+    status_cache_enabled: bool = False
+    status_cache: ProviderStatusCache = field(default_factory=ProviderStatusCache)
     proxy_config_path: str | None = None
     proxy_subnet: str = "10.88.0.0/24"
     proxy_hosts: tuple[str, ...] = ()

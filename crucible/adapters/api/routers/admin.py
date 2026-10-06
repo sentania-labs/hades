@@ -6,10 +6,11 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Query
+from fastapi import Body, Query
 from fastapi.exceptions import RequestValidationError
 
 from crucible.adapters.api.deps import Admin, Ctx, Orchestrator, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.application.admin import (
     audit,
     board,
@@ -36,7 +37,7 @@ from crucible.application.admin.context import AdminContext
 from crucible.application.errors import ConflictError, ContractValidationError
 from crucible.contracts.api import ExternalReviewAttestation, RepositoryRegistration
 
-router = APIRouter()
+router = ThreadedAPIRouter()
 
 
 @router.get("/admin/board")

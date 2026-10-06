@@ -5,11 +5,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Header, Query, Request
+from fastapi import Header, Query, Request
 from fastapi.responses import JSONResponse
 
 from crucible.adapters.api.deps import Ctx, Mutator, Operator, Orchestrator, Reader, UoW
 from crucible.adapters.api.idempotency import with_idempotency
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.application.acceptance import close_task, record_acceptance
 from crucible.application.cancel_task import cancel_task
 from crucible.application.corrections import amend_task, attach_correction
@@ -56,7 +57,7 @@ from crucible.contracts.api import (
 from crucible.domain.lifecycle import TaskState
 from crucible.ports.repository import UnitOfWork
 
-router = APIRouter(prefix="/tasks")
+router = ThreadedAPIRouter(prefix="/tasks")
 IdemKey = Annotated[str | None, Header(alias="Idempotency-Key")]
 
 

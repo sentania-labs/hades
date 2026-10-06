@@ -3,10 +3,11 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.adapters.ui.actions import register
 from crucible.adapters.ui.render import CREDENTIAL_TONES, _base, _localize, _page, templates
 from crucible.adapters.ui.session import _require
@@ -25,7 +26,7 @@ from crucible.application.transitions import record_event
 from crucible.domain.entities import Principal, Role
 from crucible.domain.events import EventKind
 
-router = APIRouter(prefix="/ui", include_in_schema=False)
+router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
 
 
 @router.get("/credentials", response_class=HTMLResponse)

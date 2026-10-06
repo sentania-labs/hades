@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -34,6 +35,7 @@ from crucible.contracts.wake import WakeReason
 from crucible.domain.entities import (
     Attempt,
     EscalationState,
+    Event,
     Execution,
     ExternalReviewCycle,
     PullRequest,
@@ -584,15 +586,40 @@ def release_publishing_hold(uow: UnitOfWork, clock: Clock, task: Task) -> None:
     )
 
 
-def publishing_waits(uow: UnitOfWork) -> list[dict[str, Any]]:
+def publishing_waits(uow: UnitOfWork, tasks: Sequence[Task] | None = None) -> list[dict[str, Any]]:
     """Every task in `publishing` whose publication is waiting, with the recorded reason.
     What `GET /v1/supervisor` and the admin UI show; empty when nothing waits."""
+    publishing = (
+        list(tasks) if tasks is not None else list(uow.tasks.list_by_state(TaskState.PUBLISHING))
+    )
+    if not publishing:
+        return []
+    kinds = (
+        EventKind.TASK_PUBLISHING.value,
+        EventKind.TASK_PUBLISH_PENDING.value,
+        EventKind.PUBLISH_STARTED.value,
+    )
+    events: Mapping[tuple[str, str], Event]
+    if not hasattr(uow.events, "latest_for_tasks_kinds"):
+        events = {
+            (task.id, kind): event
+            for task in publishing
+            for kind in kinds
+            if (event := uow.events.latest_for_task_kind(task.id, kind)) is not None
+        }
+    else:
+        events = uow.events.latest_for_tasks_kinds([task.id for task in publishing], kinds)
     out: list[dict[str, Any]] = []
-    for task in uow.tasks.list_by_state(TaskState.PUBLISHING):
-        entered_seq, _ = _publishing_entry(uow, task)
-        hold = _current_hold(uow, task, entered_seq)
-        if hold is None:
+    for task in publishing:
+        entered = events.get((task.id, EventKind.TASK_PUBLISHING.value))
+        entered_seq = int(entered.seq or 0) if entered else 0
+        pending = events.get((task.id, EventKind.TASK_PUBLISH_PENDING.value))
+        started = events.get((task.id, EventKind.PUBLISH_STARTED.value))
+        if pending is None or int(pending.seq or 0) <= entered_seq:
             continue
+        if started is not None and int(started.seq or 0) > int(pending.seq or 0):
+            continue
+        hold = dict(pending.payload)
         out.append(
             {
                 "task_id": task.id,

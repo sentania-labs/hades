@@ -11,10 +11,11 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, Request
+from fastapi import Request
 from fastapi.responses import RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.adapters.ui.render import _redirect
 from crucible.adapters.ui.session import _csrf, _form, _require
 from crucible.application.errors import ApplicationError, ConflictError, ForbiddenError
@@ -29,7 +30,7 @@ from crucible.domain.entities import Principal, Task
 from crucible.domain.lifecycle import TaskState
 from crucible.ports.repository import UnitOfWork
 
-router = APIRouter(prefix="/ui", include_in_schema=False)
+router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
 
 ORDER_PREFIX = "order_"
 

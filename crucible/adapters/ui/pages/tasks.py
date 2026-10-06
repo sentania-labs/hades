@@ -4,10 +4,11 @@ from datetime import timedelta
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, Request
+from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.adapters.ui.pages.proposals import (
     action_forms,
     batch_section,
@@ -39,7 +40,7 @@ from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
 from crucible.domain.lifecycle import TaskState
 from crucible.domain.waivers import ACCEPT_NO_CI, WAIVABLE_STATES, WAIVE_EXTERNAL_REVIEW
 
-router = APIRouter(prefix="/ui", include_in_schema=False)
+router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
 
 
 def _gate_steps(gates: list[dict[str, Any]]) -> dict[str, Any]:
@@ -133,14 +134,34 @@ def tasks_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             if p.disabled_at is not None and p.name.startswith(bootstrap.DISCARDED_PRINCIPAL_PREFIX)
         }
 
-    # Build hidden task ids and per-state hidden counts
-    hidden: set[str] = set()
-    hidden_by_state: dict[str, int] = {}
-    for state in TaskState:
-        for task in uow.tasks.list_by_state(state):
-            if task.principal_id in archived:
-                hidden.add(task.id)
-                hidden_by_state[state.value] = hidden_by_state.get(state.value, 0) + 1
+    # Counts stay in SQL, and the IDs needed below already came back in the status
+    # detail query. No page-size-dependent task scan is needed for discarded imports.
+    if archived and not hasattr(uow.tasks, "count_by_state"):
+        archived_tasks = [
+            task
+            for state in TaskState
+            for task in uow.tasks.list_by_state(state)
+            if task.principal_id in archived
+        ]
+        hidden = {task.id for task in archived_tasks}
+        hidden_by_state: dict[str, int] = {}
+        for task in archived_tasks:
+            hidden_by_state[task.state.value] = hidden_by_state.get(task.state.value, 0) + 1
+    else:
+        hidden = {
+            item["id"]
+            for items in document["lists"].values()
+            for item in items
+            if item.get("principal_id") in archived
+        }
+        hidden_by_state = (
+            {
+                state.value: count
+                for state, count in uow.tasks.count_by_state(principal_ids=tuple(archived)).items()
+            }
+            if archived
+            else {}
+        )
 
     # Filter attention list (items carry id or task_id)
     attention = [

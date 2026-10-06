@@ -23,6 +23,7 @@ from crucible.adapters.persistence.models import (
     HarnessImageRow,
     HarnessStateRow,
     PolicyRow,
+    PrincipalRow,
     ProviderSettingRow,
     ReviewDispositionRow,
     ReviewReportRow,
@@ -380,6 +381,16 @@ class GateResults:
         ).all()
         return [self._to_entity(r) for r in rows]
 
+    def list_for_tasks(self, task_ids: Sequence[str]) -> Sequence[GateResultRecord]:
+        if not task_ids:
+            return []
+        rows = self._s.scalars(
+            select(GateResultRow)
+            .where(GateResultRow.task_id.in_(task_ids))
+            .order_by(GateResultRow.task_id, GateResultRow.gate)
+        ).all()
+        return [self._to_entity(row) for row in rows]
+
 
 class Acceptances:
     def __init__(self, session: Session) -> None:
@@ -731,6 +742,22 @@ class Wakes:
             )
             or 0
         )
+
+    def pending_summary(
+        self, *, principal_id: str | None = None
+    ) -> tuple[Mapping[str, int], datetime | None, int]:
+        stmt = (
+            select(PrincipalRow.name, func.count(), func.min(WakeRow.created_at))
+            .join(WakeRow, WakeRow.principal_id == PrincipalRow.id)
+            .where(WakeRow.acked_at.is_(None))
+            .group_by(PrincipalRow.name)
+        )
+        if principal_id is not None:
+            stmt = stmt.where(PrincipalRow.id == principal_id)
+        rows = list(self._s.execute(stmt))
+        counts = {name: int(count) for name, count, _oldest in rows}
+        oldest_values = [ensure_utc(oldest) for _name, _count, oldest in rows if oldest]
+        return counts, min(oldest_values, default=None), sum(counts.values())
 
 
 class AttemptMetricsRepo:
