@@ -66,7 +66,9 @@ class QwenCodeAdapter:
     def quota_reset_at(self, stdout_tail: str, stderr_tail: str) -> datetime | None:
         return None
 
-    def provider_quota_event(self, stdout_tail: str, stderr_tail: str) -> ProviderQuotaEvent | None:
+    def provider_quota_event(
+        self, stdout_tail: str, stderr_tail: str, now: datetime | None = None
+    ) -> ProviderQuotaEvent | None:
         return None
 
     def provider_quota_exhausted(self, stdout_tail: str, stderr_tail: str) -> bool:
