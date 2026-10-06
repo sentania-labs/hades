@@ -419,13 +419,15 @@ def admin_save_kubernetes_timeouts(
     principal: Admin,
     body: Annotated[dict[str, Any], Body()],
 ) -> dict[str, Any]:
-    """The body is the `kubernetes.timeouts` document (`role_timeout_seconds`) and a
-    `reason`; the service refuses a value that is not a whole number within bounds."""
+    """The body is the `kubernetes.timeouts` document and a `reason`; the service
+    refuses timeout and retry values that are not whole numbers within bounds."""
     result = kubernetes_admin.save_timeouts(
         _admin(ctx),
         uow,
         principal=principal.name,
-        document={key: body[key] for key in ("role_timeout_seconds",) if key in body},
+        document={
+            key: body[key] for key in ("role_timeout_seconds", "api_retry_seconds") if key in body
+        },
         reason=_reason(body),
     )
     uow.commit()
