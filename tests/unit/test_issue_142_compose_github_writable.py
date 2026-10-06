@@ -30,6 +30,12 @@ def _volume_mode(volume: str) -> str | None:
     return None
 
 
+def _volume_target(volume: str) -> str:
+    """Return the target path (rightmost `:` segment for named volumes too)."""
+    parts = volume.split(":")
+    return parts[-1]
+
+
 def test_github_credential_mount_is_writable() -> None:
     """The github credential directory must be writable."""
     compose = _load_compose()
@@ -39,8 +45,7 @@ def test_github_credential_mount_is_writable() -> None:
     for vol in volumes:
         if not isinstance(vol, str):
             continue
-        # The github host path starts with ${CRUCIBLE_CREDENTIAL_ROOT}.../github
-        if "/github" in vol and "credentials/github" in vol:
+        if _volume_target(vol) == "/var/lib/crucible/credentials/github":
             github_mount = vol
             break
     assert github_mount is not None, "No github credential mount found in crucible service"
@@ -63,11 +68,9 @@ def test_other_credential_mounts_are_unchanged() -> None:
         if not isinstance(vol, str):
             continue
         # Skip the github mount we already checked
-        if "/github" in vol and "credentials/github" in vol:
+        if _volume_target(vol) == "/var/lib/crucible/credentials/github":
             continue
-        if (
-            "crucible-credentials" in vol or "CRUCIBLE_CREDENTIAL_ROOT" in vol
-        ) and "github" not in vol:
+        if "crucible-credentials" in vol:
             # Named volume mounts should be writable (no :ro)
             # This is a sanity check that we are not accidentally
             # changing other credential mounts

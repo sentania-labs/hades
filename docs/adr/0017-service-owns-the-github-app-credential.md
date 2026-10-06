@@ -115,9 +115,9 @@ building an app/seevice."
   then the old App deleted on GitHub (amended 2026-09-27; it was a new key for the same
   App through the paste form of decision 2, which is removed). The store replaces the id
   and the key together, so the two can never disagree.
-| With the Docker provider the connect flow needs the directory beside
-|  `github.app.private_key_path` writable by the service; compose mounts it
-|  writable today (crucible#142).
+|  With the Docker provider the connect flow needs the directory beside
+|  `github.app.private_key_path` writable by the service; compose uses
+|  a named volume that `credential-init` chowns to uid 1000 (crucible#142).
 
 ## Amendment: the one-click App (2026-09-27, crucible#168)
 
