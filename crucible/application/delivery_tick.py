@@ -413,6 +413,7 @@ class DeliveryCoordinator:
             work_branch=plan.work_branch,
             base_ref=plan.base_ref,
             expected_head=plan.head_sha,
+            owned_remote_heads=plan.owned_remote_heads,
             bundle_path=plan.bundle_path,
             bundle_sha256=plan.bundle_sha256,
             image=self.config.publisher_image or plan.image,
@@ -2020,6 +2021,9 @@ class DeliveryCoordinator:
                     "previous_head_sha": old_head,
                     "reason": "merge_main",
                     "force_with_lease": old_head,
+                    # Issue 403: the next publication leases this tip as Hades' own.
+                    "work_branch": pull_request.work_branch,
+                    "repository": plan.repository_name,
                 },
             )
             # The new head is certified by its own checks. A task still in external

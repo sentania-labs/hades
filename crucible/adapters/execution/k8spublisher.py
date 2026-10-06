@@ -170,6 +170,7 @@ class KubernetesPublisher:
             credential_host=self.config.credential_host,
             token_source="file",
             bundle_sha256=request.bundle_sha256,
+            owned_remote_heads=request.owned_remote_heads,
         )
         exit_code, failed = await self._run_with_token(
             spec,
