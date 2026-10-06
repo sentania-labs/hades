@@ -45,8 +45,7 @@ def _image_rows(rows: list[dict[str, Any]], *, admin: bool) -> list[list[Any]]:
                         "name": "digest",
                         "label": f"Image for {harness}",
                         "options": [
-                            (choice["digest"], f"{choice['reference']} ({choice['version']})")
-                            for choice in row["choices"]
+                            (choice["digest"], choice["reference"]) for choice in row["choices"]
                         ],
                         "selected": (current or {}).get("digest"),
                     },
