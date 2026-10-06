@@ -330,7 +330,20 @@ class FakeKubernetesApi:
         for key, obj in self.objects.items():
             labels = (obj.body.get("metadata") or {}).get("labels") or {}
             if key[0] == "pods" and labels.get(LABEL_ATTEMPT) == attempt_id:
-                obj.body["status"] = {"phase": "Failed", "reason": "Evicted"}
+                # Node-pressure eviction: Failed/Evicted with a terminated worker
+                # container. Without the containerStatuses the observe path for a
+                # Failed/lost-Pod would skip the _terminated_state branch entirely,
+                # so we keep the shape realistic (issue 133, FDY-0464).
+                obj.body["status"] = {
+                    "phase": "Failed",
+                    "reason": "Evicted",
+                    "containerStatuses": [
+                        {
+                            "name": CONTAINER_NAME,
+                            "state": {"terminated": {"exitCode": 1, "reason": "Evicted"}},
+                        }
+                    ],
+                }
 
     def object_names(self, kind: str) -> list[str]:
         return sorted(name for (k, name) in self.objects if k == kind)
