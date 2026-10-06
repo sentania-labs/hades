@@ -185,7 +185,12 @@ REASON_REQUIRED_ACTIONS = frozenset(
 
 
 NO_REASON_ACTIONS = frozenset(
-    {"/ui/actions/github-check", "/ui/actions/harness-test", "/ui/actions/gateway-test"}
+    {
+        "/ui/actions/github-check",
+        "/ui/actions/harness-test",
+        "/ui/actions/gateway-test",
+        "/ui/actions/image-change",
+    }
 )
 
 

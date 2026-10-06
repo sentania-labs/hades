@@ -218,7 +218,8 @@ def test_live_log_tail_is_the_only_page_template_preformatted_text() -> None:
 
 def test_a_reason_is_asked_for_only_where_the_service_requires_one() -> None:
     """crucible#117: one rule sets every form's reason field. Required on the
-    destructive forms, optional on the rest, and absent on a read-only check."""
+    destructive forms, absent on read-only checks and on actions that never
+    need a note (crucible#186: image-change never asks for one)."""
 
     def form(action: str) -> dict[str, Any]:
         return {
@@ -235,7 +236,7 @@ def test_a_reason_is_asked_for_only_where_the_service_requires_one() -> None:
     sections = ui_render._reason_fields(
         [
             form("/ui/actions/token-revoke"),
-            form("/ui/actions/harness"),
+            form("/ui/actions/image-change"),
             form("/ui/actions/github-check"),
         ]
     )
@@ -243,7 +244,8 @@ def test_a_reason_is_asked_for_only_where_the_service_requires_one() -> None:
         [f for f in section["form"]["fields"] if f["name"] == "reason"] for section in sections
     ]
     assert reasons[0] == [{"name": "reason", "label": "Reason", "required": True}]
-    assert reasons[1] == [{"name": "reason", "label": "Reason (optional)", "required": False}]
+    # image-change (the unified promote/rollback control) never asks for a reason.
+    assert reasons[1] == []
     assert reasons[2] == []
 
 
