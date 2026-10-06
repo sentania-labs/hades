@@ -412,13 +412,19 @@ def build_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     kube_sub.add_parser("timeouts", help="the kubernetes.timeouts setting in force and its source")
     timeouts_set = kube_sub.add_parser(
         "set-timeouts",
-        help="replace kubernetes.timeouts: the short roles' seconds from their Pod Running",
+        help="update kubernetes.timeouts: short-role timeouts and the pre-launch retry budget",
     )
     timeouts_set.add_argument(
         "--role-seconds",
         type=int,
         required=True,
         help="the bundle verifier's, the cleaner's and the publisher claim Job's seconds",
+    )
+    timeouts_set.add_argument(
+        "--api-retry-seconds",
+        type=int,
+        help="pre-launch API transport retry budget, 1 to 600 seconds; "
+        "omitted preserves the current value",
     )
     kube_sub.add_parser("egress", help="the kubernetes.egress setting in force and its source")
     egress_set = kube_sub.add_parser(
@@ -527,6 +533,13 @@ def application_error(exc: ApplicationError) -> ClientError:
         "errors": exc.errors or [],
     }
     return ClientError(exc.slug, exc.detail or exc.title, problem=problem, status=exc.status)
+
+
+def _timeouts(args: argparse.Namespace) -> dict[str, int]:
+    document = {"role_timeout_seconds": args.role_seconds}
+    if args.api_retry_seconds is not None:
+        document["api_retry_seconds"] = args.api_retry_seconds
+    return document
 
 
 def _egress(args: argparse.Namespace) -> dict[str, Any]:
@@ -804,7 +817,7 @@ def _remote(args: argparse.Namespace, remote: Api) -> Any:
             return remote.call(
                 "POST",
                 "/v1/admin/kubernetes/timeouts",
-                {**reason, "role_timeout_seconds": args.role_seconds},
+                {**reason, **_timeouts(args)},
             )
         return remote.call("POST", "/v1/admin/kubernetes/egress", {**reason, **_egress(args)})
     if command == "bootstrap":
@@ -1125,7 +1138,7 @@ def _local(args: argparse.Namespace, wiring: Wiring) -> Any:
                     admin,
                     uow,
                     principal=principal,
-                    document={"role_timeout_seconds": args.role_seconds},
+                    document=_timeouts(args),
                     reason=args.reason,
                 )
             else:

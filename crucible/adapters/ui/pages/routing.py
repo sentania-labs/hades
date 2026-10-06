@@ -52,6 +52,7 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     role_timeouts = kubernetes_admin.timeouts_view(ctx.admin, uow)
     capacity = await kubernetes_admin.capacity_view(ctx.admin)
     role_seconds = int(role_timeouts["document"].get("role_timeout_seconds") or 0)
+    api_retry_seconds = int(role_timeouts["document"].get("api_retry_seconds") or 0)
     gateway_endpoint, _source = routing.gateway_url(uow)
     command_timeout = limits_admin.command_timeout_view(uow)
     preference = routing_preference.preference_view(uow)
@@ -185,6 +186,18 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                 if role_timeouts["provider_enabled"]
                 else "not in use: the Kubernetes provider is off",
                 "hint": "bundle verifier, cleaner, and the Job that readies a publish",
+            },
+            "",
+        ],
+        [
+            "Kubernetes launch API retry budget",
+            {
+                "kind": "note",
+                "value": f"{api_retry_seconds} seconds",
+                "hint": (
+                    f"source: {role_timeouts['api_retry_seconds_source']}; applies: "
+                    f"{role_timeouts['api_retry_seconds_applies']}"
+                ),
             },
             "",
         ],
@@ -459,7 +472,9 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                     "workspace for a publish. Pulling the image and waiting for a node "
                     "count against the launch timeout instead. Seconds, "
                     f"{role_timeouts['bounds']['min']} to {role_timeouts['bounds']['max']}. "
-                    "Every process picks a save up within 15 seconds."
+                    "The launch API retry budget covers transport failures before a worker "
+                    "starts and applies on the next launch. Every process picks a save up "
+                    "within 15 seconds."
                 ),
                 "form": {
                     "action": "/ui/actions/kubernetes-timeouts",
@@ -471,6 +486,13 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                             "label": "Short-role timeout (seconds)",
                             "kind": "number",
                             "value": role_seconds,
+                            "required": True,
+                        },
+                        {
+                            "name": "api_retry_seconds",
+                            "label": "Launch API retry budget (seconds)",
+                            "kind": "number",
+                            "value": api_retry_seconds,
                             "required": True,
                         },
                         {"name": "reason", "label": "Reason", "required": True},
@@ -743,15 +765,23 @@ async def _actions(
         )
     elif action == "kubernetes-timeouts":
         raw_seconds = form.get("role_timeout_seconds", "").strip()
+        raw_retry_seconds = form.get("api_retry_seconds", "").strip()
+        document: dict[str, Any] = {
+            "role_timeout_seconds": int(raw_seconds)
+            if raw_seconds.lstrip("-").isdigit()
+            else raw_seconds
+        }
+        if raw_retry_seconds:
+            document["api_retry_seconds"] = (
+                int(raw_retry_seconds)
+                if raw_retry_seconds.lstrip("-").isdigit()
+                else raw_retry_seconds
+            )
         kubernetes_admin.save_timeouts(
             ctx.admin,
             uow,
             principal=principal.name,
-            document={
-                "role_timeout_seconds": int(raw_seconds)
-                if raw_seconds.lstrip("-").isdigit()
-                else raw_seconds
-            },
+            document=document,
             reason=reason,
         )
     elif action in ("routing-upload", "policy-upload"):

@@ -2636,16 +2636,23 @@ def test_kubernetes_timeouts_through_api_cli_and_ui(
     admin_ctx.providers["kubernetes"] = probe
     first = admin_client.get("/v1/admin/kubernetes/timeouts").json()
     assert first["source"] == "settings"
-    assert first["document"] == {"role_timeout_seconds": 120}
+    assert first["document"] == {"role_timeout_seconds": 120, "api_retry_seconds": 60}
     assert first["bounds"] == {"min": 10, "max": 3600}
+    assert first["api_retry_bounds"] == {"min": 1, "max": 600}
+    assert first["api_retry_seconds_source"] == "default"
+    assert first["api_retry_seconds_applies"] == "next launch"
 
     saved = admin_client.post(
         "/v1/admin/kubernetes/timeouts",
-        json={"role_timeout_seconds": 300, "reason": "api: slow NFS"},
+        json={
+            "role_timeout_seconds": 300,
+            "api_retry_seconds": 45,
+            "reason": "api: slow NFS",
+        },
     )
     assert saved.status_code == 200, saved.text
     assert saved.json()["source"] == "database"
-    assert saved.json()["document"] == {"role_timeout_seconds": 300}
+    assert saved.json()["document"] == {"role_timeout_seconds": 300, "api_retry_seconds": 45}
     assert probe.reloads == 1
     for bad in (5, 99999, "300", None):
         refused = admin_client.post(
@@ -2653,11 +2660,13 @@ def test_kubernetes_timeouts_through_api_cli_and_ui(
         )
         assert refused.status_code == 422, (bad, refused.text)
     assert admin_client.get("/v1/admin/kubernetes/timeouts").json()["document"] == {
-        "role_timeout_seconds": 300
+        "role_timeout_seconds": 300,
+        "api_retry_seconds": 45,
     }
 
     assert run_cli(config_file, "kubernetes", "timeouts", capsys=capsys)["document"] == {
-        "role_timeout_seconds": 300
+        "role_timeout_seconds": 300,
+        "api_retry_seconds": 45,
     }
     cli_saved = run_cli(
         config_file,
@@ -2666,7 +2675,7 @@ def test_kubernetes_timeouts_through_api_cli_and_ui(
         "--role-seconds=240",
         capsys=capsys,
     )
-    assert cli_saved["document"] == {"role_timeout_seconds": 240}
+    assert cli_saved["document"] == {"role_timeout_seconds": 240, "api_retry_seconds": 45}
 
     with TestClient(create_app(ctx)) as browser:
         csrf = ui_sign_in(browser, tokens["admin"])
@@ -2674,11 +2683,15 @@ def test_kubernetes_timeouts_through_api_cli_and_ui(
         assert page.status_code == 200
         assert 'action="/ui/actions/kubernetes-timeouts"' in page.text
         assert 'value="240"' in page.text
+        assert 'name="api_retry_seconds"' in page.text
+        assert 'value="45"' in page.text
+        assert "source: saved; applies: next launch" in page.text
         ui_saved = browser.post(
             "/ui/actions/kubernetes-timeouts",
             data={
                 "csrf": csrf,
                 "role_timeout_seconds": "180",
+                "api_retry_seconds": "30",
                 "reason": "ui: back down",
                 "return_to": "/ui/routing",
             },
@@ -2687,7 +2700,7 @@ def test_kubernetes_timeouts_through_api_cli_and_ui(
         assert ui_saved.status_code == 303
         assert "Completed" in unquote(ui_saved.headers.get("location", ""))
     final = admin_client.get("/v1/admin/kubernetes/timeouts").json()
-    assert final["document"] == {"role_timeout_seconds": 180}
+    assert final["document"] == {"role_timeout_seconds": 180, "api_retry_seconds": 30}
     assert final["reason"] == "ui: back down"
     assert probe.reloads == 2
     kinds = audit_kinds(admin_client)
