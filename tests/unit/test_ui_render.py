@@ -23,6 +23,7 @@ from crucible.adapters.ui.render import (
     templates,
 )
 from crucible.application.admin import credentials, gateway
+from crucible.application.admin import routing as routing_admin
 from crucible.application.admin import routing_models as routing_models_service
 from crucible.application.admin.credentials import HERMES
 from crucible.domain.entities import (
@@ -368,6 +369,11 @@ def test_gateway_page_unfetched_shows_admin_forms(monkeypatch: pytest.MonkeyPatc
         return ["gpt-4o"]
 
     monkeypatch.setattr(gateway, "fetch_models", counting_fetch_models)
+    monkeypatch.setattr(
+        routing_admin,
+        "routing_followers",
+        lambda _uow: {"unpinned_policies": ["default-software"], "unpinned_projects": []},
+    )
 
     now = datetime(2025, 1, 1, tzinfo=UTC)
 

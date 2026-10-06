@@ -251,6 +251,8 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         },
     ]
     sections[1:1] = routing_models_page.control_sections(uow, admin=admin)
+    if routing_ref:
+        sections.insert(1, _versions_section(uow, str(routing_ref.get("name", ""))))
     if admin:
         tier_fields: list[dict[str, Any]] = []
         for name, rule in preference["tiers"].items():
@@ -559,6 +561,34 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         intro="What routes and limits a task: the policies in force, the gateway, and pools.",
         sections=sections,
     )
+
+
+def _versions_section(uow: UoW, name: str) -> dict[str, Any]:
+    """hades #437: each routing version beside what it changed, who published it and
+    why, so a publish that flips a model or a pool cap is seen, not found a day later."""
+    history = routing.routing_history(uow, name)
+    return {
+        "title": "Routing versions",
+        "note": (
+            "Newest first. A version that enables or disables a model or changes a pool "
+            "cap names the decision it supersedes in its reason, and wakes the "
+            "orchestrator with this change."
+        ),
+        "empty": "No routing version is recorded.",
+        "columns": ["Version", "Published", "By", "Reason", "What changed"],
+        "rows": [
+            [
+                f"{item['version']}" + (" (retired)" if item["retired"] else ""),
+                item["created_at"],
+                item["published_by"] or "not recorded",
+                item["reason"] or "none given",
+                "; ".join(routing.delta_words(item["delta"]))
+                if item["delta"] is not None
+                else "first version",
+            ]
+            for item in history
+        ],
+    }
 
 
 def _capacity_words(capacity: dict[str, Any]) -> str:

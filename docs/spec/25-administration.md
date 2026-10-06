@@ -438,6 +438,19 @@ policy and do not overwrite it. Each save creates a new routing-policy version a
 new delivery-policy version that references it, writes the Squid configuration from the
 same document, and updates the running Docker provider's exact host-and-port allowlist.
 
+Every routing publish (the Local gateway page, the local endpoint entries, a model's
+availability, a tier's rules, the routing order) computes its delta against the version
+in force (hades #437): the models it enables or disables, each pool whose
+`max_concurrency` changes, each tier whose pool order changes, and the delivery
+policies and projects that follow routing unpinned and so receive it. A publish that
+enables or disables a model or changes a pool cap is refused (a problem response on
+`reason`) without a reason, which names the decision it supersedes; such a publish
+raises one `routing_changed` wake listing the delta. The `routing_policy_uploaded`
+event records the delta and the note. The Routing page lists each routing version with
+what it changed, who published it and the reason. The Local gateway page says that a
+save publishes for every unpinned project, and a model save shows the delta and asks
+for confirmation before it publishes. Pinning routing per policy is not part of this.
+
 ## Rotation and removal
 
 Rotation takes a directory the operator prepared themselves. Crucible

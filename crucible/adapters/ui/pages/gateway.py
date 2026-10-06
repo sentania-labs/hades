@@ -12,6 +12,7 @@ from crucible.adapters.ui.session import _require
 from crucible.application.admin import (
     credentials,
     gateway,
+    routing,
 )
 from crucible.application.errors import (
     ConflictError,
@@ -21,6 +22,17 @@ from crucible.domain.entities import Principal, Role
 router = APIRouter(prefix="/ui", include_in_schema=False)
 
 CAPABILITY_OPTIONS = [("small", "small"), ("mid", "mid"), ("frontier", "frontier")]
+# hades #437: a routing version that flips a model or a pool cap overrides a decision.
+REASON_LABEL = (
+    "Reason (required when the save enables or disables a model or changes the pool cap: "
+    "name the decision it supersedes)"
+)
+
+
+def _followers_words(followers: dict[str, list[str]]) -> str:
+    projects = ", ".join(followers.get("unpinned_projects") or []) or "none"
+    policies = ", ".join(followers.get("unpinned_policies") or []) or "none"
+    return f"projects {projects} (delivery policies {policies})"
 
 
 @router.get("/gateway", response_class=HTMLResponse)
@@ -37,6 +49,7 @@ async def gateway_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     _models_requested = request.query_params.get("models") == "1"
     offered = await gateway.models_view(ctx.admin, uow, fetch=_models_requested)
     passed = view["last_outcome"] == "probe:completed"
+    followers = _followers_words(routing.routing_followers(uow))
     # crucible#115: one row in plain words; the credential's state is on Credentials.
     sections: list[dict[str, Any]] = [
         {
@@ -61,8 +74,11 @@ async def gateway_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         "note": offered["error"]
         or (
             f"Gateway {offered['endpoint_url']} lists {offered['offered_count']} "
-            "model(s) for this key. Tick the ones to use; saving writes a new routing "
-            "policy version. A model the gateway no longer offers is disabled, not removed."
+            "model(s) for this key. Tick the ones to use. Saving publishes a new routing "
+            "policy version for every project that follows routing unpinned: "
+            f"{followers}. Before it publishes, this page shows what the version changes "
+            "and asks you to confirm. A model the gateway no longer offers is disabled, "
+            "not removed."
         ),
     }
     if _models_requested:
@@ -134,7 +150,7 @@ async def gateway_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                         "value": (offered["pool"] or {}).get("max_concurrency") or 4,
                         "required": True,
                     },
-                    {"name": "reason", "label": "Reason", "required": True},
+                    {"name": "reason", "label": "Reason", "reason_label": REASON_LABEL},
                 ],
             }
         sections.append(listing)
@@ -154,7 +170,10 @@ async def gateway_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                 "note": (
                     "The URL ends in /v1. Codex and Hermes share this LiteLLM virtual key; "
                     "it is stored as the Hermes credential and never shown. Saving tests "
-                    "both."
+                    "both. A changed URL publishes a new routing policy version for every "
+                    f"project that follows routing unpinned: {followers}. That version "
+                    "changes only the local entries' URL; it enables or disables no model "
+                    "and changes no pool cap."
                 ),
                 "form": {
                     "action": "/ui/actions/gateway-save",
@@ -375,12 +394,25 @@ async def _action_gateway_models(
             }
         )
         index += 1
+    max_concurrency = int(form.get("max_concurrency") or "0") or None
+    if form.get("confirm") != "true":
+        # hades #437: show the delta this save publishes, and to whom, before it does.
+        preview = await gateway.save_models(
+            ctx.admin,
+            uow,
+            principal=principal,
+            models=picks,
+            max_concurrency=max_concurrency,
+            reason=reason,
+            preview=True,
+        )
+        return _confirm_page(request, principal, csrf, form, preview)
     saved = await gateway.save_models(
         ctx.admin,
         uow,
         principal=principal,
         models=picks,
-        max_concurrency=int(form.get("max_concurrency") or "0") or None,
+        max_concurrency=max_concurrency,
         reason=reason,
     )
     uow.commit()
@@ -395,3 +427,64 @@ async def _action_gateway_models(
 
 
 register("gateway-models", _action_gateway_models)
+
+
+def _confirm_page(
+    request: Request,
+    principal: Principal,
+    csrf: str,
+    form: dict[str, str],
+    preview: dict[str, Any],
+) -> Response:
+    """The model choices back, with the routing version they would publish spelled out
+    and a button that publishes it. Nothing was written to get here."""
+    delta = preview["delta"]
+    current = preview["routing_policy"]
+    carried = [
+        {"kind": "hidden", "name": name, "value": value}
+        for name, value in form.items()
+        if name.startswith("model.") or name == "max_concurrency"
+    ]
+    needs_reason = routing.delta_needs_reason(delta)
+    return _page(
+        request,
+        principal,
+        csrf,
+        active="/ui/gateway",
+        heading="Local gateway",
+        intro="Confirm the routing version these model choices publish.",
+        sections=[
+            {
+                "title": "What saving publishes",
+                "note": (
+                    f"Saving publishes routing {current['name']} version "
+                    f"{int(current['version']) + 1} over version {current['version']} for "
+                    "every project that follows routing unpinned: "
+                    f"{_followers_words(delta)}. Nothing is saved until you publish."
+                    + (
+                        " It enables or disables a model or changes a pool cap, so the "
+                        "reason must name the decision it supersedes, and the orchestrator "
+                        "is woken with this change."
+                        if needs_reason
+                        else ""
+                    )
+                ),
+                "columns": ["Change"],
+                "rows": [[line] for line in routing.delta_words(delta)],
+                "form": {
+                    "action": "/ui/actions/gateway-models",
+                    "label": "Publish this routing version",
+                    "fields": [
+                        *carried,
+                        {"kind": "hidden", "name": "confirm", "value": "true"},
+                        {
+                            "name": "reason",
+                            "label": "Reason",
+                            "reason_label": REASON_LABEL,
+                            "value": form.get("reason", ""),
+                        },
+                    ],
+                },
+            }
+        ],
+    )
