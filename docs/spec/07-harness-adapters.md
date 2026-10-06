@@ -178,6 +178,16 @@ never retry.
 - Output: stream-json parsed like Claude Code's, keyed by `event` rather
   than `type` (`{"event": "result", "result": {...}}`); the adapter reads
   both keys.
+- Quota: the final `result` line with `status: ERROR` is the account's quota,
+  and the authoritative mark signal (05b), when its error is the RPC's
+  `RESOURCE_EXHAUSTED`, a structured `code: 429`, or the CLI's own sentence
+  "Individual quota reached ... Resets in 3h52m" (hades #378). That sentence
+  names no status, so it is matched by its words; the reset it states as a
+  duration ("Resets in XhYmZs") becomes `reset_at` counted from the moment
+  the supervisor observed the exit, and a refusal that states none leaves
+  the pool's `default_cooldown_seconds`. `MODEL_CAPACITY_EXHAUSTED` is the
+  model's capacity, not the account's quota: it stays `infrastructure`
+  (hades #353) and marks nothing.
 
 ## Hermes
 

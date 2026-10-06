@@ -444,8 +444,12 @@ class HarnessAdapter(Protocol):
     def quota_reset_at(self, stdout_tail: str, stderr_tail: str) -> datetime | None: ...
 
     def provider_quota_event(
-        self, stdout_tail: str, stderr_tail: str
-    ) -> ProviderQuotaEvent | None: ...
+        self, stdout_tail: str, stderr_tail: str, now: datetime | None = None
+    ) -> ProviderQuotaEvent | None:
+        """The harness's authoritative provider-refusal event with its reset, or None.
+        `now` is when the refusal was observed, for a reset the event states as a
+        duration (hades #378); it defaults to the wall clock."""
+        ...
 
     def provider_quota_exhausted(self, stdout_tail: str, stderr_tail: str) -> bool:
         """True only for the harness's authoritative provider-refusal event."""
