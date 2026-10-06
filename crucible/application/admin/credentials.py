@@ -1029,9 +1029,7 @@ def model_ids(body: bytes, *, strict: bool = False) -> list[str]:
             raise ValueError("invalid models response")
         return []
     if strict and any(
-        not isinstance(item, dict)
-        or not isinstance(item.get("id"), str)
-        or not item["id"].strip()
+        not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"].strip()
         for item in items
     ):
         raise ValueError("invalid models response")
