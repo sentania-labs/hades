@@ -18,7 +18,8 @@ every attempt's behavior unreproducible.
   keep that digest unless Foundry explicitly authorizes a change.
 - Each adapter declares its tested version range; the API reports
   installed and supported versions and refuses unsupported combinations.
-- Promotion: Renovate opens weekly update PRs; CI builds a digest-pinned
+- Promotion: the weekly and on-demand `harness-pins.yml` workflow opens one
+  update PR per harness, with the release changelog and adapter range result; CI builds a digest-pinned
   candidate; adapter contract tests run; a bounded live canary runs
   outside CI; a person reviews flags, output, auth, and parsing; the
   supported range is updated; the image publishes to GHCR on release; an
