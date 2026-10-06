@@ -104,6 +104,40 @@ def create_wake(
     return wake
 
 
+def pool_exhausted_summary(pool: str, reset_at: datetime, reason: str) -> str:
+    """The one sentence a pool exhaustion tells Foundry (hades #378): which pool, why,
+    and until when its models are out of routing. Shared by every wake that reports a
+    pool mark, so the words are the same wherever the mark was made."""
+    return (
+        f"pool {pool} is exhausted ({reason}); its models are excluded from routing "
+        f"until {reset_at.isoformat()}"
+    )
+
+
+def create_pool_exhausted_wake(
+    uow: UnitOfWork,
+    clock: Clock,
+    *,
+    task: Task,
+    attempt_id: str,
+    pool: str,
+    reset_at: datetime,
+    reason: str,
+) -> Wake:
+    """One wake per exhaustion of a pool (hades #378): raised when a mark opens, not for
+    every attempt the same mark later turns away. The caller decides the "once"."""
+    return create_wake(
+        uow,
+        clock,
+        principal_id=task.principal_id,
+        reason=WakeReason.QUOTA_EXHAUSTED,
+        summary=pool_exhausted_summary(pool, reset_at, reason),
+        task=task,
+        attempt_id=attempt_id,
+        extra_links={"routing_usage": "/v1/routing/usage"},
+    )
+
+
 def wake_body(uow: UnitOfWork, wake: Wake) -> bytes:
     principal = uow.principals.get(wake.principal_id)
     name = principal.name if principal else wake.principal_id

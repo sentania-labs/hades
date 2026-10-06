@@ -66,11 +66,18 @@ step:
    names the attempt, then pushed; the SHA goes in the event. Nothing is
    discarded silently and nothing is left uncommitted. Squash on merge
    removes the WIP commit from `main`.
-2. The attempt's pool is marked exhausted until `reset_at` (05b).
+2. The attempt's pool is marked exhausted until `reset_at` (05b). The one
+   wake the refusal raises names the pool, the reason and the reset time
+   (hades #378): the `reported` or `awaiting_quota` wake of steps 3 and 4
+   carries that sentence when the refusal wrote the mark, and an attempt
+   refused while the mark is already in force extends the mark without a
+   wake of the pool's own.
 3. Selection runs again for the tier with marked pools excluded. A
    candidate: a new attempt on the same contract version, resumed from the
    remote work branch as corrections are, and a `reroute` event naming the
-   pool left, the model chosen, and the ordered candidates. No wake.
+   pool left, the model chosen, and the ordered candidates. One
+   `quota_exhausted` wake naming the pool and its reset when this refusal
+   opened the pool's exhaustion; otherwise no wake.
 4. No candidate: the task moves to `awaiting_quota` with `resume_at` the
    earliest `reset_at` among the tier's pools, and one informational wake
    (17). The supervisor tick relaunches at `resume_at` through step 3. Past
