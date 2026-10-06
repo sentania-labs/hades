@@ -1298,6 +1298,11 @@ class DeliveryCoordinator:
                     }
                 )
             else:
+                # main_tip is None when the run was cancelled (no real verdict).
+                # Do not treat a cancelled run as green: keep it in watching so
+                # a re-run on the same SHA can still be judged.
+                if main_tip is None:
+                    return
                 clears = not held_sha or plan.merge_sha in (held_sha, main_tip)
                 if clears:
                     document.update(
@@ -1385,12 +1390,13 @@ class DeliveryCoordinator:
                         check["command"] = f"uv run pytest -q {sha7_test}"
                         check["id"] = f"V-fix-{merge_sha7}"
                         has_new_test_check = True
+                        break  # Only replace the first matching check.
             if not has_new_test_check:
                 required.append(
                     {
                         "id": f"V-fix-{merge_sha7}",
                         "command": f"uv run pytest -q {sha7_test}",
-                        "expect_exit": 1,
+                        "expect_exit": 0,
                     }
                 )
         now = self._clock.now()
