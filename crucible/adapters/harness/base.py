@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -194,6 +194,52 @@ def _reset_from_document(document: Mapping[str, Any]) -> datetime | None:
     return None
 
 
+# Hades #378: a reset the harness states as a duration from now rather than a
+# timestamp. AGY's own words for an exhausted account are "Individual quota reached
+# ... Resets in 3h52m"; the duration is hours, minutes and seconds, each optional, in
+# that order, with or without spaces ("3h52m", "3h 52m 10s", "45m"). Human prose
+# elsewhere in a document never qualifies: the match needs the word before the
+# duration, and the caller only asks about the one event its predicate accepted.
+_RESET_IN = re.compile(
+    r"\bresets?\s+in\s+"
+    r"(?=\d)"
+    r"(?:(?P<days>\d+)\s*d)?\s*"
+    r"(?:(?P<hours>\d+)\s*h)?\s*"
+    r"(?:(?P<minutes>\d+)\s*m)?\s*"
+    r"(?:(?P<seconds>\d+)\s*s)?"
+    r"(?![\w:])",
+    re.IGNORECASE,
+)
+
+
+def reset_after(text: str) -> timedelta | None:
+    """The "Resets in XhYmZs" duration in `text`, or None when there is none."""
+    for match in _RESET_IN.finditer(text):
+        parts = {name: int(value) for name, value in match.groupdict().items() if value}
+        if parts:
+            return timedelta(**parts)
+    return None
+
+
+def _strings(value: Any) -> Iterator[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+
+
+def _reset_after_from_document(document: Mapping[str, Any]) -> timedelta | None:
+    for text in _strings(document):
+        after = reset_after(text)
+        if after is not None:
+            return after
+    return None
+
+
 def quota_reset_at(*tails: str, quota: Sequence[Pattern]) -> datetime | None:
     """Parse a machine timestamp only from a line that also proves quota exhaustion."""
 
@@ -211,9 +257,17 @@ def quota_reset_at(*tails: str, quota: Sequence[Pattern]) -> datetime | None:
 
 
 def provider_quota_event(
-    *tails: str, predicate: Callable[[Mapping[str, Any]], bool]
+    *tails: str,
+    predicate: Callable[[Mapping[str, Any]], bool],
+    now: datetime | None = None,
 ) -> ProviderQuotaEvent | None:
-    """Return the refusal and reset from the same structured harness event."""
+    """Return the refusal and reset from the same structured harness event.
+
+    The reset is the event's own timestamp when it carries one; otherwise a duration
+    the event states ("Resets in 3h52m", hades #378) counted from `now`, the moment
+    the refusal was observed (the supervisor's clock; the wall clock when no caller
+    says). An event that says neither leaves `reset_at` None and the pool's default
+    cooldown applies."""
     for tail in tails:
         for line in reversed(tail[-TAIL_LIMIT:].splitlines()):
             try:
@@ -221,7 +275,12 @@ def provider_quota_event(
             except (json.JSONDecodeError, TypeError):
                 continue
             if isinstance(document, dict) and predicate(document):
-                return ProviderQuotaEvent(reset_at=_reset_from_document(document))
+                reset_at = _reset_from_document(document)
+                if reset_at is None:
+                    after = _reset_after_from_document(document)
+                    if after is not None:
+                        reset_at = (now or datetime.now(UTC)) + after
+                return ProviderQuotaEvent(reset_at=reset_at)
     return None
 
 

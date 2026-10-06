@@ -84,8 +84,13 @@ AUTH_PATTERNS = base.patterns(
     "UNAUTHENTICATED",
     "Run 'agy' to log in",
 )
+# Hades #378: the account's own quota, as the CLI words it on the `result` line of a run
+# it ended for it ("Individual quota reached ... Resets in 3h52m", observed 2026-10-05):
+# no RPC status name, no HTTP status, and the reset as a duration rather than a time.
+QUOTA_REACHED = "Individual quota reached"
 QUOTA_PATTERNS = base.patterns(
     "RESOURCE_EXHAUSTED",
+    QUOTA_REACHED,
     "quota exceeded",
     "Quota exceeded",
     "rate limit exceeded",
@@ -101,14 +106,25 @@ CAPACITY_REASON = "MODEL_CAPACITY_EXHAUSTED"
 _LEADING_STATUS = re.compile(r"^\s*([A-Z][A-Z_]{3,})\b")
 
 
+def _result_body(event: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The body of a `result` line in either shape the CLI has written: 1.2.4's
+    `{"event": "result", "result": {...}}` (found live) or S3's `{"type": "result", ...}`;
+    None for any other line."""
+    kind = str(event.get("event") or event.get("type") or "")
+    if kind != "result":
+        return None
+    nested = event.get(kind)
+    return nested if isinstance(nested, dict) else event
+
+
 def _provider_quota_refusal(document: Mapping[str, Any]) -> bool:
-    error = str(document.get("error", ""))
-    return (
-        document.get("type") == "result"
-        and document.get("status") == "ERROR"
-        and "RESOURCE_EXHAUSTED" in error
-        and CAPACITY_REASON not in error
-    )
+    """The authoritative refusal that marks the pool (05b): the final `result` line of a
+    run that ended `ERROR` because the account's quota refused the call, whether the
+    error is the RPC's RESOURCE_EXHAUSTED, a structured 429, or the CLI's own
+    "Individual quota reached" sentence (hades #378). MODEL_CAPACITY_EXHAUSTED is the
+    model's capacity, not the account's quota, and never marks."""
+    body = _result_body(document)
+    return body is not None and body.get("status") == "ERROR" and _result_failure(body).quota
 
 
 def _result_failure(body: Mapping[str, Any]) -> ProviderFailure:
@@ -131,11 +147,12 @@ def _result_failure(body: Mapping[str, Any]) -> ProviderFailure:
         status = GOOGLE_STATUSES.get(leading.group(1)) if leading else None
     status = status or status_line(text)
     capacity = CAPACITY_REASON in raw
+    quota = status == 429 or "RESOURCE_EXHAUSTED" in raw or QUOTA_REACHED.lower() in raw.lower()
     return ProviderFailure(
         raw[:2000],
         status=None if capacity else status,
         capacity=capacity,
-        quota=status == 429 and not capacity,
+        quota=quota and not capacity,
     )
 
 
@@ -144,13 +161,9 @@ def _last_result_failure(*tails: str) -> ProviderFailure | None:
     calls worked, whatever was retried before it."""
     for line in tail_lines(*tails):
         event = base.json_object(line.strip())
-        if event is None:
+        body = _result_body(event) if event is not None else None
+        if body is None:
             continue
-        kind = str(event.get("event") or event.get("type") or "")
-        if kind != "result":
-            continue
-        nested = event.get(kind)
-        body: Mapping[str, Any] = nested if isinstance(nested, dict) else event
         return _result_failure(body) if body.get("status") == "ERROR" else None
     return None
 
@@ -164,9 +177,13 @@ class AgyAdapter:
     def quota_reset_at(self, stdout_tail: str, stderr_tail: str) -> datetime | None:
         return base.quota_reset_at(stdout_tail, stderr_tail, quota=QUOTA_PATTERNS)
 
-    def provider_quota_event(self, stdout_tail: str, stderr_tail: str) -> ProviderQuotaEvent | None:
+    def provider_quota_event(
+        self, stdout_tail: str, stderr_tail: str, now: datetime | None = None
+    ) -> ProviderQuotaEvent | None:
+        # The reset is "Resets in 3h52m" in the error text (hades #378), counted from
+        # `now`; a result line that names none leaves the pool's default cooldown.
         return base.provider_quota_event(
-            stdout_tail, stderr_tail, predicate=_provider_quota_refusal
+            stdout_tail, stderr_tail, predicate=_provider_quota_refusal, now=now
         )
 
     def provider_quota_exhausted(self, stdout_tail: str, stderr_tail: str) -> bool:
