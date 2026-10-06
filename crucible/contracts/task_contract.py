@@ -23,6 +23,7 @@ class HarnessName(StrEnum):
     CODEX = "codex"
     AGY = "agy"
     HERMES = "hermes"
+    QWEN_CODE = "qwen_code"
     # The e2e tier's harness (18): a script implementing the adapter's launch contract,
     # with no model and no credential. It is a real harness name because a contract has
     # to be able to name it, and the provider path it exercises is the real one.

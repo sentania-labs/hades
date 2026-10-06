@@ -155,7 +155,9 @@ async def harness_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             "note": (
                 "Test runs what a task runs: the harness's image, its credential, a worker "
                 "under the worker's egress, and one small model call. It takes up to a "
-                "couple of minutes."
+                "couple of minutes. Qwen Code uses the Local gateway key shared with Hermes. "
+                "Its per-turn tool-call cap is disabled; its context window comes from "
+                "the routing model (131072 tokens by default)."
             ),
             "columns": ["Harness", "Status", "Image", "Credential", "Last test", ""],
             "rows": rows,

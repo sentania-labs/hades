@@ -298,7 +298,7 @@ registry-check: ## resolve through the real crane: a redirecting stub registry, 
 	$(UV) sync --frozen --quiet
 	@crane=$$(tools/crane/fetch.sh) && export PATH="$$(dirname "$$crane"):$$PATH" \
 	  && CRUCIBLE_E2E_REGISTRY=1 $(UV) run pytest tests/e2e/test_registry.py -q -m e2e_registry \
-	  && $(UV) run python tools/registry/check_published.py --reference "$(REGISTRY_CHECK_REFERENCE)"
+	  && $(UV) run python tools/registry/check_published.py --reference "$(REGISTRY_CHECK_REFERENCE)" --expect-image-harnesses
 
 # CRUCIBLE_CLUSTER_CPU_BUDGET and CRUCIBLE_CLUSTER_MEMORY_BUDGET_GI (issue 93): the
 # cluster's CPU and memory ceiling the render-time resource check refuses to exceed.

@@ -41,7 +41,10 @@ def harness_list(
         installed = sorted(
             {version for i in images if (version := i.version_of(adapter.name)) is not None}
         )
-        credential = credential_state(adapter.credential_spec(), sources.get(adapter.name), state)
+        spec = adapter.credential_spec()
+        credential = credential_state(
+            spec, sources.get(spec.harness if spec else adapter.name), state
+        )
         default = defaults.get(adapter.name)
         # hades #174: an administrator's decision replaces the configuration default,
         # whose reason stays as a warning.

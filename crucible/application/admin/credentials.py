@@ -81,6 +81,7 @@ def mount_mode_setting(harness: str) -> str:
 def mount_mode_value(ctx: AdminContext, uow: UnitOfWork, harness: str) -> RuntimeValue:
     """The mount mode used by every runtime caller, with deployment input only a seed."""
     spec = spec_for(ctx, harness)
+    harness = spec.harness
     source = ctx.credential_sources.get(harness)
     seed = source.mount_mode.value if source is not None and source.mount_mode is not None else None
     default = MountMode.RENEWER.value if harness == "codex" else spec.minimum_mode.value
@@ -101,6 +102,8 @@ def mount_mode_value(ctx: AdminContext, uow: UnitOfWork, harness: str) -> Runtim
 
 
 def effective_source(ctx: AdminContext, uow: UnitOfWork, harness: str) -> CredentialSource:
+    spec = adapter_for(ctx, harness).credential_spec()
+    harness = spec.harness if spec is not None else harness
     original = ctx.credential_sources.get(harness)
     return CredentialSource(
         path=original.path if original is not None else "",
@@ -341,6 +344,7 @@ async def read_secrets(
     ]
 
     async def one(name: str) -> SecretRead:
+        name = spec_for(ctx, name).harness
         try:
             return await asyncio.wait_for(asyncio.to_thread(read_secret, store, name), wait)
         except TimeoutError:
@@ -364,6 +368,7 @@ def stored_files(store: Any, harness: str) -> dict[str, bytes] | None:
 
 
 def source_for(ctx: AdminContext, harness: str) -> CredentialSource:
+    harness = spec_for(ctx, harness).harness
     source = ctx.credential_sources.get(harness)
     if source is None or not source.path:
         raise CredentialAdminError(
@@ -379,8 +384,9 @@ def state_view(
     """The credential's state. On Kubernetes `secret` is the Secret as `read_secrets`
     already read it off the event loop; without one it is read here, once, blocking."""
     adapter = adapter_for(ctx, harness)
-    state = uow.harnesses.get(harness)
     spec = adapter.credential_spec()
+    harness = spec.harness if spec is not None else harness
+    state = uow.harnesses.get(harness)
     source = effective_source(ctx, uow, harness) if spec is not None else None
     store = secret_store(ctx) if spec is not None else None
     if store is not None:

@@ -24,6 +24,8 @@ from typing import Any
 # for ever. 131072 is a common window for the coding models a local gateway serves and
 # above Hermes's 64000 floor; it is not read from the gateway, so a model with a smaller
 # window needs its real figure saved, or 0 to let Hermes probe for it.
+# Qwen's full engine window when the routing entry does not override it (#448).
+DEFAULT_QWEN_CONTEXT_LENGTH = 131_072
 DEFAULT_HERMES_MAX_TURNS = 300
 DEFAULT_HERMES_CONTEXT_LENGTH = 131_072
 # Hades #388: the response allowance the lab's gateway applies when a request names none.
