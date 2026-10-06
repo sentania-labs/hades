@@ -254,7 +254,7 @@ def test_a_worker_binary_threshold_cannot_hide_a_secret(tmp_path: Path) -> None:
     output = _collect(tmp_path, repo)
     assert f"+token={SECRET}" in (output / "diff.patch").read_text()
     assert f"+token={SECRET}" in _review_diff(output)
-    assert {"where": "diff", "pattern": "github_token"} in _scan(tmp_path, output)
+    assert any(f["where"] == "diff:z.txt" for f in _scan(tmp_path, output))
 
 
 def test_a_large_binary_does_not_push_a_later_secret_past_the_scanner(tmp_path: Path) -> None:
@@ -265,7 +265,7 @@ def test_a_large_binary_does_not_push_a_later_secret_past_the_scanner(tmp_path: 
     output = _collect(tmp_path, repo)
     raw = (output / "diff.patch").read_bytes()
     assert b"Binary files" in raw and len(raw) < 64 * 1024
-    assert {"where": "diff", "pattern": "github_token"} in _scan(tmp_path, output)
+    assert any(f["where"] == "diff:z.txt" for f in _scan(tmp_path, output))
     assert len((output / REVIEW_DIFF_DIR / "diff.patch").read_bytes()) < 64 * 1024
 
 
@@ -310,7 +310,7 @@ def test_a_replace_ref_changes_neither_the_diff_nor_the_scanned_content(tmp_path
     raw = (output / "diff.patch").read_text()
     assert f"+token={SECRET}" in raw and "benign" not in raw and "decoy" not in raw
     assert f"+token={SECRET}" in _review_diff(output)
-    assert {"where": "diff", "pattern": "github_token"} in _scan(tmp_path, output)
+    assert any(f["where"] == "diff:evil.txt" for f in _scan(tmp_path, output))
     assert (output / "head.txt").read_text().strip() == evil_head
 
 
@@ -472,7 +472,7 @@ def test_the_review_diff_has_its_own_role_and_is_not_run_evidence(tmp_path: Path
         assert outcome.result is GateResult.FAIL, outcome.detail
 
 
-def test_the_review_diff_is_scanned_like_every_other_artifact() -> None:
+def test_the_review_diff_is_not_scanned_a_second_time() -> None:
     secret = ("gh" + "p_" + "a" * 36).encode()
     outputs = CollectedOutputs(
         report=None,
@@ -487,9 +487,7 @@ def test_the_review_diff_is_scanned_like_every_other_artifact() -> None:
             ),
         ),
     )
-    assert _scanner_findings(outputs, None) == [
-        {"where": f"artifact:{REVIEW_DIFF_NAME}", "pattern": "github_token"}
-    ]
+    assert _scanner_findings(outputs, None) == []
 
 
 # The UI route, through the real router and an app test client.

@@ -232,6 +232,10 @@ def _scanner_findings(
             if hit:
                 findings.append({"where": hit.path, "pattern": hit.pattern, "excerpt": hit.excerpt})
     for artifact in outputs.artifacts:
+        # The review diff is a presentation copy of the authoritative collected patch.
+        # Scanning it again would judge deleted and context lines (#488).
+        if artifact.name == REVIEW_DIFF_NAME:
+            continue
         hit = match_text(
             artifact.content.decode("utf-8", "replace"), path=f"artifact:{artifact.name}"
         )
