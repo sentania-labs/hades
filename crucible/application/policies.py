@@ -6,6 +6,7 @@ admin principal, and each is recorded as a decision."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
@@ -201,7 +202,9 @@ def put_routing_policy(
     version: int,
     document: object,
     reason: str | None = None,
+    extra: Mapping[str, Any] | None = None,
 ) -> RoutingPolicyRecord:
+    """`extra` joins the event payload: a publish records its delta there (hades #437)."""
     routing = validate_routing_policy(document, name=name, version=version)
     existing = uow.routing_policies.get(name, version)
     if existing is not None and uow.routing_policies.is_referenced(name, version):
@@ -240,6 +243,7 @@ def put_routing_policy(
                 if reason is not None
                 else {}
             ),
+            **(extra or {}),
         },
     )
     return stored

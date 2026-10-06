@@ -25,6 +25,13 @@ from crucible.adapters.persistence.migrations.versions import (
 REPO = Path(__file__).resolve().parents[2]
 MERGE = "0045_merge_0044_heads"
 MERGED = {"0044_attempt_stall_shape", "0044_editor_leftovers_policy", "0044_merge_423_424"}
+# The single head after the merge. hades #393 added 0046 above it and hades #425 added
+# 0047 above that; hades #389's migration was renumbered to 0047 on top and chains from
+# 0047_attempt_egress_probe so the graph stays linear. hades #176 adds 0048 on top.
+ABOVE = "0046_blocked_reason"
+PROBE = "0047_attempt_egress_probe"
+LAUNCH = "0047_successful_launch_time"
+HEAD = "0048_repository_rebound"
 
 
 def _script() -> ScriptDirectory:
@@ -44,7 +51,15 @@ def test_the_0045_merge_joins_the_three_0044_heads() -> None:
     merge = script.get_revision(MERGE)
     assert merge is not None
     assert set(merge.down_revision or ()) == MERGED
-    assert script.get_current_head() == MERGE
+    assert script.get_current_head() == HEAD
+    above = script.get_revision(ABOVE)
+    assert above is not None and above.down_revision == MERGE
+    probe = script.get_revision(PROBE)
+    assert probe is not None and probe.down_revision == ABOVE
+    launch = script.get_revision(LAUNCH)
+    assert launch is not None and launch.down_revision == PROBE
+    head = script.get_revision(HEAD)
+    assert head is not None and head.down_revision == LAUNCH
 
 
 def test_the_cli_config_sees_the_same_single_head() -> None:
@@ -52,7 +67,7 @@ def test_the_cli_config_sees_the_same_single_head() -> None:
     cfg = Config(str(REPO / "alembic.ini"))
     script = ScriptDirectory.from_config(cfg)
     assert Path(script.dir).resolve() == migrate.MIGRATIONS_DIR.resolve()
-    assert script.get_heads() == [MERGE]
+    assert script.get_heads() == [HEAD]
 
 
 def _postgres_renders(kinds: list[str]) -> str:
@@ -71,7 +86,8 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
         # would leave out the sibling branch, which is the whole point here.
         plan = [step.revision.revision for step in script._upgrade_revs("head", head)]
         assert plan.index("0043_credential_mount_mode") < plan.index("0044_merge_423_424")
-        assert plan[-1] == MERGE
+        assert plan.index("0044_merge_423_424") < plan.index(MERGE)
+        assert plan[-5:] == [MERGE, ABOVE, PROBE, LAUNCH, HEAD]
 
 
 def test_0043_credential_mount_mode_keeps_the_kinds_the_live_check_permits() -> None:

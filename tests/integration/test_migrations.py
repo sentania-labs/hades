@@ -1547,7 +1547,7 @@ def test_each_0044_head_upgrades_through_the_0045_merge(
 ) -> None:
     """FDY-0385: PRs 426, 438 and 441 each added a 0044 head. A deployed database stands on
     exactly one of them and holds events of the kinds its own 0043 ancestor allowed. It
-    reaches the single 0045 head with those rows intact and no drift. From the two heads
+    reaches the current head through 0045 with those rows intact and no drift. From the two heads
     over 0043_proposed_tasks the path runs 0043_credential_mount_mode over the proposal
     rows, so that revision has to keep the kinds the live CHECK permits rather than
     rebuild it from the 0039 kinds alone."""
@@ -1572,7 +1572,9 @@ def test_each_0044_head_upgrades_through_the_0045_merge(
                 {"kind": kind},
             )
         migrate.upgrade(database_url)
-        assert migrate.current_revision(engine) == "0045_merge_0044_heads"
+        # hades #393 put 0046_blocked_reason above the merge and hades #425 put
+        # 0047_attempt_egress_probe above that; the path still runs both.
+        assert migrate.current_revision(engine) == "0047_attempt_egress_probe"
         ok, detail = migrate.is_current(engine, database_url)
         assert ok, detail
         with engine.begin() as conn:

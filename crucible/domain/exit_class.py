@@ -5,8 +5,21 @@ from __future__ import annotations
 import shlex
 from enum import StrEnum
 
+# The exit code a worker that can set its harness's code uses to say "I am stuck". A
+# model cannot set its harness's exit code, so `blocked.md` on a clean exit (0 or 75) is
+# the escalation whatever the code (FDY-0140); the file, not the code, is the signal.
 EXIT_CODE_BLOCKED = 75
 EXIT_CODE_ENVIRONMENT = 70
+
+# hades #393: the two reasons a worker may give in `blocked.md` for stopping. A line
+# `reason: <value>` names one; the rest of the file is the worker's statement, carried
+# verbatim to the attempt record and the escalation. A blocked attempt is never retried
+# and marks no pool: a person answers, and a correction brings the answer back.
+BLOCKED_REASON_MISSING_CAPABILITY = "missing_capability"
+BLOCKED_REASON_AMBIGUOUS_CONTRACT = "ambiguous_contract"
+BLOCKED_REASONS: frozenset[str] = frozenset(
+    {BLOCKED_REASON_MISSING_CAPABILITY, BLOCKED_REASON_AMBIGUOUS_CONTRACT}
+)
 
 
 class ExitClass(StrEnum):
@@ -102,6 +115,9 @@ def classify_exit(
     if blocked_present and exit_code in (0, EXIT_CODE_BLOCKED):
         # FDY-0140: a model cannot choose its harness's exit code, so `blocked.md` on a
         # clean exit is the escalation whatever the code, and it wins over a report.
+        # hades #393: the file's reason line and statement are parsed by the supervisor
+        # (contracts.completion_claim.parse_blocked_md); the class is the same for both
+        # reasons, and it is never retried.
         return ExitClass.BLOCKED
     if exit_code == 0:
         return ExitClass.COMPLETED if report_present else ExitClass.COMPLETED_WITHOUT_REPORT

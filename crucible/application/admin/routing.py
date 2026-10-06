@@ -3,22 +3,30 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from crucible.application.admin.context import AdminContext, admin_event, guard_mutation
-from crucible.application.errors import NotFoundError
+from crucible.application.admin.context import (
+    AdminContext,
+    admin_event,
+    guard_mutation,
+    record_refusal,
+)
+from crucible.application.errors import ContractValidationError, NotFoundError
 from crucible.application.policies import put_policy, put_routing_policy
 from crucible.application.proxy_config import (
     enabled_local_endpoints,
     install_worker_proxy_config,
     worker_proxy_config,
 )
+from crucible.application.wakes import create_wake
 from crucible.contracts.policy import RoutingModel
+from crucible.contracts.wake import WakeReason
 from crucible.domain.endpoints import validate_endpoint
-from crucible.domain.entities import Policy, Principal, ProviderSetting
+from crucible.domain.entities import Policy, Principal, ProviderSetting, Role
 from crucible.domain.events import EventKind
 from crucible.ports.repository import UnitOfWork
 
@@ -109,6 +117,203 @@ def gateway_url(uow: UnitOfWork) -> tuple[str | None, str]:
     return None, "none"
 
 
+def _models_enabled(document: Mapping[str, Any]) -> dict[str, bool]:
+    return {
+        str(model.get("id", "")): model.get("enabled") is True
+        for model in document.get("models") or []
+    }
+
+
+def routing_delta(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any]:
+    """What a routing version changes against the one it replaces (hades #437): the
+    models it enables or disables (a new enabled entry is enabled, a removed enabled one
+    disabled), each pool whose max_concurrency changes, and each tier whose pool order
+    changes. The projects that follow routing unpinned are added by the caller, which
+    knows the policies."""
+    old_models, new_models = _models_enabled(before), _models_enabled(after)
+    enabled = sorted(i for i, on in new_models.items() if on and not old_models.get(i, False))
+    disabled = sorted(i for i, on in old_models.items() if on and not new_models.get(i, False))
+    old_pools = before.get("pools") or {}
+    new_pools = after.get("pools") or {}
+    caps = [
+        {
+            "pool": name,
+            "before": (old_pools.get(name) or {}).get("max_concurrency"),
+            "after": (new_pools.get(name) or {}).get("max_concurrency"),
+        }
+        for name in sorted(set(old_pools) | set(new_pools))
+        if (old_pools.get(name) or {}).get("max_concurrency")
+        != (new_pools.get(name) or {}).get("max_concurrency")
+    ]
+    old_tiers = before.get("tiers") or {}
+    new_tiers = after.get("tiers") or {}
+    orders = [
+        {
+            "tier": name,
+            "before": (old_tiers.get(name) or {}).get("prefer_pools"),
+            "after": (new_tiers.get(name) or {}).get("prefer_pools"),
+        }
+        for name in sorted(set(old_tiers) | set(new_tiers))
+        if (old_tiers.get(name) or {}).get("prefer_pools")
+        != (new_tiers.get(name) or {}).get("prefer_pools")
+    ]
+    return {
+        "models_enabled": enabled,
+        "models_disabled": disabled,
+        "pool_caps": caps,
+        "tier_pool_order": orders,
+    }
+
+
+def delta_needs_reason(delta: Mapping[str, Any]) -> bool:
+    """A version that enables or disables a model or changes a pool cap overrides an
+    earlier decision, so it must say which one (hades #437)."""
+    return bool(
+        delta.get("models_enabled") or delta.get("models_disabled") or delta.get("pool_caps")
+    )
+
+
+def _order_words(pools: Any) -> str:
+    return ", ".join(str(item) for item in pools) if pools else "no preference"
+
+
+def delta_words(delta: Mapping[str, Any]) -> list[str]:
+    """The delta in plain words, one line per kind of change, for the wake summary and
+    the Routing and Local gateway pages."""
+    lines: list[str] = []
+    if delta.get("models_enabled"):
+        lines.append("enables " + ", ".join(delta["models_enabled"]))
+    if delta.get("models_disabled"):
+        lines.append("disables " + ", ".join(delta["models_disabled"]))
+    for cap in delta.get("pool_caps") or []:
+        old = "unset" if cap["before"] is None else cap["before"]
+        new = "unset" if cap["after"] is None else cap["after"]
+        lines.append(f"pool {cap['pool']} max_concurrency {old} to {new}")
+    for order in delta.get("tier_pool_order") or []:
+        lines.append(
+            f"tier {order['tier']} pool order {_order_words(order['before'])} "
+            f"to {_order_words(order['after'])}"
+        )
+    if not lines:
+        lines.append("no model, pool cap or tier order change")
+    if "unpinned_projects" in delta:
+        projects = delta.get("unpinned_projects") or []
+        policies = delta.get("unpinned_policies") or []
+        lines.append(
+            "applies to projects following routing unpinned: "
+            + (", ".join(projects) if projects else "none")
+            + (f" (policies {', '.join(policies)})" if policies else "")
+        )
+    return lines
+
+
+def _following_policies(uow: UnitOfWork, policy: Any, routing_name: str) -> list[Policy]:
+    """The newest unretired version of every delivery policy that names `routing_name`
+    without pinning it: each one follows a publish (crucible#91)."""
+    followers: list[Policy] = []
+    policy_names = {policy.name, *(repo.policy_name for repo in uow.repositories.list_all())}
+    for policy_name in sorted(policy_names):
+        policy_versions = [
+            item for item in uow.policies.list_versions(policy_name) if item.retired_at is None
+        ]
+        if not policy_versions:
+            continue
+        current = max(policy_versions, key=lambda item: item.version)
+        current_ref = (current.document.get("routing") or {}).get("policy") or {}
+        if current_ref.get("name") != routing_name or current_ref.get("pinned") is True:
+            continue
+        followers.append(current)
+    return followers
+
+
+def publish_delta(
+    uow: UnitOfWork, *, policy: Any, routing: Any, routing_document: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The delta publishing `routing_document` over `routing` makes, with the delivery
+    policies and the projects (repositories) that follow routing unpinned and so get it.
+    The Local gateway page shows this before it publishes."""
+    delta = routing_delta(routing.document, routing_document)
+    followers = {item.name for item in _following_policies(uow, policy, routing.name)}
+    delta["unpinned_policies"] = sorted(followers)
+    delta["unpinned_projects"] = sorted(
+        str(repo.name) for repo in uow.repositories.list_all() if repo.policy_name in followers
+    )
+    return delta
+
+
+def routing_followers(uow: UnitOfWork) -> dict[str, list[str]]:
+    """The delivery policies and projects that follow the routing policy in force
+    unpinned, so every routing publish reaches them; empty when none is in force."""
+    try:
+        policy, routing = _active_documents(uow)
+    except NotFoundError:
+        return {"unpinned_policies": [], "unpinned_projects": []}
+    delta = publish_delta(uow, policy=policy, routing=routing, routing_document=routing.document)
+    return {
+        "unpinned_policies": delta["unpinned_policies"],
+        "unpinned_projects": delta["unpinned_projects"],
+    }
+
+
+def routing_history(uow: UnitOfWork, name: str, *, limit: int = 20) -> list[dict[str, Any]]:
+    """The newest `limit` versions of routing policy `name`, newest first, each with who
+    published it, the reason, the note, and its delta against the version before it
+    (hades #437). The delta is computed from the documents, so a version published
+    before the delta was recorded still shows one; the projects that followed it come
+    from the publish event, when it recorded them."""
+    events: dict[int, Any] = {}
+    after = 0
+    while True:
+        batch = uow.events.list_global(
+            after_seq=after,
+            kind=EventKind.ROUTING_POLICY_UPLOADED.value,
+            since=None,
+            limit=500,
+        )
+        for event in batch:
+            ref = event.payload.get("routing_policy") or {}
+            if ref.get("name") == name:
+                events[int(ref.get("version", 0))] = event
+        if len(batch) < 500:
+            break
+        after = int(batch[-1].seq or 0)
+    versions = sorted(uow.routing_policies.list_versions(name), key=lambda item: item.version)
+    rows: list[dict[str, Any]] = []
+    previous: Any = None
+    for record in versions:
+        published = events.get(record.version)
+        payload = published.payload if published is not None else {}
+        delta = routing_delta(previous.document, record.document) if previous is not None else None
+        recorded = payload.get("delta") or {}
+        if delta is not None and "unpinned_projects" in recorded:
+            delta["unpinned_projects"] = list(recorded.get("unpinned_projects") or [])
+            delta["unpinned_policies"] = list(recorded.get("unpinned_policies") or [])
+        rows.append(
+            {
+                "version": record.version,
+                "created_at": record.created_at.isoformat(),
+                "published_by": published.principal if published is not None else None,
+                "reason": payload.get("reason") or None,
+                "note": payload.get("note") or None,
+                "retired": record.retired_at is not None,
+                "delta": delta,
+            }
+        )
+        previous = record
+    return list(reversed(rows))[:limit]
+
+
+def _orchestrator(uow: UnitOfWork) -> Principal | None:
+    principals = sorted(
+        (p for p in uow.principals.list_all() if p.disabled_at is None),
+        key=lambda p: p.created_at,
+    )
+    return next(
+        (p for p in principals if p.role is Role.ORCHESTRATOR),
+        next((p for p in principals if p.role is Role.ADMIN), None),
+    )
+
+
 def publish_routing(
     ctx: AdminContext,
     uow: UnitOfWork,
@@ -123,7 +328,25 @@ def publish_routing(
     """Store `routing_document` as the next version of the routing policy in force and a
     next delivery policy version that names it, then bring the worker egress in line:
     the proxy allowlist, the Docker provider's allowlist, and the Kubernetes provider's
-    settings. Returns the new (policy version, routing version)."""
+    settings. Returns the new (policy version, routing version).
+
+    hades #437: a version that enables or disables a model or changes a pool cap is
+    refused without a reason naming the decision it supersedes, and raises one
+    `routing_changed` wake listing the delta and the projects that follow it."""
+    delta = publish_delta(uow, policy=policy, routing=routing, routing_document=routing_document)
+    material = delta_needs_reason(delta)
+    if material and not (reason or "").strip():
+        changes = "; ".join(delta_words(delta)[:-1])
+        record_refusal(
+            ctx,
+            principal=principal.name,
+            operation="routing publish",
+            detail=f"no reason was given for: {changes}",
+        )
+        raise ContractValidationError(
+            f"this routing version {changes}; give a reason that names the decision it supersedes",
+            errors=[{"path": "reason", "message": "must name the decision this supersedes"}],
+        )
     routing_versions = uow.routing_policies.list_versions(routing.name)
     next_routing_version = max(item.version for item in routing_versions) + 1
     routing_document["version"] = next_routing_version
@@ -135,21 +358,13 @@ def publish_routing(
         version=next_routing_version,
         document=routing_document,
         reason=reason,
+        extra={"delta": delta, "note": note, "previous_version": routing.version},
     )
     ref = (policy.document.get("routing") or {}).get("policy") or {}
     pinned = ref.get("pinned") is True
     next_policy_version = policy.version
-    policy_names = {policy.name, *(repo.policy_name for repo in uow.repositories.list_all())}
-    for policy_name in sorted(policy_names):
-        policy_versions = [
-            item for item in uow.policies.list_versions(policy_name) if item.retired_at is None
-        ]
-        if not policy_versions:
-            continue
-        current = max(policy_versions, key=lambda item: item.version)
-        current_ref = (current.document.get("routing") or {}).get("policy") or {}
-        if current_ref.get("name") != routing.name or current_ref.get("pinned") is True:
-            continue
+    for current in _following_policies(uow, policy, routing.name):
+        policy_name = current.name
         new_policy_version = (
             max(item.version for item in uow.policies.list_versions(policy_name)) + 1
         )
@@ -177,6 +392,23 @@ def publish_routing(
         )
         if policy_name == policy.name:
             next_policy_version = new_policy_version
+    if material:
+        target = _orchestrator(uow)
+        if target is not None:
+            create_wake(
+                uow,
+                ctx.clock,
+                principal_id=target.id,
+                reason=WakeReason.ROUTING_CHANGED,
+                summary=(
+                    f"routing {routing.name} version {next_routing_version} published by "
+                    f"{principal.name} ({note}): "
+                    + "; ".join(delta_words(delta))
+                    + f". Reason: {reason}"
+                ),
+                extra_links={"routing": "/ui/routing"},
+                raised_by=principal.name,
+            )
     egress_document = routing_document
     if pinned:
         referenced_routing = uow.routing_policies.get(

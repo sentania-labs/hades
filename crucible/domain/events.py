@@ -215,5 +215,6 @@ class EventKind(StrEnum):
     PRINCIPAL_REVOKED = "principal_revoked"
     PRINCIPAL_RENAMED = "principal_renamed"
     REPOSITORY_REGISTERED = "repository_registered"
+    REPOSITORY_REBOUND = "repository_rebound"
     REPOSITORY_REMOVED = "repository_removed"
     REPOSITORY_ATTESTATION_RECORDED = "repository_attestation_recorded"

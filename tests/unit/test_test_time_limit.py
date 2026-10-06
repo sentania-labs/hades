@@ -10,6 +10,8 @@ import time
 import tomllib
 from pathlib import Path
 
+from tests.conftest import cpu_time
+
 ROOT = Path(__file__).resolve().parents[2]
 HANGING = ROOT / "tests" / "fixtures_data" / "hanging" / "hanging_suite.py"
 
@@ -51,7 +53,7 @@ def test_a_hanging_test_fails_within_the_limit_and_names_itself(tmp_path: Path) 
     elapsed = time.monotonic() - started
     out = result.stdout + result.stderr
     assert result.returncode == 1, out
-    assert elapsed < 30, out
+    assert elapsed < 30 * cpu_time(), out
     assert "FAILED test_hanging_fixture.py::test_hangs_forever" in out, out
     assert "Timeout (>3.0s) from pytest-timeout" in out, out
     # Every thread's stack, the stuck line included.

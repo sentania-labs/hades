@@ -301,7 +301,17 @@ def credential_state(
         return CredentialState("absent", mode, None, tuple(files), f"missing: {', '.join(missing)}")
     fingerprint = digest.hexdigest()
     if state is not None and state.last_auth_failure_at is not None:
-        last_ok = state.last_validated_at or state.last_launch_at
+        last_ok = max(
+            (
+                v
+                for v in (
+                    state.last_validated_at,
+                    state.last_successful_launch_at,
+                )
+                if v is not None
+            ),
+            default=None,
+        )
         if last_ok is None or state.last_auth_failure_at >= last_ok:
             return CredentialState(
                 "invalid",
@@ -482,6 +492,8 @@ def record_launch_outcome(
     state.last_launch_outcome = outcome
     if auth_failure:
         state.last_auth_failure_at = at
+    else:
+        state.last_successful_launch_at = at
     state.updated_at = clock.now()
     uow.harnesses.put(state)
     return state

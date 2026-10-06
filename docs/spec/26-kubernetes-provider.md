@@ -130,7 +130,10 @@ included the pull. A role Job whose Pod the namespace quota refuses ends at
 once with the quota's own message rather than at its timeout, except the
 publisher's two Jobs, which wait for room until their deadline (a failed
 publication needs an operator's retry, and a full namespace is not a failed
-push), and whose timeout then names the quota.
+push), and whose timeout then names the quota. For the gate probe and the
+preparer that end is a `LaunchWaitError` the supervisor answers by launching
+the attempt again later; for a collection role it is the unavailable path the
+supervisor collects again from (hades #423).
 
 ## Pod shape (every role)
 
@@ -260,19 +263,26 @@ generates the proxy allowlist locally (05b routing pools, the adapter's
 declared endpoints, 13), resolved to CIDRs or FQDN rules where the CNI
 supports them:
 
-- worker: the model provider endpoints of the routed harness, the package
-  registries the project policy names, and, for a local route, the configured
-  `endpoint_url` hostname and port over HTTP or HTTPS. GitHub is not
-  reachable from a worker; the preparer and the publisher do the git
-  traffic.
+- worker: the policy's `egress_allowlist` as written (05b: "hostnames the
+  egress proxy permits for workers"), the model provider endpoints of the
+  routed harness, and, for a local route, the configured `endpoint_url`
+  hostname and port over HTTP or HTTPS. GitHub is on that list exactly when
+  the policy puts it there: a worker holds no GitHub credential, so what it
+  gets is read-only in effect, and the git traffic Crucible itself does is the
+  preparer's and the publisher's. Until hades #425 (2026-10-05) the provider
+  subtracted `github.com` and `api.github.com` from the worker and the
+  verifier on the strength of an older sentence here, so a policy that
+  allowlisted github.com produced a worker whose curl to it timed out against
+  the default deny while the task page said it was permitted; the Docker
+  provider's Squid had permitted it all along.
 - preparer and publisher: `github.com` and `api.github.com` only. For a
   private repository whose `github.credential_host` is not `github.com`
   (GitHub Enterprise Server, ADR 0019), the preparer and the refresher may
   also reach that host and port, resolved like any other allowlisted name,
   and the publisher always may, because that is where it pushes.
 - collector, bundle verifier, verifier: no egress at all (the verifier
-  gets the registries only when `required_verification` needs them and the
-  policy says so).
+  gets the policy's `egress_allowlist` as written, the same list the Docker
+  verifier reaches through the proxy, and never the harness endpoints).
 - login Job: the harness's login endpoints only, the adapter's
   `login_endpoints` (Claude Code `platform.claude.com` and `api.anthropic.com`,
   Codex `auth.openai.com`, AGY `oauth2.googleapis.com` and `www.googleapis.com`),
@@ -303,10 +313,75 @@ out against the default deny (hades #191, 2026-09-28). The broad rule pins
 nothing. `kubernetes.broad_egress`
 (default false) replaces the resolved addresses with the broad rule, the
 public internet on 443 minus every denied range, for a CNI that enforces names
-some other way; that rule lets a worker reach GitHub, so a deployment turns it
-on deliberately or not at all. Both are restart-bound settings, set like
-`kubernetes.probe_image` and shown on the admin UI's settings page. (Made
-concrete 2026-09-25, issue 61.)
+some other way, and does so for the git and login roles only, whose destinations
+the provider fixes. The worker and the verifier never take it: their hosts are
+the policy's `egress_allowlist` as written and they run code the attempt
+controls, so the broad rule would let them reach any public address the policy
+never named. Their names are always resolved, ruled by address and pinned in
+`hostAliases`, whatever `broad_egress` says (hades #425: once the worker's list
+stopped dropping github.com, the kind tier's broad setting let its isolation
+probe reach example.com, which no policy names).
+Both are restart-bound settings, set like `kubernetes.probe_image` and shown on
+the admin UI's settings page. (Made concrete 2026-09-25, issue 61.)
+
+**How a worker reaches an allowlisted host (hades #425).** On this provider
+the path is direct. There is no proxy and no proxy variable in the worker's
+environment: `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` are the Docker
+provider's (13) and are never set here, so a plain `curl https://pypi.org/`
+or a `uv sync` connects straight to the host. What lets the connection through
+is the attempt's worker NetworkPolicy, an `ipBlock` per address the name
+resolved to when the policy was written, on TCP 443, and what makes the Pod
+connect to one of those addresses rather than a fresh answer from the resolver
+is the `hostAliases` entry that pins the name to them. A host the policy names
+but the worker cannot reach is therefore one of three things: the name resolved
+to an address the namespace denies (the launch is refused and says so), the
+name's rule was not written at all (the cause of #425, now gone), or the far
+end did not answer on 443. An address that two allowlisted names share is
+permitted for both; an unlisted name that happens to resolve to a permitted
+address (raw.githubusercontent.com beside objects.githubusercontent.com, both
+on Fastly) answers too, which is a property of address-based enforcement and
+not a wider grant. IPv6 is denied entirely, so a name's AAAA answer never
+matters.
+
+**The egress probe.** Before the harness starts, the launch wrapper the
+worker command is wrapped in (the same wrapper on both providers, 07) tries
+every name in `CRUCIBLE_EGRESS_ALLOWLIST`, which the provider sets to the
+worker's resolved plan: each name in order, `curl` to `https://<host>/` with a
+5 second connect timeout and 10 seconds per host, certificate not checked, the
+proxy variables honoured where they exist. A `host:port` entry (a local model
+endpoint) is left alone. It writes one line to stderr,
+`crucible-egress-probe: {"hosts": [...]}`, with per host `reachable` (true
+when a connection was made: curl 0, or 35 and 52 when only the TLS handshake
+or the HTTP exchange failed after it), `curl_exit`, `ms` and curl's own
+message as `detail`. A host it cannot reach is reported, never a reason not
+to start the harness, and a missing `curl` is reported the same way. The
+supervisor reads the line off the log stream it already pulls and keeps the
+parsed document, with `recorded_at`, as the attempt's `egress_probe` (the
+first such line only; the harness echoing one later never replaces it), which
+`GET /tasks/{id}` and `GET /attempts/{id}` return and the task page shows as
+its Egress section, one row per attempt and host. So a dependency install
+that failed reads against what the worker could reach before it started,
+and is attributed to the egress path or to the worker accordingly. An attempt
+with no allowlisted host is not wrapped for the probe and records nothing.
+
+The line is the worker's word, and the worker is untrusted (S4), so the
+supervisor believes it only so far. A marker line from an attempt that runs
+no probe (the policy's network mode or the contract's network is `none`) is
+ignored and logged, never parsed. For an attempt that does, the first marker
+line in its log decides: the wrapper writes its line before the harness can
+write anything, so a later line is never the wrapper's. That first line is
+sized before it is parsed: at most 64 KiB after the marker, nesting at most
+three levels deep (an object, its `hosts` array, the flat rows) and at most
+100 host rows, all well above what the wrapper writes (a row is a name, three
+small numbers and at most 200 characters of curl's message). A line over any
+cap, or not a JSON object with a `hosts` array, is rejected without being
+loaded, and the rejection is what the attempt records (`hosts` empty,
+`rejected` saying why, shown on the task page as one row), so no later line
+is parsed for that attempt either and the log offset still advances past it.
+Because the probe's network round trip now precedes the harness, a worker's
+run is at least that long even when the harness exits at once; a test that
+read the exit class in the tick that launched the worker polls for it instead
+(the `test_class_routing` cases on both tiers).
 
 Two destinations are denied explicitly, because a naive policy lets them
 through: cluster DNS is allowed on port 53 UDP and TCP to the cluster's DNS
@@ -456,7 +531,7 @@ the namespace. A deployment therefore names one exact, pullable reference in
   | exists | Pending past the launch timeout | launch failure, the Pod's conditions as detail (image pull, no schedulable node, PVC unbound), not a stall |
   | exists | terminated container | `exited(code)` |
   | exists | evicted, or its node is gone | `lost` |
-  | exists | none yet, and a `FailedCreate` naming the namespace quota | launch failure at once, with the quota's message (the lab findings of 2026-09-29; the Job controller retries such a Pod forever and never fails the Job) |
+  | exists | none yet, and a `FailedCreate` naming the namespace quota | `running`, waiting for room, with the quota's message as detail; the launch timeout counts from the last refusal (hades #423; `launch` itself ends as a wait when it sees the refusal, and the supervisor launches the attempt again later. Before that it was a launch failure at once, the lab findings of 2026-09-29) |
   | exists | none yet, within the launch timeout | `running` (a Job controller can take a few seconds to create a Pod on a busy node; this is not a loss, 103) |
   | exists | none yet, past the launch timeout | launch failure ("the Job controller never created a Pod") |
   | exists | had one, now gone | `lost` (the Pod existed and disappeared, unlike the row above) |
@@ -481,7 +556,13 @@ the namespace. A deployment therefore names one exact, pullable reference in
   by the supervisor from the PVC through a short-lived reader Pod, never by
   mounting the PVC into the Crucible pods. The reader's tar is streamed to a
   scratch file and extracted from there, so the supervisor never holds the
-  collected archive (up to 256 MiB) in memory. A step the cluster could not
+  collected archive (up to 256 MiB) in memory. The blobs the worker added or
+  changed, which the collector exports for the secret scanner (hades #398), are
+  not in that archive: the bundle carries each of them once already, and a
+  second copy of a large binary change would push the archive past its bound.
+  The reader streams `output/changed-blobs` as a tar of its own, bounded the
+  same way, into a sink that scans each blob as it arrives and keeps only the
+  verdict per object id, never the bytes (11). A step the cluster could not
   take or answer (an API server that refused, reset or timed out a
   connection or answered 429 or 5xx, a quota-refused role Pod, a reader Pod
   that did not start, an exec stream that ended before its status) raises
@@ -603,7 +684,8 @@ Pod names, the node, the effective limits and requests, the pod PID limit and
 the NetworkPolicy applied) is stored as one `report/kubernetes-launch.json`
 artifact of the attempt, which carries an `artifact_present` evidence row like
 any other per-attempt fact Crucible observed (11). The image digest stays on
-the attempt row. (Made concrete 2026-09-21 during C8a.) `limits.as_dict()`
+the attempt row, and so does the launch wrapper's egress probe (`egress_probe`,
+hades #425, above). (Made concrete 2026-09-21 during C8a.) `limits.as_dict()`
 (issue 93) carries `cpu_request` and `memory_request` beside `cpu` and
 `memory`, so the evidence records what was actually asked of the scheduler
 next to what was allowed to run. The limits are read back from the live Pod
@@ -622,7 +704,55 @@ namespace's ResourceQuotas: the fewest attempts any one limit admits, with
 `count/jobs.batch` divided by five Jobs an attempt and the CPU and memory
 requests and limits by one Pod's worth at the limits of the last launch (the
 policy defaults before one). Until the lab findings of 2026-09-29 only the Job
-count was read. The admin status page (25) shows the namespace
+count was read.
+
+Since hades #423 that number is the worker capacity, not the quota's raw
+headroom. Hades runs short-role Pods of the worker's shape beside the workers
+(the gate probe, the preparer, the collector and the other collection roles,
+the login Job; the canary is smaller), and a quota that admitted ten Pods with
+ten workers running refused every gate probe and every eleventh worker. The
+provider now keeps `kubernetes.short_role_pods` Pods (one by default) of the
+largest short-role shape out of the headroom: for each counted resource the
+capacity is what the quota admits less the reservation, and the fewest any
+resource admits is the worker capacity (a quota that admits one Pod still
+admits one worker, since a lone attempt's Pods run one after another). An active
+short-role Pod satisfies one place in that reservation because ResourceQuota
+usage already counts it; it is never counted again as room that must stay free.
+The checks on `GET /v1/admin/providers` carry `quota_headroom`,
+`short_role_pods_reserved`, `short_role_reservation` (the shape kept free),
+`worker_capacity`, `capacity_source` (which quota and which resource binds, or
+the configured fallback) and `capacity_detail` in words, beside
+`max_concurrency`; the Routing page's Kubernetes rows show the same.
+`kubernetes.max_concurrency` is the capacity only when the namespace has no
+quota naming a counted resource; with one it is not consulted.
+
+The capacity is a dispatch limit the supervisor holds launches to: before a
+launch begins it reads the provider's capacity (once per launch pass) and
+counts the attempts holding a slot on that provider (preparing through
+exited, since every Pod an attempt runs is inside the slot it took). A launch
+past the capacity stays pending and scheduled with a `harness_launch_deferred`
+event saying why, and begins on a later tick when a worker has finished; its
+gate probe runs then. The per-harness and per-pool caps of the policy stand
+beside this, unchanged.
+
+A quota refusal that reaches the cluster anyway (the canary or a login took
+the reservation, an operator shrank the quota) is a wait, never a failure of
+the attempt. `launch` gives the Job controller a few polls to create the
+worker's Pod; a `FailedCreate` naming the quota in that window, or a 403 on
+the Job itself, deletes the Job and raises `LaunchWaitError`, and the
+supervisor puts the attempt back to pending (the task back to scheduled) with
+the quota's words as the reason, the attempt unconsumed and without an exit
+class. The gate probe and the preparer raise the same when the quota refuses
+their Pod, and a `persistentvolumeclaims` quota refusing the workspace claim
+does too; a refused gate probe is therefore retried on a later tick rather
+than recorded as `check_cannot_run`. A refusal `observe` sees after the launch
+window keeps the attempt running while the controller retries the Pod, and
+the launch timeout counts from the last refusal. Any other create refusal (a
+webhook that denied the Pod, a policy that rejected the spec) ends the
+attempt as `environment` with the API server's message as its
+`termination_detail` and in the wake's summary.
+
+The admin status page (25) shows the namespace
 readiness probe, the CNI egress enforcement result, the pod PID limit, and
 the runtime class in use ("standard" in this version). Attempt evidence
 records the image digest, the Job and Pod names, the node, the effective
@@ -702,6 +832,12 @@ manifests, and runs the same cases as the Docker tier plus:
 
 - every NetworkPolicy denial from inside a worker pod: API server, cluster
   DNS on any port but 53, another namespace, link-local, the lab ranges;
+- a worker under a policy that allowlists a host reaches it (hades #425): the
+  tier's stand-in github.com on `198.51.100.10`, under resolved rules and
+  `hostAliases`, fetched from inside the worker, with the launch wrapper's
+  probe reporting it reachable and the allowlisted-but-silent
+  `198.51.100.30` unreachable; then the same through the supervisor, with
+  the probe on the attempt record and the task page;
 - a Pod evicted or deleted out of band is `lost`;
 - a worker that ignores SIGTERM is killed at the grace period;
 - the per-attempt Secret is gone after cleanup under every policy;

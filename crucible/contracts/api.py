@@ -49,6 +49,10 @@ class AttemptSummary(Response):
     routing_version: int | None = None
     # hades #388: context_length, max_output_tokens and thinking, as launched.
     effective_settings: dict[str, Any] | None = None
+    # hades #425: the launch wrapper's egress probe, `{"hosts": [{"host", "reachable",
+    # "curl_exit", "ms", "detail"}, ...], "recorded_at"}`; None until the worker log
+    # carried it, or for an attempt with no allowlisted host.
+    egress_probe: dict[str, Any] | None = None
     reroute_from_attempt_id: str | None = None
     resume_from_remote: bool = False
 
@@ -199,12 +203,17 @@ class AttemptView(Response):
     pool: str | None = None
     routing_version: int | None = None
     effective_settings: dict[str, Any] | None = None
+    egress_probe: dict[str, Any] | None = None
     ordered_candidates: list[dict[str, Any]] = Field(default_factory=list)
     resume_from_remote: bool = False
     # Issue 278: a stall ended early: its shape (loop:wait, loop:empty_command,
     # loop:command, no_activity) and the reason, naming the repeated command.
     stall_shape: str | None = None
     termination_detail: str | None = None
+    # hades #393: why a worker stopped with `blocked.md` (missing_capability or
+    # ambiguous_contract) and what it said, verbatim. Both None for any other ending.
+    blocked_reason: str | None = None
+    blocked_statement: str | None = None
 
 
 class ExecutionView(Response):
@@ -733,6 +742,8 @@ class EscalationView(Response):
     opened_at: Rfc3339
     closed_at: Rfc3339 | None
     decision_id: str | None
+    # hades #393: the reason the worker's `blocked.md` named, when it named one.
+    reason: str | None = None
 
 
 class PolicyView(Response):

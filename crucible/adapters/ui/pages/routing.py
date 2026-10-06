@@ -28,7 +28,7 @@ router = APIRouter(prefix="/ui", include_in_schema=False)
 
 
 @router.get("/routing", response_class=HTMLResponse)
-def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
+async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     found = _require(request, ctx, uow)
     if isinstance(found, RedirectResponse):
         return found
@@ -50,6 +50,7 @@ def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     local = routing.local_endpoint_view(uow)
     egress = kubernetes_admin.egress_view(ctx.admin, uow)
     role_timeouts = kubernetes_admin.timeouts_view(ctx.admin, uow)
+    capacity = await kubernetes_admin.capacity_view(ctx.admin)
     role_seconds = int(role_timeouts["document"].get("role_timeout_seconds") or 0)
     gateway_endpoint, _source = routing.gateway_url(uow)
     command_timeout = limits_admin.command_timeout_view(uow)
@@ -187,6 +188,19 @@ def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             },
             "",
         ],
+        [
+            "Kubernetes worker capacity",
+            {
+                "kind": "note",
+                "value": _capacity_words(capacity),
+                "hint": (
+                    "the namespace quota's headroom, less the Pods kept for Hades's own "
+                    "short-role Pods (gate probe, collector, canary, login, preparer); a "
+                    "launch past it waits, scheduled, for a worker to finish"
+                ),
+            },
+            "",
+        ],
     ]
     marks = [item for item in exhaustion["items"] if item["active"]]
     sections: list[dict[str, Any]] = [
@@ -199,6 +213,7 @@ def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                 _document_section("Routing order and demotion", preference),
                 _document_section("Kubernetes egress selectors", egress),
                 _document_section("Kubernetes short-role timeout", role_timeouts),
+                _document_section("Kubernetes worker capacity", capacity),
                 _document_section("Per-command timeout", command_timeout),
                 _document_section("Gate classes", classes),
                 _document_section("Delivery policy document", policy.document if policy else {}),
@@ -236,6 +251,8 @@ def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         },
     ]
     sections[1:1] = routing_models_page.control_sections(uow, admin=admin)
+    if routing_ref:
+        sections.insert(1, _versions_section(uow, str(routing_ref.get("name", ""))))
     if admin:
         tier_fields: list[dict[str, Any]] = []
         for name, rule in preference["tiers"].items():
@@ -543,6 +560,54 @@ def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         heading="Routing",
         intro="What routes and limits a task: the policies in force, the gateway, and pools.",
         sections=sections,
+    )
+
+
+def _versions_section(uow: UoW, name: str) -> dict[str, Any]:
+    """hades #437: each routing version beside what it changed, who published it and
+    why, so a publish that flips a model or a pool cap is seen, not found a day later."""
+    history = routing.routing_history(uow, name)
+    return {
+        "title": "Routing versions",
+        "note": (
+            "Newest first. A version that enables or disables a model or changes a pool "
+            "cap names the decision it supersedes in its reason, and wakes the "
+            "orchestrator with this change."
+        ),
+        "empty": "No routing version is recorded.",
+        "columns": ["Version", "Published", "By", "Reason", "What changed"],
+        "rows": [
+            [
+                f"{item['version']}" + (" (retired)" if item["retired"] else ""),
+                item["created_at"],
+                item["published_by"] or "not recorded",
+                item["reason"] or "none given",
+                "; ".join(routing.delta_words(item["delta"]))
+                if item["delta"] is not None
+                else "first version",
+            ]
+            for item in history
+        ],
+    }
+
+
+def _capacity_words(capacity: dict[str, Any]) -> str:
+    """hades #423: the worker capacity in one line: headroom, reservation, result."""
+    if not capacity.get("provider_enabled"):
+        return "not in use: the Kubernetes provider is off"
+    if capacity.get("error"):
+        return f"could not be read: {capacity['error']}"
+    workers = capacity.get("worker_capacity")
+    headroom = capacity.get("quota_headroom")
+    reserved = capacity.get("short_role_pods_reserved") or 0
+    if headroom is None:
+        return (
+            f"{workers} worker(s) at once from kubernetes.max_concurrency; "
+            "no quota in the namespace"
+        )
+    return (
+        f"{workers} worker(s) at once: the quota admits {headroom} Pod(s), "
+        f"{reserved} kept for short-role Pods"
     )
 
 

@@ -570,6 +570,15 @@ def no_secrets(gi: GateInput) -> GateOutcome:
         where = [f"{f.get('where')}:{f.get('pattern')}" for f in findings][:10]
         return GateOutcome(GateResult.FAIL, f"secret pattern matched at {where}", (item.id,))
     scanned = item.payload.get("scanned") or []
+    unscanned = item.payload.get("unscanned") or []
+    if unscanned:
+        # hades #398: every changed file's content is scanned, or the gate waits.
+        return GateOutcome(
+            GateResult.PENDING,
+            f"{COLLECTOR_MARKER}: the collector did not export the content of "
+            f"{len(unscanned)} changed path(s) to scan: {unscanned[:10]}",
+            (item.id,),
+        )
     if not item.payload.get("diff_scanned"):
         # 11 wants the scanner over the diff itself. A collector that produced no diff
         # content leaves this gate waiting rather than claiming coverage it lacks.

@@ -48,7 +48,7 @@ from urllib.parse import urlsplit
 
 from crucible.adapters.execution import identity as identity_bundle
 from crucible.adapters.execution import k8sspec, scripts, workspace
-from crucible.adapters.execution.collected import read_outputs, read_verifications
+from crucible.adapters.execution.collected import BlobTarScan, read_outputs, read_verifications
 from crucible.adapters.execution.create_policy import image_allowed
 from crucible.adapters.execution.endpoint_health import probe_model_endpoint
 from crucible.adapters.execution.k8sapi import (
@@ -114,6 +114,7 @@ from crucible.ports.execution import (
     LaunchCancelledError,
     LaunchRefusedError,
     LaunchSpec,
+    LaunchWaitError,
     LogChunk,
     LogOffset,
     Observation,
@@ -125,6 +126,7 @@ from crucible.ports.execution import (
     ProviderHealth,
     ProviderUnavailableError,
     VerificationRun,
+    WorkerCapacity,
     Workspace,
     WorkspaceState,
 )
@@ -191,6 +193,12 @@ JOB_TIMED_OUT = -2
 # shown as attempt capacity.
 JOBS_PER_ATTEMPT = 5
 
+# How many polls `launch` gives the Job controller to create the worker's Pod before it
+# hands the attempt to `observe` (hades #423). A Pod normally exists within one; a
+# `FailedCreate` naming the namespace quota in this window ends the launch as a wait,
+# never as a running attempt the quota then fails.
+LAUNCH_POD_POLLS = 5
+
 POD_DELETION_MARGIN_SECONDS = 5
 DEFAULT_POD_GRACE_SECONDS = 30
 COLLECTION_ROLES = (k8sspec.ROLE_COLLECTOR, k8sspec.ROLE_BUNDLE, k8sspec.ROLE_VERIFIER)
@@ -221,12 +229,14 @@ OBJECT_PREFIX: dict[str, str] = {
     k8sspec.ROLE_READER: "reader",
 }
 
-# 26 is unconditional: "GitHub is not reachable from a worker; the preparer and the
-# publisher do the git traffic." A policy document may still name these in its
-# `egress_allowlist` for the roles that do need them (05b's default does), so the worker
-# role subtracts them rather than trusting the list. The removal is recorded in the
-# policy's annotation, so what was asked for and what was granted are both readable.
-WORKER_DENIED_HOSTS: frozenset[str] = frozenset({"github.com", "api.github.com"})
+# hades #425: the worker's egress is the policy's `egress_allowlist` as written (05b:
+# "hostnames the egress proxy permits for workers"), the same list the Docker provider's
+# Squid permits. Until #425 this provider subtracted `github.com` and `api.github.com`
+# from the worker and the verifier on 26's old sentence that a worker never reaches
+# GitHub, so a policy that allowlisted github.com produced a worker whose curl to it timed
+# out against the default deny while the task page said it was permitted. The git roles
+# (preparer, cache refresher, publisher) still get GitHub whether or not the policy names
+# it; a worker gets it only when the policy does, and holds no credential for it either way.
 
 DEFAULT_IMAGE_ALLOWLIST: tuple[str, ...] = (
     "crucible-worker:*",
@@ -259,9 +269,15 @@ LIST_IMAGES_SKIP_PREFIX = "ci-"
 LOG_READ_LIMIT = 4 * 1024 * 1024
 JOB_TAIL_LINES = 2000
 LOG_READ_CEILING = 64 * 1024 * 1024
-# How much of a collected output tar is accepted. The tree is excluded from it, so this
-# is the diff, the bundle, the report copy and the verifier logs.
+# How much of a collected output tar is accepted. The tree and the exported blobs are
+# excluded from it, so this is the diff, the bundle, the report copy and the verifier
+# logs.
 OUTPUT_READ_LIMIT = 256 * 1024 * 1024
+# hades #398: the blobs the worker added or changed come off the claim as their own tar,
+# streamed through the secret scanner and never written to local disk, so they do not
+# count against the archive above (the bundle already carries each of them once). The
+# same bound, counted on its own: a stream cut at it is a collection failure, as above.
+CHANGED_BLOBS_READ_LIMIT = OUTPUT_READ_LIMIT
 # The one line the activity probe prints (FDY-0140).
 ACTIVITY_READ_LIMIT = 4096
 
@@ -343,7 +359,15 @@ class KubernetesConfig:
     role_timeout_seconds: int = DEFAULT_ROLE_TIMEOUT_SECONDS
     report_size_cap_bytes: int = 10 * 1024 * 1024
     log_tail_bytes: int = 64 * 1024
+    # The dispatch limit when the namespace has no ResourceQuota to derive one from. With
+    # a quota the capacity is the quota's (hades #423) and this number is not consulted.
     max_concurrency: int = 3
+    # hades #423: how many of Hades's own short-role Pods (gate probe, collector, canary,
+    # login, preparer) are kept room for beside the workers the quota admits, so a probe
+    # fits while workers are at capacity. The reservation is this many Pods of the
+    # largest short-role shape, which is the worker's own (the roles run at the policy
+    # limits; the canary is smaller).
+    short_role_pods: int = 1
     poll_interval_seconds: float = 2.0
     api_timeout_seconds: float = 30.0
     api_retry_seconds: float = 60.0
@@ -369,8 +393,9 @@ class KubernetesConfig:
     # them". A plain `networking.k8s.io/v1` CNI has no FQDN rule, so the names are
     # resolved here and the policy carries their addresses. Turning this off gives the
     # broad rule instead ("the public internet on 443, minus every denied range"), which
-    # a deployment may want when its CNI enforces names some other way; it is off by
-    # default because that rule would let a worker reach GitHub, and 26 says it cannot.
+    # a deployment may want when its CNI enforces names some other way. It applies to
+    # the git and login roles only; a worker and a verifier always get their resolved
+    # allowlist (`_broad_for`, hades #425).
     broad_egress: bool = False
     # How long a resolved address stays in a policy before it is looked up again.
     resolve_ttl_seconds: float = 300.0
@@ -668,6 +693,9 @@ class KubernetesProvider:
         # only: after a restart the copy is compared by issued-at alone, as before.
         self._seeded: dict[str, dict[str, str | None]] = {}
         self._quota_concurrency: int | None = None
+        # hades #423: the last reading of the namespace quota as worker capacity, with
+        # the short-role reservation it holds back; None until a quota has been read.
+        self._quota: WorkerCapacity | None = None
         # One Pod's limits as the most recent launch asked for them, which is what the
         # quota's CPU and memory are divided by for the advertised capacity.
         self._last_limits: Limits | None = None
@@ -1298,6 +1326,10 @@ class KubernetesProvider:
             interrupted = True
             raise
         except KubernetesApiError as exc:
+            if _quota_refused(exc):
+                raise LaunchWaitError(
+                    f"the namespace quota has no room for the gate probe: {exc}"
+                ) from exc
             raise ProviderError(f"gate probe Job failed: {exc}") from exc
         finally:
             if (
@@ -1311,6 +1343,12 @@ class KubernetesProvider:
                 )
         if code != 0:
             detail = self.role_errors.get((role, spec.attempt_id), ("", False))[0]
+            if code == JOB_API_ERROR and _names_quota(detail):
+                # hades #423: a probe the quota refused is retried on a later tick, not
+                # recorded as a check that cannot run.
+                raise LaunchWaitError(
+                    f"the namespace quota has no room for the gate probe: {detail}"
+                )
             raise ProviderError(f"gate probe Job exit {code}: {detail}")
         rows: list[VerificationRun] = []
         for line in "".join(output).splitlines():
@@ -1377,16 +1415,24 @@ class KubernetesProvider:
 
         # 26: the PVC, the ConfigMap and the per-attempt Secret, then the preparer Job.
         await self._delete_attempt_objects(spec.attempt_id)
-        await self._create_with_backoff(
-            "persistentvolumeclaims",
-            k8sspec.workspace_claim(
-                name=k8sspec.object_name("ws", spec.attempt_id),
-                namespace=self.config.namespace,
-                object_labels=self._labels(spec, k8sspec.ROLE_WORKER),
-                size=self.config.workspace_size,
-                storage_class=self.config.storage_class,
-            ),
-        )
+        try:
+            await self._create_with_backoff(
+                "persistentvolumeclaims",
+                k8sspec.workspace_claim(
+                    name=k8sspec.object_name("ws", spec.attempt_id),
+                    namespace=self.config.namespace,
+                    object_labels=self._labels(spec, k8sspec.ROLE_WORKER),
+                    size=self.config.workspace_size,
+                    storage_class=self.config.storage_class,
+                ),
+            )
+        except KubernetesApiError as exc:
+            if _quota_refused(exc):
+                # hades #423: a `persistentvolumeclaims` quota with no room is a wait.
+                raise LaunchWaitError(
+                    f"the namespace quota has no room for the workspace claim: {exc}"
+                ) from exc
+            raise
         bundle, identity_paths, identity_sha = await asyncio.to_thread(
             _render_identity, spec, work_branch, self.harnesses
         )
@@ -1674,9 +1720,13 @@ class KubernetesProvider:
                 cancelled=cancelled,
             )
         if exit_code != 0:
+            detail = redact(self.last_error.get(k8sspec.ROLE_PREPARER, ""))
+            if exit_code == JOB_API_ERROR and _names_quota(detail):
+                # hades #423: the preparer is a separate Pod the quota counts; one it
+                # refused waits for room, as the probe and the worker do.
+                raise LaunchWaitError(f"the namespace quota has no room for the preparer: {detail}")
             raise ProviderError(
-                f"the preparer Job could not build the checkout (exit {exit_code}): "
-                f"{redact(self.last_error.get(k8sspec.ROLE_PREPARER, ''))}"
+                f"the preparer Job could not build the checkout (exit {exit_code}): {detail}"
             )
         prepared = await self._read_files(
             spec,
@@ -1862,6 +1912,7 @@ class KubernetesProvider:
                 active_deadline_seconds=max(60, spec.timeout_seconds + limits.grace_seconds),
             )
             await self._create_with_backoff("jobs", body)
+            refusal = await self._await_worker_pod(job_name)
         except (KubernetesApiError, SpecError) as exc:
             with contextlib.suppress(Exception):
                 await self._call(self.client.delete, "jobs", job_name)
@@ -1872,7 +1923,27 @@ class KubernetesProvider:
             # started must not leave it behind for nothing to come back for.
             with contextlib.suppress(Exception):
                 await self._delete_credential_secret(spec.attempt_id)
+            if _quota_refused(exc):
+                # hades #423: the API server itself refused the Job for the quota (a
+                # `count/jobs.batch` limit). A wait, not a failure of the attempt.
+                raise LaunchWaitError(
+                    f"the namespace quota has no room for the worker: {exc}"
+                ) from exc
             raise ProviderError(f"could not start the worker: {exc}") from exc
+        if refusal is not None:
+            # hades #423: the Job controller could not create the worker's Pod because
+            # the namespace is full. Nothing ran. The Job goes, and the attempt waits
+            # for room rather than ending with an exit class it never earned.
+            with contextlib.suppress(Exception):
+                await self._call(self.client.delete, "jobs", job_name)
+            if policy_name:
+                with contextlib.suppress(Exception):
+                    await self._call(self.client.delete, "networkpolicies", policy_name)
+            with contextlib.suppress(Exception):
+                await self._delete_credential_secret(spec.attempt_id)
+            with contextlib.suppress(Exception):
+                await self._await_job_pods_gone(job_name)
+            raise LaunchWaitError(f"the namespace quota has no room for the worker: {refusal}")
         self._launched[spec.attempt_id] = _Launched(
             job_name=job_name,
             spec=spec,
@@ -1889,6 +1960,27 @@ class KubernetesProvider:
             image_digest=resolved,
             name=job_name,
         )
+
+    async def _await_worker_pod(self, job_name: str) -> str | None:
+        """hades #423: give the Job controller a few polls to create the worker's Pod.
+        Returns the quota's refusal when a `FailedCreate` names it in that window, None
+        once the Job counts a Pod (`status.active`, or one already ended) or when nothing
+        is known by the end of the window (`observe` takes it from there). The Job's
+        status is read rather than the Pods listed, so the launch never consumes a look
+        at the Pod itself. A look that fails is not an answer."""
+        for _ in range(LAUNCH_POD_POLLS):
+            try:
+                job = await self._call(self.client.get, "jobs", job_name)
+            except KubernetesApiError:
+                return None
+            status = job.get("status") or {}
+            if any(int(status.get(key) or 0) for key in ("active", "succeeded", "failed")):
+                return None
+            refusal = await self._quota_refusal(job_name, job)
+            if refusal is not None:
+                return refusal
+            await asyncio.sleep(self.config.poll_interval_seconds)
+        return None
 
     async def observe(self, h: Handle) -> Observation:
         launched = self._launched.get(h.attempt_id)
@@ -1915,10 +2007,18 @@ class KubernetesProvider:
             ):
                 refusal = await self._quota_refusal(h.ref, job)
                 if refusal is not None:
-                    # 26 with the lab findings of 2026-09-29: a full namespace is a
-                    # launch failure now, with the quota's own words, not a silent wait
-                    # for the launch timeout.
-                    return Observation(ObservationState.EXITED, exit_code=70, detail=refusal)
+                    # hades #423: a full namespace is a wait, never a failure. `launch`
+                    # catches the usual case; one seen here (the controller was slow to
+                    # try) keeps the attempt pending while the controller retries the Pod,
+                    # and the launch timeout counts from the last refusal, not the
+                    # launch, so waiting for room is not spent as the Pod's own start
+                    # time. Before this (the lab findings of 2026-09-29) it was a launch
+                    # failure with the quota's words.
+                    launched.launched_at = time.monotonic()
+                    return Observation(
+                        ObservationState.RUNNING,
+                        detail=f"waiting for room in the namespace quota: {refusal}",
+                    )
             return self._observation_without_pod(h, launched, job)
         status = pod.get("status") or {}
         phase = str(status.get("phase", ""))
@@ -2283,7 +2383,7 @@ class KubernetesProvider:
         verifications = () if interrupted else await self._run_verifier(spec, limits)
         with tempfile.TemporaryDirectory(prefix="crucible-k8s-") as scratch:
             root = Path(scratch)
-            await self._read_workspace(spec, root, limits)
+            changed_blobs = await self._read_workspace(spec, root, limits)
             outputs = read_outputs(
                 root / "output",
                 root / "verify",
@@ -2294,6 +2394,7 @@ class KubernetesProvider:
                     verifications, root / "verify", spec, self.config.verifier_timeout_seconds
                 ),
                 tail_bytes=self.config.log_tail_bytes,
+                changed_blobs=changed_blobs,
             )
         state = await self._workspace_state(spec.attempt_id)
         return CollectedOutputs(
@@ -2304,7 +2405,8 @@ class KubernetesProvider:
             stderr_tail=stderr_tail,
             interruption=interruption,
             diff_paths=outputs.diff_paths,
-            diff_text=outputs.diff_text,
+            diff_findings=outputs.diff_findings,
+            diff_unscanned=outputs.diff_unscanned,
             diff_changes=outputs.diff_changes,
             base_paths=outputs.base_paths,
             over_limit=outputs.over_limit,
@@ -2724,8 +2826,10 @@ class KubernetesProvider:
             checks["api_server"] = f"unreachable: {type(exc).__name__}"
             return ProviderHealth("unavailable", checks)
         with contextlib.suppress(Exception):
-            self._quota_concurrency = await self._read_quota()
-        checks["max_concurrency"] = self._quota_concurrency or self.config.max_concurrency
+            await self._refresh_quota()
+        capacity = self.capacity_view()
+        checks["max_concurrency"] = capacity.workers
+        checks.update(capacity.as_dict())
         probe = await self.ensure_ready()
         checks.update(probe.as_dict())
         if not probe.checked:
@@ -3193,7 +3297,7 @@ class KubernetesProvider:
                 return
             plan = self._egress_plan(spec, k8sspec.ROLE_LOGIN)
             if not plan.empty:
-                plan = await self._resolve_plan(plan)
+                plan = await self._resolve_plan(plan, broad=self._broad_for(k8sspec.ROLE_LOGIN))
                 policy_name = k8sspec.object_name("np-login", login_id)
                 await self._call(
                     self.client.create,
@@ -3730,7 +3834,9 @@ class KubernetesProvider:
         return mounts, volumes, init
 
     def _command(self, spec: LaunchSpec) -> tuple[list[str], dict[str, str]]:
-        """The harness argv, wrapped exactly as the Docker provider wraps it (07)."""
+        """The harness argv, wrapped exactly as the Docker provider wraps it (07), and
+        always when the attempt has allowlisted hosts: the wrapper's egress probe runs
+        before the harness and reports each of them (hades #425)."""
         from crucible.adapters.execution.docker import LAUNCH_WRAPPER  # noqa: PLC0415
 
         argv = list(spec.command)
@@ -3740,6 +3846,7 @@ class KubernetesProvider:
                 argv = list(adapter.build_launch(self._launch_context(spec)).argv)
         wrapped = bool(spec.env_from_files or spec.stdin_files or spec.stdin_text)
         wrapped = wrapped or bool(spec.transcript_path)
+        wrapped = wrapped or bool(self._egress_plan(spec, k8sspec.ROLE_WORKER).hosts)
         if not wrapped:
             return argv, {}
         env: dict[str, str] = {}
@@ -3798,12 +3905,12 @@ class KubernetesProvider:
         policy_hosts = [str(h) for h in (network.get("egress_allowlist") or [])]
         extra = [str(h) for h in (spec.contract.get("constraints", {}).get("egress_extra") or [])]
         if role == k8sspec.ROLE_WORKER:
+            # The allowlist as written, GitHub included when the policy names it (hades
+            # #425): the worker reaches exactly what the policy document says it may.
             wanted = tuple(
-                host
-                for host in egress_allowlist(
+                egress_allowlist(
                     self.harnesses, spec.harness, policy_hosts, extra, spec.endpoint_url
                 )
-                if host not in WORKER_DENIED_HOSTS
             )
         elif role in (
             k8sspec.ROLE_PREPARER,
@@ -3811,8 +3918,7 @@ class KubernetesProvider:
             k8sspec.ROLE_PUBLISHER,
         ):
             # 26: the preparer, the cache refresher and the publisher do the git
-            # traffic, and nothing else.
-            # GitHub is not reachable from a worker.
+            # traffic, and nothing else, whether or not the policy names GitHub.
             wanted = ("api.github.com", "github.com")
         elif role == k8sspec.ROLE_LOGIN:
             # 26: "the harness's login endpoints only" (crucible#58). The adapter's
@@ -3821,11 +3927,10 @@ class KubernetesProvider:
             wanted = tuple(sorted(adapter.capabilities().login_endpoints)) if adapter else ()
         elif role == k8sspec.ROLE_VERIFIER:
             # 26: the verifier gets the registries only when the policy says so. The
-            # policy's own allowlist is that statement; the harness endpoints are not
-            # part of it, because the verifier runs the repository's commands and never
-            # a model, and the git remote is not part of it either, for the same reason
-            # a worker does not get it.
-            wanted = tuple(sorted(set(policy_hosts) - WORKER_DENIED_HOSTS))
+            # policy's own allowlist is that statement, as written (hades #425); the
+            # harness endpoints are not part of it, because the verifier runs the
+            # repository's commands and never a model.
+            wanted = tuple(sorted(set(policy_hosts)))
         else:
             # Collector, bundle verifier, reader, cleaner: no egress at all.
             return EgressPlan()
@@ -3914,14 +4019,29 @@ class KubernetesProvider:
         is pinned to (`k8sspec.host_aliases`, hades #191)."""
         if plan.empty:
             return None, plan
-        plan = await self._resolve_plan(plan)
+        plan = await self._resolve_plan(plan, broad=self._broad_for(role))
         name = k8sspec.object_name(f"np-{role}", spec.attempt_id)
         body = self._policy_body(name, self._labels(spec, role), spec.attempt_id, role, plan)
         create = self._create_with_backoff if use_backoff else self._create
         await create("networkpolicies", body)
         return name, plan
 
-    async def _resolve_plan(self, plan: EgressPlan) -> EgressPlan:
+    def _broad_for(self, role: str) -> bool:
+        """Whether a role's policy may take the broad rule (`broad_egress`).
+
+        Never for the worker or the verifier: their hosts are the policy's
+        `egress_allowlist` as written (hades #425), and they run code the attempt
+        controls. The broad rule is "the public internet on 443", so a worker whose
+        allowlist named one host would reach every public address, which is what
+        `test_isolation_probes_are_refused_on_kubernetes` caught once the worker's list
+        stopped being empty. Their hosts are always resolved to addresses and pinned in
+        the Pod's hosts file; the opt-out applies to the git and login roles, whose
+        destinations are fixed by the provider rather than by the policy."""
+        if role in (k8sspec.ROLE_WORKER, k8sspec.ROLE_VERIFIER):
+            return False
+        return self.config.broad_egress
+
+    async def _resolve_plan(self, plan: EgressPlan, *, broad: bool | None = None) -> EgressPlan:
         """Turn the allowlist's names into the addresses a CIDR-only CNI can enforce.
 
         A name that does not resolve refuses the launch rather than being dropped or
@@ -3972,8 +4092,9 @@ class KubernetesProvider:
                 f"denies: {sorted(endpoint_forbidden)}"
             )
         plan = replace(plan, endpoints=tuple(dict.fromkeys(resolved_endpoints)))
-        if self.config.broad_egress or not plan.hosts:
-            return replace(plan, broad=self.config.broad_egress)
+        broad = self.config.broad_egress if broad is None else broad
+        if broad or not plan.hosts:
+            return replace(plan, broad=broad)
         cidrs: list[str] = []
         by_host: list[tuple[str, tuple[str, ...]]] = []
         unresolved: list[str] = []
@@ -4400,8 +4521,13 @@ class KubernetesProvider:
             await create("jobs", body)
         except (KubernetesApiError, SpecError) as exc:
             log.warning("%s Job failed", role, extra={"error": str(exc)})
+            # A Job the API server refused for the namespace quota (a count limit) is
+            # as much a wait as a Pod the Job controller could not create (hades #423).
             self._role_error(
-                role, spec.attempt_id, str(exc), isinstance(exc, KubernetesUnavailableError)
+                role,
+                spec.attempt_id,
+                str(exc),
+                isinstance(exc, KubernetesUnavailableError) or _quota_refused(exc),
             )
             # A failed create may have reached the server. In particular, a probe
             # refusal has no later workspace cleanup to remove this Job or policy.
@@ -4630,13 +4756,20 @@ class KubernetesProvider:
                     out[path] = data
         return out
 
-    async def _read_workspace(self, spec: LaunchSpec, into: Path, limits: Limits) -> None:
+    async def _read_workspace(
+        self, spec: LaunchSpec, into: Path, limits: Limits
+    ) -> dict[str, str | bool | None]:
         """The collected output and the verifier's logs, as a tar off the claim.
 
         `output/tree` is excluded: it is a git clone the verifier already ran against
         and nothing on the Crucible side reads it. The tar is written to a scratch file
         beside `into` as it arrives and extracted from there, so the supervisor never
-        holds the archive in memory (lab findings of 2026-09-29)."""
+        holds the archive in memory (lab findings of 2026-09-29).
+
+        `output/changed-blobs` is excluded too (hades #398): the bundle carries each of
+        those blobs already, and a second copy of a large binary change would push the
+        archive past its bound. The reader streams them separately, through the secret
+        scanner as they arrive, and what comes back is the verdict per object id."""
         archive = into.parent / f".{into.name}-collected.tar"
         try:
             async with self._reader(spec, limits) as pod:
@@ -4656,38 +4789,33 @@ class KubernetesProvider:
                     raise CollectionFailedError(
                         f"the collected output could not be written to local disk: {exc}"
                     ) from exc
-            if result.exit_code is None:
-                # The API server never sent the error channel: the stream ended early.
-                # Accepting it would let a partial tar through `_extract`, which
-                # suppresses tar errors; the claim still holds everything, so it is
-                # read again later rather than failing the attempt.
-                raise CollectionUnavailableError(
-                    "the reader Pod's output stream ended before the command reported "
-                    f"a status: {result.stderr.decode('utf-8', 'replace')[:400]}"
-                )
-            if result.exit_code != 0 or result.stderr:
-                # A report or a diff quietly missing files is a wrong gate result
-                # rather than a visible failure.
-                raise CollectionFailedError(
-                    "the reader Pod could not hand the collected output back "
-                    f"(exit {result.exit_code}): "
-                    f"{result.stderr.decode('utf-8', 'replace')[:400]}"
-                )
-            if result.stdout_size >= OUTPUT_READ_LIMIT:
-                # 16: outputs Crucible could not read whole are an environment failure.
-                # A partial extraction would give the gates a diff and a report quietly
-                # missing files, which is worse than failing the attempt.
-                raise CollectionFailedError(
-                    f"the collected output exceeded {OUTPUT_READ_LIMIT} bytes and was truncated"
-                )
+                _check_read_back(result, OUTPUT_READ_LIMIT, "the collected output")
+                scan = BlobTarScan(scripts.CHANGED_BLOBS_DIR)
+                try:
+                    blobs_result = await self._call(
+                        self.client.pod_exec_to,
+                        pod,
+                        ["sh", "-c", _CHANGED_BLOBS_TAR_SCRIPT],
+                        scan,
+                        container=k8sspec.CONTAINER_NAME,
+                        limit=CHANGED_BLOBS_READ_LIMIT,
+                    )
+                finally:
+                    blobs = scan.close()
+                _check_read_back(blobs_result, CHANGED_BLOBS_READ_LIMIT, "the changed blobs")
+                if scan.error is not None:
+                    raise CollectionFailedError(
+                        f"the changed blobs could not be read back as a tar: {scan.error}"
+                    )
             if not result.stdout_size:
-                return
+                return blobs
             try:
                 await asyncio.to_thread(_extract, archive, into)
             except OSError as exc:
                 raise CollectionFailedError(
                     f"the collected output could not be extracted on local disk: {exc}"
                 ) from exc
+            return blobs
         finally:
             with contextlib.suppress(OSError):
                 archive.unlink(missing_ok=True)
@@ -5130,33 +5258,131 @@ class KubernetesProvider:
             attempt_id=attempt_id,
         )
 
-    async def _read_quota(self) -> int | None:
-        """26: attempt capacity from the namespace's ResourceQuotas: the fewest attempts
-        any one limit admits. An attempt is five Jobs over its life and one Pod at a
-        time, so `count/jobs.batch` is divided by five and the CPU and memory limits by
-        one Pod's worth at the limits of the last launch (the defaults before one).
-        Before the lab findings of 2026-09-29 only the Job count was read, so a
-        namespace whose memory fitted fewer attempts still advertised more."""
+    async def worker_capacity(self) -> WorkerCapacity:
+        """hades #423: how many worker Pods may run at once, read from the namespace
+        quota now (the last reading when the API server does not answer), with the
+        short-role reservation taken out. The supervisor holds launches to this number
+        and a launch past it waits for a worker to finish, so the quota is never what
+        refuses a gate probe or a worker. Without a quota, `kubernetes.max_concurrency`."""
+        try:
+            await self._refresh_quota()
+        except KubernetesApiError as exc:
+            log.warning("the namespace quota could not be read: %s", exc)
+        return self.capacity_view()
+
+    def capacity_view(self) -> WorkerCapacity:
+        """The capacity as last read, without an API call (the admin pages read this)."""
+        if self._quota is not None:
+            return self._quota
+        return WorkerCapacity(
+            workers=self.config.max_concurrency,
+            source="kubernetes.max_concurrency (no ResourceQuota in the namespace)",
+            reserved_pods=self.config.short_role_pods,
+            detail=(
+                f"no ResourceQuota names a counted resource in {self.config.namespace}; "
+                f"the configured fallback of {self.config.max_concurrency} applies"
+            ),
+        )
+
+    async def _refresh_quota(self) -> None:
+        self._quota = await self._read_quota()
+        self._quota_concurrency = self._quota.workers if self._quota is not None else None
+
+    async def _read_quota(self) -> WorkerCapacity | None:
+        """26, hades #423: worker capacity from the namespace's ResourceQuotas. For each
+        counted resource, what the quota admits with nothing held back (the headroom: an
+        attempt is five Jobs over its life and one Pod at a time, so `count/jobs.batch`
+        is divided by five and the CPU and memory limits by one Pod's worth at the
+        limits of the last launch, the defaults before one), minus the reservation for
+        the short-role Pods Hades runs beside workers (`short_role_pods` Pods of the
+        largest short-role shape, the worker's own). The fewest workers any resource
+        then admits is the capacity. A quota that admits at least one Pod admits at
+        least one worker: a lone attempt's probe, preparer and worker run one after
+        another and never meet. Before the lab findings of 2026-09-29 only the Job
+        count was read; before hades #423 nothing was reserved, so with workers at
+        capacity every probe was refused. None when no quota names a counted resource."""
         rows = await self._call(self.client.list_objects, "resourcequotas")
         limits = self._last_limits or k8sspec.limits_from_policy({})
-        per_attempt = {
-            "count/jobs.batch": float(JOBS_PER_ATTEMPT),
-            "pods": 1.0,
-            "requests.cpu": k8sspec.quantity(limits.cpu_request) or 0.0,
-            "limits.cpu": k8sspec.quantity(limits.cpu) or 0.0,
-            "requests.memory": k8sspec.quantity(limits.memory_request) or 0.0,
-            "limits.memory": k8sspec.quantity(limits.memory) or 0.0,
+        reserved = max(0, self.config.short_role_pods - await self._active_short_role_pods())
+        # Per attempt, and per reserved short-role Pod (one Job, one Pod, the worker's
+        # shape), for each resource a quota may count.
+        per_attempt: dict[str, tuple[float, float]] = {
+            "count/jobs.batch": (float(JOBS_PER_ATTEMPT), 1.0),
+            "pods": (1.0, 1.0),
+            "requests.cpu": (k8sspec.quantity(limits.cpu_request) or 0.0,) * 2,
+            "limits.cpu": (k8sspec.quantity(limits.cpu) or 0.0,) * 2,
+            "requests.memory": (k8sspec.quantity(limits.memory_request) or 0.0,) * 2,
+            "limits.memory": (k8sspec.quantity(limits.memory) or 0.0,) * 2,
         }
-        capacity: int | None = None
+        headroom: int | None = None
+        workers: int | None = None
+        binding = ""
+        names: list[str] = []
         for row in rows:
+            name = str((row.get("metadata") or {}).get("name") or "")
             hard = (row.get("spec") or {}).get("hard") or {}
-            for key, each in per_attempt.items():
+            for key, (each, each_reserved) in per_attempt.items():
                 total = k8sspec.quantity(hard.get(key)) if key in hard else None
                 if total is None or each <= 0:
                     continue
+                if name and name not in names:
+                    names.append(name)
                 fits = int(total // each)
-                capacity = fits if capacity is None else min(capacity, fits)
-        return capacity
+                headroom = fits if headroom is None else min(headroom, fits)
+                left = total - each_reserved * reserved
+                fits_workers = int(left // each) if left > 0 else 0
+                if fits >= 1:
+                    fits_workers = max(1, fits_workers)
+                if workers is None or fits_workers < workers:
+                    workers = fits_workers
+                    binding = f"{name} {key}".strip()
+        if headroom is None or workers is None:
+            return None
+        shape = {
+            "cpu": limits.cpu,
+            "memory": limits.memory,
+            "cpu_request": limits.cpu_request,
+            "memory_request": limits.memory_request,
+            "jobs": 1,
+        }
+        return WorkerCapacity(
+            workers=workers,
+            source=f"ResourceQuota {', '.join(names)}; {binding} binds",
+            headroom=headroom,
+            reserved_pods=reserved,
+            reservation={"pods": reserved, "each": shape},
+            detail=(
+                f"the quota admits {headroom} Pod(s) of the worker's shape; {reserved} kept "
+                f"for Hades's short-role Pods (gate probe, collector, canary, login, "
+                f"preparer) leaves {workers} worker(s) at once"
+            ),
+        )
+
+    async def _active_short_role_pods(self) -> int:
+        """Count quota-consuming Hades Pods that already satisfy the reservation.
+
+        ResourceQuota usage already includes these Pods. Holding back their shape again
+        would count a hanging preparer, collector, probe, canary, or login twice and can
+        prevent a worker from launching even though the namespace has room for it.
+        Terminal Pods no longer consume pod CPU and memory quota, so they do not count.
+        """
+        rows = await self._call(self.client.list_objects, "pods")
+        short_roles = {
+            "gate-probe",
+            k8sspec.ROLE_PREPARER,
+            k8sspec.ROLE_COLLECTOR,
+            k8sspec.ROLE_BUNDLE,
+            k8sspec.ROLE_VERIFIER,
+            k8sspec.ROLE_CANARY,
+            k8sspec.ROLE_LOGIN,
+        }
+        return sum(
+            1
+            for row in rows
+            if str((row.get("status") or {}).get("phase") or "") in ("Pending", "Running")
+            and str(((row.get("metadata") or {}).get("labels") or {}).get(k8sspec.LABEL_ROLE) or "")
+            in short_roles
+        )
 
 
 # ----- pure helpers -------------------------------------------------------
@@ -5179,6 +5405,14 @@ def _names_quota(text: str) -> bool:
     quota counts."""
     lowered = text.lower()
     return "exceeded quota" in lowered or "failed quota" in lowered
+
+
+def _quota_refused(exc: BaseException) -> bool:
+    """hades #423: whether the API server itself refused a create for the namespace
+    quota (a 403 Forbidden whose message names it), as it does for a bare Pod, a claim
+    or a Job under a count limit. The Job controller's refusal of a Job's Pod arrives
+    as a `FailedCreate` event instead (`_quota_refusal`)."""
+    return isinstance(exc, KubernetesApiError) and exc.status == 403 and _names_quota(str(exc))
 
 
 async def _stop_if_cancelled(cancelled: CancelCheck | None, where: str) -> None:
@@ -5452,6 +5686,33 @@ def _merge_verifications(
     return runs
 
 
+def _check_read_back(result: ExecResult, limit: int, what: str) -> None:
+    """What makes a reader Pod's stream a result: a status, a clean exit, and a size
+    under its bound."""
+    if result.exit_code is None:
+        # The API server never sent the error channel: the stream ended early.
+        # Accepting it would let a partial tar through `_extract`, which
+        # suppresses tar errors; the claim still holds everything, so it is
+        # read again later rather than failing the attempt.
+        raise CollectionUnavailableError(
+            "the reader Pod's output stream ended before the command reported "
+            f"a status: {result.stderr.decode('utf-8', 'replace')[:400]}"
+        )
+    if result.exit_code != 0 or result.stderr:
+        # A report or a diff quietly missing files is a wrong gate result
+        # rather than a visible failure.
+        raise CollectionFailedError(
+            f"the reader Pod could not hand {what} back "
+            f"(exit {result.exit_code}): "
+            f"{result.stderr.decode('utf-8', 'replace')[:400]}"
+        )
+    if result.stdout_size >= limit:
+        # 16: outputs Crucible could not read whole are an environment failure.
+        # A partial extraction would give the gates a diff and a report quietly
+        # missing files, which is worse than failing the attempt.
+        raise CollectionFailedError(f"{what} exceeded {limit} bytes and was truncated")
+
+
 def _extract(archive: Path, into: Path) -> None:
     """Extract the reader Pod's tar from the file it was streamed to. `filter="data"`
     refuses an absolute path, a `..` component, a device, a symlink out of the tree, and
@@ -5632,7 +5893,14 @@ set --
 [ -d output ] && set -- "$@" output
 [ -d verify ] && set -- "$@" verify
 [ $# -eq 0 ] && exit 0
-exec tar cf - --exclude=output/tree "$@"
+exec tar cf - --exclude=output/tree --exclude=output/{scripts.CHANGED_BLOBS_DIR} "$@"
+"""
+
+# hades #398: the blobs the worker added or changed, as their own stream for the
+# scanner (`BlobTarScan`). An absent directory is an older collector, and no output.
+_CHANGED_BLOBS_TAR_SCRIPT = f"""cd {WORK_MOUNT} || exit 1
+[ -d output/{scripts.CHANGED_BLOBS_DIR} ] || exit 0
+exec tar cf - output/{scripts.CHANGED_BLOBS_DIR}
 """
 
 # The canary of 26: it must fail to reach the API server, and it reports the node's pod

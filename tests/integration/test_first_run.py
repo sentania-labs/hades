@@ -323,8 +323,10 @@ def test_the_gateway_is_set_tested_and_its_models_picked(
             form[f"model.{index}.id"] = model
             if model in ("fast", "coder-large"):
                 form[f"model.{index}.enabled"] = "true"
+        preview = browser.post("/ui/actions/gateway-models", data=form, follow_redirects=False)
+        assert preview.status_code == 200 and "What saving publishes" in preview.text
         saved_as_shown = browser.post(
-            "/ui/actions/gateway-models", data=form, follow_redirects=False
+            "/ui/actions/gateway-models", data={**form, "confirm": "true"}, follow_redirects=False
         )
         assert saved_as_shown.status_code == 303, saved_as_shown.text
         location = unquote(saved_as_shown.headers["location"])

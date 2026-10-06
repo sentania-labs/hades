@@ -176,11 +176,21 @@ class Attempt:
     # hades #388: the context length, response allowance and thinking setting the
     # harness was launched with, recorded once and reused by every later spec of it.
     effective_settings: dict[str, Any] | None = None
+    # hades #425: what the launch wrapper's egress probe found before the harness
+    # started, per allowlisted host (`crucible.domain.egress_probe`), read off the
+    # worker log once; None until the line arrives, or for an attempt with no network.
+    egress_probe: dict[str, Any] | None = None
     # Issue 278: the shape of a stall Crucible ended before the time-based limit
     # (exit_class STALL_SHAPES: loop:wait, loop:empty_command, loop:command, no_activity)
     # and the reason in words, naming the repeated command. None for any other ending.
     stall_shape: str | None = None
     termination_detail: str | None = None
+    # hades #393: what a worker that stopped with `blocked.md` said. The reason is one
+    # of BLOCKED_REASONS (missing_capability, ambiguous_contract) or None when the file
+    # named none; the statement is the rest of the file, verbatim (redacted only when it
+    # matches a secret pattern). Both None for any other ending.
+    blocked_reason: str | None = None
+    blocked_statement: str | None = None
 
 
 @dataclass(slots=True)
@@ -386,6 +396,9 @@ class Escalation:
     closed_at: datetime | None = None
     decision_id: str | None = None
     last_wake_at: datetime | None = None
+    # hades #393: the reason the worker's `blocked.md` named (missing_capability or
+    # ambiguous_contract), None when it named none or the escalation is not a worker's.
+    reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -484,6 +497,9 @@ class HarnessState:
     last_launch_outcome: str | None = None
     last_auth_failure_at: datetime | None = None
     last_validated_at: datetime | None = None
+    # hades #389: the most recent successful launch time, for credential-state
+    # recovery (last_launch_at moves on failures too, so we track successes).
+    last_successful_launch_at: datetime | None = None
     # The last harness test (crucible#118): when, pass or fail, and each step's result in
     # plain words. Never output: the steps say what was checked and why it failed.
     last_test: dict[str, Any] | None = None

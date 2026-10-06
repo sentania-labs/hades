@@ -250,6 +250,19 @@ never retry.
   503 or 504 or no answer at all (refused, reset, timed out), the exit is
   `infrastructure` (hades #353) and is retried under the interruption budget; any
   other 5xx stays `provider_error`. Neither marks the pool from text.
+- Crucible's launch wrapper runs the egress probe before the harness whenever the
+  attempt has allowlisted hosts: every name in `CRUCIBLE_EGRESS_ALLOWLIST` is tried
+  sequentially with `curl` and one `crucible-egress-probe: {...}` line goes to stderr,
+  which the supervisor records on the attempt as `egress_probe` (26, hades #425):
+  the first marker line only, only for an attempt that has a network, and only
+  within the caps 26 gives (64 KiB, three levels, 100 rows), since the harness can
+  print the marker too. A host it cannot reach never stops the harness, and the
+  harness starts only after the probe's round trips (10 seconds per host at most), so even a
+  harness that exits at once is observed running in the tick that launched it. The
+  wrapper forwards SIGTERM
+  to the harness and waits for its cleanup within the container termination grace
+  period. It drains cleanup output into the transcript and preserves the harness
+  exit status, including when prompt input or command monitoring is enabled.
 - Crucible's launch wrapper is the sole transcript writer. The Hermes image wrapper
   inherits stdout and only enriches the usage record after the child exits.
 
