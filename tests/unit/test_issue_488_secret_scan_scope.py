@@ -120,7 +120,7 @@ def test_hunk_state_resets_between_files(tmp_path: Path) -> None:
     assert findings == ()
 
 
-def test_gate_summary_result_keeps_the_match_detail() -> None:
+def test_gate_summary_keeps_result_shape_and_match_detail() -> None:
     row = SimpleNamespace(
         gate="no_secrets",
         result="fail",
@@ -133,10 +133,9 @@ def test_gate_summary_result_keeps_the_match_detail() -> None:
         tasks=SimpleNamespace(get=lambda _task_id: SimpleNamespace(head_sha="head")),
         gate_results=SimpleNamespace(list_for_task=lambda _task_id: [row]),
     )
-    assert gate_summary(uow, "task")["results"]["no_secrets"] == {
-        "result": "fail",
-        "detail": row.detail,
-    }
+    summary = gate_summary(uow, "task")
+    assert summary["results"]["no_secrets"] == "fail"
+    assert summary["details"]["no_secrets"] == row.detail
 
 
 def _wrapper(name: str) -> ModuleType:
