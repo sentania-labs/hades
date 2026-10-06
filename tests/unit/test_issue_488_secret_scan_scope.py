@@ -92,7 +92,7 @@ def test_added_fixture_fails_with_path_rule_and_excerpt(tmp_path: Path) -> None:
         },
     )()
     gate_input = type("Input", (), {"one": lambda self, kind: item})()
-    outcome = no_secrets(gate_input)  # type: ignore[arg-type]
+    outcome = no_secrets(gate_input)
     assert outcome.result is GateResult.FAIL
     assert "diff:fixture.py:github_token:ghp...AAA" in outcome.detail
 
