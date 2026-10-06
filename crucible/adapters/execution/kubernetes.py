@@ -1653,7 +1653,6 @@ class KubernetesProvider:
                     resume_bundle_head=spec.resume_bundle_head,
                     resume_bundle_sha256=spec.resume_bundle_sha256,
                     resume_bundle_ancestor=spec.resume_bundle_ancestor,
-                    refresh_cache=False,
                     checkout_token="file" if token else None,
                     credential_host=self.config.credential_host,
                 ),
