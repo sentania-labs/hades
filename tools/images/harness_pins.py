@@ -91,14 +91,14 @@ def discover(name: str, get_json: JsonGet = _json_get, get_bytes: BytesGet = _by
         )
     if name == "agy":
         data = get_json(
-            "https://storage.googleapis.com/antigravity-public/antigravity-cli/download-index.json"
+            "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/"
+            "manifests/linux_amd64.json"
         )
-        linux = data["linux-x64"]
-        version, build = str(linux["version"]), str(linux["build"])
-        artifact = str(
-            linux.get("url")
-            or f"https://storage.googleapis.com/antigravity-public/antigravity-cli/{version}-{build}/linux-x64/cli_linux_x64.tar.gz"
-        )
+        version, artifact = str(data["version"]), str(data["url"])
+        build_match = re.search(rf"/{re.escape(version)}-(\d+)/", artifact)
+        if build_match is None:
+            raise ValueError("AGY manifest URL does not contain its build number")
+        build = build_match.group(1)
         return Release(
             name,
             version,

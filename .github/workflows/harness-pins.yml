@@ -48,7 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           if ! output=$(images/check-manifest.sh 2>&1); then
-            tag=$(sed -n 's/.*expects \(crucible-worker:[^ ]*\).*/\1/p' <<<"$output" | head -1)
+            tag=$(sed -n "s/.*expected '\([^']*\)'.*/\1/p" <<<"$output" | head -1)
             test -n "$tag"
             sed -i "s|^WORKER=.*|WORKER=$tag|" images/manifest.env
           fi

@@ -69,6 +69,20 @@ def test_out_of_range_release_is_reported_but_not_pinned() -> None:
     )
 
 
+def test_agy_manifest_supplies_version_url_and_build() -> None:
+    artifact = (
+        "https://storage.googleapis.com/antigravity-public/antigravity-cli/"
+        "1.2.9-123456/linux-x64/cli_linux_x64.tar.gz"
+    )
+    release = harness_pins.discover(
+        "agy",
+        get_json=lambda _url: {"version": "1.2.9", "url": artifact, "sha512": "ignored"},
+        get_bytes=lambda _url: b"agy",
+    )
+
+    assert (release.version, release.build, release.artifact_url) == ("1.2.9", "123456", artifact)
+
+
 def test_dry_run_writes_body_without_changing_pins(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
