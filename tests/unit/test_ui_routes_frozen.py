@@ -44,6 +44,7 @@ FROZEN_ROUTES = [
 
 FROZEN_ACTIONS = [
     "auto-merge",
+    "status-cache",
     "bootstrap-commit",
     "bootstrap-discard",
     "command-timeout",

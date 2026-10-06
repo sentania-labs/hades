@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from crucible.application.admin import credentials
+from crucible.application.admin import credentials, status_cache
 from crucible.application.admin.context import (
     AdminContext,
     guard_mutation,
@@ -21,7 +21,7 @@ async def list_images(ctx: AdminContext) -> list[tuple[str, ImageInfo]]:
     """Return the supervisor-owned snapshot; never contact a provider from a request."""
     if not getattr(ctx, "status_cache_enabled", False):
         return await refresh_images(ctx)
-    return list(ctx.status_cache.images)
+    return list(status_cache.read(ctx).images)
 
 
 async def refresh_images(ctx: AdminContext) -> list[tuple[str, ImageInfo]]:

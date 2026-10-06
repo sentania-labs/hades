@@ -136,10 +136,14 @@ def action_forms(task: Task) -> dict[str, Any]:
     }
 
 
-def proposal_sections(uow: UnitOfWork, principal: Principal) -> list[dict[str, Any]]:
+def proposal_sections(
+    uow: UnitOfWork, principal: Principal, *, hidden: set[str] | None = None
+) -> list[dict[str, Any]]:
     """One section per proposal, its contract readable and, for an operator, the forms."""
     sections = []
     for task in proposed_tasks(uow):
+        if hidden and task.id in hidden:
+            continue
         rows = contract_rows(uow, task)
         if principal.role in OPERATOR_ROLES:
             rows.append(["Answer", action_forms(task)])
@@ -153,10 +157,12 @@ def proposal_sections(uow: UnitOfWork, principal: Principal) -> list[dict[str, A
     return sections
 
 
-def batch_section(uow: UnitOfWork, principal: Principal) -> dict[str, Any] | None:
+def batch_section(
+    uow: UnitOfWork, principal: Principal, *, hidden: set[str] | None = None
+) -> dict[str, Any] | None:
     """Approve several proposals in one action. The operator numbers the ones to approve;
     that order is the queue order, recorded on each approval."""
-    tasks = proposed_tasks(uow)
+    tasks = [task for task in proposed_tasks(uow) if not hidden or task.id not in hidden]
     if not tasks or principal.role not in OPERATOR_ROLES:
         return None
     options = [("", "not selected")] + [(str(n), str(n)) for n in range(1, len(tasks) + 1)]

@@ -134,8 +134,8 @@ def tasks_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             if p.disabled_at is not None and p.name.startswith(bootstrap.DISCARDED_PRINCIPAL_PREFIX)
         }
 
-    # Counts stay in SQL, and the IDs needed below already came back in the status
-    # detail query. No page-size-dependent task scan is needed for discarded imports.
+    # Counts stay in SQL. Fetch only archived IDs, across every state, so delivery,
+    # publishing and gates receive the same filtering as the attention lists.
     if archived and not hasattr(uow.tasks, "count_by_state"):
         archived_tasks = [
             task
@@ -148,12 +148,7 @@ def tasks_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         for task in archived_tasks:
             hidden_by_state[task.state.value] = hidden_by_state.get(task.state.value, 0) + 1
     else:
-        hidden = {
-            item["id"]
-            for items in document["lists"].values()
-            for item in items
-            if item.get("principal_id") in archived
-        }
+        hidden = set(uow.tasks.ids_for_principals(tuple(archived))) if archived else set()
         hidden_by_state = (
             {
                 state.value: count
@@ -243,8 +238,8 @@ def tasks_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                     if task.id not in hidden
                 ],
             },
-            *([batch] if (batch := batch_section(uow, principal)) else []),
-            *proposal_sections(uow, principal),
+            *([batch] if (batch := batch_section(uow, principal, hidden=hidden)) else []),
+            *proposal_sections(uow, principal, hidden=hidden),
             {
                 "title": "Needs attention",
                 "empty": "No task needs attention.",

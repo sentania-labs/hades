@@ -148,6 +148,8 @@ class TaskRepository(Protocol):
 
     def list_by_state(self, state: TaskState, *, for_update: bool = False) -> Sequence[Task]: ...
 
+    def ids_for_principals(self, principal_ids: Sequence[str]) -> Sequence[str]: ...
+
     def count_by_state(
         self,
         *,

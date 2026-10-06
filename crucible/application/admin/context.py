@@ -41,7 +41,7 @@ class GitHubAppInfo:
 
 @dataclass(slots=True)
 class ProviderStatusCache:
-    """Process-local snapshot written by the supervisor and read by admin requests."""
+    """Snapshot written by the supervisor and shared with API processes through the database."""
 
     images: list[tuple[str, Any]] = field(default_factory=list)
     providers: list[dict[str, Any]] = field(default_factory=list)
@@ -71,6 +71,7 @@ class AdminContext:
     probe_timeout_seconds: int = 120
     login_timeout_seconds: int = 900
     status_cache_ttl_seconds: float = 60.0
+    status_cache_shared: bool = False
     status_cache_enabled: bool = False
     status_cache: ProviderStatusCache = field(default_factory=ProviderStatusCache)
     proxy_config_path: str | None = None

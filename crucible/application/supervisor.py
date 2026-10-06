@@ -34,6 +34,7 @@ import yaml
 from crucible.application.admin import credentials as admin_credentials
 from crucible.application.admin import gateway as admin_gateway
 from crucible.application.admin import routing as admin_routing
+from crucible.application.admin import status_cache as admin_status_cache
 from crucible.application.admin.context import AdminContext
 from crucible.application.admin.harnesses import refresh_images
 from crucible.application.admin.providers import refresh_providers_status
@@ -1014,9 +1015,24 @@ class Supervisor:
     async def _refresh_admin_status(self) -> None:
         """Refresh expensive admin reads at most once per configured TTL."""
         ctx = self._admin_context
-        if ctx is None or not ctx.status_cache.due(ctx.status_cache_ttl_seconds):
+        if ctx is None:
+            return
+
+        def ttl() -> float:
+            with self._uow_factory() as uow:
+                return float(admin_status_cache.ttl_value(ctx, uow).value)
+
+        if not ctx.status_cache.due(await self._db(ttl)):
             return
         images, providers = await asyncio.gather(refresh_images(ctx), refresh_providers_status(ctx))
+        if ctx.status_cache_shared:
+
+            def persist() -> None:
+                with self._fenced() as uow:
+                    admin_status_cache.write(ctx, uow, images, providers)
+                    uow.commit()
+
+            await self._db(persist)
         ctx.status_cache.images = images
         ctx.status_cache.providers = providers
         ctx.status_cache.refreshed_at = time.monotonic()

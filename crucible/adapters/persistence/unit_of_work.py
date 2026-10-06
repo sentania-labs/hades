@@ -439,6 +439,11 @@ class Tasks:
             stmt = stmt.with_for_update()
         return [self._to_entity(r) for r in self._s.scalars(stmt).all()]
 
+    def ids_for_principals(self, principal_ids: Sequence[str]) -> Sequence[str]:
+        return list(
+            self._s.scalars(select(TaskRow.id).where(TaskRow.principal_id.in_(principal_ids)))
+        )
+
     def count_by_state(
         self,
         *,
