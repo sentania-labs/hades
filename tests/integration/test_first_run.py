@@ -273,12 +273,12 @@ def test_the_gateway_is_set_tested_and_its_models_picked(
     assert result["gateway"]["credential_state"] == "validated"
     assert "GET /health/readiness" in stubs.stubs.seen and "GET /v1/models" in stubs.stubs.seen
 
-    # #121: what the key can see, beside the seeded `coder` entry the gateway lacks.
+    # #121: only what the key can see, without the seeded `coder` entry it lacks.
     listing = admin.get("/v1/admin/gateway/models").json()
     rows = {row["id"]: row for row in listing["models"]}
     assert listing["reachable"] is True and listing["offered_count"] == 2
     assert rows["fast"]["offered"] is True and rows["fast"]["in_policy"] is False
-    assert rows["coder"]["offered"] is False and rows["coder"]["in_policy"] is True
+    assert set(rows) == {"fast", "coder-large"}
 
     refused = admin.post(
         "/v1/admin/gateway/models",
@@ -304,9 +304,8 @@ def test_the_gateway_is_set_tested_and_its_models_picked(
     codes = [s["code"] for s in _readiness(admin, "hermes")["steps"]]
     assert codes == ["no_promoted_image"]
 
-    # A model the gateway stops offering is disabled with that reason, not removed. The
-    # page still shows `fast` ticked, and saving it exactly as shown does that rather
-    # than refuse.
+    # The page only shows what the key can still see. Saving that view disables the
+    # missing `fast` route with the not-offered reason rather than removing it.
     stubs.stubs.config["models"] = ["coder-large"]
     with TestClient(create_app(ctx)) as browser:
         csrf = ui_sign_in(browser, tokens["admin"])
@@ -315,7 +314,7 @@ def test_the_gateway_is_set_tested_and_its_models_picked(
         assert "Set the gateway URL and key" in plain_page
         assert "List the gateway" in plain_page
         page = browser.get("/ui/gateway?models=1").text
-        assert "not offered by the gateway; saving disables it" in page
+        assert 'value="fast"' not in page
         shown_rows = re.findall(r'name="model\.(\d+)\.id" value="([^"]+)"', page)
         form = {"csrf": csrf, "reason": "saved as shown", "return_to": "/ui/gateway"}
         form["max_concurrency"] = "2"

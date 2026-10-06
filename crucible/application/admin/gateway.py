@@ -116,7 +116,10 @@ def fetch_models(endpoint: str, bearer: str, *, timeout: float = LIST_TIMEOUT_SE
         raise GatewayError(f"Gateway {endpoint} refused the key (HTTP 401).")
     if status != 200:
         raise GatewayError(f"Gateway {endpoint} answered HTTP {status} when asked for its models.")
-    return credentials.model_ids(body)
+    try:
+        return credentials.model_ids(body, strict=True)
+    except ValueError:
+        raise GatewayError(f"Gateway {endpoint} returned an invalid models response.") from None
 
 
 def _local_entries(uow: UnitOfWork) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -168,7 +171,7 @@ def gateway_view(
 
 async def models_view(ctx: AdminContext, uow: UnitOfWork, *, fetch: bool = True) -> dict[str, Any]:
     """What the gateway offers this key, beside the local entries in force: one row per
-    model, offered or not, with what saving would do to it.
+    offered model. An inconclusive listing retains the configured rows.
 
     When *fetch* is False the gateway is not contacted and a not-asked note is returned
     instead.  This keeps the gateway page fast until the operator clicks the link.
@@ -200,7 +203,7 @@ async def models_view(ctx: AdminContext, uow: UnitOfWork, *, fetch: bool = True)
     for model_id in codex:
         by_id.setdefault(model_id, {})
     rows: list[dict[str, Any]] = []
-    for model_id in [*(offered or []), *(i for i in by_id if i not in (offered or []))]:
+    for model_id in offered if offered is not None else by_id:
         entry = by_id.get(model_id)
         display_entry = entry or codex.get(model_id)
         is_offered = None if offered is None else model_id in offered

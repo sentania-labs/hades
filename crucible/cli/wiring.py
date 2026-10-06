@@ -139,6 +139,7 @@ class Wiring:
             credential_renewal=(
                 self._credential_renewal if self.credential_renewer is not None else None
             ),
+            admin_context=self.admin,
         )
 
     def _credential_renewal(self) -> bool:
