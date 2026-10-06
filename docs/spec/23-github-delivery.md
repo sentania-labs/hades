@@ -21,7 +21,7 @@ delivery half of the task lifecycle (09).
   Issues write. Repository
   registration (`PUT /repositories/{name}`) records the installation ID
   the App has for that repository; the key never appears in the record.
-  The GitHub page's repository picker fills it (25): it lists what each
+  The Repositories page's repository picker fills it (25): it lists what each
   installation covers, grouped by account, using a token scoped to
   `metadata: read` that is discarded before the listing returns, and a pick
   registers the repository with that installation ID, the default branch

@@ -29,6 +29,7 @@ from crucible.application.admin.context import (
 )
 from crucible.application.admin.repositories import register as register_repository
 from crucible.application.errors import ConflictError
+from crucible.application.repositories import PrivateCheckoutRefusedError
 from crucible.contracts.api import ExternalReviewAttestation, RepositoryRegistration
 from crucible.domain.events import EventKind
 from crucible.ports.github import AppCredential, GitHubAppStoreError, GitHubError
@@ -372,18 +373,28 @@ def _is_public(ctx: AdminContext) -> bool:
         return True
 
 
-def apps_view(ctx: AdminContext, uow: UnitOfWork) -> dict[str, Any]:
+def _connected(ctx: AdminContext) -> bool:
+    client = getattr(ctx, "github", None)
+    configured = getattr(client, "configured", None)
+    return (client is not None and (not callable(configured) or bool(configured()))) and getattr(
+        ctx, "github_apps", None
+    ) is not None
+
+
+NOT_CONNECTED = "No GitHub App is connected. Create one on the GitHub page first."
+
+
+def apps_view(ctx: AdminContext, uow: UnitOfWork, *, repositories: bool = True) -> dict[str, Any]:
     """The picker: the App, its install link, and each installation's repositories,
     grouped by the account or organization it is installed on. Each repository says
     whether it is registered already, and under which name. Reads only.
 
     Adds `app_public` (bool) and `install_target_url` (str | None) so the page can
     guide the operator to install the App on another account or explain why that
-    is not available for a private App (crucible#266)."""
-    configured = getattr(ctx.github, "configured", None)
-    connected = (
-        ctx.github is not None and (not callable(configured) or bool(configured()))
-    ) and ctx.github_apps is not None
+    is not available for a private App (crucible#266). With `repositories=False` the
+    installations are listed without asking GitHub what each covers (the GitHub page,
+    which links to the picker on Repositories, crucible#265)."""
+    connected = _connected(ctx)
     view: dict[str, Any] = {
         "connected": connected,
         "app": None,
@@ -394,7 +405,7 @@ def apps_view(ctx: AdminContext, uow: UnitOfWork) -> dict[str, Any]:
         "installations": [],
     }
     if not connected:
-        view["error"] = "No GitHub App is connected. Create one on the GitHub page first."
+        view["error"] = NOT_CONNECTED
         return view
     assert ctx.github_apps is not None
     try:
@@ -407,9 +418,42 @@ def apps_view(ctx: AdminContext, uow: UnitOfWork) -> dict[str, Any]:
     view["app_public"] = _is_public(ctx)
     view["install_url"] = _install_url(app, ctx.github_app.api_base)
     view["install_target_url"] = _install_target_url(app, ctx.github_app.api_base)
-    registered = {
-        repo.url.rstrip("/").removesuffix(".git").lower(): repo.name for repo in _registered(uow)
-    }
+    view["installations"] = (
+        _covered(ctx, uow, installations)
+        if repositories
+        else sorted(installations, key=lambda i: str(i.get("account") or "").lower())
+    )
+    return view
+
+
+def installations_view(ctx: AdminContext, uow: UnitOfWork) -> dict[str, Any]:
+    """What the Repositories page's picker shows (crucible#265): each installation's
+    repositories, marked, with its counts, and nothing about the App itself. Reads
+    only; a refusal is reported, never raised."""
+    view: dict[str, Any] = {"connected": _connected(ctx), "error": None, "installations": []}
+    if not view["connected"]:
+        view["error"] = NOT_CONNECTED
+        return view
+    assert ctx.github_apps is not None
+    try:
+        installations = ctx.github_apps.installations()
+    except Exception as exc:
+        view["error"] = _github_refusal(exc, _app_id(ctx), ctx.github_app.api_base).detail
+        return view
+    view["installations"] = _covered(ctx, uow, installations)
+    return view
+
+
+def _covered(
+    ctx: AdminContext, uow: UnitOfWork, installations: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Each installation with the repositories it covers, each marked with the name it
+    is registered under, and the counts: covered, registered, and registered against
+    this installation but no longer covered by it."""
+    assert ctx.github_apps is not None
+    known = _registered(uow)
+    registered = {repo.url.rstrip("/").removesuffix(".git").lower(): repo.name for repo in known}
+    out: list[dict[str, Any]] = []
     for installation in sorted(installations, key=lambda i: str(i.get("account") or "").lower()):
         entry: dict[str, Any] = {**installation, "error": None, "repositories": []}
         try:
@@ -427,8 +471,30 @@ def apps_view(ctx: AdminContext, uow: UnitOfWork) -> dict[str, Any]:
                     "unsupported": unsupported(repository),
                 }
             )
-        view["installations"].append(entry)
-    return view
+        seen = {
+            key
+            for repository in entry["repositories"]
+            if (key := _repository_identity(str(repository.get("html_url") or ""))) is not None
+        }
+        # Unknown while the listing is refused: nothing is called uncovered on a guess.
+        gone = (
+            []
+            if entry["error"]
+            else sorted(
+                repo.name
+                for repo in known
+                if repo.installation_id == int(installation["id"])
+                and _repository_identity(repo.url) not in seen
+            )
+        )
+        entry["no_longer_covered"] = gone
+        entry["counts"] = {
+            "covered": len(entry["repositories"]),
+            "registered": sum(1 for r in entry["repositories"] if r["registered_as"]),
+            "no_longer_covered": len(gone),
+        }
+        out.append(entry)
+    return out
 
 
 def _app_id(ctx: AdminContext) -> int:
@@ -570,3 +636,110 @@ def add_repository(
         ),
         reason=reason,
     )
+
+
+SKIP_ALREADY_REGISTERED = "already_registered"
+SKIP_ARCHIVED = "archived"
+SKIP_UNSUPPORTED = "unsupported"
+
+
+def add_repositories(
+    ctx: AdminContext,
+    uow: UnitOfWork,
+    *,
+    principal: str,
+    installation_id: int,
+    repositories: list[str],
+    policy_name: str,
+    attested_all_prs: bool,
+    attested_by: str | None,
+    reason: str | None,
+) -> dict[str, Any]:
+    """Register several repositories one installation covers, in one action
+    (crucible#265): one policy and one attestation for all of them, and one reason
+    (optional, as for one registration) on every registration's audit event. Each is
+    registered under its own name with GitHub's facts, as `add_repository` does. A
+    repository that cannot be registered is skipped and named with why: already
+    registered, archived, or unsupported (not covered by this installation, its name
+    taken by another URL, or a private checkout GitHub refused). A refusal that is the
+    batch's own (the reason, the policy, the attestation) refuses the whole batch."""
+    reason = guard_mutation(
+        ctx,
+        uow,
+        reason,
+        principal=principal,
+        operation=f"github add-repositories installation {installation_id}",
+    )
+    chosen = list(dict.fromkeys(r.strip() for r in repositories if r.strip()))
+    if not chosen:
+        raise ConflictError("no repositories were chosen")
+    if ctx.github_apps is None:
+        raise ConflictError("no GitHub App is connected; connect one on the GitHub page")
+    try:
+        covered = ctx.github_apps.installation_repositories(installation_id)
+    except (GitHubError, OSError) as exc:
+        raise _github_refusal(exc, _app_id(ctx), ctx.github_app.api_base) from None
+    by_name = {str(r.get("full_name")).lower(): r for r in covered}
+    registered = {
+        key: repo.name
+        for repo in _registered(uow)
+        if (key := _repository_identity(repo.url)) is not None
+    }
+    added: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    def skip(repository: str, cause: str, why: str) -> None:
+        skipped.append({"repository": repository, "cause": cause, "reason": why})
+
+    for requested in chosen:
+        found = by_name.get(requested.lower())
+        if found is None:
+            skip(requested, SKIP_UNSUPPORTED, f"not covered by installation {installation_id}")
+            continue
+        full_name = str(found["full_name"])
+        url = str(found.get("html_url") or f"https://github.com/{full_name}")
+        identity = _repository_identity(url)
+        if identity is not None and identity in registered:
+            skip(
+                full_name, SKIP_ALREADY_REGISTERED, f"already registered as {registered[identity]}"
+            )
+            continue
+        why = unsupported(found)
+        if why is not None:
+            skip(full_name, SKIP_ARCHIVED if found.get("archived") else SKIP_UNSUPPORTED, why)
+            continue
+        name = full_name.rsplit("/", 1)[-1]
+        existing = uow.repositories.get_by_name(name)
+        if existing is not None:
+            skip(
+                full_name,
+                SKIP_UNSUPPORTED,
+                f"the name {name!r} is registered for {existing.url}; register it on its "
+                "own under another name",
+            )
+            continue
+        try:
+            done = register_repository(
+                ctx,
+                uow,
+                principal=principal,
+                name=name,
+                registration=RepositoryRegistration(
+                    url=url,
+                    default_branch=str(found.get("default_branch") or "main"),
+                    policy_name=policy_name,
+                    installation_id=installation_id,
+                    external_review=ExternalReviewAttestation(
+                        attested_all_prs=attested_all_prs, attested_by=attested_by
+                    ),
+                    private=found.get("private") is True,
+                ),
+                reason=reason,
+            )
+        except PrivateCheckoutRefusedError as exc:
+            skip(full_name, SKIP_UNSUPPORTED, exc.detail)
+            continue
+        added.append({**done, "full_name": full_name})
+        if identity is not None:
+            registered[identity] = name
+    return {"installation_id": installation_id, "registered": added, "skipped": skipped}
