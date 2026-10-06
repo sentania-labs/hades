@@ -9,7 +9,12 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from crucible.adapters.api.deps import Ctx, UoW
 from crucible.adapters.ui.actions import register
 from crucible.adapters.ui.pages import routing_models as routing_models_page
-from crucible.adapters.ui.render import _document_section, _duration_words, _page
+from crucible.adapters.ui.render import (
+    _document_section,
+    _duration_words,
+    _page,
+    _routing_policy_details,
+)
 from crucible.adapters.ui.session import _require
 from crucible.application.admin import credentials as credentials_admin
 from crucible.application.admin import gate_classes as gate_classes_admin
@@ -229,9 +234,12 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                 _document_section("Kubernetes worker capacity", capacity),
                 _document_section("Per-command timeout", command_timeout),
                 _document_section("Gate classes", classes),
-                _document_section("Delivery policy document", policy.document if policy else {}),
-                _document_section(
-                    "Routing policy document", routing_record.document if routing_record else {}
+                *(
+                    _routing_policy_details(
+                        routing_record.document if routing_record else None,
+                        policy.document if policy else None,
+                    )
+                    for _ in [1]
                 ),
             ],
         },
