@@ -37,7 +37,10 @@ terms.
    provider the preparer container, which also refreshes the reference cache, is created
    with stdin open and a 64 KiB tmpfs at `/run/crucible-token` (mode 0700, `noexec`); the
    value is written to stdin, and the script puts it on that tmpfs, exactly as the
-   publisher's is delivered. On Kubernetes it is a per-attempt Secret
+   publisher's is delivered. (Since hades #137, 2026-10-06, the Docker provider
+   refreshes the cache in a container of its own, before the preparer, and that
+   refresher receives the token the same way; the preparer mounts the cache read-only,
+   as on Kubernetes. Spec 08 describes the current shape.) On Kubernetes it is a per-attempt Secret
    `checkout-<attempt>`, mounted read-only (mode 0400) at the same path into the cache
    refresher Job and the preparer Job only, and deleted as soon as the preparer's Pod is
    gone, on every path. A Secret that cannot be deleted fails the prepare, so no worker is
@@ -99,7 +102,8 @@ private repository's mirror now lives there, keyed by its URL. Every preparer an
 refresher mounts the whole cache (on Docker read-write, as before this change; on
 Kubernetes only the refresher writes it, #55), so a hostile preparer image running for
 any other repository's attempt can read a private repository's mirror without any
-token, and on Docker could rewrite it. A worker never mounts the cache. Narrowing each
+token, and on Docker could rewrite it. (Since hades #137 the Docker preparer mounts the
+cache read-only too, and only the refresher container writes it, on both providers.) A worker never mounts the cache. Narrowing each
 preparer to its own repository's mirror is a follow-up; until then the protection is
 the same as for the harness credentials: the worker images are the operator's promoted
 ones (ADR 0018), and the preparer runs only Crucible's script from them.

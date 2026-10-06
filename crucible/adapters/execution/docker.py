@@ -4,7 +4,8 @@ Talks to the daemon only through the socket proxy. Creates workers, collectors, 
 verifiers, and verifiers; nothing it creates ever receives the socket, the proxy
 endpoint, the database, or another attempt's credential mount.
 
-Four containers per attempt:
+Four containers per attempt, after the preparer (and, for a remote repository with the
+reference cache on, the cache refresher that runs just before it, hades #137):
 
 - the **worker**, from the allowlisted harness image, on the internal workers network
   with the egress proxy as its only way out;
@@ -150,6 +151,9 @@ LABEL_ROLE = "crucible.role"
 LABEL_HARNESS = "crucible.harness"
 ROLE_WORKER = "worker"
 ROLE_PREPARER = "preparer"
+# hades #137: the reference cache's only writer, a container of its own that runs before
+# the preparer, as the Kubernetes refresher Job does (26, #55).
+ROLE_CACHE_REFRESHER = "cache-refresher"
 ROLE_CLEANER = "cleaner"
 ROLE_COLLECTOR = "collector"
 ROLE_BUNDLE = "bundle-verifier"
@@ -519,8 +523,8 @@ class DockerProvider:
         checkout_token: InstallationToken | None = None,
         cancelled: CancelCheck | None = None,
     ) -> Workspace:
-        # hades #189: the preparer container refreshes the cache and clones in one step,
-        # so a cancel is honoured before it starts and on every poll while it runs.
+        # hades #189: a cancel is honoured before each container starts and on every poll
+        # while one runs: the cache refresher first (hades #137), then the preparer.
         if cancelled is not None and await cancelled():
             raise LaunchCancelledError("the task was cancelled before the preparer started")
         repository = spec.contract.get("repository", {})
@@ -557,23 +561,38 @@ class DockerProvider:
         env: dict[str, str] = {}
         cache_name: str | None = None
         clone_url = url
+        # ADR 0019: a private repository's token goes to the two containers that talk to
+        # the remote, the cache refresher and the preparer, on stdin and onto a tmpfs of
+        # each one's own, as the publisher's does; the worker is a different container
+        # that never has either.
+        private = checkout_token is not None and local is None
         if local is not None:
             # A repository that already lives in the artifact root (the e2e origin) is
             # mounted read-only; nothing has to leave the daemon for it.
             mounts.append(self._volume_mount(local, scripts.ORIGIN_MOUNT, read_only=True))
             clone_url = scripts.ORIGIN_MOUNT
         else:
+            network, env = self._network_and_env(spec)
             if self.config.use_reference_cache:
                 cache_name = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
                 await asyncio.to_thread(self._ensure_cache_dir)
-                mounts.append(self._volume_mount("cache", scripts.CACHE_MOUNT, read_only=False))
-            network, env = self._network_and_env(spec)
+                # hades #137: the refresh runs in a container of its own, the cache's one
+                # writer, before the preparer. The cache is the one volume every attempt
+                # shares, so a preparer that could write it could poison every later
+                # checkout (#55); the preparer mounts it read-only and only reads it.
+                await self._refresh_cache(
+                    spec,
+                    url=url,
+                    cache_name=cache_name,
+                    image=resolved,
+                    network=network,
+                    env=env,
+                    checkout_token=checkout_token if private else None,
+                    cancelled=cancelled,
+                )
+                mounts.append(self._volume_mount("cache", scripts.CACHE_MOUNT, read_only=True))
 
         git_policy = spec.policy.get("git", {})
-        # ADR 0019: a private repository's token goes to this one container on stdin,
-        # onto its own tmpfs, as the publisher's does; the worker is a different
-        # container that never has either.
-        private = checkout_token is not None and local is None
         exit_code = await self._run_throwaway(
             spec,
             role=ROLE_PREPARER,
@@ -618,7 +637,58 @@ class DockerProvider:
         except workspace.WorkspaceError as exc:
             raise ProviderError(str(exc)) from exc
 
+    async def _refresh_cache(
+        self,
+        spec: LaunchSpec,
+        *,
+        url: str,
+        cache_name: str,
+        image: str,
+        network: str,
+        env: Mapping[str, str],
+        checkout_token: InstallationToken | None,
+        cancelled: CancelCheck | None,
+    ) -> None:
+        """hades #137: refresh the reference cache in a short-lived container of its own,
+        the only container that mounts it writable, before the preparer runs; the Docker
+        shape of the Kubernetes refresher Job (26, #55). It carries no workspace, no
+        identity bundle and no harness credential: only the cache, the preparer's network
+        and, for a private repository, the checkout token on stdin (ADR 0019).
+
+        A refresh that fails is logged and the preparer goes on, cloning from the mirror
+        as it was or from the remote: a stale or absent cache costs time, never
+        correctness. A cancel is honoured before the refresher starts and on every poll
+        while it runs, as the preparer's is (hades #189)."""
+        code = await self._run_throwaway(
+            spec,
+            role=ROLE_CACHE_REFRESHER,
+            image=image,
+            script=scripts.cache_refresh_script(
+                url=url,
+                cache_name=cache_name,
+                checkout_token="stdin" if checkout_token is not None else None,
+                credential_host=self.config.credential_host,
+            ),
+            mounts=[self._volume_mount("cache", scripts.CACHE_MOUNT, read_only=False)],
+            network=network,
+            timeout=self.config.collector_timeout_seconds,
+            env=env,
+            secret_stdin=checkout_token,
+            cancelled=cancelled,
+        )
+        if code != 0:
+            log.warning(
+                "the reference cache refresh failed; the preparer clones without it",
+                extra={
+                    "exit_code": code,
+                    "detail": redact(self.last_error.get(ROLE_CACHE_REFRESHER, "")),
+                },
+            )
+
     def _ensure_cache_dir(self) -> None:
+        """The shared cache directory the refresher writes and every preparer reads. It
+        has to exist before either container is created, because the daemon mounts a
+        path under the artifact root and will not create one."""
         cache = Path(self.config.artifact_root) / "cache"
         cache.mkdir(parents=True, exist_ok=True)
         cache.chmod(self.config.workspace_dir_mode)

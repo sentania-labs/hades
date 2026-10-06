@@ -765,8 +765,9 @@ def test_a_verification_id_that_looks_like_a_command_stays_a_file_name(tmp_path:
     assert exit_file.read_text().strip() == "7"
 
 
-def test_a_kubernetes_preparer_reads_the_cache_and_never_refreshes_it() -> None:
-    """crucible#55: on Kubernetes the refresher Job is the cache's only writer."""
+def test_a_preparer_reads_the_cache_and_never_refreshes_it() -> None:
+    """crucible#55, hades #137: on both providers the refresher is the cache's only
+    writer; the preparer script has no fetch or mirror clone to run."""
     common = {
         "url": "https://github.com/example-org/example-service",
         "base_ref": "main",
@@ -781,13 +782,11 @@ def test_a_kubernetes_preparer_reads_the_cache_and_never_refreshes_it() -> None:
         "exclude_entries": workspace.EXCLUDE_ENTRIES,
         "identity_mount": IDENTITY_MOUNT,
     }
-    docker = scripts.preparer_script(**common)  # type: ignore[arg-type]
-    kubernetes = scripts.preparer_script(**common, refresh_cache=False)  # type: ignore[arg-type]
+    preparer = scripts.preparer_script(**common)  # type: ignore[arg-type]
     cache = "/crucible/cache/0123456789abcdef.git"
-    assert "fetch --prune origin" in docker and "clone --mirror" in docker
-    assert "fetch --prune origin" not in kubernetes and "clone --mirror" not in kubernetes
-    assert f'rm -rf "{cache}"' not in kubernetes
-    assert f"--reference {cache} --dissociate" in kubernetes
+    assert "fetch --prune origin" not in preparer and "clone --mirror" not in preparer
+    assert f'rm -rf "{cache}"' not in preparer
+    assert f"--reference {cache} --dissociate" in preparer
 
     refresh = scripts.cache_refresh_script(
         url="https://github.com/example-org/example-service", cache_name="0123456789abcdef"

@@ -353,13 +353,20 @@ async def test_docker_hands_the_token_to_the_preparer_alone_on_stdin(tmp_path: P
     ws = await provider.prepare(launch, checkout_token=token)
     await provider.launch(ws, launch)
 
+    # hades #137: the cache refresher and the preparer are the two containers that talk
+    # to the remote, and each gets the token on its own stdin and tmpfs.
+    refresher = next(c for c in client.created if c["name"].startswith("crucible-cache-"))
     preparer = next(c for c in client.created if c["name"].startswith("crucible-preparer-"))
-    body = preparer["body"]
-    tmpfs = body["HostConfig"]["Tmpfs"][scripts.TOKEN_MOUNT]
-    assert "noexec" in tmpfs and "mode=0700" in tmpfs and "uid=1000" in tmpfs
-    assert body["OpenStdin"] is True and body["StdinOnce"] is True
-    assert "CRUCIBLE_TOKEN_FILE" in body["Cmd"][-1]
-    assert client.stdin == [("container-1", _secret_value().encode())]
+    for created in (refresher, preparer):
+        body = created["body"]
+        tmpfs = body["HostConfig"]["Tmpfs"][scripts.TOKEN_MOUNT]
+        assert "noexec" in tmpfs and "mode=0700" in tmpfs and "uid=1000" in tmpfs
+        assert body["OpenStdin"] is True and body["StdinOnce"] is True
+        assert "CRUCIBLE_TOKEN_FILE" in body["Cmd"][-1]
+    assert client.stdin == [
+        ("container-1", _secret_value().encode()),
+        ("container-2", _secret_value().encode()),
+    ]
 
     for created in client.created:
         text = json.dumps(created["body"])
@@ -373,9 +380,11 @@ async def test_docker_hands_the_token_to_the_preparer_alone_on_stdin(tmp_path: P
 async def test_docker_prepares_a_public_repository_with_nothing_on_stdin(tmp_path: Path) -> None:
     client, provider = _docker(tmp_path)
     await provider.prepare(docker_spec())
-    preparer = client.created[0]["body"]
-    assert scripts.TOKEN_MOUNT not in preparer["HostConfig"]["Tmpfs"]
-    assert "OpenStdin" not in preparer
+    assert len(client.created) == 2  # the cache refresher, then the preparer (hades #137)
+    for created in client.created:
+        body = created["body"]
+        assert scripts.TOKEN_MOUNT not in body["HostConfig"]["Tmpfs"]
+        assert "OpenStdin" not in body
     assert client.stdin == []
 
 
@@ -545,8 +554,11 @@ async def test_docker_removes_the_preparer_when_the_token_cannot_be_written(
     launch = replace(docker_spec(), repository_url="https://github.com/octo-lab/secret")
     with pytest.raises(ProviderError, match="preparer container could not build"):
         await provider.prepare(launch, checkout_token=_token())
-    assert client.created and client.removed == ["container-1"]
-    assert client.killed == ["container-1"]
+    # hades #137: the refresher's token write failed first, which only costs the
+    # refresh; the preparer's is what fails the prepare. Neither container outlives it.
+    assert [c["name"].split("-")[1] for c in client.created] == ["cache", "preparer"]
+    assert client.removed == ["container-1", "container-2"]
+    assert client.killed == ["container-1", "container-2"]
 
 
 async def test_kubernetes_deletes_the_token_secret_when_prepare_is_cancelled() -> None:
