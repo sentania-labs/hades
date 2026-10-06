@@ -196,7 +196,10 @@ def ensure_network(
 
     # Issue 135: derive subnets and retry on overlap.
     if seed is None:
-        raise ValueError("either subnet or seed must be provided")
+        # No seed or subnet provided - create without --subnet (backward compat).
+        run(*args, name)
+        return ""
+
     tried: list[str] = []
     for attempt in range(max_attempts):
         candidate = derive_subnet(seed, attempt)
