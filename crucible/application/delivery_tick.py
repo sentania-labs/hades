@@ -2021,6 +2021,9 @@ class DeliveryCoordinator:
                     "previous_head_sha": old_head,
                     "reason": "merge_main",
                     "force_with_lease": old_head,
+                    # Issue 403: the next publication leases this tip as Hades' own.
+                    "work_branch": pull_request.work_branch,
+                    "repository": plan.repository_name,
                 },
             )
             # The new head is certified by its own checks. A task still in external

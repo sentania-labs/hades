@@ -114,10 +114,9 @@ review is recorded, and Foundry's `AcceptanceResult` for that head is
    confirmed `branch_pushed` head for this task, repository and branch, or
    carry a nonempty `Crucible-Attempt:` trailer. Otherwise refuse publication
    and name the foreign commit SHA and author, even for a fast-forward.
-   For a Hades tip, require it to be an ancestor of the accepted head, or
-   require a clean in-memory merge whose tree equals the accepted tree.
-   This proves the checkpoint adds no work absent from the corrected head;
-   conflicts or added work fail closed. Push with an explicit
+   A Hades tip is replaced whether or not the accepted head descends from
+   it: a quota checkpoint is ungated partial work, and the accepted head is
+   the gated result that supersedes it. Push with an explicit
    `--force-with-lease=refs/heads/<work_branch>:<fetched tip>` so a concurrent
    writer cannot be overwritten. A new branch uses an empty expected tip.
    The sealed bundle and accepted head checks still apply; the publisher

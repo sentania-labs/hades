@@ -311,7 +311,11 @@ def body_sha256(text: str) -> str:
 def publication_owned_heads(
     events: Sequence[Event], *, work_branch: str, repository: str
 ) -> tuple[str, ...]:
-    """Only confirmed Hades pushes on this task's repository and branch authorize a lease."""
+    """Only confirmed Hades pushes on this task's repository and branch authorize a lease.
+
+    `events` are one task's. A `branch_pushed` that names a branch or repository is
+    taken only when they are this publication's; one that names neither (the merge-main
+    push recorded before issue 403) is the task's own branch, since a task has one."""
     return tuple(
         sorted(
             {
@@ -320,8 +324,8 @@ def publication_owned_heads(
                 if event.kind == EventKind.BRANCH_PUSHED.value
                 and event.principal == PRINCIPAL_CRUCIBLE
                 and event.verified
-                and event.payload.get("work_branch") == work_branch
-                and event.payload.get("repository") == repository
+                and event.payload.get("work_branch", work_branch) == work_branch
+                and event.payload.get("repository", repository) == repository
                 and re.fullmatch(
                     r"[0-9a-f]{40}|[0-9a-f]{64}", str(event.payload.get("head_sha", ""))
                 )

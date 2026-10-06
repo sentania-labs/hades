@@ -398,7 +398,10 @@ def build_plan(uow: UnitOfWork, task: Task, work: tuple[Attempt, Execution]) -> 
                 events, work_branch=work_branch, repository=repository_slug(repository)
             )
         )
-        after = int(events[-1].seq or after)
+        last = events[-1].seq
+        if last is None or last <= after:
+            break
+        after = last
     return PublishPlan(
         owned_remote_heads=tuple(sorted(owned_heads)),
         task_id=task.id,

@@ -1242,23 +1242,12 @@ if [ -n "$REMOTE" ]; then
       "$REMOTE" "$AUTHOR" > "$OUT/error.txt"
     drop_token; exit 5
   fi
-  echo checkpoint-contained > "$OUT/step.txt"
-  # An ancestor is retained in history. For divergent checkpoints, merging must
-  # succeed and add nothing to the accepted tree. Conflicts fail closed.
-  EXPECTED_TREE=$(git rev-parse "$EXPECTED^{{tree}}")
-  if ! git merge-base --is-ancestor "$REMOTE" "$EXPECTED"; then
-    if ! git merge-tree --write-tree "$EXPECTED" "$REMOTE" > "$OUT/containment.txt" \
-        2>> "$OUT/publisher.log" \
-        || [ "$(head -n 1 "$OUT/containment.txt")" != "$EXPECTED_TREE" ]; then
-      printf 'Hades checkpoint %s is not contained in accepted head %s\n' \
-        "$REMOTE" "$EXPECTED" > "$OUT/error.txt"
-      drop_token; exit 5
-    fi
-  fi
 fi
 echo push > "$OUT/step.txt"
-# An empty lease requires the branch to remain absent; an exact tip protects
-# against every writer racing the fetch, including another Hades checkpoint.
+# Hades owns its work branches (issue 403): a tip it pushed, such as a quota checkpoint
+# of ungated partial work, is replaced by the accepted head whether or not the head
+# descends from it. An empty lease requires the branch to remain absent; an exact tip
+# protects against every writer racing the fetch, including another Hades checkpoint.
 if git push --quiet origin "refs/heads/crucible-publish:refs/heads/$WORK_BRANCH" \
     --force-with-lease="refs/heads/$WORK_BRANCH:$REMOTE" \
     2> "$OUT/push.err"; then

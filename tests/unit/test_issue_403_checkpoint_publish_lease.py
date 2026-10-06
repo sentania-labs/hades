@@ -160,15 +160,15 @@ def test_foreign_tip_names_commit_and_author_even_for_fast_forward(
 
 
 @pytest.mark.parametrize("conflict", [False, True])
-def test_checkpoint_work_cannot_be_discarded(tmp_path: Path, conflict: bool) -> None:
+def test_divergent_checkpoint_is_replaced(tmp_path: Path, conflict: bool) -> None:
+    """A quota checkpoint is ungated partial work; the accepted head need not contain it."""
     repo, origin, checkpoint, _ = _history(tmp_path)
     _git(repo, "reset", "--hard", "main")
     head = _commit(repo, "work.txt" if conflict else "other.txt", "different\n", "correction")
     outcome = _run(tmp_path / "run", origin, _bundle(repo, tmp_path / "bundle"), head)
-    assert not outcome.pushed
-    assert outcome.step == "checkpoint-contained"
-    assert checkpoint in outcome.detail
-    assert _git(origin, "rev-parse", f"refs/heads/{BRANCH}").strip() == checkpoint
+    assert outcome.pushed, outcome
+    assert outcome.remote_head_before == checkpoint
+    assert _git(origin, "rev-parse", f"refs/heads/{BRANCH}").strip() == head
 
 
 @pytest.mark.parametrize("absent", [False, True])
@@ -249,6 +249,11 @@ def test_republish_recovers_the_same_sealed_correction(
             "checkpoint": True,
         },
     )
+    # The merge-main push names neither branch nor repository; the task has one of each.
+    merge_main = replace(event, payload={"head_sha": checkpoint, "reason": "merge_main"})
+    assert publication_owned_heads(
+        [merge_main], work_branch=plan.work_branch, repository=plan.repository_name
+    ) == (checkpoint,)
     # A record for another branch, repository, or principal never establishes ownership.
     for invalid in (
         replace(event, principal="worker"),
