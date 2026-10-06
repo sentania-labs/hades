@@ -23,6 +23,9 @@ from crucible.application.harnesses import HarnessUnavailableError, harness_stat
 from crucible.domain.exit_class import ExitClass
 from crucible.ports.repository import UnitOfWork
 
+HERMES = "hermes"
+QWEN_CODE = "qwen_code"
+
 ENABLED = "Harness enabled"
 IMAGE = "Worker image"
 CREDENTIAL = "Credential"
@@ -30,6 +33,34 @@ ROUTE = "Model"
 WORKER = "Worker starts"
 MODEL = "Model call"
 STEPS = (ENABLED, IMAGE, CREDENTIAL, ROUTE, WORKER, MODEL)
+
+
+def _is_hermes_like(harness: str) -> bool:
+    """True for the Hermes-like harnesses that use Local gateway."""
+    return harness in {HERMES, QWEN_CODE}
+
+
+def _route_title(harness: str, detail: str) -> str:
+    """A plain, actionable sentence for a ROUTE step failure."""
+    hermes = _is_hermes_like(harness)
+    if hermes:
+        return f"{harness} has no enabled model. Pick one on Local gateway."
+    return f"{harness} has no enabled model in the routing policy in force. Enable one on Routing."
+
+
+def _credential_title(harness: str, detail: str) -> str:
+    """A plain, actionable sentence for a CREDENTIAL step failure."""
+    hermes = _is_hermes_like(harness)
+    if "no API key is stored" in detail or "no credential is stored" in detail:
+        if hermes:
+            return f"No key is stored for {harness}. Set it on Local gateway."
+        return f"No credential is stored for {harness}. Log in on Credentials."
+    if "cannot be read" in detail:
+        if hermes:
+            return f"The credential of {harness} cannot be read. Check Local gateway."
+        return f"The credential of {harness} cannot be read. Check Credentials."
+    return detail
+
 
 # What each way a run can end means to the operator, for the model call step.
 EXIT_WORDS = {
@@ -52,8 +83,21 @@ class _Steps:
     def passed(self, name: str, detail: str) -> None:
         self.items.append({"name": name, "ok": True, "result": "pass", "detail": detail})
 
-    def failed(self, name: str, detail: str) -> dict[str, Any]:
-        self.items.append({"name": name, "ok": False, "result": "fail", "detail": detail})
+    def failed(self, name: str, detail: str, *, title: str | None = None) -> dict[str, Any]:
+        """Record a failed step.
+
+        `detail` contains policy internals (policy names, versions).
+        `title` is a plain, actionable sentence the operator can act on.
+        """
+        entry: dict[str, Any] = {
+            "name": name,
+            "ok": False,
+            "result": "fail",
+            "detail": detail,
+        }
+        if title is not None:
+            entry["title"] = title
+        self.items.append(entry)
         for later in STEPS[STEPS.index(name) + 1 :]:
             self.items.append({"name": later, "ok": None, "result": "not run", "detail": ""})
         return self.items[-1]
@@ -105,19 +149,28 @@ async def _run(
     try:
         ctx.harnesses.resolve(harness, gates=ctx.harness_gates, state=uow.harnesses.get(harness))
     except HarnessUnavailableError as exc:
-        steps.failed(ENABLED, f"{exc.reason}; enable it on Harnesses")
+        steps.failed(
+            ENABLED,
+            f"{exc.reason}; enable it on Harnesses",
+            title="Enable the harness on Harnesses.",
+        )
         return
     steps.passed(ENABLED, "enabled in configuration and on Harnesses")
 
     default = uow.harness_images.get(harness)
     if default is None:
-        steps.failed(IMAGE, f"no worker image is promoted for {harness}; choose one on Images")
+        steps.failed(
+            IMAGE,
+            f"no worker image is promoted for {harness}; choose one on Images",
+            title=f"Promote a worker image for {harness} on Images.",
+        )
         return
     if not adapter.supported_versions.supports(default.version):
         steps.failed(
             IMAGE,
             f"{default.reference} carries {harness} {default.version}, outside the tested "
             f"range {adapter.supported_versions.text}; promote a supported image on Images",
+            title=f"Promote a supported image for {harness} on Images.",
         )
         return
     steps.passed(IMAGE, f"{default.reference} ({harness} {default.version})")
@@ -131,27 +184,30 @@ async def _run(
         view = credentials.state_view(ctx, uow, harness, secrets.get(harness))
         state = str(view.get("state"))
         if state == "unreadable":
-            steps.failed(
-                CREDENTIAL,
-                f"the credential of {harness} cannot be read: {view.get('detail') or 'no detail'}",
+            detail = (
+                f"the credential of {harness} cannot be read: {view.get('detail') or 'no detail'}"
             )
+            steps.failed(CREDENTIAL, detail, title=_credential_title(harness, detail))
             return
         # A refused credential ("invalid") goes on to the model call, which is the check
         # that can clear it once the operator has fixed it.
         if state == "absent":
-            steps.failed(
-                CREDENTIAL,
-                f"no API key is stored for {harness}; set it with the gateway URL on Local gateway"
-                if harness == credentials.HERMES
-                else f"no credential is stored for {harness}; log in on Credentials",
-            )
+            if harness == credentials.HERMES:
+                detail = (
+                    "no API key is stored for "
+                    f"{harness}; set it with the gateway URL on Local gateway"
+                )
+            else:
+                detail = f"no credential is stored for {harness}; log in on Credentials"
+            steps.failed(CREDENTIAL, detail, title=_credential_title(harness, detail))
             return
         steps.passed(CREDENTIAL, f"stored ({state})")
 
     try:
         model, endpoint, endpoint_url = credentials.probe_route(uow, adapter, harness)
     except ApplicationError as exc:
-        steps.failed(ROUTE, exc.detail or exc.title)
+        detail = exc.detail or exc.title
+        steps.failed(ROUTE, detail, title=_route_title(harness, detail))
         return
     if model == "none":
         steps.passed(ROUTE, "this harness calls no model")
@@ -165,15 +221,18 @@ async def _run(
             ctx, uow, harness=harness, principal=principal, reason=reason
         )
     except ApplicationError as exc:
-        steps.failed(WORKER, exc.detail or exc.title)
+        detail = exc.detail or exc.title
+        steps.failed(WORKER, detail, title=f"Check the worker's egress for {harness}.")
         return
     except ValueError as exc:
         # The adapter refused to build a launch for this route (Hermes without a local
         # endpoint): a routing problem, reported, never a server error.
-        steps.failed(WORKER, f"the harness cannot be launched on this route: {exc}")
+        detail = f"the harness cannot be launched on this route: {exc}"
+        steps.failed(WORKER, detail, title=f"Fix the route for {harness} on Routing.")
         return
     if record.cause == "provider_unavailable":
-        steps.failed(WORKER, f"the worker did not start: {record.detail}")
+        detail = f"the worker did not start: {record.detail}"
+        steps.failed(WORKER, detail, title=f"Check the worker's egress for {harness}.")
         return
     seconds = f"{record.duration_seconds:g} s"
     steps.passed(WORKER, f"ran {record.image_digest or record.image} under the worker's egress")
@@ -187,4 +246,5 @@ async def _run(
         return
     words = EXIT_WORDS.get(record.exit_class, f"the run ended as {record.exit_class}")
     code = f" (exit code {record.exit_code})" if record.exit_code is not None else ""
-    steps.failed(MODEL, f"{words}{code}, after {seconds}")
+    detail = f"{words}{code}, after {seconds}"
+    steps.failed(MODEL, detail, title=f"Fix the credential or provider for {harness}.")
