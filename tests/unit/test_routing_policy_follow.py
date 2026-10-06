@@ -26,7 +26,7 @@ class _Versions:
 
 class _Repositories:
     def __init__(self, policy_names: list[str]) -> None:
-        self.rows = [SimpleNamespace(policy_name=name) for name in policy_names]
+        self.rows = [SimpleNamespace(name=name, policy_name=name) for name in policy_names]
 
     def list_all(self) -> list[Any]:
         return self.rows
@@ -126,6 +126,8 @@ def test_pinned_active_policy_keeps_old_local_endpoint_authorized(
         policies=_Versions([policy]),
         routing_policies=_Versions([route]),
         repositories=_Repositories([]),
+        # No principal to wake: the wake itself is covered in test_issue_437.
+        principals=SimpleNamespace(list_all=lambda: []),
     )
     docker = SimpleNamespace(
         config=DockerConfig(
