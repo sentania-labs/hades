@@ -169,6 +169,11 @@ Resolver = Callable[[str], list[str]]
 # up through the pod's search path so the cluster domain need not be known here.
 CANARY_DNS_NAME = "kubernetes.default.svc"
 
+# How long to reuse an unsettled probe result without re-running the canary.
+# Prepare and launch both call _require_ready -> ensure_ready; while the local
+# endpoint is down both would otherwise run a fresh canary each time (issue 160).
+_UNSETTLED_TTL_SECONDS: float = 45.0
+
 # The runtime settings source: the `kubernetes.egress` document (None when it was never
 # saved) and the enabled local endpoint URL (None when no local model is enabled).
 SettingsSource = Callable[[], tuple[Mapping[str, Any] | None, str | None]]
@@ -675,6 +680,14 @@ class KubernetesProvider:
         # that is an outage to retry, not a role that took too long.
         self._job_unanswered: set[str] = set()
         self.probe: NamespaceProbe | None = None
+        # When the probe last became unsettled (local_endpoint_detail set). Cached
+        # unsetttled results are reused for a bounded window so that prepare and
+        # launch of the same attempt do not run the canary twice (issue 160).
+        self._probe_unsettled_at: float | None = None
+        # Set by `prepare` after a successful _require_ready; cleared at the start
+        # of `launch`. While true, a subsequent ensure_ready() call returns the
+        # cached (unsettled or settled) probe without re-running the canary.
+        self._probe_cached_for_launch: bool = False
         # One lock per event loop: the API serves requests on its own loop and runs each
         # login on a loop of its own thread, and an asyncio lock belongs to one loop.
         self._probe_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = (
@@ -926,12 +939,31 @@ class KubernetesProvider:
     async def ensure_ready(self) -> NamespaceProbe:
         """Probe the namespace once, and keep the answer. A failed probe, or one whose
         local endpoint result is not settled, is re-run on the next call: lab-admin
-        fixing the CNI, or the endpoint coming back, must not need a Crucible restart."""
+        fixing the CNI, or the endpoint coming back, must not need a Crucible restart.
+
+        Within the bounded window after `prepare` succeeds, a second call returns the
+        cached result so that prepare and launch of the same attempt do not run the
+        canary twice (issue 160).
+        """
         await self._refresh_settings()
         if self.probe is not None and self._probe_is_settled(self.probe):
             return self.probe
+        # Cache hit for an unsettled result: we are still within the same
+        # attempt (prepare set the flag, launch has not cleared it yet).
+        if (
+            self.probe is not None
+            and not self._probe_is_settled(self.probe)
+            and self._probe_cached_for_launch
+        ):
+            return self.probe
         async with self._probe_locks.setdefault(asyncio.get_running_loop(), asyncio.Lock()):
             if self.probe is not None and self._probe_is_settled(self.probe):
+                return self.probe
+            if (
+                self.probe is not None
+                and not self._probe_is_settled(self.probe)
+                and self._probe_cached_for_launch
+            ):
                 return self.probe
             # A canary proves the rules it ran under. If a refresh changed them while it
             # ran, its answer is about rules no longer in force and is not kept.
@@ -940,6 +972,8 @@ class KubernetesProvider:
                 probe = await self._run_probe()
                 if self.config is proved_under:
                     self.probe = probe
+                    if not self._probe_is_settled(probe):
+                        self._probe_unsettled_at = time.monotonic()
                     return probe
             self.probe = NamespaceProbe(
                 False,
@@ -1396,6 +1430,8 @@ class KubernetesProvider:
         # 26: the preparer renders its own egress policy (the DNS selector included),
         # and the supervisor calls prepare() before launch(). Refresh here too, or a
         # stale seed's policy is rendered and launch()'s own refresh is never reached.
+        # 160: clear any stale flag from a prior attempt.
+        self._probe_cached_for_launch = False
         await self._refresh_settings()
         repository = spec.contract.get("repository", {})
         url = spec.repository_url or str(repository.get("url", ""))
@@ -1412,6 +1448,9 @@ class KubernetesProvider:
         # enforcement and PID limit are unproven. The image is resolved first because
         # the canary runs the image an attempt resolved when no probe image is named.
         await self._require_ready(spec)
+        # 160: prepare has already run the canary; keep the result so that launch
+        # (which also calls _require_ready) does not re-run it.
+        self._probe_cached_for_launch = True
 
         # 26: the PVC, the ConfigMap and the per-attempt Secret, then the preparer Job.
         await self._delete_attempt_objects(spec.attempt_id)
