@@ -80,7 +80,7 @@ def test_transcript_fixture_versions_match_dockerfile_pins() -> None:
             # No fixtures exist for this harness; nothing to match.
             continue
 
-        if pin_version not in fixture_versions:
+        if fixture_versions != {pin_version}:
             errors.append(
                 f"harness {fixture_prefix}: pinned version "
                 f"{pin_version!r} in images/worker/Dockerfile "
