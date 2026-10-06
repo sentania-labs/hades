@@ -2027,6 +2027,12 @@ class KubernetesProvider:
             launched.node = str((pod.get("spec") or {}).get("nodeName") or "") or None
         if launched is not None and launched.limits_source != "pod":
             _observe_limits(launched, pod)
+        if phase == "Failed" and str(status.get("reason", "")) in _LOST_REASONS:
+            # 26: an evicted Pod, or one whose node is gone, is `lost`, not an exit.
+            # Check lost reasons before inspecting the terminated container so that a
+            # node-pressure eviction (Failed/Evicted with a terminated container) is
+            # classified as lost rather than exiting (issue 133, FDY-0464).
+            return Observation(ObservationState.LOST, detail=f"the Pod was {status.get('reason')}")
         terminated = _terminated_state(status)
         if terminated is not None:
             code = int(terminated.get("exitCode", -1))
@@ -2044,9 +2050,6 @@ class KubernetesProvider:
                 detail=f"{detail}:oom_killed" if oom else detail,
                 oom_killed=oom,
             )
-        if phase == "Failed" and str(status.get("reason", "")) in _LOST_REASONS:
-            # 26: an evicted Pod, or one whose node is gone, is `lost`, not an exit.
-            return Observation(ObservationState.LOST, detail=f"the Pod was {status.get('reason')}")
         if phase == "Failed":
             # The Pod failed without the worker's own container producing an exit. The
             # init container that seeds a `rw-narrow` credential copy is the way this
