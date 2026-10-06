@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% macro card(item, lane) -%}
+<article class="board-card">
+  <a class="board-card-main" href="/ui/tasks/{{ item.id }}">
+    <span class="board-card-id">{{ safe_value("external id", item.external_id) }}</span>
+    <strong>{{ safe_value("title", item.title) }}</strong>
+  </a>
+  <span class="board-card-project">{{ safe_value("project", item.project) }}</span>
+  <span class="board-card-links">
+    {% for issue in item.issues %}{% if issue.url %}<a href="{{ issue.url }}" rel="noopener noreferrer" target="_blank">Closes {{ issue.label }}</a>{% else %}Closes {{ issue.label }}{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
+    {% if item.pull_request %}<a href="{{ item.pull_request.url }}" rel="noopener noreferrer" target="_blank">PR #{{ item.pull_request.number }}</a>{% endif %}
+  </span>
+  <dl class="board-card-facts">
+    <div><dt>Worker</dt><dd>{{ item.harness or "not started" }} / {{ item.model or "not selected" }}</dd></div>
+    <div><dt>Tier</dt><dd>{{ item.tier }}</dd></div>
+    <div><dt>Waiting on</dt><dd>{{ safe_value("waiting on", item.waiting_on) }}</dd></div>
+    <div><dt>Lane age</dt><dd title="Since {{ item.age.entered_at }}">{{ item.age.label }}</dd></div>
+  </dl>
+  {% if lane.key == "graveyard" %}<p class="board-card-reason"><b>Reason:</b> {{ safe_value("reason", item.reason) }}{% if item.replacement %} <a href="/ui/tasks/{{ item.replacement.task_id }}">Replaced by {{ item.replacement.external_id }}</a>{% endif %}</p>{% endif %}
+</article>
+{%- endmacro %}
+{% block content %}
+<div class="admin-title"><div><h1>Board</h1><p>Read-only view of work, grouped by what happens next.</p></div></div>
+<div class="board-lanes">
+{% for lane in lanes %}
+  {% if lane.collapsed %}<details class="board-lane" data-lane="{{ lane.key }}"><summary><span><b>{{ lane.name }}</b> <span class="board-count">{% if lane.key == "wins" %}{{ lane.count_today }} today · {{ lane.count_all_time }} all time{% else %}{{ lane.count }}{% endif %}</span></span><small>{{ lane.meaning }}</small></summary>
+  {% else %}<section class="board-lane" data-lane="{{ lane.key }}"><header><span><h2>{{ lane.name }}</h2><span class="board-count">{{ lane.count }}</span></span><p>{{ lane.meaning }}</p></header>{% endif %}
+  <div class="board-cards">{% for item in lane.cards %}{{ card(item, lane) }}{% else %}<p class="admin-empty">No cards.</p>{% endfor %}</div>
+  {% if lane.collapsed %}</details>{% else %}</section>{% endif %}
+{% endfor %}
+</div>
+{% endblock %}
