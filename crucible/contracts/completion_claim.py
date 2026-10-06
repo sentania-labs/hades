@@ -21,6 +21,7 @@ import yaml
 from pydantic import Field, ValidationError, field_validator, model_validator
 
 from crucible.contracts.common import StrictModel, check_major_version
+from crucible.domain.exit_class import BLOCKED_REASONS
 
 # The fields Crucible derives from its own evidence, and the ones only the worker can
 # write. images/worker/crucible-report.py mirrors both lists; a unit test holds them equal.
@@ -230,6 +231,55 @@ def load_report(raw: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     if isinstance(loaded, dict):
         return loaded, []
     return None, [{"loc": [], "msg": "report is not a mapping", "type": "shape"}]
+
+
+# hades #393: the reason line of `blocked.md`. `reason: missing_capability` or
+# `reason: ambiguous_contract`, on a line of its own, anywhere in the file, in any case,
+# with or without a Markdown bullet, bold or code marks around it.
+_BLOCKED_REASON_LINE = re.compile(
+    r"^\s*(?:[-*]\s+)?[*_`]*reason[*_`]*\s*:\s*[*_`]*([A-Za-z_]+)[*_`]*\s*$",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class BlockedNote:
+    """What a worker's `blocked.md` says (hades #393): the reason it names, when it is one
+    of the two Crucible knows, and the worker's statement, which is the rest of the file
+    verbatim. `reason` is None when the file names none or names one Crucible does not
+    know; the unknown line then stays in the statement, so nothing the worker wrote is
+    lost."""
+
+    reason: str | None
+    statement: str
+
+
+def parse_blocked_md(text: str) -> BlockedNote:
+    """Split `blocked.md` into its reason line and the worker's statement (hades #393).
+
+    The first line that reads `reason: <value>` with a value in BLOCKED_REASONS is the
+    reason; that line is taken out, and everything else is the statement, verbatim, with
+    only blank lines at either end dropped. A reason line Crucible does not recognise is
+    not a reason and stays in the statement."""
+    lines = text.splitlines()
+    reason: str | None = None
+    kept: list[str] = []
+    skip_blank = False
+    for line in lines:
+        if skip_blank and not line.strip():
+            # The blank line that separated the reason line from the text after it.
+            skip_blank = False
+            continue
+        skip_blank = False
+        match = _BLOCKED_REASON_LINE.match(line) if reason is None else None
+        value = match.group(1).lower() if match else None
+        if value is not None and value in BLOCKED_REASONS:
+            reason = value
+            skip_blank = bool(kept) and not kept[-1].strip()
+            continue
+        kept.append(line)
+    statement = "\n".join(kept).strip("\n")
+    return BlockedNote(reason=reason, statement=statement)
 
 
 @dataclass(frozen=True, slots=True)

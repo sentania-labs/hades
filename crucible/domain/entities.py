@@ -181,6 +181,12 @@ class Attempt:
     # and the reason in words, naming the repeated command. None for any other ending.
     stall_shape: str | None = None
     termination_detail: str | None = None
+    # hades #393: what a worker that stopped with `blocked.md` said. The reason is one
+    # of BLOCKED_REASONS (missing_capability, ambiguous_contract) or None when the file
+    # named none; the statement is the rest of the file, verbatim (redacted only when it
+    # matches a secret pattern). Both None for any other ending.
+    blocked_reason: str | None = None
+    blocked_statement: str | None = None
 
 
 @dataclass(slots=True)
@@ -386,6 +392,9 @@ class Escalation:
     closed_at: datetime | None = None
     decision_id: str | None = None
     last_wake_at: datetime | None = None
+    # hades #393: the reason the worker's `blocked.md` named (missing_capability or
+    # ambiguous_contract), None when it named none or the escalation is not a worker's.
+    reason: str | None = None
 
 
 @dataclass(slots=True)

@@ -581,6 +581,8 @@ def attempt_view(uow: UnitOfWork, attempt_id: str) -> AttemptView:
         resume_from_remote=a.resume_from_remote,
         stall_shape=a.stall_shape,
         termination_detail=a.termination_detail,
+        blocked_reason=a.blocked_reason,
+        blocked_statement=a.blocked_statement,
     )
 
 
@@ -672,6 +674,7 @@ def _escalation_view(e: Escalation) -> EscalationView:
         opened_at=e.opened_at,
         closed_at=e.closed_at,
         decision_id=e.decision_id,
+        reason=e.reason,
     )
 
 

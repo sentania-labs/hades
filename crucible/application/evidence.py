@@ -336,6 +336,7 @@ def record_collection_evidence(
             "termination_reason": attempt.termination_reason,
             "stall_shape": attempt.stall_shape,
             "termination_detail": attempt.termination_detail,
+            "blocked_reason": attempt.blocked_reason,
         },
     )
     claim_artifact_id: str | None = None
