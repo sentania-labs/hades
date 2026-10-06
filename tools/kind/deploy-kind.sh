@@ -246,6 +246,19 @@ server = "https://${registry_host}:5000"
   ca = "/etc/crucible-kind/ca.crt"
 EOF
 
+# docker.io mirror so that cluster-side pulls (busybox, CoreDNS) use the mirror first
+# and fall back to Docker Hub itself (22).
+docker exec "$node" mkdir -p "/etc/containerd/certs.d/docker.io"
+docker exec -i "$node" sh -c "cat > '/etc/containerd/certs.d/docker.io/hosts.toml'" <<EOF
+server = "https://registry-1.docker.io"
+
+[host."https://${CRUCIBLE_KIND_DOCKER_HUB_MIRROR}"]
+  capabilities = ["pull", "resolve"]
+
+[host."https://registry-1.docker.io"]
+  capabilities = ["pull", "resolve"]
+EOF
+
 crucible_kind_install_calico "$scratch" "$kubeconfig"
 
 # The locally built image goes in by kind load, never a registry pull. Retag it inside
