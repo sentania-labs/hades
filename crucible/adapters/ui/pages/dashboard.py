@@ -19,6 +19,106 @@ from crucible.application.errors import (
 router = APIRouter(prefix="/ui", include_in_schema=False)
 
 
+def _first_run_path(readiness: dict[str, Any]) -> list[dict[str, Any]]:
+    """crucible#169: the first-run setup path. Five numbered steps, each linking to its
+    page, shown as not done or done from the readiness state the Status page already
+    computes. The path disappears once every step is done. No em-dashes."""
+    steps: list[dict[str, Any]] = []
+    harnesses = readiness.get("harnesses", [])
+    readiness_steps = readiness.get("steps", [])
+
+    # Step 1: Local gateway -- Hermes/Qwen Code needs an endpoint and a valid credential.
+    # Done only when at least one hermes/qwen_code harness is ready (meaning endpoint
+    # and credential are set and verified).
+    gateway_done = False
+    for h in harnesses:
+        if h["name"] in ("hermes", "qwen_code") and h.get("state") == "ready":
+            gateway_done = True
+            break
+    steps.append(
+        {
+            "number": 1,
+            "label": "Local gateway",
+            "link": "/ui/gateway",
+            "done": gateway_done,
+            "detail": "Set the gateway URL and credential for Hermes.",
+        }
+    )
+
+    # Step 2: Images -- at least one harness has a promoted default image.
+    images_done = any(
+        h.get("state") in ("ready", "not_ready") and h.get("default_image") for h in harnesses
+    )
+    steps.append(
+        {
+            "number": 2,
+            "label": "Images",
+            "link": "/ui/images",
+            "done": images_done,
+            "detail": "Promote a worker image for each harness.",
+        }
+    )
+
+    # Step 3: Credentials -- all non-Hermes harnesses have valid credentials.
+    credentials_done = True
+    credential_names = {"credential_missing", "credential_unreadable", "credential_invalid"}
+    for h in harnesses:
+        if h["name"] in ("hermes", "qwen_code"):
+            continue
+        for s in h.get("steps", []):
+            if s.get("code", "") in credential_names:
+                credentials_done = False
+    # Also check readiness top-level: if no_ready_harness is present and there
+    # are non-Hermes harnesses, credentials may still be missing.
+    has_non_hermes_with_creds = any(h["name"] not in ("hermes", "qwen_code") for h in harnesses)
+    if has_non_hermes_with_creds and not credentials_done:
+        pass
+    elif has_non_hermes_with_creds and not readiness.get("ready_harnesses"):
+        # If no harness is ready at all, credentials may still be incomplete.
+        credentials_done = False
+    steps.append(
+        {
+            "number": 3,
+            "label": "Credentials",
+            "link": "/ui/credentials",
+            "done": credentials_done,
+            "detail": "Log in for each harness that needs a credential.",
+        }
+    )
+
+    # Step 4: GitHub -- a repository is registered and the app is connected.
+    github_done = all(
+        s.get("code") not in ("no_repository", "github_app_not_connected") for s in readiness_steps
+    )
+    steps.append(
+        {
+            "number": 4,
+            "label": "GitHub",
+            "link": "/ui/github",
+            "done": github_done,
+            "detail": "Register a repository and connect the GitHub App.",
+        }
+    )
+
+    # Step 5: Test each harness -- all non-off harnesses are ready.
+    active_harnesses = [h for h in harnesses if h.get("state") != "off"]
+    if active_harnesses:
+        harness_test_done = all(h.get("state") == "ready" for h in active_harnesses)
+    else:
+        harness_test_done = False
+    steps.append(
+        {
+            "number": 5,
+            "label": "Test each harness",
+            "link": "/ui/harnesses",
+            "done": harness_test_done,
+            "detail": "Run a test for every harness.",
+        }
+    )
+
+    return steps
+
+
 def _readiness_sections(readiness: dict[str, Any]) -> tuple[list[dict[str, Any]], list[Any]]:
     """crucible#123: the to-do list from the status document's `readiness` part, which is
     computed from the same state the other pages show. One row per missing step, each
@@ -92,6 +192,28 @@ async def dashboard(request: Request, ctx: Ctx, uow: UoW) -> Response:
     document = await status.status(ctx.admin, uow)
     readiness = document["readiness"]
     sections, (harness_summary, harness_detail) = _readiness_sections(readiness)
+    first_run = _first_run_path(readiness)
+    any_not_done = any(not s["done"] for s in first_run)
+    if any_not_done:
+        sections.insert(
+            0,
+            {
+                "title": "Before a task",
+                "columns": ["#", "Step", ""],
+                "rows": [
+                    [
+                        f"Step {s['number']}",
+                        {"kind": "note", "value": s["label"], "hint": s["detail"]}
+                        if not s["done"]
+                        else {"kind": "status", "value": s["label"], "tone": "ok"},
+                        {"kind": "link", "href": s["link"], "label": "Open"}
+                        if not s["done"]
+                        else "Done",
+                    ]
+                    for s in first_run
+                ],
+            },
+        )
     supervisor = document["supervisor"]
     tasks_part = document["tasks"]
     attention = sum(len(rows) for rows in tasks_part["lists"].values())
