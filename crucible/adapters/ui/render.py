@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from pathlib import Path
@@ -372,6 +373,131 @@ def _duration_words(milliseconds: Any) -> str:
 
 def _document_section(title: str, document: Any) -> dict[str, Any]:
     return {"title": title, "panel": _panel(document)}
+
+
+def _routing_policy_details(
+    routing_policy: dict[str, Any] | None,
+    delivery_policy: dict[str, Any] | None = None,
+    concurrency: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Routing Details for a policy document (issue 172).
+
+    Shows sentences about harnesses, pools, and pool exhaustion, model rows
+    (name, on/off, harness by default), and a collapsed JSON block.
+    """
+    lines: list[str] = []
+    model_rows: list[dict[str, Any]] = []
+
+    if routing_policy is None:
+        return {
+            "title": "Routing policy details",
+            "note": "No routing policy is loaded.",
+            "details": [],
+            "details_label": "View policy JSON",
+        }
+
+    # Build model index
+    models_list = routing_policy.get("models", [])
+    pools_dict = routing_policy.get("pools", {})
+
+    models_by_harness: dict[str, list[dict[str, Any]]] = {}
+    model_name_map: dict[str, str] = {}
+    for m in models_list:
+        harness = m.get("harness", "unknown")
+        models_by_harness.setdefault(harness, []).append(m)
+        model_name_map[m.get("id", "")] = m.get("model_name", m.get("id", ""))
+
+    # Which gateway (unique endpoint_url)
+    endpoints = {m.get("endpoint_url") for m in models_list if m.get("endpoint_url")}
+    gateway = sorted(endpoints)[0] if len(endpoints) == 1 else None
+
+    # Per-harness sentences
+    for harness in sorted(models_by_harness.keys()):
+        harness_models = models_by_harness[harness]
+        enabled = [m for m in harness_models if m.get("enabled")]
+        disabled = [m for m in harness_models if not m.get("enabled")]
+        model_ids = ", ".join(m["id"] for m in enabled) if enabled else "none"
+        line = f"{harness}: models {model_ids}"
+        if disabled:
+            disabled_ids = ", ".join(m["id"] for m in disabled)
+            line += f"; disabled: {disabled_ids}"
+        if gateway:
+            line += f" on {gateway}"
+        lines.append(line)
+
+    # Pool concurrency sentences
+    for pool_name in sorted(pools_dict.keys()):
+        pool = pools_dict[pool_name]
+        max_conc = pool.get("max_concurrency")
+        window = pool.get("window", "unknown")
+        budget = pool.get("budget_units", "unknown")
+        soft_limit = pool.get("soft_limit")
+
+        # How many run at once
+        at_once = str(max_conc) if max_conc else "unlimited"
+
+        # How the pool is exhausted
+        soft_str = ""
+        if soft_limit is not None:
+            soft_str = f", soft limit {soft_limit}"
+        if max_conc:
+            exhaust = (
+                f"pool {pool_name}: {at_once} run at once "
+                f"(window {window}, {budget}{soft_str}); "
+                "when the pool is exhausted routing waits for a run to finish"
+            )
+        else:
+            exhaust = (
+                f"pool {pool_name}: no concurrency cap "
+                f"(window {window}, {budget}{soft_str}); "
+                "when the pool is exhausted routing waits for a run to finish"
+            )
+        lines.append(exhaust)
+
+    # Model rows: name, on/off, harness by default
+    for m in models_list:
+        enabled_label = "on" if m.get("enabled") else "off"
+        harness = m.get("harness", "")
+        row: dict[str, Any] = {
+            "id": m.get("id", ""),
+            "enabled": enabled_label,
+            "harness": harness,
+        }
+        # Cost, weight, capability, pool, template flags: on request via `columns`
+        model_rows.append(row)
+
+    # Build columns - basic columns always present
+    columns = [
+        {"label": "Model", "source": "id"},
+        {"label": "State", "source": "enabled"},
+        {"label": "Harness", "source": "harness"},
+    ]
+
+    # One detail section with both documents
+    detail_items: list[dict[str, Any]] = []
+    if routing_policy is not None:
+        detail_items.append(
+            {
+                "title": "Routing policy",
+                "text": json.dumps(routing_policy, indent=2),
+            }
+        )
+    if delivery_policy is not None:
+        detail_items.append(
+            {
+                "title": "Delivery policy",
+                "text": json.dumps(delivery_policy, indent=2),
+            }
+        )
+
+    return {
+        "title": "Routing policy details",
+        "columns": columns,
+        "rows": [[r["id"], r["enabled"], r["harness"]] for r in model_rows],
+        "note": " ".join(lines) if lines else "",
+        "details": detail_items,
+        "details_label": "View policy JSON",
+    }
 
 
 templates.env.globals["panel_from_cell"] = _panel
