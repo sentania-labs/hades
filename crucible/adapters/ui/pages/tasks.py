@@ -33,6 +33,7 @@ from crucible.contracts.api import (
     DecisionRequest,
 )
 from crucible.contracts.evidence import REVIEW_DIFF_NAME, REVIEW_DIFF_TYPE
+from crucible.domain.egress_probe import host_words
 from crucible.domain.entities import Artifact, Role
 from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
 from crucible.domain.lifecycle import TaskState
@@ -69,6 +70,32 @@ def _effective_words(settings: dict[str, Any]) -> str:
         f"max output tokens {settings.get('max_output_tokens')}, "
         f"thinking {'on' if settings.get('thinking') else 'off'}"
     )
+
+
+def _egress_rows(view: Any) -> list[list[str]]:
+    """hades #425: one row per attempt per probed host, `reachable` or why not; an
+    attempt whose probe named no host, or whose probe line was rejected, says so in one
+    row."""
+    rows: list[list[str]] = []
+    for execution in view.executions:
+        for attempt in execution.attempts:
+            probe = attempt.egress_probe
+            if not probe:
+                continue
+            hosts = probe.get("hosts") or []
+            if probe.get("rejected"):
+                # The worker's first marker line was not the wrapper's shape: nothing
+                # was read from it, and that is what the row says.
+                rows.append([attempt.id, "none", f"probe line rejected: {probe['rejected']}"])
+                continue
+            if not hosts:
+                rows.append([attempt.id, "none", "no allowlisted host to probe"])
+                continue
+            for row in hosts:
+                words = host_words(row)
+                host = str(row.get("host", ""))
+                rows.append([attempt.id, host, words.removeprefix(f"{host} ")])
+    return rows
 
 
 def _busy_fallthrough(attempt: Any) -> str | None:
@@ -429,6 +456,21 @@ def task_page(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Response:
                 "title": "Routing",
                 "columns": ["Attempt", "Decision"],
                 "rows": fallthroughs,
+            }
+        )
+    # hades #425: what the launch wrapper could reach before the harness started, per
+    # allowlisted host, so a failed install reads as egress rather than as the worker.
+    egress_rows = _egress_rows(view)
+    if egress_rows:
+        sections.append(
+            {
+                "title": "Egress",
+                "note": (
+                    "Each allowlisted host, tried from inside the worker before the "
+                    "harness started. An unreachable host is the egress path, not the worker."
+                ),
+                "columns": ["Attempt", "Host", "Result"],
+                "rows": egress_rows,
             }
         )
     # Report: show what Crucible filled and what differed per attempt.

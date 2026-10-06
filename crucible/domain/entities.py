@@ -176,6 +176,10 @@ class Attempt:
     # hades #388: the context length, response allowance and thinking setting the
     # harness was launched with, recorded once and reused by every later spec of it.
     effective_settings: dict[str, Any] | None = None
+    # hades #425: what the launch wrapper's egress probe found before the harness
+    # started, per allowlisted host (`crucible.domain.egress_probe`), read off the
+    # worker log once; None until the line arrives, or for an attempt with no network.
+    egress_probe: dict[str, Any] | None = None
     # Issue 278: the shape of a stall Crucible ended before the time-based limit
     # (exit_class STALL_SHAPES: loop:wait, loop:empty_command, loop:command, no_activity)
     # and the reason in words, naming the repeated command. None for any other ending.

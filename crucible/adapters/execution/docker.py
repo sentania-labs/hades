@@ -176,8 +176,52 @@ WORKER_UID = 1000
 # `"session_id"` per command (Hermes's process registry, issue 152). While the harness
 # runs, the wrapper counts them every 10 seconds and writes the count to stderr whenever
 # it changes, so the supervisor can see a command in flight during the run. Only the
-# count leaves the file.
+# count leaves the file. CRUCIBLE_EGRESS_ALLOWLIST (hades #425) lists the hosts the
+# attempt's egress permits: before the harness starts, `egress_probe` tries each name on
+# 443 the way the harness would (through HTTPS_PROXY when it is set, straight through the
+# NetworkPolicy when it is not), for at most ten seconds per host, and writes one
+# `crucible-egress-probe: {...}` line to stderr (crucible/domain/egress_probe.py), which
+# the supervisor records on the attempt. A host it cannot reach is reported, never a
+# reason not to start; a `host:port` entry is a local endpoint and is left alone.
 LAUNCH_WRAPPER = r"""set -u
+egress_probe() {
+  list=${CRUCIBLE_EGRESS_ALLOWLIST:-}
+  [ -n "$list" ] || return 0
+  old_ifs=$IFS
+  IFS=,
+  set -- $list
+  IFS=$old_ifs
+  rows=
+  for host do
+    case "$host" in *:*) continue;; esac
+    result=$(curl -sS -k -o /dev/null --connect-timeout 5 --max-time 10 \
+      -w '\ncrucible_time=%{time_total}' "https://$host/" 2>&1)
+    code=$?
+    case "$result" in
+      *crucible_time=*)
+        seconds=${result##*crucible_time=}
+        detail=${result%crucible_time=*}
+        ;;
+      *) seconds=0; detail=$result;;
+    esac
+    case "$code" in 0|35|52) reachable=true;; *) reachable=false;; esac
+    # jq replaces malformed UTF-8 and --ascii-output keeps the pods/log marker ASCII.
+    # Sequential checks need no temporary-file utilities beyond the guaranteed shell.
+    row=$(jq -acn \
+      --ascii-output \
+      --arg host "$host" \
+      --argjson reachable "$reachable" \
+      --argjson curl_exit "$code" \
+      --arg seconds "$seconds" \
+      --arg detail "$detail" \
+      '{host:$host,reachable:$reachable,curl_exit:$curl_exit,
+        ms:(($seconds | tonumber) * 1000 | round),
+        detail:($detail | gsub("[\\n\\r\\t]"; " ") | .[0:200])}') || continue
+    rows="$rows${rows:+,}$row"
+  done
+  printf 'crucible-egress-probe: {"hosts":[%s]}\n' "$rows" >&2
+}
+egress_probe
 if [ -n "${CRUCIBLE_CODEX_CONFIG:-}" ]; then
   mkdir -p "$CODEX_HOME" || exit 1
   printf '%s\n' "$CRUCIBLE_CODEX_CONFIG" > "$CODEX_HOME/config.toml" || exit 1
@@ -195,13 +239,6 @@ unset CRUCIBLE_ENV_FROM_FILES
 feed() {
   for f in ${CRUCIBLE_STDIN_FILES:-}; do cat "$f"; printf '\n'; done
   if [ -n "${CRUCIBLE_PROMPT:-}" ]; then printf '%s\n' "$CRUCIBLE_PROMPT"; fi
-}
-run() {
-  if [ -n "${CRUCIBLE_STDIN_FILES:-}${CRUCIBLE_PROMPT:-}" ]; then
-    feed | "$@"
-  else
-    "$@" </dev/null
-  fi
 }
 watch_in_flight() {
   shown=0
@@ -223,12 +260,59 @@ if [ -n "${CRUCIBLE_IN_FLIGHT_FILE:-}" ]; then
   watch_in_flight </dev/null >/dev/null &
   watcher=$!
 fi
-if [ -n "${CRUCIBLE_TRANSCRIPT:-}" ]; then
-  run "$@" | tee "$CRUCIBLE_TRANSCRIPT"
+# Keep the harness a direct child, including when stdin is fed or stdout is teed.
+# A foreground pipeline defers Bash's TERM trap until the harness has exited.
+child=
+termination_requested=0
+interrupted=0
+forward_term() {
+  termination_requested=1
+  interrupted=1
+  if [ -n "$child" ]; then kill -TERM "$child" 2>/dev/null || :; fi
+}
+trap forward_term TERM
+wait_for() {
+  while :; do
+    interrupted=0
+    wait "$1"
+    result=$?
+    # A trapped signal interrupts wait. Reap the child after its cleanup finishes.
+    [ "$interrupted" -eq 0 ] && return "$result"
+  done
+}
+feeder=
+if [ -n "${CRUCIBLE_STDIN_FILES:-}${CRUCIBLE_PROMPT:-}" ]; then
+  exec {input}< <(feed)
+  feeder=$!
 else
-  run "$@"
+  exec {input}</dev/null
 fi
+transcriber=
+if [ -n "${CRUCIBLE_TRANSCRIPT:-}" ]; then
+  exec {output}> >(tee "$CRUCIBLE_TRANSCRIPT")
+  transcriber=$!
+else
+  exec {output}>&1
+fi
+"$@" <&"$input" >&"$output" &
+child=$!
+exec {input}<&-
+exec {output}>&-
+if [ "$termination_requested" -eq 1 ]; then kill -TERM "$child" 2>/dev/null || :; fi
+wait_for "$child"
 status=$?
+child=
+# Preserve pipefail ordering and drain the transcript, including cleanup output.
+if [ -n "$feeder" ]; then
+  wait_for "$feeder"
+  feed_status=$?
+  [ "$status" -ne 0 ] || status=$feed_status
+fi
+if [ -n "$transcriber" ]; then
+  wait_for "$transcriber"
+  tee_status=$?
+  [ "$tee_status" -eq 0 ] || status=$tee_status
+fi
 if [ -n "$watcher" ]; then kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null; fi
 exit "$status"
 """
@@ -904,16 +988,9 @@ class DockerProvider:
             **PACKAGE_CACHE_ENV,
             **spec.env,
         }
-        network_policy = str(spec.policy.get("network", {}).get("mode", "egress-proxy"))
-        if spec.network == "none" or network_policy == "none":
+        wanted = self._egress_wanted(spec)
+        if wanted is None:
             return "none", env
-        wanted = egress_allowlist(
-            self.harnesses,
-            spec.harness,
-            [str(h) for h in (spec.policy.get("network", {}).get("egress_allowlist") or [])],
-            [str(h) for h in (spec.contract.get("constraints", {}).get("egress_extra") or [])],
-            spec.endpoint_url,
-        )
         configured = set(self.config.proxy_allowlist)
         if configured and not set(wanted) <= configured:
             missing = sorted(set(wanted) - configured)
@@ -969,16 +1046,40 @@ class DockerProvider:
             "HostConfig": host_config,
         }
 
+    def _egress_wanted(self, spec: LaunchSpec) -> tuple[str, ...] | None:
+        """Every destination this attempt's egress permits (13, S6): the policy's
+        `egress_allowlist`, the contract's `egress_extra`, the adapter's declared
+        endpoints and a local route's `host:port`. None when the attempt has no network
+        at all."""
+        network_policy = str(spec.policy.get("network", {}).get("mode", "egress-proxy"))
+        if spec.network == "none" or network_policy == "none":
+            return None
+        return tuple(
+            egress_allowlist(
+                self.harnesses,
+                spec.harness,
+                [str(h) for h in (spec.policy.get("network", {}).get("egress_allowlist") or [])],
+                [str(h) for h in (spec.contract.get("constraints", {}).get("egress_extra") or [])],
+                spec.endpoint_url,
+            )
+        )
+
+    def _probe_hosts(self, spec: LaunchSpec) -> tuple[str, ...]:
+        """hades #425: the allowlisted names the launch wrapper probes before the harness
+        starts. `host:port` entries are local endpoints, which the probe leaves alone."""
+        return tuple(h for h in (self._egress_wanted(spec) or ()) if ":" not in h)
+
     def _command(self, spec: LaunchSpec) -> tuple[list[str], dict[str, str]]:
-        """The harness argv, wrapped only when the launch needs stdin, a transcript, or
-        a variable filled from a credential file (07). A plain argv stays plain."""
+        """The harness argv, wrapped only when the launch needs stdin, a transcript, a
+        variable filled from a credential file (07), or the egress probe (hades #425: an
+        attempt with allowlisted hosts). A plain argv with no network stays plain."""
         argv = list(spec.command)
         if not argv:
             adapter = self.harnesses.get(spec.harness)
             if adapter is not None:
                 argv = list(adapter.build_launch(self._launch_context(spec)).argv)
         wrapped = bool(spec.env_from_files or spec.stdin_files or spec.stdin_text)
-        wrapped = wrapped or bool(spec.transcript_path)
+        wrapped = wrapped or bool(spec.transcript_path) or bool(self._probe_hosts(spec))
         if not wrapped:
             return argv, {}
         env: dict[str, str] = {}

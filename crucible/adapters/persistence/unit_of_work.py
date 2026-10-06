@@ -664,6 +664,7 @@ class Attempts:
             effective_settings=(
                 dict(row.effective_settings) if row.effective_settings is not None else None
             ),
+            egress_probe=dict(row.egress_probe) if row.egress_probe is not None else None,
             stall_shape=row.stall_shape,
             termination_detail=row.termination_detail,
             blocked_reason=row.blocked_reason,
@@ -706,6 +707,7 @@ class Attempts:
                 resume_from_remote=attempt.resume_from_remote,
                 routing_version=attempt.routing_version,
                 effective_settings=attempt.effective_settings,
+                egress_probe=attempt.egress_probe,
                 stall_shape=attempt.stall_shape,
                 termination_detail=attempt.termination_detail,
                 blocked_reason=attempt.blocked_reason,
@@ -753,6 +755,7 @@ class Attempts:
                 resume_from_remote=attempt.resume_from_remote,
                 routing_version=attempt.routing_version,
                 effective_settings=attempt.effective_settings,
+                egress_probe=attempt.egress_probe,
                 stall_shape=attempt.stall_shape,
                 termination_detail=attempt.termination_detail,
                 blocked_reason=attempt.blocked_reason,

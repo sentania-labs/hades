@@ -107,3 +107,20 @@ def test_pod_log_sends_limit_bytes_and_since_time(monkeypatch: pytest.MonkeyPatc
     assert call["params"]["sinceTime"] == "2026-09-25T17:00:00Z"
     client.pod_log("worker-1")
     assert "limitBytes" not in seen[1]["params"]
+
+
+def test_pod_log_replaces_non_utf8_bytes_at_the_kubernetes_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InvalidBody:
+        def read(self) -> bytes:
+            return b"publisher byte: \xfc\n"
+
+    @contextmanager
+    def request(method: str, path: str, **kwargs: Any) -> Iterator[InvalidBody]:
+        yield InvalidBody()
+
+    client = KubernetesClient(ClusterAccess(server="https://127.0.0.1:6443"), "workers")
+    monkeypatch.setattr(client, "_request", request)
+    [frame] = client.pod_log("publisher-1")
+    assert frame.payload.decode("utf-8") == "publisher byte: \ufffd\n"
