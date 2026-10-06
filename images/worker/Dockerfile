@@ -1,9 +1,9 @@
-# Crucible worker image (spec 13, ADR 0011): one image carrying all four harness
-# CLIs, Claude Code, Codex, AGY and Hermes, each at its pinned version. The operator
+# Crucible worker image (spec 13, ADR 0011): one image carrying all five harness
+# CLIs, Claude Code, Codex, AGY, Hermes and Qwen Code, each at its pinned version. The operator
 # chose one image over one per harness on 2026-09-22 at 3:09 PM (C11): one digest
 # to build, publish, promote and roll back. Debian slim by digest, uid 1000 worker,
 # git, curl, jq, make, ripgrep, the lab root CA, the Python runtime Hermes needs, the
-# four CLIs, the toolchain a Python project's own checks call (uv, CPython 3.12 and
+# five CLIs, the toolchain a Python project's own checks call (uv, CPython 3.12 and
 # gitleaks, hades #184, ADR 0020), and the shared libraries Qt's offscreen platform
 # loads (hades #430: what ldd reports missing for PySide6's libQt6Gui.so.6 and
 # libqoffscreen.so, so a GUI test suite runs with QT_QPA_PLATFORM=offscreen and no
@@ -95,6 +95,27 @@ ARG HARNESS_HERMES_SHA256=bd0bac012aee38a60894781f4597dc29ee7bedb3448540249921f1
 ADD --checksum=sha256:${HARNESS_HERMES_SHA256} --chmod=0644 \
     https://files.pythonhosted.org/packages/e5/30/c85be8290e9565dc3c7a9720e93f3e59e09b1b163487be4946c3aa848f80/hermes_agent-${HARNESS_HERMES_VERSION}-py3-none-any.whl \
     /fetch/hermes_agent-${HARNESS_HERMES_VERSION}-py3-none-any.whl
+
+# Qwen Code's npm release is a self-contained JS bundle. Extract only the pinned
+# tarball: no npm dependency resolution or optional native addons in this headless
+# worker. Shell tools use child_process and the image's rg. Node includes npm (#288).
+FROM ${BASE_IMAGE} AS fetch-qwen-code
+ARG SOURCE_DATE_EPOCH
+ARG NODE_VERSION=22.16.0
+ARG NODE_SHA256=fb870226119d47378fa9c92c4535389c72dae14fcc7b47e6fdcc82c43de5a547
+ARG HARNESS_QWEN_CODE_VERSION=0.25.0
+ARG HARNESS_QWEN_CODE_SHA256=afeab0c85d682f201101319ce05decf3302d7ed7fb6319baa6a592051ea1a1ba
+ADD --checksum=sha256:${NODE_SHA256} --chmod=0644 \
+    https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz \
+    /fetch/node.tar.gz
+ADD --checksum=sha256:${HARNESS_QWEN_CODE_SHA256} --chmod=0644 \
+    https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-${HARNESS_QWEN_CODE_VERSION}.tgz \
+    /fetch/qwen.tgz
+RUN set -eu; \
+    mkdir -p /fetch/node /fetch/qwen; \
+    tar -xzf /fetch/node.tar.gz -C /fetch/node --strip-components=1 --no-same-owner; \
+    tar -xzf /fetch/qwen.tgz -C /fetch/qwen --strip-components=1 --no-same-owner; \
+    find /fetch/node /fetch/qwen -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
 
 # The project toolchain (hades #184, ADR 0020): what a repository's `make lint`,
 # `make test-unit` and `make scan` call when the repository is a uv project, which
@@ -245,6 +266,19 @@ RUN set -eu; \
     test -s /tmp/locked; \
     diff -u /tmp/locked /tmp/installed; \
     rm -rf /root/.cache /tmp/requirements.lock /tmp/locked /tmp/installed /fetch
+COPY --from=fetch-qwen-code /fetch/node /usr/local
+COPY --from=fetch-qwen-code /fetch/qwen /opt/qwen-code
+ARG NODE_VERSION=22.16.0
+ARG HARNESS_QWEN_CODE_VERSION=0.25.0
+RUN set -eu; \
+    chmod 0755 /opt/qwen-code/cli-entry.js; \
+    ln -s /opt/qwen-code/cli-entry.js /usr/local/bin/qwen; \
+    export HOME=/tmp/qwen-version NPM_CONFIG_CACHE=/tmp/qwen-npm; \
+    test "$(node --version)" = "v${NODE_VERSION}"; \
+    npm --version; \
+    test "$(qwen --version)" = "${HARNESS_QWEN_CODE_VERSION}"; \
+    rm -rf /tmp/qwen-version /tmp/qwen-npm
+COPY --chmod=0755 worker/crucible-qwen-code.py /usr/local/bin/crucible-qwen-code
 COPY --chmod=0755 worker/crucible-hermes.py /usr/local/bin/crucible-hermes
 # FDY-0140: Hermes puts the directory of whichever `hermes` it finds first on the PATH
 # of every command the model runs; with none on PATH it falls back to its own venv's

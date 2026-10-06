@@ -1141,7 +1141,7 @@ class KubernetesProvider:
             return False
         if credential.required_for_launch:
             return True
-        secret_name = self.config.credential_secret_name(harness)
+        secret_name = self.config.credential_secret_name(credential.harness)
         try:
             source = await self._call(self.client.get, "secrets", secret_name)
         except KubernetesUnavailableError:

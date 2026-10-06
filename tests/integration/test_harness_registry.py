@@ -144,7 +144,7 @@ async def test_get_harnesses_reports_flags_ranges_and_a_sanitized_credential_sta
     task_id = submit_and_start(client, "crucible-worker:fake-succeed")
     await run_to_settled(supervisor, client, task_id)
     items = {h["name"]: h for h in client.get("/v1/harnesses").json()["items"]}
-    assert set(items) == {"claude_code", "codex", "agy", "hermes", "script-harness"}
+    assert set(items) == {"claude_code", "codex", "agy", "hermes", "qwen_code", "script-harness"}
     agy = items["agy"]
     assert agy["enabled"] is False and agy["enabled_by_administrator"] is False
     assert agy["enabled_by_configuration"] is True

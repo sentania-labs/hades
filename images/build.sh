@@ -65,7 +65,8 @@ case "${NO_CACHE:-0}" in 0|"") ;; *) no_cache="--no-cache" ;; esac
   "${GITLEAKS_VERSION:?}" "${GITLEAKS_SHA256:?}" "${RIPGREP_VERSION:?}" \
   "${LIBGL1_VERSION:?}" "${LIBEGL1_VERSION:?}" "${LIBXKBCOMMON0_VERSION:?}" \
   "${LIBDBUS_1_3_VERSION:?}" "${LIBFONTCONFIG1_VERSION:?}" "${LIBFREETYPE6_VERSION:?}" \
-  "${LIBGLIB2_0_0_VERSION:?}" "${LIBX11_6_VERSION:?}" "${LIBXCB1_VERSION:?}"
+  "${LIBGLIB2_0_0_VERSION:?}" "${LIBX11_6_VERSION:?}" "${LIBXCB1_VERSION:?}" \
+  "${NODE_VERSION:?}" "${NODE_SHA256:?}"
 
 # rewrite-timestamp only clamps a file newer than SOURCE_DATE_EPOCH. A context file at
 # or before it (a checkout from before an epoch bump) would keep its own mtime in the
@@ -193,6 +194,8 @@ for image in "${images[@]}"; do
         --build-arg "LIBGLIB2_0_0_VERSION=$LIBGLIB2_0_0_VERSION" \
         --build-arg "LIBX11_6_VERSION=$LIBX11_6_VERSION" \
         --build-arg "LIBXCB1_VERSION=$LIBXCB1_VERSION" \
+        --build-arg "NODE_VERSION=$NODE_VERSION" \
+        --build-arg "NODE_SHA256=$NODE_SHA256" \
         --build-arg "UV_VERSION=$UV_VERSION" \
         --build-arg "UV_SHA256=$UV_SHA256" \
         --build-arg "CPYTHON_VERSION=$CPYTHON_VERSION" \

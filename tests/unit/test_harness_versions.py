@@ -182,3 +182,10 @@ def test_an_image_with_no_harness_label_is_refused_before_launch() -> None:
     assert not check.ok and "no crucible.harnesses" in check.detail
     assert not check_image_version("codex", labels("claude_code", "0.156.0")).ok
     assert check_image_version("codex", labels("codex", "0.156.0")).ok
+
+
+def test_qwen_code_version_is_pinned_and_gated() -> None:
+    assert check_image_version("qwen_code", WORKER_LABELS).ok
+    assert WORKER_LABELS["crucible.harness.qwen_code.version"] == "0.25.0"
+    for version in ("0.24.0", "0.26.0"):
+        assert not check_image_version("qwen_code", labels("qwen_code", version)).ok

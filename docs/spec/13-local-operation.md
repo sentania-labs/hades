@@ -91,13 +91,13 @@ requirement.
 2026-09-22 at 3:09 PM (C11): "let's go with one image, it'll make the tests
 cheaper and easier in the long run." Before C11 there was one image per
 harness; now `images/worker/Dockerfile` builds a single image with Claude
-Code, Codex, AGY and Hermes, each CLI at its own pinned version and each
+Code, Codex, AGY, Hermes and Qwen Code, each CLI at its own pinned version and each
 downloaded by URL and verified against a sha256 computed when the pin was
 taken. It is Debian slim, non-root `worker` (uid 1000), git, curl, jq,
 make (the shipped policy's required checks start with it, hades #181),
 ripgrep (Hermes's search tool runs it, and its grep fallback missed matches
 under a relative root, hades #385), the lab root CA, the Python runtime and
-hash-locked virtual environment Hermes needs, the four CLIs, the toolchain a
+hash-locked virtual environment Hermes needs, the five CLIs, the toolchain a
 uv project's own checks call (`uv`,
 CPython 3.12 as `python3.12` only, and `gitleaks`, each pinned in
 `images/pins.env`; hades #184, ADR 0020), `crucible-report` (the worker's report checker, a
@@ -116,6 +116,18 @@ to the epoch (07, S11). Each adapter launches its CLI by absolute path
 inside the shared image, and Hermes's virtual environment is on PATH for
 the Hermes process only. The e2e image, `images/script-harness`, stays
 separate: it exists for CI.
+
+Qwen Code 0.25.0 is the bundled `@qwen-code/qwen-code` npm tarball, pinned by
+version and SHA256 in its self-contained `fetch-qwen-code` stage. Node 22.16.0
+and its bundled npm are pinned by version and SHA256 there and in `pins.env`;
+Node's checksum is published in its [release SHASUMS](https://nodejs.org/dist/v22.16.0/SHASUMS256.txt).
+The npm archive checksum is recorded by the
+[Qwen 0.25.0 package manifest](https://github.com/amrkmn/homebrew-tap/blob/3191e2bd3ba50b2068e1158a0217067db2f26dd0/Formula/qwen-code.rb);
+CI verifies the download against it. No optional native npm addons are resolved. The wrapper
+selects child_process shell execution and system ripgrep. Node and npm also let
+repositories run their JavaScript checks (#288); these are available names in
+`repository.required_programs`. See spec 07 for Qwen's loop-cap and context-window
+settings and their routing override.
 
 Tag: `crucible-worker:<YYYYMMDD>-<build>` for the worker image, where the
 date is the UTC day of `SOURCE_DATE_EPOCH` (the pinned inputs' instant) and

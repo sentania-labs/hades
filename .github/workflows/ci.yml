@@ -195,6 +195,13 @@ jobs:
         run: >-
           make images-check CACHE_DIR="$RUNNER_TEMP/buildkit-cache" NO_CACHE="$NO_CACHE"
           DIGEST_WRITEBACK="$DIGEST_WRITEBACK"
+      - name: Qwen Code and Node versions in the built worker image
+        run: |
+          set -euo pipefail
+          source images/manifest.env
+          test "$(docker run --rm --network none "$WORKER" node --version)" = "v22.16.0"
+          docker run --rm --network none "$WORKER" npm --version
+          test "$(docker run --rm --network none "$WORKER" qwen --version)" = "0.25.0"
       # The handoff to images-digest.yml: only the digest lines, as data. That workflow
       # trusts nothing in it and checks it against the branch's manifest again.
       - name: hand the built digests to the digest commit

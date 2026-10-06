@@ -8,7 +8,7 @@ run back into a parsed report. Adapters contain no lifecycle logic.
 
 ```python
 class HarnessAdapter(Protocol):
-    name: HarnessName                     # "claude_code" | "codex" | "agy" | "hermes" | "script-harness" (e2e only, 18)
+    name: HarnessName                     # "claude_code" | "codex" | "agy" | "hermes" | "qwen_code" | "script-harness" (e2e only, 18)
     supported_versions: VersionRange      # tested range; launch refused outside it
     def capabilities(self) -> HarnessCapabilities: ...
     def credential_spec(self) -> CredentialSpec: ...
@@ -374,3 +374,34 @@ Local egress adds the gateway endpoint instead of Codex's subscription hosts; po
 package registries remain available as for Hermes. Local Codex holds no writable
 subscription credential and shares the local pool's concurrency limit. Subscription
 launch, credential synchronization, and its concurrency cap of one are unchanged.
+
+### Qwen Code (`qwen_code`, 0.25.0)
+
+The local-only adapter launches `crucible-qwen-code`, which writes settings and
+execs `qwen --yolo --auth-type openai --advisor off --output-format stream-json
+--max-session-turns 300 "<IDENTITY>"`. The full IDENTITY.md precedes the pointer
+prompt, including the requirement to write `report.yaml` as CompletionClaimV1.
+CLI success prose is never substituted for that report. `OPENAI_BASE_URL` names
+the gateway and `OPENAI_MODEL` the routed lane (`model_name` when configured).
+The adapter mounts Hermes's existing `api-key` read-only and resolves it as
+`OPENAI_API_KEY` at container start, with no credential sync-back.
+
+The fresh home gets `~/.qwen/settings.json` with two model settings:
+
+- `model.maxToolCallsPerTurn: 0` disables the per-turn tool-call cap that stopped
+  10 of the 44 replay runs in #448.
+- `model.generationConfig.contextWindowSize` is the full engine window, from the
+  routing entry's positive integer `context_length`, or **131072** by default.
+  Qwen 0.25.0 clamps output to the room left in this window, including its safety
+  margin, preventing a 32000-token output reservation beyond the engine limit.
+  The effective value is recorded on the attempt and reused on reconstruction.
+
+Shell execution uses child_process rather than optional native PTY addons; search
+uses the image's pinned ripgrep. The npm bundle is extracted without resolving
+optional native dependencies. CI checks Node, npm and Qwen in the built image.
+The provider captures stream-json as `transcript.jsonl`; the adapter reads result
+usage and completion, and pairs assistant `tool_use` with user `tool_result`
+blocks for command activity. A missing result is an evidence anomaly. Exit 75
+with `blocked.md` is blocked; a 400 context overflow is a provider error, and a
+quota refusal is quota exhausted. Unstructured refusals do not change shared pool
+state. Session-turn exhaustion is incomplete.

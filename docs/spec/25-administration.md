@@ -574,3 +574,19 @@ the red merge commit, its failing jobs, the pull requests merged since the last 
 main, and the automatically opened fix-main task. Green checks clear the hold only for
 the held commit itself or for main's verified current tip; a superseded older commit's
 green does not (23).
+
+### Qwen Code on Harnesses and Images
+
+Harnesses lists all five adapters: Claude Code, Codex, AGY, Hermes and Qwen Code
+(`qwen_code`). Enable Qwen Code and add a local routing model on `lab-local`;
+set the gateway key on Local gateway, shared read-only with Hermes. The Images
+workflow offers a separate Qwen Code promotion and rollback, using its own
+`harness_images` row and the image's `crucible.harness.qwen_code.version` label.
+Promoting Qwen Code never moves Hermes or the subscription harness defaults.
+
+The Qwen wrapper writes `model.maxToolCallsPerTurn: 0` before launch to disable
+the per-turn tool-call cap, and `model.generationConfig.contextWindowSize` from
+the routing model's `context_length` (default 131072). This full engine window
+lets Qwen reserve output within the limit; an engine with another capacity needs
+its actual value on the routing entry. These settings are independent of the
+Hermes run-limit form. See spec 07 for the launch and stream evidence contract.

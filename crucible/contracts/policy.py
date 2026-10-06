@@ -173,7 +173,8 @@ class Git(StrictModel):
 class RepositoryRules(StrictModel):
     required_checks: list[str]
     # hades #184: the programs those checks call beyond the first word of each (`uv`,
-    # `gitleaks` behind `make lint` and `make scan`). A declaration only: Crucible does
+    # `gitleaks` behind `make lint` and `make scan`, or `node` and `npm` for JavaScript).
+    # A declaration only: Crucible does
     # not read it at run time; `make images-policy-check` proves each resolves in the
     # worker image, so a shipped policy and the image cannot disagree about them.
     required_programs: list[str] = Field(default_factory=list)
@@ -422,6 +423,8 @@ class ChatTemplateKwargs(StrictModel):
 
 
 class RoutingModel(StrictModel):
+    # Full engine window for Qwen Code; absent uses its documented 131072 default.
+    context_length: int | None = Field(default=None, gt=0, strict=True)
     # Gateway alias when two harnesses share one model but need distinct routing IDs.
     model_name: str | None = Field(default=None, min_length=1)
     id: str = Field(min_length=1)
