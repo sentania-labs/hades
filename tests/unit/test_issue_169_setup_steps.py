@@ -271,3 +271,62 @@ def test_off_harnesses_ignored_for_harness_test() -> None:
     )
     path = _first_run_path(readiness)
     assert path[4]["done"] is True
+
+
+def test_image_state_shows_when_missing() -> None:
+    """Image state is preserved in the readiness payload so the first-run path
+    can see when a harness has no promoted image. The test constructs a readiness
+    payload that mimics what harness_readiness() now returns (with default_image
+    and images preserved from the source), then renders the first-run path and
+    asserts that the missing image state surfaces."""
+    readiness = _readiness_with_harnesses(
+        [
+            {
+                "name": "codex",
+                "state": "not_ready",
+                "steps": [{"code": "no_promoted_image", "text": "no image", "fix": "/ui/images"}],
+                "default_image": None,
+                "images": [
+                    {
+                        "reference": "w:2",
+                        "harness_version": "0.24.0",
+                        "digest": "sha256:def",
+                        "promotion_state": "candidate",
+                    }
+                ],
+            }
+        ]
+    )
+    path = _first_run_path(readiness)
+    # Step 2 (Images) should be not done because codex has no promoted default image.
+    assert path[1]["label"] == "Images"
+    assert path[1]["done"] is False
+    # The harness entry in readiness should still carry images.
+    harness = next(h for h in readiness["harnesses"] if h["name"] == "codex")
+    assert harness["images"] is not None
+    assert len(harness["images"]) == 1
+    assert harness["images"][0]["promotion_state"] == "candidate"
+
+
+def test_images_done_via_images_list() -> None:
+    """Images step is done when an image has promotion_state == 'default'."""
+    readiness = _readiness_with_harnesses(
+        [
+            {
+                "name": "hermes",
+                "state": "ready",
+                "steps": [],
+                "default_image": {"reference": "w:1"},
+                "images": [
+                    {
+                        "reference": "w:1",
+                        "harness_version": "0.25.0",
+                        "digest": "sha256:abc",
+                        "promotion_state": "default",
+                    }
+                ],
+            }
+        ]
+    )
+    path = _first_run_path(readiness)
+    assert path[1]["done"] is True
