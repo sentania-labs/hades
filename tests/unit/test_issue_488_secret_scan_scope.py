@@ -6,13 +6,14 @@ import hashlib
 import importlib.util
 import subprocess
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
 from crucible.adapters.execution import scripts, workspace
 from crucible.adapters.execution.collected import scan_changed_content
 from crucible.adapters.harness.hermes import HERMES_HOME
+from crucible.application.queries import gate_summary
 from crucible.domain.gates import GateResult, no_secrets
 from crucible.ports.execution import WORK_MOUNT
 
@@ -95,6 +96,25 @@ def test_added_fixture_fails_with_path_rule_and_excerpt(tmp_path: Path) -> None:
     outcome = no_secrets(gate_input)
     assert outcome.result is GateResult.FAIL
     assert "diff:fixture.py:github_token:ghp...AAA" in outcome.detail
+
+
+def test_gate_summary_result_keeps_the_match_detail() -> None:
+    row = SimpleNamespace(
+        gate="no_secrets",
+        result="fail",
+        detail="secret pattern matched at diff:x:github_token:ghp...AAA",
+        blocking=True,
+        findings=[],
+        head_sha="head",
+    )
+    uow = SimpleNamespace(
+        tasks=SimpleNamespace(get=lambda _task_id: SimpleNamespace(head_sha="head")),
+        gate_results=SimpleNamespace(list_for_task=lambda _task_id: [row]),
+    )
+    assert gate_summary(uow, "task")["results"]["no_secrets"] == {
+        "result": "fail",
+        "detail": row.detail,
+    }
 
 
 def _wrapper(name: str) -> ModuleType:

@@ -178,7 +178,7 @@ def test_gate_failure_wake_names_next_starting_head(monkeypatch: pytest.MonkeyPa
     assert "remote_branch is an explicit alternative" in wake.payload["summary"]
 
 
-def test_no_secrets_failure_wake_names_published_head(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_secrets_failure_wake_names_correctable_match(monkeypatch: pytest.MonkeyPatch) -> None:
     supervisor, pending, uow = _routing_setup(monkeypatch, all_busy=False)
     pending.task.state = TaskState.REPORTED
     pending.task.head_sha = "unsafe-head"
@@ -203,5 +203,6 @@ def test_no_secrets_failure_wake_names_published_head(monkeypatch: pytest.Monkey
         execution=pending.execution,
     )
     wake = uow.wakes.add.call_args.args[0]
-    assert "failed bundle is unsafe because no_secrets failed" in wake.payload["summary"]
-    assert "published head published-head" in wake.payload["summary"]
+    assert "secret pattern matched" in wake.payload["summary"]
+    assert "defaults to last_attempt at unsafe-head" in wake.payload["summary"]
+    assert "where the match can be removed" in wake.payload["summary"]
