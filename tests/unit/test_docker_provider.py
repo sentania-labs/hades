@@ -301,7 +301,8 @@ async def test_a_hung_verifier_fails_verification_ran_with_the_reason(tmp_path: 
 
 class CloningClient(StubClient):
     """A preparer that clones until it is force-removed, as one against a git host
-    that never answers would: the daemon's wait returns only when the container goes."""
+    that never answers would: the daemon's wait returns only when the container goes.
+    The cache refresher that runs before it (hades #137) finishes at once."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -310,10 +311,17 @@ class CloningClient(StubClient):
         self.returned = threading.Event()
         self.forced: list[bool] = []
 
+    def _is_preparer(self, container_id: str) -> bool:
+        index = int(container_id.removeprefix("container-")) - 1
+        return str(self.created[index]["name"]).startswith("crucible-preparer-")
+
     def start_container(self, container_id: str) -> None:
-        self.started.set()
+        if self._is_preparer(container_id):
+            self.started.set()
 
     def wait_container(self, container_id: str, *, timeout: float) -> int:
+        if not self._is_preparer(container_id):
+            return 0
         try:
             if not self.gone.wait(timeout):
                 raise TimeoutError("timed out")
@@ -322,6 +330,8 @@ class CloningClient(StubClient):
             self.returned.set()
 
     def remove_container(self, container_id: str, *, force: bool = True) -> None:
+        if not self._is_preparer(container_id):
+            return
         self.forced.append(force)
         super().remove_container(container_id, force=force)
         self.gone.set()
@@ -358,8 +368,10 @@ async def test_a_cancel_during_the_preparer_removes_it_within_one_poll(tmp_path:
     # Asked on every poll while the clone ran, and noticed within one poll of the cancel.
     assert len(asked) >= 3, asked
     assert settled <= docker.cancel_poll_seconds + 0.15, settled
-    assert client.created and client.created[0]["name"].startswith("crucible-preparer-")
-    assert client.removed == ["container-1"] and client.forced == [True]
+    # The refresher ran and finished first; the hang, and the cancel, were the preparer's.
+    assert [c["name"].split("-", 2)[1] for c in client.created] == ["cache", "preparer"]
+    assert client.created[1]["name"].startswith("crucible-preparer-")
+    assert client.removed == ["container-2"] and client.forced == [True]
     # The daemon's wait, abandoned in its thread, ended once the container was gone.
     assert await asyncio.to_thread(client.returned.wait, 5)
 

@@ -34,6 +34,7 @@ from crucible.ports.execution import (
 
 __all__ = [
     "ACTIVITY_SCRIPT",
+    "ACTIVITY_WALK_SECONDS",
     "BUNDLE_MOUNT",
     "BUNDLE_VERIFY_SCRIPT",
     "COMMIT_HOOK_DIR",
@@ -56,6 +57,9 @@ __all__ = [
     "verifier_script",
 ]
 
+# The reference cache: bare mirrors keyed by repository URL, shared across attempts. The
+# refresher (a Job on Kubernetes, 26; a container of its own with Docker, hades #137)
+# is its one writer; every preparer mounts it read-only and clones with `--reference`.
 CACHE_MOUNT = "/crucible/cache"
 ORIGIN_MOUNT = "/crucible/origin"
 # Where a GitHub installation token lives inside the one container that uses it: the
@@ -266,9 +270,15 @@ DIFF_ARTIFACT_CAP_BYTES = 4 * 1024 * 1024
 # `report/`, which holds the worker's copied files, so neither can overwrite the other.
 REVIEW_DIFF_DIR = "crucible-review"
 
+# hades #398: every blob the worker added or changed, by object id, for the secret
+# scanner. Unbounded on purpose: every byte the worker added or changed is scanned. The
+# bundle carries each of these once already, so the Kubernetes reader keeps them out of
+# the output archive and streams them through the scanner on their own (26).
+CHANGED_BLOBS_DIR = "changed-blobs"
+
 # Every diff the collector runs: no textconv, no external diff driver. Never `--text`
-# on the raw diff: a binary must stay "Binary files differ" there, or its bytes push the
-# text after it past the secret scanner's window and fill the output.
+# on the raw diff: a binary must stay "Binary files differ" there, or its bytes fill the
+# output. The secret scanner reads every changed blob itself (hades #398).
 _DIFF_FLAGS = "--no-ext-diff --no-textconv"
 
 # Paths whose `diff` attribute is unset (`-diff`, the `binary` macro) or names a driver:
@@ -285,7 +295,7 @@ _COLLECTOR_OUTPUTS = (
     "commit-paths.txt work_branch.bundle bundle.log commits.txt commit-policy tree "
     "clone.log report copy-rejections.tsv collection-failed.txt checkpoint-refusal.txt "
     "leftover-committed.txt leftover-refusal.txt collector.ok attr-text.patch "
-    f"{REVIEW_DIFF_DIR}"
+    f"{CHANGED_BLOBS_DIR} changed-blob-ids.txt {REVIEW_DIFF_DIR}"
 )
 
 
@@ -315,14 +325,15 @@ def cache_refresh_script(
     checkout_token: str | None = None,
     credential_host: str = "github.com",
 ) -> str:
-    """26: the one writer of the reference cache on Kubernetes, run on its own before a
-    preparer that mounts the cache read-only (crucible#55). A refresh that fails leaves
-    no mirror rather than a half-fetched one, and the preparer then clones from the
-    remote directly; so this script exits 0 either way.
+    """The one writer of the reference cache, run on its own before a preparer that
+    mounts the cache read-only: the refresher Job on Kubernetes (26, crucible#55) and
+    the refresher container with Docker (hades #137). A refresh that fails leaves no
+    mirror rather than a half-fetched one, and the preparer then clones from the remote
+    directly; so this script exits 0 either way.
 
-    `checkout_token` names where a private repository's read-only token is (ADR 0019),
-    `file` on Kubernetes; None for a public repository, which fetches with no
-    credential at all."""
+    `checkout_token` names where a private repository's read-only token is (ADR 0019):
+    `stdin` with the Docker provider, `file` on Kubernetes; None for a public
+    repository, which fetches with no credential at all."""
     cache_dir = f"{CACHE_MOUNT}/{cache_name}.git"
     credential = ""
     if checkout_token is not None:
@@ -353,7 +364,6 @@ def preparer_script(
     resume_bundle_head: str | None = None,
     resume_bundle_sha256: str | None = None,
     resume_bundle_ancestor: str | None = None,
-    refresh_cache: bool = True,
     checkout_token: str | None = None,
     credential_host: str = "github.com",
 ) -> str:
@@ -361,15 +371,15 @@ def preparer_script(
 
     The reference cache is a bare mirror the checkout is cloned from with
     `--dissociate`, so the checkout owns its objects and nothing shared is ever
-    mounted into a worker. With `refresh_cache` this script refreshes the mirror
-    itself (the Docker provider); without it the mirror is only read, and something
-    else keeps it fresh (the Kubernetes provider's refresher Job, 26). The origin URL
-    is replaced with a placeholder before the worker sees it, and no credential helper
-    is configured, so a push cannot start.
+    mounted into a worker. This script only reads the mirror, from a read-only mount;
+    the refresher keeps it fresh on its own before this runs (`cache_refresh_script`:
+    the Kubernetes provider's refresher Job, 26, and the Docker provider's refresher
+    container, hades #137). The origin URL is replaced with a placeholder before the
+    worker sees it, and no credential helper is configured, so a push cannot start.
 
-    A private repository's clone and cache refresh use a read-only installation token
-    (ADR 0019): `checkout_token` names where it is (`stdin` with the Docker provider,
-    `file` on Kubernetes) and None means a public repository and no credential at all.
+    A private repository's clone uses a read-only installation token (ADR 0019):
+    `checkout_token` names where it is (`stdin` with the Docker provider, `file` on
+    Kubernetes) and None means a public repository and no credential at all.
     git stops using it once it has cloned: the helper and its configuration go before
     the checkout is positioned, and again on every exit. From a tmpfs (`stdin`) the
     token file goes with them; a Secret volume (`file`) is read-only and goes with the
@@ -378,8 +388,7 @@ def preparer_script(
     cache_dir = f"{CACHE_MOUNT}/{cache_name}.git" if cache_name else ""
     refresh = ""
     if cache_name:
-        refresh = _cache_refresh(cache_dir) if refresh_cache else ""
-        refresh += f"""
+        refresh = f"""
 if [ -d "{cache_dir}" ]; then
   REFERENCE="--reference {cache_dir} --dissociate"
 fi
@@ -620,6 +629,32 @@ def _injected_collection_script() -> str:
   done < "$OUT/injected-blob-ids.sorted"'''
 
 
+def _changed_blobs_script() -> str:
+    """Export each blob the worker added or changed for the secret scanner (hades #398).
+
+    The ids come from the raw diff against the merge base, which names the new blob of
+    every changed path; a deletion has none and a submodule's commit is not content
+    here. `cat-file blob` reads the object as stored: the worker's attributes, textconv
+    and filters never apply, so a path marked binary, or holding a NUL, is scanned as
+    the bytes it holds. The service streams each file through the scanner.
+    """
+    return rf'''mkdir -p "$OUT/{CHANGED_BLOBS_DIR}"
+  # Alternate headers and paths so a header-shaped path remains data.
+  LC_ALL=C awk 'BEGIN {{ RS="\0" }}
+    skip {{ skip=0; next }}
+    {{ sub(/^\n+/, "") }}
+    /^:/ {{
+      skip=1
+      if ($2 != "160000" && $5 !~ /^D/ && $4 ~ /^[0-9a-f]+$/ &&
+          (length($4)==40 || length($4)==64) && $4 !~ /^0+$/)
+        print $4
+    }}' "$OUT/diff-raw.txt" | sort -u > "$OUT/changed-blob-ids.txt" || true
+  while IFS= read -r blob; do
+    {GIT} -C "$REPO" cat-file blob "$blob" > "$OUT/{CHANGED_BLOBS_DIR}/$blob" 2>/dev/null \
+      || rm -f "$OUT/{CHANGED_BLOBS_DIR}/$blob"
+  done < "$OUT/changed-blob-ids.txt"'''
+
+
 def collector_script(
     *,
     base_ref: str,
@@ -787,6 +822,7 @@ if [ -n "$BASE" ]; then
   # #400: classify every raw path before filtering; Git pathspecs cannot normalize
   # Unicode. Read blobs by object id, including those in earlier commits.
   {_injected_collection_script()}
+  {_changed_blobs_script()}
   {GIT} -C "$REPO" bundle create "$OUT/work_branch.bundle" \
     "$BASE..$WORK_BRANCH" > "$OUT/bundle.log" 2>&1 || true
   {GIT} -C "$REPO" rev-list --count "$BASE"..HEAD > "$OUT/commits.txt" \

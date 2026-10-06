@@ -210,6 +210,10 @@ class AttemptView(Response):
     # loop:command, no_activity) and the reason, naming the repeated command.
     stall_shape: str | None = None
     termination_detail: str | None = None
+    # hades #393: why a worker stopped with `blocked.md` (missing_capability or
+    # ambiguous_contract) and what it said, verbatim. Both None for any other ending.
+    blocked_reason: str | None = None
+    blocked_statement: str | None = None
 
 
 class ExecutionView(Response):
@@ -738,6 +742,8 @@ class EscalationView(Response):
     opened_at: Rfc3339
     closed_at: Rfc3339 | None
     decision_id: str | None
+    # hades #393: the reason the worker's `blocked.md` named, when it named one.
+    reason: str | None = None
 
 
 class PolicyView(Response):

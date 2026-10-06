@@ -667,6 +667,8 @@ class Attempts:
             egress_probe=dict(row.egress_probe) if row.egress_probe is not None else None,
             stall_shape=row.stall_shape,
             termination_detail=row.termination_detail,
+            blocked_reason=row.blocked_reason,
+            blocked_statement=row.blocked_statement,
         )
 
     def add(self, attempt: Attempt) -> None:
@@ -708,6 +710,8 @@ class Attempts:
                 egress_probe=attempt.egress_probe,
                 stall_shape=attempt.stall_shape,
                 termination_detail=attempt.termination_detail,
+                blocked_reason=attempt.blocked_reason,
+                blocked_statement=attempt.blocked_statement,
             )
         )
         self._s.flush()
@@ -754,6 +758,8 @@ class Attempts:
                 egress_probe=attempt.egress_probe,
                 stall_shape=attempt.stall_shape,
                 termination_detail=attempt.termination_detail,
+                blocked_reason=attempt.blocked_reason,
+                blocked_statement=attempt.blocked_statement,
             )
         )
 

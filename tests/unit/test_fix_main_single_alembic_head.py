@@ -24,8 +24,11 @@ from crucible.adapters.persistence.migrations.versions import (
 
 REPO = Path(__file__).resolve().parents[2]
 MERGE = "0045_merge_0044_heads"
-HEAD = "0046_attempt_egress_probe"
 MERGED = {"0044_attempt_stall_shape", "0044_editor_leftovers_policy", "0044_merge_423_424"}
+# The single head after the merge. hades #393 added 0046 above it and hades #425 added
+# 0047 above that; the next revision moves these names on and nothing else here.
+ABOVE = "0046_blocked_reason"
+HEAD = "0047_attempt_egress_probe"
 
 
 def _script() -> ScriptDirectory:
@@ -46,9 +49,10 @@ def test_the_0045_merge_joins_the_three_0044_heads() -> None:
     assert merge is not None
     assert set(merge.down_revision or ()) == MERGED
     assert script.get_current_head() == HEAD
+    above = script.get_revision(ABOVE)
+    assert above is not None and above.down_revision == MERGE
     probe = script.get_revision(HEAD)
-    assert probe is not None
-    assert probe.down_revision == MERGE
+    assert probe is not None and probe.down_revision == ABOVE
 
 
 def test_the_cli_config_sees_the_same_single_head() -> None:
@@ -75,7 +79,8 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
         # would leave out the sibling branch, which is the whole point here.
         plan = [step.revision.revision for step in script._upgrade_revs("head", head)]
         assert plan.index("0043_credential_mount_mode") < plan.index("0044_merge_423_424")
-        assert plan[-2:] == [MERGE, HEAD]
+        assert plan.index("0044_merge_423_424") < plan.index(MERGE)
+        assert plan[-3:] == [MERGE, ABOVE, HEAD]
 
 
 def test_0043_credential_mount_mode_keeps_the_kinds_the_live_check_permits() -> None:

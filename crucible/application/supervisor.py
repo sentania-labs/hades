@@ -26,7 +26,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from functools import partial
-from itertools import chain
 from pathlib import Path
 from typing import Any, ClassVar, Literal, TypeVar
 
@@ -88,6 +87,7 @@ from crucible.contracts.completion_claim import (
     CompletedClaim,
     complete_claim,
     load_report,
+    parse_blocked_md,
     parse_claim,
 )
 from crucible.contracts.evidence import ROLE_RUN_EVIDENCE, EvidenceKind, EvidenceSource
@@ -184,6 +184,12 @@ from crucible.ports.publish import Publisher
 from crucible.ports.repository import FencedTokenRejectedError, UnitOfWork, UnitOfWorkFactory
 
 log = logging.getLogger("crucible.supervisor")
+
+# How many seconds the workspace fingerprint walk may spend before giving up.
+# Mirrors ACTIVITY_WALK_SECONDS in scripts.py so the supervisor and the worker
+# use the same budget for their directory walks.
+ACTIVITY_WALK_SECONDS: int = 10
+
 T = TypeVar("T")
 
 TERMINATION_TIMEOUT = "timeout"
@@ -227,6 +233,26 @@ def retryable_exit(exit_class: ExitClass, retry_on: Sequence[str]) -> bool:
 def too_big_wake_summary(cap: Literal["turns", "time"]) -> str:
     cap_name = "turn" if cap == "turns" else cap
     return f"split the task: the local attempt hit its {cap_name} cap"
+
+
+# The escalation question when `blocked.md` was there with nothing in it but a reason line
+# (or nothing at all): the worker stopped and said why in no words of its own.
+BLOCKED_WITHOUT_STATEMENT = "the worker stopped without a statement"
+
+
+def blocked_note(blocked_md: str | None) -> tuple[str | None, str | None]:
+    """The reason and the statement of a collected `blocked.md` (hades #393).
+
+    (None, None) when there was no file. The reason is the file's `reason:` line when
+    it names missing_capability or ambiguous_contract, else None. The statement is the
+    rest of the file verbatim, or the redaction marker when the file matches a secret
+    pattern (12): the reason is one of two fixed words and is kept either way."""
+    if blocked_md is None:
+        return None, None
+    note = parse_blocked_md(blocked_md)
+    if find_secrets(blocked_md):
+        return note.reason, "[redacted: secret pattern]"
+    return note.reason, note.statement
 
 
 # 16 defaults, used when the policy names none.
@@ -375,14 +401,61 @@ def commands_counted(
     return tuple(counted)
 
 
-def workspace_fingerprint(workspace: Workspace) -> tuple[int, int, int]:
-    """Cheap activity fingerprint for the writable checkout and report trees."""
+def workspace_fingerprint(workspace: Workspace) -> tuple[int, int, int] | None:
+    """Cheap activity fingerprint for the writable checkout and report trees.
+
+    Returns ``(newest_mtime_ns, file_count, total_bytes)`` on a tree small enough to
+    walk within *ACTIVITY_WALK_SECONDS*.  Returns ``None`` when the walk would exceed
+    the budget (the stall clock is never reset from ``None``).
+
+    The ``.git`` subtree is skipped entirely: it dominates the node count on most
+    Git worktrees and has no activity signal we care about.
+    """
     newest_ns = files = total_bytes = 0
+    budget_ns = int(ACTIVITY_WALK_SECONDS * 1_000_000_000)  # seconds -> nanoseconds
+    start_ns = time.monotonic_ns()
+
+    def _walk(root: Path) -> Iterator[Path]:
+        """Yield every entry under *root*, pruning ``.git`` and symlinked dirs.
+
+        Uses an explicit stack so deep nesting never raises ``RecursionError``,
+        and checks ``lstat`` on every entry so directory symlinks (e.g. a
+        worker-controlled symlink pointing at another attempt's workspace) are
+        never descended.
+        """
+        stack: list[Path] = [root]
+        yield root
+        while stack:
+            current = stack.pop()
+            try:
+                entries = sorted(current.iterdir(), key=lambda p: p.name)
+            except OSError:
+                continue
+            dirs: list[Path] = []
+            for child in entries:
+                if child.name == ".git":
+                    # Skip the entire .git tree without descending.
+                    continue
+                yield child
+                try:
+                    child_stat = child.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.S_ISDIR(child_stat.st_mode):
+                    dirs.append(child)
+            stack.extend(dirs)
+
     for root_name in (workspace.checkout_path, workspace.report_path):
         root = Path(root_name)
         try:
-            paths = chain((root,), root.rglob("*"))
-            for path in paths:
+            for path in _walk(root):
+                # Budget check before every stat (cheap monotonic_ns call).
+                if time.monotonic_ns() - start_ns > budget_ns:
+                    log.debug(
+                        "workspace_fingerprint exceeded budget; returning None",
+                        extra={"budget_seconds": ACTIVITY_WALK_SECONDS},
+                    )
+                    return None
                 try:
                     file_stat = path.stat(follow_symlinks=False)
                 except OSError:
@@ -631,7 +704,7 @@ class Supervisor:
         self._workspaces: dict[str, Workspace] = {}
         # The harnesses a login is running for, read once per launch pass (12, 25).
         self._logins_now: frozenset[str] = frozenset()
-        self._workspace_fingerprints: dict[str, tuple[int, int, int]] = {}
+        self._workspace_fingerprints: dict[str, tuple[int, int, int] | None] = {}
         # FDY-0140: when each attempt's provider was last asked for its activity.
         self._activity_asked: dict[str, datetime] = {}
         self._activity_refresh: dict[str, int] = {}
@@ -5054,13 +5127,12 @@ class Supervisor:
                         "differences": [dict(d) for d in completed.differences],
                     },
                 )
-            blocked_text: str | None = None
-            if outputs.blocked_md is not None:
-                blocked_text = (
-                    "[redacted: secret pattern]"
-                    if find_secrets(outputs.blocked_md)
-                    else outputs.blocked_md
-                )
+            blocked_reason, blocked_text = blocked_note(outputs.blocked_md)
+            if attempt.exit_class is ExitClass.BLOCKED:
+                # hades #393: on the attempt record before the evidence and the
+                # classification read it.
+                attempt.blocked_reason = blocked_reason
+                attempt.blocked_statement = blocked_text
             move_attempt(
                 uow,
                 self._clock,
@@ -5072,6 +5144,7 @@ class Supervisor:
                     "report_parsed": claim_ok,
                     "partial_report_kept_unparsed": cancelled and report_present,
                     "blocked_present": outputs.blocked_md is not None,
+                    **({"blocked_reason": blocked_reason} if blocked_reason else {}),
                     # Issue 128: commands the harness was waiting on and cut off at its
                     # exit. A background process left running is not listed (153).
                     **(
@@ -5138,6 +5211,7 @@ class Supervisor:
                 uow,
                 attempt,
                 blocked_text,
+                blocked_reason=blocked_reason,
                 claim_ok=claim_ok,
                 defer_quota=defer_quota,
                 turn_cap_reached=parsed is not None and parsed.limit_reached is not None,
@@ -5934,13 +6008,21 @@ class Supervisor:
         attempt: Attempt,
         blocked_text: str | None,
         *,
+        blocked_reason: str | None = None,
         claim_ok: bool = False,
         defer_quota: bool = False,
         turn_cap_reached: bool = False,
         has_commits: bool = True,
         pool_mark: tuple[PoolExhaustion, bool] | None = None,
     ) -> None:
-        """`pool_mark` is the exhaustion mark this exit wrote and whether it opened the
+        """Move the attempt to its terminal state and the task after it (09, 16).
+
+        hades #393: `blocked_text` is the worker's `blocked.md` statement verbatim and
+        `blocked_reason` the reason line it named (missing_capability or
+        ambiguous_contract, or None). A blocked attempt keeps both, opens the one
+        escalation carrying both, consumes no retry and marks no pool: this returns
+        before the retry count and never reaches pool accounting.
+        `pool_mark` is the exhaustion mark this exit wrote and whether it opened the
         pool's exhaustion (hades #378): the one wake the refusal raises names the pool
         and its reset, whichever path the attempt takes from here."""
         execution = uow.executions.get(attempt.execution_id, for_update=True)
@@ -5970,7 +6052,16 @@ class Supervisor:
                 uow, self._clock, attempt, AttemptState.SUCCEEDED, EventKind.ATTEMPT_SUCCEEDED
             )
         elif exit_class is ExitClass.BLOCKED:
-            move_attempt(uow, self._clock, attempt, AttemptState.BLOCKED, EventKind.ATTEMPT_BLOCKED)
+            attempt.blocked_reason = blocked_reason
+            attempt.blocked_statement = blocked_text
+            move_attempt(
+                uow,
+                self._clock,
+                attempt,
+                AttemptState.BLOCKED,
+                EventKind.ATTEMPT_BLOCKED,
+                payload={"blocked_reason": blocked_reason} if blocked_reason else None,
+            )
         else:
             if exit_class is ExitClass.COMPLETED and not claim_ok:
                 attempt.exit_class = ExitClass.COMPLETED_WITHOUT_REPORT
@@ -6000,16 +6091,25 @@ class Supervisor:
                 task,
                 TaskState.BLOCKED,
                 EventKind.TASK_BLOCKED,
-                payload={**common, "exit_class": exit_class.value, "blocked_md": blocked_text},
+                payload={
+                    **common,
+                    "exit_class": exit_class.value,
+                    "blocked_md": blocked_text,
+                    "blocked_reason": blocked_reason,
+                },
                 **common,
             )
-            # 09: entering `blocked` opens an escalation and creates a wake.
+            # 09: entering `blocked` opens an escalation and creates a wake. hades #393:
+            # the escalation carries the worker's reason and its statement verbatim, and
+            # nothing retries the attempt; the answer comes back as a decision or a
+            # correction.
             open_escalation(
                 uow,
                 self._clock,
                 task=task,
                 attempt_id=attempt.id,
-                question=blocked_text or "the worker exited 75 without a question",
+                question=blocked_text or BLOCKED_WITHOUT_STATEMENT,
+                reason=blocked_reason,
             )
             return
         if local_cap is not None:
@@ -6062,8 +6162,11 @@ class Supervisor:
         if attempt.termination_reason == TERMINATION_REFUSED:
             # 07: a refused launch would be refused again; Foundry has the wake.
             retryable = False
+        # hades #393: a blocked attempt is a question, not a failure, so it consumes no
+        # retry when a decision schedules the same execution again.
         ordinary_attempts = sum(
-            prior.exit_class not in {ExitClass.QUOTA_EXHAUSTED, ExitClass.INFRASTRUCTURE}
+            prior.exit_class
+            not in {ExitClass.QUOTA_EXHAUSTED, ExitClass.INFRASTRUCTURE, ExitClass.BLOCKED}
             and prior.termination_reason not in {"gate_proves_nothing", "check_cannot_run"}
             for prior in uow.attempts.list_for_execution(execution.id)
             if prior.state in ATTEMPT_TERMINAL

@@ -1,7 +1,7 @@
 """Record the launch wrapper's egress probe on each attempt.
 
-Revision ID: 0046_attempt_egress_probe
-Revises: 0045_merge_0044_heads
+Revision ID: 0047_attempt_egress_probe
+Revises: 0046_blocked_reason
 
 hades #425: before the harness starts, the launch wrapper tries every host of the
 attempt's egress allowlist and writes one line to the worker log; the supervisor keeps the
@@ -15,8 +15,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision = "0046_attempt_egress_probe"
-down_revision = "0045_merge_0044_heads"
+revision = "0047_attempt_egress_probe"
+down_revision = "0046_blocked_reason"
 branch_labels = None
 depends_on = None
 
