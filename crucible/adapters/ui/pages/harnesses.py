@@ -10,6 +10,7 @@ from crucible.adapters.ui.actions import register
 from crucible.adapters.ui.render import _page, _redirect
 from crucible.adapters.ui.session import _require
 from crucible.application.admin import (
+    audit,
     harness_test,
     harnesses,
     status,
@@ -90,19 +91,53 @@ def _harness_status(item: dict[str, Any], ready: dict[str, Any] | None) -> dict[
     return {"kind": "status", "value": "ready", "tone": "ok"}
 
 
-def _test_cell(last: dict[str, Any] | None) -> dict[str, Any]:
+def _last_gateway_or_routing_change_ts(uow: UoW) -> str | None:
+    """Return the timestamp of the most recent gateway or routing change, or None."""
+    admin_kindswithts = (
+        "local_gateway_updated",
+        "routing_policy_uploaded",
+    )
+    latest: str | None = None
+    # Scan forward from the beginning to find the latest matching event.
+    cursor: int | None = 0
+    while True:
+        result = audit.tail(uow, cursor=cursor, limit=200)
+        items = result["items"]
+        if not items:
+            break
+        for item in items:
+            if item["kind"] in admin_kindswithts:
+                ts = item["ts"]
+                if latest is None or ts > latest:
+                    latest = ts
+        cursor = result["next_cursor"]
+        if not items or len(items) < 200:
+            break
+    return latest
+
+
+def _test_cell(last: dict[str, Any] | None, uow: UoW | None = None) -> dict[str, Any]:
     if not last:
         return {"kind": "note", "value": "not tested yet"}
     tones = {"pass": "ok", "fail": "bad", "not run": "accent"}
-    return {
+    steps_out: list[dict[str, Any]] = [
+        {**step, "tone": tones.get(str(step.get("result")), "accent")}
+        for step in last.get("steps", [])
+        if step.get("result") != "not run"
+    ]
+    result: dict[str, Any] = {
         "kind": "steps",
-        "items": [
-            {**step, "tone": tones.get(str(step.get("result")), "accent")}
-            for step in last.get("steps", [])
-            if step.get("result") != "not run"
-        ],
+        "items": steps_out,
         "tested_at": last.get("tested_at"),
     }
+    # Check staleness: is the stored test older than the last gateway/routing change?
+    if uow is not None and last.get("tested_at"):
+        latest_change = _last_gateway_or_routing_change_ts(uow)
+        if latest_change is not None and last["tested_at"] < latest_change:
+            result["note"] = (
+                "this result is from before you changed the gateway or routing; run Test again"
+            )
+    return result
 
 
 @router.get("/harnesses", response_class=HTMLResponse)
@@ -168,7 +203,7 @@ async def harness_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                     else {"kind": "link", "href": "/ui/images", "label": "Choose on Images"}
                 ),
                 item["credential"]["state"].replace("_", " "),
-                _test_cell(last),
+                _test_cell(last, uow),
                 {"kind": "actions", "items": actions} if actions else "",
             ]
         )
