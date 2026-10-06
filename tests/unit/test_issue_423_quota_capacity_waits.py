@@ -62,7 +62,7 @@ def _config(**overrides: Any) -> KubernetesConfig:
 async def test_the_lab_quota_admits_nine_workers_and_keeps_one_pod_for_a_probe() -> None:
     api, _registry, provider = build(config=_config())
     _quota(api, LAB_QUOTA)
-    provider._last_limits = k8sspec.limits_from_policy(THREE_CPU_POLICY)
+    provider.set_policy(THREE_CPU_POLICY)
 
     capacity = await provider.worker_capacity()
 
@@ -77,7 +77,7 @@ async def test_the_lab_quota_admits_nine_workers_and_keeps_one_pod_for_a_probe()
 async def test_the_health_checks_expose_headroom_reservation_and_capacity() -> None:
     api, _registry, provider = build(config=_config())
     _quota(api, LAB_QUOTA)
-    provider._last_limits = k8sspec.limits_from_policy(THREE_CPU_POLICY)
+    provider.set_policy(THREE_CPU_POLICY)
 
     health = await provider.health()
 
@@ -93,7 +93,7 @@ async def test_the_health_checks_expose_headroom_reservation_and_capacity() -> N
 async def test_more_reserved_pods_leave_fewer_workers() -> None:
     api, _registry, provider = build(config=_config(short_role_pods=2))
     _quota(api, LAB_QUOTA)
-    provider._last_limits = k8sspec.limits_from_policy(THREE_CPU_POLICY)
+    provider.set_policy(THREE_CPU_POLICY)
     assert (await provider.worker_capacity()).workers == 8
 
 
@@ -111,9 +111,6 @@ async def test_an_existing_preparer_satisfies_the_short_role_reservation() -> No
             "requests.memory": "12Gi",
             "limits.memory": "12Gi",
         },
-    )
-    provider._last_limits = k8sspec.limits_from_policy(
-        {"resources": {"cpus": 1, "memory": "256MiB"}}
     )
     api.pending_forever.add("prepare-hanging")
     api.create(
@@ -159,11 +156,13 @@ async def test_the_fewest_workers_any_resource_admits_binds() -> None:
     """Memory for six Pods beside CPU for ten: five workers, and the source says why."""
     api, _registry, provider = build(config=_config())
     _quota(api, {**LAB_QUOTA, "limits.memory": "24Gi"})
-    provider._last_limits = k8sspec.limits_from_policy(THREE_CPU_POLICY)
+    provider.set_policy(THREE_CPU_POLICY)
     capacity = await provider.worker_capacity()
     assert capacity.headroom == 6
     assert capacity.workers == 5
-    assert capacity.source.endswith("hades-workers limits.memory binds; shape from the last launch")
+    assert capacity.source.endswith(
+        "hades-workers limits.memory binds; shape from the active policy"
+    )
 
 
 # ----- a quota refusal on create is a wait, never a failure ---------------------------
@@ -576,7 +575,7 @@ def test_the_failure_reason_reaches_the_wake_summary() -> None:
 async def test_the_kubernetes_admin_view_shows_headroom_reservation_and_capacity() -> None:
     api, _registry, provider = build(config=_config())
     _quota(api, LAB_QUOTA)
-    provider._last_limits = k8sspec.limits_from_policy(THREE_CPU_POLICY)
+    provider.set_policy(THREE_CPU_POLICY)
     ctx: Any = SimpleNamespace(providers={"kubernetes": provider})
 
     view = await kubernetes_admin.capacity_view(ctx)
@@ -586,7 +585,7 @@ async def test_the_kubernetes_admin_view_shows_headroom_reservation_and_capacity
     assert view["short_role_pods_reserved"] == 1
     assert view["worker_capacity"] == 9
     assert _capacity_words(view) == (
-        "9 worker(s) at once: the quota admits 10 Pod(s), shape from the last launch, "
+        "9 worker(s) at once: the quota admits 10 Pod(s), the active policy, "
         "1 kept for short-role Pods"
     )
 
