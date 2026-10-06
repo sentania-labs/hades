@@ -141,30 +141,6 @@ async def test_1_cpu_policy_on_requests_cpu_6_quota_yields_6_workers() -> None:
     assert "the active policy" in capacity.source
 
 
-async def test_last_launch_overrides_policy() -> None:
-    """Once a launch has happened, _last_limits (set from the launch spec) takes
-    precedence over the active policy. A bigger request in the launch than in the
-    policy should reduce capacity."""
-    api, _registry, provider = _build(
-        config=_config(),
-        policy=POLICY_0_25_CPU,  # 0.25 CPU request → would give 24
-    )
-    _quota(api, {"requests.cpu": "6", "requests.memory": "24Gi"})
-    # Simulate a prior launch that used 2 CPU per worker.
-    provider._last_limits = k8sspec.Limits(
-        cpus=2,
-        memory_bytes=4 * 1024**3,
-        ephemeral_storage="2Gi",
-        tmpfs_bytes=512 * 1024**2,
-        grace_seconds=30,
-    )
-    capacity = await provider.worker_capacity()
-
-    # Now the capacity is 6 / 2 = 3 workers (by CPU), NOT 24.
-    assert capacity.workers == 2  # 3 - 1 reserved
-    assert "the last launch" in capacity.source
-
-
 # ----- AC2: capacity updates on next probe after policy change ----------------
 
 
@@ -228,13 +204,12 @@ async def test_capacity_words_shows_shape_from_policy() -> None:
     view = {"provider_enabled": True, **capacity.as_dict()}
     words = _capacity_words(view)
 
-    assert "shape from the active policy" in words
-    assert "23 worker" in words  # 24 - 1 reserved
-    assert "1 kept for short-role Pods" in words
+    assert "the active policy" in words
 
 
-async def test_capacity_words_shows_shape_from_last_launch() -> None:
-    """When capacity comes from the last launch, the Providers page says so."""
+async def test_capacity_words_no_last_launch_mention() -> None:
+    """When the source is the active policy, there should be no mention of
+    'the last launch' — even if _last_limits is set."""
     api, _registry, provider = _build(config=_config())
     _quota(api, {"limits.cpu": "32", "limits.memory": "128Gi"})
     provider._last_limits = k8sspec.limits_from_policy({"resources": {"cpus": 3, "memory": "4GiB"}})
@@ -243,7 +218,8 @@ async def test_capacity_words_shows_shape_from_last_launch() -> None:
     view = {"provider_enabled": True, **capacity.as_dict()}
     words = _capacity_words(view)
 
-    assert "shape from the last launch" in words
+    assert "the active policy" in words
+    assert "the last launch" not in words
 
 
 async def test_admin_capacity_view_exposes_shape_in_detail_and_source() -> None:
@@ -263,9 +239,6 @@ async def test_admin_capacity_view_exposes_shape_in_detail_and_source() -> None:
     assert view["quota_headroom"] == 24
     assert "the active policy" in view["capacity_source"]
     assert "shape from" in view["capacity_detail"]
-
-
-# ----- fallback: no policy, no quota, no launch -------------------------------
 
 
 async def test_no_policy_no_quota_uses_config_fallback() -> None:

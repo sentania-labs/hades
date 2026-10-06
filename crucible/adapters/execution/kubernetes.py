@@ -5352,11 +5352,15 @@ class KubernetesProvider:
             workers=self.config.max_concurrency,
             source=(
                 "kubernetes.max_concurrency (no ResourceQuota in the namespace; "
-                f"policy shape {self._fallback_shape().cpu_request} CPU / "
+                f"shape from the active policy: "
+                f"{self._fallback_shape().cpu_request} CPU / "
                 f"{self._fallback_shape().memory_request} memory)"
             ),
             reserved_pods=self.config.short_role_pods,
             detail=(
+                f"shape from the active policy: "
+                f"{self._fallback_shape().cpu_request} CPU / "
+                f"{self._fallback_shape().memory_request} memory; "
                 f"no ResourceQuota names a counted resource in {self.config.namespace}; "
                 f"the configured fallback of {self.config.max_concurrency} applies"
             ),
@@ -5380,7 +5384,7 @@ class KubernetesProvider:
         count was read; before hades #423 nothing was reserved, so with workers at
         capacity every probe was refused. None when no quota names a counted resource."""
         rows = await self._call(self.client.list_objects, "resourcequotas")
-        limits = self._last_limits or k8sspec.limits_from_policy(self._policy)
+        limits = k8sspec.limits_from_policy(self._policy)
         reserved = max(0, self.config.short_role_pods - await self._active_short_role_pods())
         # Per attempt, and per reserved short-role Pod (one Job, one Pod, the worker's
         # shape), for each resource a quota may count.
@@ -5416,11 +5420,19 @@ class KubernetesProvider:
                     binding = f"{name} {key}".strip()
         if headroom is None or workers is None:
             return None
-        limits_source = "the active policy" if self._last_limits is None else "the last launch"
+        policy_name = self._policy.get("name") if isinstance(self._policy, dict) else None
+        policy_version = self._policy.get("version") if isinstance(self._policy, dict) else None
+        if policy_name is not None and policy_version is not None:
+            limits_source = f"policy {policy_name} v{policy_version}"
+        elif policy_name is not None:
+            limits_source = f"policy {policy_name}"
+        else:
+            limits_source = "the active policy"
         shape_source = (
-            f"policy {limits.cpu_request} CPU / {limits.memory_request} memory "
-            if self._last_limits is None
-            else "launch shape"
+            f"policy {policy_name} v{policy_version} "
+            f"{limits.cpu_request} CPU / {limits.memory_request} memory"
+            if policy_name is not None and policy_version is not None
+            else f"{limits.cpu_request} CPU / {limits.memory_request} memory from {limits_source}"
         )
         shape = {
             "cpu": limits.cpu,
