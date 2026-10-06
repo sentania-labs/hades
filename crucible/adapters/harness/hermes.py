@@ -181,7 +181,9 @@ class HermesAdapter:
     def quota_reset_at(self, stdout_tail: str, stderr_tail: str) -> datetime | None:
         return None
 
-    def provider_quota_event(self, stdout_tail: str, stderr_tail: str) -> ProviderQuotaEvent | None:
+    def provider_quota_event(
+        self, stdout_tail: str, stderr_tail: str, now: datetime | None = None
+    ) -> ProviderQuotaEvent | None:
         # Hermes 0.19 has no structured provider-refusal event. Text may classify this
         # attempt, but it can never write shared pool exhaustion state.
         return None

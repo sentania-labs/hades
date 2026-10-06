@@ -75,15 +75,18 @@ wake.
 The adapter first parses the harness-specific structured provider-refusal event, then
 reads an explicit machine timestamp from that same event under a JSON key named
 `reset_at`, `resetAt`, `resets_at`, `resetsAt`, or `reset_time`. It accepts RFC 3339,
-Unix seconds, or Unix milliseconds. Human prose, assistant events, and timestamps on
-other lines are ignored. The actual observed quota failure samples do not provide a
-reset time, so the seeded policy supplies the fallback.
+Unix seconds, or Unix milliseconds. When the event carries no such key but states the
+reset as a duration ("Resets in 3h52m": hours, minutes and seconds, each optional),
+`reset_at` is that duration counted from the supervisor's clock at the moment the exit
+was observed (hades #378). Human prose, assistant events, and timestamps on other lines
+are ignored. The Claude Code and Codex samples provide no reset time, so the seeded
+policy supplies the fallback; AGY's observed refusal of 2026-10-05 states one.
 
 | Harness | Authoritative mark signal | Reset supplied | Seeded fallback |
 |---|---|---:|---:|
 | Claude Code | `rate_limit_event` with `status: rejected` or `out_of_credits` | no | 18,000 seconds |
 | Codex | `turn.failed` with error code `usage_limit_reached` | no | 18,000 seconds |
-| AGY | `result` with `status: ERROR` and `RESOURCE_EXHAUSTED` | no | 3,600 seconds |
+| AGY | `result` with `status: ERROR` and `RESOURCE_EXHAUSTED`, a structured `code: 429`, or "Individual quota reached" (hades #378) | "Resets in XhYmZs" when stated | 3,600 seconds |
 
 The Claude Code line is the live exhaustion captured on September 17, 2026 at
 8:58 AM America/Chicago and already retained in the C5 evidence. The Codex and AGY

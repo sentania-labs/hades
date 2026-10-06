@@ -77,7 +77,9 @@ from crucible.application.transitions import (
     record_rejected_transition,
 )
 from crucible.application.wakes import (
+    create_pool_exhausted_wake,
     create_wake,
+    pool_exhausted_summary,
     record_delivery,
     retry_hours_from_policy,
     wake_body,
@@ -4777,13 +4779,18 @@ class Supervisor:
             ):
                 # FDY-0140: Crucible ended it for a stall, so it is recorded as one.
                 attempt.exit_class = ExitClass.STALLED
+            # hades #378: the reset a harness states as "Resets in 3h52m" counts from
+            # the supervisor's own clock, the moment the refusal was observed.
             provider_quota = (
-                adapter.provider_quota_event(outputs.stdout_tail, outputs.stderr_tail)
+                adapter.provider_quota_event(
+                    outputs.stdout_tail, outputs.stderr_tail, now=self._clock.now()
+                )
                 if attempt.exit_class is ExitClass.QUOTA_EXHAUSTED and adapter is not None
                 else None
             )
+            pool_mark: tuple[PoolExhaustion, bool] | None = None
             if attempt.exit_class is ExitClass.QUOTA_EXHAUSTED:
-                self._mark_pool_exhausted(
+                pool_mark = self._mark_pool_exhausted(
                     uow, attempt, execution, provider_quota.reset_at if provider_quota else None
                 )
             # A collection failure makes this exit `environment` below, whatever the
@@ -5073,6 +5080,7 @@ class Supervisor:
                 defer_quota=defer_quota,
                 turn_cap_reached=parsed is not None and parsed.limit_reached is not None,
                 has_commits=outputs.bundle is not None and outputs.bundle.commits > 0,
+                pool_mark=pool_mark,
             )
             # A valid report from a failed or locally capped attempt is evidence,
             # but its dispositions must not settle findings or queue public replies.
@@ -5362,7 +5370,14 @@ class Supervisor:
         attempt: Attempt,
         execution: Execution,
         selection: Any,
+        pool_mark: tuple[PoolExhaustion, bool] | None = None,
     ) -> None:
+        mark, opened = pool_mark if pool_mark is not None else (None, False)
+        sentence = (
+            pool_exhausted_summary(mark.pool, mark.reset_at, mark.reason)
+            if mark is not None
+            else None
+        )
         context = self._routing_context(uow, task, execution)
         now = self._clock.now()
         if context is None:
@@ -5393,7 +5408,9 @@ class Supervisor:
                     attempt_id=attempt.id,
                     payload={"attempt_number": attempt.number},
                 )
-            self._task_reported(uow, task, attempt, ExitClass.QUOTA_EXHAUSTED, {})
+            self._task_reported(
+                uow, task, attempt, ExitClass.QUOTA_EXHAUSTED, {}, wake_summary=sentence
+            )
             return
         routing, contract = context
         resets = self._class_pool_resets(uow, routing, contract)
@@ -5425,7 +5442,9 @@ class Supervisor:
                     attempt_id=attempt.id,
                     payload={"attempt_number": attempt.number},
                 )
-            self._task_reported(uow, task, attempt, ExitClass.QUOTA_EXHAUSTED, {})
+            self._task_reported(
+                uow, task, attempt, ExitClass.QUOTA_EXHAUSTED, {}, wake_summary=sentence
+            )
             return
         if attempt.state not in ATTEMPT_TERMINAL:
             attempt.exit_class = ExitClass.QUOTA_EXHAUSTED
@@ -5479,12 +5498,15 @@ class Supervisor:
                 principal_id=task.principal_id,
                 reason=WakeReason.AWAITING_QUOTA,
                 summary=(
-                    f"all pools for class {contract.execution_request.tier.value} are exhausted; "
-                    f"Crucible will resume at {task.resume_at.isoformat()}"
+                    (f"{sentence}; " if sentence is not None else "")
+                    + f"all pools for class {contract.execution_request.tier.value} are "
+                    f"exhausted; Crucible will resume at {task.resume_at.isoformat()}"
                 ),
                 task=task,
                 attempt_id=attempt.id,
             )
+        elif mark is not None and opened:
+            self._wake_pool_exhausted(uow, task, attempt, mark)
 
     def _mark_local_endpoint_down(
         self, uow: UnitOfWork, attempt: Attempt, execution: Execution
@@ -5541,12 +5563,18 @@ class Supervisor:
         reset_at: Any,
         *,
         reason: str = "harness reported quota_exhausted",
-    ) -> None:
+    ) -> tuple[PoolExhaustion, bool] | None:
+        """Mark the attempt's pool exhausted until `reset_at` (05b). Returns the mark and
+        whether it opened the pool's exhaustion (no mark was in force before it), or
+        None when the attempt's route does not match its routing entry (hades #359).
+        Foundry hears of an exhaustion once (hades #378): the caller raises that wake for
+        a mark that opened, and an attempt refused while the mark is in force extends
+        the mark and raises no second pool wake."""
         task = uow.tasks.get(attempt.task_id)
         assert task is not None
         context = self._routing_context(uow, task, execution, attempt.routing_version)
         if context is None or attempt.selected_pool is None:
-            return
+            return None
         routing, _ = context
         # Only the pool of the route the attempt was verified to launch on is marked:
         # its model's entry in the attempt's routing version, paired with the harness
@@ -5563,7 +5591,7 @@ class Supervisor:
                 attempt.selected_pool,
                 extra={"attempt_id": attempt.id},
             )
-            return
+            return None
         now = self._clock.now()
         reset, parsed_reset = self._bounded_quota_reset(
             now,
@@ -5571,6 +5599,8 @@ class Supervisor:
             max_seconds=routing.reroute.resume_max_wait_seconds,
             default_seconds=routing.pools[attempt.selected_pool].default_cooldown_seconds,
         )
+        prior = uow.pool_exhaustions.get(attempt.selected_pool)
+        opened = prior is None or prior.cleared_at is not None or prior.reset_at <= now
         mark = uow.pool_exhaustions.put(
             PoolExhaustion(
                 pool=attempt.selected_pool,
@@ -5597,6 +5627,21 @@ class Supervisor:
                 "reason": reason,
             },
         )
+        return mark, opened
+
+    def _wake_pool_exhausted(
+        self, uow: UnitOfWork, task: Task, attempt: Attempt, mark: PoolExhaustion
+    ) -> None:
+        """The pool's own wake (hades #378), for a refusal whose path raises no other."""
+        create_pool_exhausted_wake(
+            uow,
+            self._clock,
+            task=task,
+            attempt_id=attempt.id,
+            pool=mark.pool,
+            reset_at=mark.reset_at,
+            reason=mark.reason,
+        )
 
     @staticmethod
     def _bounded_quota_reset(
@@ -5614,7 +5659,17 @@ class Supervisor:
         attempt: Attempt,
         *,
         source: str = "worker",
+        pool_mark: tuple[PoolExhaustion, bool] | None = None,
     ) -> None:
+        # hades #378: one wake per refusal names the pool and its reset. A task that
+        # ends or waits says it in the wake it raises anyway; a reroute, which raised
+        # none, raises the pool's own, once per exhaustion (when the mark opened).
+        mark, opened = pool_mark if pool_mark is not None else (None, False)
+        sentence = (
+            pool_exhausted_summary(mark.pool, mark.reset_at, mark.reason)
+            if mark is not None
+            else None
+        )
         # hades #254: the reroute routes with the version in force now, not the one the
         # exhausted attempt recorded, so a model disabled since is never launched again.
         context = self._routing_context(uow, task, execution)
@@ -5622,7 +5677,9 @@ class Supervisor:
             move_execution(
                 uow, self._clock, execution, ExecutionState.FAILED, EventKind.EXECUTION_FAILED
             )
-            self._task_reported(uow, task, attempt, ExitClass.QUOTA_EXHAUSTED, {})
+            self._task_reported(
+                uow, task, attempt, ExitClass.QUOTA_EXHAUSTED, {}, wake_summary=sentence
+            )
             return
         routing, _contract = context
         reroutes = sum(
@@ -5657,7 +5714,19 @@ class Supervisor:
                 EventKind.EXECUTION_FAILED,
                 payload={"exit_class": "quota_exhausted", "reroute_cap": reroutes},
             )
-            self._task_reported(uow, task, attempt, ExitClass.QUOTA_EXHAUSTED, {})
+            self._task_reported(
+                uow,
+                task,
+                attempt,
+                ExitClass.QUOTA_EXHAUSTED,
+                {},
+                wake_summary=(
+                    f"{sentence}; attempt {attempt.number} ended quota_exhausted with no "
+                    f"reroute remaining (reroute_max {routing.reroute.reroute_max})"
+                    if sentence is not None
+                    else None
+                ),
+            )
             return
         stored = uow.contracts.get(task.id, execution.contract_version)
         assert stored is not None
@@ -5695,8 +5764,10 @@ class Supervisor:
                     "ordered_candidates": list(selection.candidates),
                 },
             )
+            if mark is not None and opened:
+                self._wake_pool_exhausted(uow, task, attempt, mark)
             return
-        self._enter_quota_wait(uow, task, attempt, execution, selection)
+        self._enter_quota_wait(uow, task, attempt, execution, selection, pool_mark=pool_mark)
 
     @staticmethod
     def _all_task_events(uow: UnitOfWork, task_id: str) -> list[Any]:
@@ -5805,7 +5876,11 @@ class Supervisor:
         defer_quota: bool = False,
         turn_cap_reached: bool = False,
         has_commits: bool = True,
+        pool_mark: tuple[PoolExhaustion, bool] | None = None,
     ) -> None:
+        """`pool_mark` is the exhaustion mark this exit wrote and whether it opened the
+        pool's exhaustion (hades #378): the one wake the refusal raises names the pool
+        and its reset, whichever path the attempt takes from here."""
         execution = uow.executions.get(attempt.execution_id, for_update=True)
         task = uow.tasks.get(attempt.task_id, for_update=True)
         assert execution is not None and task is not None
@@ -5914,8 +5989,12 @@ class Supervisor:
                 self._task_reported(uow, task, attempt, exit_class, common)
                 return
             if defer_quota and has_commits:
+                # The checkpoint push decides the rest later (16 step 1); the pool's
+                # fact is already true, so a mark that opened is told now.
+                if pool_mark is not None and pool_mark[1]:
+                    self._wake_pool_exhausted(uow, task, attempt, pool_mark[0])
                 return
-            self._handle_quota_exit(uow, task, execution, attempt)
+            self._handle_quota_exit(uow, task, execution, attempt, pool_mark=pool_mark)
             return
         retryable = retryable_exit(exit_class, execution.retry_on)
         if attempt.termination_reason == TERMINATION_REFUSED:
