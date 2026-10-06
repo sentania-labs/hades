@@ -6,6 +6,7 @@ Revises: 0047_successful_launch_time
 
 from __future__ import annotations
 
+import sqlalchemy as sa
 from alembic import op
 
 from crucible.adapters.persistence.migrations.versions._0044_merge_runtime_settings_proposals import (
@@ -33,6 +34,17 @@ def _replace_event_kinds(kinds: list[str]) -> None:
 
 def upgrade() -> None:
     _replace_event_kinds(_event_kinds())
+    connection = op.get_bind()
+    archive = connection.execute(
+        sa.text("SELECT to_regclass(:name)"), {"name": f"public.{EVENT_ARCHIVE}"}
+    ).scalar()
+    if archive:
+        op.execute("ALTER TABLE events DISABLE TRIGGER trg_events_append_only")
+        op.execute("ALTER TABLE events DISABLE TRIGGER trg_events_fenced")
+        op.execute(f"INSERT INTO events SELECT * FROM {EVENT_ARCHIVE}")
+        op.execute("ALTER TABLE events ENABLE TRIGGER trg_events_append_only")
+        op.execute("ALTER TABLE events ENABLE TRIGGER trg_events_fenced")
+        op.execute(f"DROP TABLE {EVENT_ARCHIVE}")
 
 
 def downgrade() -> None:
