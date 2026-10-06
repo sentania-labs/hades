@@ -375,14 +375,20 @@ def scan_changed_content(
     found: list[SecretMatch] = []
     unscanned: list[str] = []
     current_path = "diff"
+    in_hunk = False
     excluded = False
     try:
         with patch.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
-                if line.startswith("+++ b/"):
+                # Inside a hunk, even +++ b/ is source content, not a path header.
+                if line.startswith("diff --git "):
+                    in_hunk = False
+                elif line.startswith("@@ "):
+                    in_hunk = True
+                elif not in_hunk and line.startswith("+++ b/"):
                     current_path = line[6:].rstrip("\n")
                     excluded = harness_private_path(current_path)
-                elif line.startswith("+") and not line.startswith("+++") and not excluded:
+                elif in_hunk and line.startswith("+") and not excluded:
                     hit = match_text(line[1:], path=f"diff:{current_path}")
                     if hit is not None:
                         found.append(hit)

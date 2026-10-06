@@ -69,9 +69,10 @@ def test_preexisting_fixture_is_not_judged(operation: str, tmp_path: Path) -> No
     assert findings == ()
 
 
-def test_added_fixture_fails_with_path_rule_and_excerpt(tmp_path: Path) -> None:
+@pytest.mark.parametrize("prefix", ["fixture = ", "++ b/", "++ ", "+++ "])
+def test_added_fixture_fails_with_path_rule_and_excerpt(tmp_path: Path, prefix: str) -> None:
     repo = _repo(tmp_path)
-    (repo / "fixture.py").write_text(f"fixture = '{KEY}'\n")
+    (repo / "fixture.py").write_text(f"{prefix}{KEY}\n")
     _git(repo, "commit", "-qam", "add key")
     findings, _ = scan_changed_content(_output(repo, tmp_path))
     assert findings is not None
@@ -96,6 +97,27 @@ def test_added_fixture_fails_with_path_rule_and_excerpt(tmp_path: Path) -> None:
     outcome = no_secrets(gate_input)
     assert outcome.result is GateResult.FAIL
     assert "diff:fixture.py:github_token:ghp...AAA" in outcome.detail
+
+
+def test_header_shaped_content_cannot_change_path_or_exclude_hunk(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "fixture.py").write_text(f"++ b/.hermes/state.db\n{KEY}\n")
+    _git(repo, "commit", "-qam", "header shaped content")
+    findings, _ = scan_changed_content(_output(repo, tmp_path))
+    assert findings is not None
+    assert [(m.path, m.pattern) for m in findings] == [("diff:fixture.py", "github_token")]
+
+
+def test_hunk_state_resets_between_files(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "fixture.py").write_text("changed\n")
+    # A secret-shaped filename is metadata, not an added source line. Sorting it
+    # after fixture.py exercises leaving a hunk before recognizing the next header.
+    (repo / KEY).write_text("plain\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "two files")
+    findings, _ = scan_changed_content(_output(repo, tmp_path))
+    assert findings == ()
 
 
 def test_gate_summary_result_keeps_the_match_detail() -> None:
@@ -147,13 +169,14 @@ def test_real_wrapper_state_is_excluded_from_scan(harness: str, tmp_path: Path) 
     assert f"/{state.relative_to(repo).as_posix().split('/')[0]}/" in workspace.EXCLUDE_ENTRIES
 
 
-def test_resume_reports_match_and_still_prepares_a_correction(tmp_path: Path) -> None:
+@pytest.mark.parametrize("prefix", ["fixture = ", "++ b/", "++ ", "+++ "])
+def test_resume_reports_match_and_still_prepares_a_correction(tmp_path: Path, prefix: str) -> None:
     origin = tmp_path / "origin.git"
     subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
     seed = _repo(tmp_path)
     _git(seed, "remote", "add", "origin", str(origin))
     _git(seed, "push", "-q", "origin", "main")
-    (seed / "fixture.py").write_text(f"fixture = '{KEY}'\n")
+    (seed / "fixture.py").write_text(f"{prefix}{KEY}\n")
     _git(seed, "commit", "-qam", "failed attempt")
     head = _git(seed, "rev-parse", "HEAD")
     bundle = tmp_path / "attempt.bundle"
@@ -181,4 +204,5 @@ def test_resume_reports_match_and_still_prepares_a_correction(tmp_path: Path) ->
     result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0
     assert "path=fixture.py rule=github_token excerpt=ghp...AAA" in result.stderr
+    assert KEY not in result.stderr
     assert _git(work / "repo", "rev-parse", "HEAD") == head

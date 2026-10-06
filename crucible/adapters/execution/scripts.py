@@ -444,6 +444,7 @@ done
 # same merge-base and added-line scope as no_secrets. A finding is diagnostic here: the
 # worker must be allowed to remove it, then the collected gate makes that correction
 # enforceable instead of turning preparation into a dead launch.
+# Only extract additions inside hunks; +++ can also start an added source line.
 SECRET_BASE=$({GIT} merge-base "refs/remotes/origin/$BASE_REF" HEAD)
 scan_added() {{
   SECRET_RULE=$1
@@ -453,7 +454,8 @@ scan_added() {{
 {harness_case}
     esac
     MATCH=$({GIT} diff --no-ext-diff --no-textconv --unified=0 "$SECRET_BASE" HEAD \
-      -- "$SECRET_PATH" | sed -n '/^+++ /d; /^+/s/^+//p' | grep -P -o -m1 -e "$SECRET_PATTERN" \
+      -- "$SECRET_PATH" | awk '/^diff --git / {{ hunk=0; next }} /^@@ / {{ hunk=1; next }}
+        hunk && /^\\+/ {{ print substr($0, 2) }}' | grep -P -o -m1 -e "$SECRET_PATTERN" \
       || true)
     if [ -n "$MATCH" ]; then
       FIRST=$(printf '%s' "$MATCH" | cut -c1-3)
