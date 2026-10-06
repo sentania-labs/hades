@@ -425,7 +425,8 @@ def test_the_script_checks_the_seal_before_it_contacts_any_remote() -> None:
         assert seal < script.index("git push --quiet origin")
         assert f"exit {BUNDLE_SEAL_REFUSED}" in script
         push = next(line for line in script.splitlines() if "git push" in line)
-        assert "--force" not in push and " -f" not in push and ":+" not in push
+        assert "--force " not in script and " -f" not in push and ":+" not in push
+        assert '--force-with-lease="refs/heads/$WORK_BRANCH:$REMOTE"' in script
     with pytest.raises(ValueError, match="unknown token source"):
         scripts.publisher_script(
             clone_url="u",

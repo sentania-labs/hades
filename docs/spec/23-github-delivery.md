@@ -109,18 +109,20 @@ review is recorded, and Foundry's `AcceptanceResult` for that head is
    else enters this container: not the worker's tree, not the worker's
    `.git`, not a cache a worker could have influenced. Then verify the
    fetched head equals the collected head SHA Crucible recorded; push
-   `work_branch` to the derived push remote without force. The publisher
-   does not check commit authors or trailers: on 2026-09-29 the operator
-   decided the trailer is not required and the task record is the paper
-   trail (hades FDY-0143). What it guarantees is that it pushes exactly the
-   sealed, verified bundle at the reviewed and accepted head. Who authored
-   the commits is shown to the reviewer before review, in the
-   `commit_policy` gate's detail (11). A remote head that is not an
-   ancestor of the bundle head (someone
-   pushed out of band) fails the push, records `publish_failed` with the
-   remote head, and wakes Foundry; Crucible never force-pushes. The one
-   leased push is merge-main (below): it replaces only the head Crucible
-   pushed or adopted, and git refuses it if the branch moved since.
+   `work_branch` to the derived push remote. Hades owns its work branches
+   (issue 403). Fetch the remote branch first. An existing tip must be a
+   confirmed `branch_pushed` head for this task, repository and branch, or
+   carry a nonempty `Crucible-Attempt:` trailer. Otherwise refuse publication
+   and name the foreign commit SHA and author, even for a fast-forward.
+   A Hades tip is replaced whether or not the accepted head descends from
+   it: a quota checkpoint is ungated partial work, and the accepted head is
+   the gated result that supersedes it. Push with an explicit
+   `--force-with-lease=refs/heads/<work_branch>:<fetched tip>` so a concurrent
+   writer cannot be overwritten. A new branch uses an empty expected tip.
+   The sealed bundle and accepted head checks still apply; the publisher
+   does not impose author or trailer requirements on the accepted commits.
+   Republish retries the same sealed bundle through these same checks,
+   including after a post-push failure. The existing retry cap still applies.
 5. From Crucible (API calls, same token): `ls-remote` to confirm
    `branch_pushed_at_head`; then open the PR if none exists for this task,
    or reuse the existing PR whose head just changed. **A reused PR is
