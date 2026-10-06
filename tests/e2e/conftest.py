@@ -42,6 +42,7 @@ from crucible.application.supervisor import Supervisor
 from crucible.contracts.api import ExternalReviewAttestation, RepositoryRegistration
 from crucible.domain.entities import Role
 from tests.e2e import daemon
+from tests.e2e.daemon import derive_subnet  # Issue 135: subnet retry
 from tests.e2e.policy import e2e_policy_document, e2e_routing_document
 from tests.e2e.repo import make_origin
 from tests.fixtures import contract_document, promote_for_test
@@ -62,12 +63,11 @@ EGRESS_PROXY_IMAGE = (
 RUN_ID = uuid.uuid4().hex[:8]
 NET_WORKERS = f"crucible-e2e-workers-{RUN_ID}"
 NET_CONTROL = f"crucible-e2e-control-{RUN_ID}"
-# 41: a fixed subnet collides when a second run creates its `internal: true` network on
-# the same rootless daemon at the same time. RUN_ID is already a random uuid4 prefix, so
-# its bits pick the subnet too; two concurrent runs share it only by the same odds they'd
-# share RUN_ID's own middle bytes.
-_run_bits = int(RUN_ID, 16)
-WORKERS_SUBNET = f"10.{100 + (_run_bits >> 8) % 100}.{_run_bits % 256}.0/24"
+# Issue 135: derive the subnet from RUN_ID so that `ensure_network` retries on
+# overlap by cycling through 10.100..10.199 /24s.  The seed is also the same
+# value used by `derive_subnet` in the stack fixture and by the daemon itself.
+SEED = RUN_ID
+WORKERS_SUBNET = derive_subnet(SEED, 0)
 # github.com for the script tier, plus every endpoint the real adapters declare (S6),
 # so the live tier's workers reach their model API through the same filtering proxy.
 EGRESS_ALLOWLIST = (
@@ -96,7 +96,7 @@ TRUNCATE = (
 )
 
 
-def _squid_conf(directory: Path) -> Path:
+def _squid_conf(directory: Path, subnet: str) -> Path:
     """The same configuration `make proxy-config` writes, for the test's allowlist."""
     endpoint = (
         os.environ.get("CRUCIBLE_LOCAL_ENDPOINT_URL")
@@ -115,7 +115,7 @@ def _squid_conf(directory: Path) -> Path:
     }
     path = directory / "squid.conf"
     path.write_text(
-        worker_proxy_config(WORKERS_SUBNET, list(EGRESS_ALLOWLIST), [routing]),
+        worker_proxy_config(subnet, list(EGRESS_ALLOWLIST), [routing]),
         encoding="utf-8",
     )
     path.chmod(0o644)
@@ -170,9 +170,11 @@ def stack(artifact_root: Path) -> Iterator[dict[str, Any]]:
         "egress": f"crucible-e2e-egress-{RUN_ID}",
     }
     daemon.ensure_network(NET_CONTROL, internal=False)
-    daemon.ensure_network(NET_WORKERS, internal=True, subnet=WORKERS_SUBNET)
+    # Issue 135: retry on subnet overlap; seed=RUN_ID, max 5 attempts.
+    # Returns the actual subnet used (may differ from WORKERS_SUBNET if retry).
+    actual_workers_subnet = daemon.ensure_network(NET_WORKERS, internal=True, seed=RUN_ID)
     pg_port, proxy_port = daemon.free_port(), daemon.free_port()
-    conf = _squid_conf(artifact_root)
+    conf = _squid_conf(artifact_root, actual_workers_subnet)
     socket_path = os.environ.get("CRUCIBLE_E2E_DOCKER_SOCKET", "/var/run/docker.sock")
     try:
         daemon.run_detached(

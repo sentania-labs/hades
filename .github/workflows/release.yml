@@ -133,17 +133,6 @@ jobs:
           echo "image label: $LABEL"
           [ "$LABEL" = "${VERSION}" ]
 
-      # The candidate's own crane resolves the published worker image on GHCR (108): the
-      # same adapter the Kubernetes provider runs, inside the image about to be
-      # published, so a service image that cannot resolve a worker image never ships.
-      # Anonymous: the package is public and no credential is passed in.
-      - name: the image resolves the published worker image through its crane
-        run: |
-          set -euo pipefail
-          docker run --rm -v "$PWD/tools/registry:/check:ro" --entrypoint python \
-            "${IMAGE}:${VERSION}" /check/check_published.py \
-            --reference "${WORKER_REGISTRY}:latest"
-
       # Gate 3, part one. Boot the exact image that is about to be published,
       # the way an operator boots it, and prove the running containers are that
       # image. Part two drives a task through it.
@@ -189,12 +178,14 @@ jobs:
         if: failure()
         env:
           CRUCIBLE_IMAGE: ghcr.io/sentania-labs/crucible:${{ env.VERSION }}
+          POSTGRES_PASSWORD: CHANGE_ME
         run: docker compose logs
 
       - name: down
         if: always()
         env:
           CRUCIBLE_IMAGE: ghcr.io/sentania-labs/crucible:${{ env.VERSION }}
+          POSTGRES_PASSWORD: CHANGE_ME
         run: make down
 
       # Gate 3, part three. The worker images (13, C11): the worker image carrying
@@ -215,6 +206,24 @@ jobs:
       # whose worker images cannot be pushed publishes no service version.
       - name: push the worker images, never over an existing version
         run: tools/release/push_worker_images.sh
+
+      # The candidate's own crane resolves the published worker image on GHCR (108): the
+      # same adapter the Kubernetes provider runs, inside the image about to be
+      # published, so a service image that cannot resolve a worker image never ships.
+      # Compare the published build inputs with actual latest, which follows the highest
+      # published version, not the nearest ancestor tag (delayed patch releases differ).
+      # Changed inputs use the immutable version tag pushed immediately above; identical
+      # inputs keep checking latest. The crane check is anonymous: the package is public
+      # and no credential is passed in.
+      - name: the image resolves the published worker image through its crane
+        run: |
+          set -euo pipefail
+          WORKER_REFERENCE=$(python3 tools/release/worker_check_reference.py \
+            --registry "${WORKER_REGISTRY}" --version "${VERSION}")
+          echo "checking worker image: ${WORKER_REFERENCE}"
+          docker run --rm -v "$PWD/tools/registry:/check:ro" --entrypoint python \
+            "${IMAGE}:${VERSION}" /check/check_published.py \
+            --reference "${WORKER_REFERENCE}"
 
       # Gate 4. Publish. An existing version tag is never overwritten: a re-run
       # after a transient failure skips the push instead of failing on it.
