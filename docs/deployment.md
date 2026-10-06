@@ -227,7 +227,9 @@ the workers (the gate probe, the preparer, the collector, a login; hades #423):
 `kubernetes.short_role_pods` Pods of the worker's shape, one by default. A quota sized
 for N Pods therefore admits N minus one workers at once, and the N-th slot is what a
 gate probe or a collector runs in while the workers are at capacity. Size the quota for
-N + 1 to run N workers. The Providers page and the Routing page show the quota's
+N + 1 to run N workers. A short-role Pod already running satisfies that reservation;
+the quota counts its usage, so the provider does not also keep a second slot free for
+it. The Providers page and the Routing page show the quota's
 headroom, the reservation and the resulting worker capacity; a launch past the
 capacity waits, scheduled, for a worker to finish rather than being refused by the
 quota. `kubernetes.max_concurrency` only applies when the namespace has no quota.

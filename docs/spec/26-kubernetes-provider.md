@@ -642,8 +642,10 @@ provider now keeps `kubernetes.short_role_pods` Pods (one by default) of the
 largest short-role shape out of the headroom: for each counted resource the
 capacity is what the quota admits less the reservation, and the fewest any
 resource admits is the worker capacity (a quota that admits one Pod still
-admits one worker, since a lone attempt's Pods run one after another). The
-checks on `GET /v1/admin/providers` carry `quota_headroom`,
+admits one worker, since a lone attempt's Pods run one after another). An active
+short-role Pod satisfies one place in that reservation because ResourceQuota
+usage already counts it; it is never counted again as room that must stay free.
+The checks on `GET /v1/admin/providers` carry `quota_headroom`,
 `short_role_pods_reserved`, `short_role_reservation` (the shape kept free),
 `worker_capacity`, `capacity_source` (which quota and which resource binds, or
 the configured fallback) and `capacity_detail` in words, beside

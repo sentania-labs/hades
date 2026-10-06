@@ -97,6 +97,43 @@ async def test_more_reserved_pods_leave_fewer_workers() -> None:
     assert (await provider.worker_capacity()).workers == 8
 
 
+async def test_an_existing_preparer_satisfies_the_short_role_reservation() -> None:
+    """The kind tier has room for three 1-CPU Pods. A hanging preparer is already in
+    quota usage and in the supervisor's held-attempt count, so reserving it again must
+    not stop the second task after that task's probe has completed."""
+    api, _registry, provider = build(config=_config())
+    _quota(
+        api,
+        {
+            "count/jobs.batch": "17",
+            "requests.cpu": "3",
+            "limits.cpu": "6",
+            "requests.memory": "12Gi",
+            "limits.memory": "12Gi",
+        },
+    )
+    provider._last_limits = k8sspec.limits_from_policy(
+        {"resources": {"cpus": 1, "memory": "256MiB"}}
+    )
+    api.pending_forever.add("prepare-hanging")
+    api.create(
+        "pods",
+        {
+            "metadata": {
+                "name": "prepare-hanging",
+                "labels": {k8sspec.LABEL_ROLE: k8sspec.ROLE_PREPARER},
+            },
+            "status": {"phase": "Running"},
+        },
+    )
+
+    capacity = await provider.worker_capacity()
+
+    assert capacity.headroom == 3
+    assert capacity.reserved_pods == 0
+    assert capacity.workers == 3
+
+
 async def test_a_quota_for_one_pod_still_admits_one_worker() -> None:
     """A lone attempt's probe, preparer and worker run one after another and never meet,
     so a reservation that would leave nothing is not what keeps the namespace idle."""

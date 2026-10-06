@@ -5283,7 +5283,7 @@ class KubernetesProvider:
         capacity every probe was refused. None when no quota names a counted resource."""
         rows = await self._call(self.client.list_objects, "resourcequotas")
         limits = self._last_limits or k8sspec.limits_from_policy({})
-        reserved = max(0, self.config.short_role_pods)
+        reserved = max(0, self.config.short_role_pods - await self._active_short_role_pods())
         # Per attempt, and per reserved short-role Pod (one Job, one Pod, the worker's
         # shape), for each resource a quota may count.
         per_attempt: dict[str, tuple[float, float]] = {
@@ -5336,6 +5336,32 @@ class KubernetesProvider:
                 f"for Hades's short-role Pods (gate probe, collector, canary, login, "
                 f"preparer) leaves {workers} worker(s) at once"
             ),
+        )
+
+    async def _active_short_role_pods(self) -> int:
+        """Count quota-consuming Hades Pods that already satisfy the reservation.
+
+        ResourceQuota usage already includes these Pods. Holding back their shape again
+        would count a hanging preparer, collector, probe, canary, or login twice and can
+        prevent a worker from launching even though the namespace has room for it.
+        Terminal Pods no longer consume pod CPU and memory quota, so they do not count.
+        """
+        rows = await self._call(self.client.list_objects, "pods")
+        short_roles = {
+            "gate-probe",
+            k8sspec.ROLE_PREPARER,
+            k8sspec.ROLE_COLLECTOR,
+            k8sspec.ROLE_BUNDLE,
+            k8sspec.ROLE_VERIFIER,
+            k8sspec.ROLE_CANARY,
+            k8sspec.ROLE_LOGIN,
+        }
+        return sum(
+            1
+            for row in rows
+            if str((row.get("status") or {}).get("phase") or "") in ("Pending", "Running")
+            and str(((row.get("metadata") or {}).get("labels") or {}).get(k8sspec.LABEL_ROLE) or "")
+            in short_roles
         )
 
 
