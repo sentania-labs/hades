@@ -200,7 +200,7 @@ async def models_view(ctx: AdminContext, uow: UnitOfWork, *, fetch: bool = True)
     for model_id in codex:
         by_id.setdefault(model_id, {})
     rows: list[dict[str, Any]] = []
-    for model_id in [*(offered or []), *(i for i in by_id if i not in (offered or []))]:
+    for model_id in offered or []:
         entry = by_id.get(model_id)
         display_entry = entry or codex.get(model_id)
         is_offered = None if offered is None else model_id in offered

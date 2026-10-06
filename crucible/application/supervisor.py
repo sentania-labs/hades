@@ -31,6 +31,10 @@ from typing import Any, ClassVar, Literal, TypeVar
 
 import yaml
 
+from crucible.application.admin import credentials as admin_credentials
+from crucible.application.admin import gateway as admin_gateway
+from crucible.application.admin import routing as admin_routing
+from crucible.application.admin.context import AdminContext
 from crucible.application.checkout import (
     CheckoutRefusedError,
     checkout_token_for,
@@ -42,7 +46,7 @@ from crucible.application.decisions import (
     repeat_stale_escalation_wakes,
 )
 from crucible.application.delivery_tick import DeliveryConfig, DeliveryCoordinator
-from crucible.application.errors import ApplicationError
+from crucible.application.errors import ApplicationError, NotFoundError
 from crucible.application.evidence import claim_facts, record_collection_evidence, store_artifact
 from crucible.application.gates import evaluate_and_advance, gate_input
 from crucible.application.harnesses import (
@@ -113,10 +117,12 @@ from crucible.domain.entities import (
     Heartbeat,
     LogChunkRecord,
     PoolExhaustion,
+    Principal,
     PullRequestState,
     Repository,
     RetentionAction,
     ReviewDisposition,
+    Role,
     Task,
 )
 from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
@@ -658,6 +664,7 @@ class Supervisor:
         credential_sources: Mapping[str, CredentialSource] | None = None,
         credential_sweep: Callable[[UnitOfWork], int] | None = None,
         credential_renewal: Callable[[], bool] | None = None,
+        admin_context: AdminContext | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._providers = providers
@@ -672,6 +679,7 @@ class Supervisor:
         # window has elapsed; the retention step calls this with the fenced unit of work.
         self._credential_sweep = credential_sweep
         self._credential_renewal = credential_renewal
+        self._admin_context = admin_context
         self._artifacts = artifact_store
         self._wakes = wake_deliverer
         self.holder = holder
@@ -946,6 +954,7 @@ class Supervisor:
         if not held:
             return result
         try:
+            await self._check_gateway_models()
             result.orphans = await self._reconcile_provider_handles()
             await self._resume_quota_checkpoints()
             await self._db(self._resume_quota_waits)
@@ -1016,6 +1025,93 @@ class Supervisor:
     async def reconcile(self) -> TickResult:
         """Reconciliation is the tick; running it twice changes nothing the second time."""
         return await self.tick()
+
+    async def _check_gateway_models(self) -> None:
+        """Disable local routes missing from a successful gateway model listing.
+
+        Listing is deliberately outside the write transaction. A missing configuration,
+        missing key, timeout, or gateway refusal makes this check a no-op. The fenced
+        write re-reads routing before it applies the result, and only turns routes off.
+        """
+        ctx = self._admin_context
+        if ctx is None:
+            return
+        endpoint = await self._db(self._gateway_endpoint)
+        if endpoint is None:
+            return
+        bearer = await asyncio.to_thread(admin_credentials.read_api_key, ctx, admin_gateway.HERMES)
+        if bearer is None:
+            return
+        try:
+            offered = await asyncio.to_thread(admin_gateway.fetch_models, endpoint, bearer)
+        except (admin_gateway.GatewayError, TimeoutError):
+            return
+        await self._db(partial(self._disable_unoffered_gateway_models, offered))
+
+    def _gateway_endpoint(self) -> str | None:
+        with self._fenced() as uow:
+            endpoint, _source = admin_routing.gateway_url(uow)
+            return endpoint
+
+    def _disable_unoffered_gateway_models(self, offered: Sequence[str]) -> None:
+        ctx = self._admin_context
+        if ctx is None:
+            return
+        offered_set = set(offered)
+        with self._fenced() as uow:
+            try:
+                policy, routing = admin_routing.active_documents(uow)
+            except NotFoundError:
+                return
+            document = copy.deepcopy(routing.document)
+            disabled: list[str] = []
+            gateway_models: set[str] = set()
+            for entry in document.get("models") or []:
+                if entry.get("endpoint") != "local" or entry.get("enabled") is not True:
+                    continue
+                model_name = str(entry.get("model_name") or entry.get("id") or "")
+                if model_name in offered_set:
+                    continue
+                entry["enabled"] = False
+                entry["disabled_reason"] = admin_gateway.NOT_OFFERED
+                disabled.append(str(entry.get("id") or model_name))
+                gateway_models.add(model_name)
+            if not disabled:
+                return
+            checked_at = self._clock.now()
+            names = ", ".join(sorted(gateway_models))
+            reason = f"gateway listing at {checked_at.isoformat()} no longer offers {names}"
+            principal = Principal(
+                id=PRINCIPAL_CRUCIBLE,
+                name=PRINCIPAL_CRUCIBLE,
+                role=Role.ADMIN,
+                created_at=checked_at,
+            )
+            _policy_version, routing_version = admin_routing.publish_routing(
+                ctx,
+                uow,
+                principal=principal,
+                policy=policy,
+                routing=routing,
+                routing_document=document,
+                reason=reason,
+                note="Gateway listing removed local models",
+            )
+            record_event(
+                uow,
+                self._clock,
+                EventKind.LOCAL_GATEWAY_UPDATED,
+                principal=PRINCIPAL_CRUCIBLE,
+                payload={
+                    "change": "models automatically disabled",
+                    "models": sorted(gateway_models),
+                    "routes": sorted(disabled),
+                    "checked_at": checked_at.isoformat(),
+                    "routing_version": routing_version,
+                    "reason": reason,
+                },
+            )
+            uow.commit()
 
     # ----- step: provider reconcile ---------------------------------------
 
