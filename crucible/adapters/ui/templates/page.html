@@ -41,7 +41,7 @@
   {% elif cell is mapping and cell.kind == "more" %}{% if cell.value %}<details><summary>{{ cell.label or "Show" }}</summary>{{ render_panel(panel_from_cell(cell.value)) }}</details>{% endif %}
   {% elif cell is mapping and cell.kind == "link" %}<a href="{{ cell.href }}">{{ safe_value("label", cell.label) }}</a>
   {% elif cell is mapping and cell.kind == "status" %}<span class="lat-badge lat-badge--{{ cell.tone or 'accent' }}">{{ safe_value("status", cell.value) }}</span>{% if cell.hint %}<div class="admin-hint">{{ safe_value("hint", cell.hint) }}</div>{% endif %}
-  {% elif cell is mapping and cell.kind == "note" %}<div>{{ safe_value("note", cell.value) }}</div>{% if cell.hint %}<div class="admin-hint">{{ safe_value("hint", cell.hint) }}</div>{% endif %}
+  {% elif cell is mapping and cell.kind == "note" %}<div{% if cell.title %} title="{{ safe_value('title', cell.title) }}"{% endif %}>{{ safe_value("note", cell.value) }}</div>{% if cell.hint %}<div class="admin-hint">{{ safe_value("hint", cell.hint) }}</div>{% endif %}
   {% elif cell is mapping and cell.kind == "steps" %}<ol class="admin-steps">{% for step in cell["items"] %}<li><span class="lat-badge lat-badge--{{ step.tone }}">{{ step.result }}</span> <b>{{ step.name }}</b>{% if step.detail %}: {{ safe_value("detail", step.detail) }}{% endif %}</li>{% endfor %}</ol>{% if cell.tested_at %}<div class="admin-hint">{{ cell.tested_at }}</div>{% endif %}
   {% elif cell is string and cell.startswith('/ui') %}<a href="{{ cell }}">Open</a>
   {% elif cell is mapping and cell.href is defined %}<a href="{{ cell.href }}"{% if not cell.href.startswith('/ui') %} rel="noopener noreferrer" target="_blank"{% endif %}>{{ cell.label }}</a>

@@ -19,6 +19,29 @@ from crucible.domain.entities import Principal, Role
 
 router = APIRouter(prefix="/ui", include_in_schema=False)
 
+# Human-friendly display names for harnesses; the key is the identifier shown in
+# the table.  Operators read the display name and get the identifier on hover via
+# the title attribute (issue 149).
+DISPLAY_NAME: dict[str, str] = {
+    "claude_code": "Claude Code",
+    "codex": "Codex",
+    "agy": "AGY",
+    "hermes": "Hermes",
+    "qwen_code": "Qwen Code",
+    "script-harness": "Script harness",
+}
+
+
+def _harness_display(name: str) -> dict[str, str]:
+    """Return a note cell that shows a display name with the identifier on hover."""
+    display = DISPLAY_NAME.get(name, name)
+    return {
+        "kind": "note",
+        "value": display,
+        "hint": name,
+    }
+
+
 # The first readiness step of a harness in one word (crucible#115, #123).
 STEP_WORDS = {
     "disabled": "disabled",
@@ -133,7 +156,7 @@ async def harness_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             )
         rows.append(
             [
-                name,
+                _harness_display(name),
                 _harness_status(item, ready_by_name.get(name)),
                 (
                     {
@@ -175,7 +198,7 @@ async def harness_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                     ],
                     "rows": [
                         [
-                            item["name"],
+                            _harness_display(item["name"]),
                             "on" if item["enabled_by_configuration"] else "off",
                             (
                                 ("enabled" if item["enabled_by_administrator"] else "disabled")

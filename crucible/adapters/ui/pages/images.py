@@ -23,6 +23,13 @@ def _image_label(entry: dict[str, Any] | None, harness: str) -> str:
     return f"{entry['reference']} ({harness} {entry['version']})"
 
 
+def _image_tag(reference: str) -> str:
+    """Return the tag portion of a worker reference (the part after the first colon)."""
+    if ":" in reference:
+        return reference.split(":", 1)[1]
+    return reference
+
+
 def _image_rows(rows: list[dict[str, Any]], *, admin: bool) -> list[list[Any]]:
     """One row per harness (ADR 0018): its default, the image a rollback returns to, and
     a pulldown of the images that carry it at a supported version."""
@@ -67,13 +74,20 @@ def _image_rows(rows: list[dict[str, Any]], *, admin: bool) -> list[list[Any]]:
                 (
                     {
                         "kind": "note",
-                        "value": current["reference"],
+                        "value": _image_tag(current["reference"]),
+                        "title": current["reference"],
                         "hint": f"{harness} {current['version']}",
                     }
                     if current
                     else {"kind": "status", "value": "none promoted", "tone": "warn"}
                 ),
-                _image_label(previous, harness) if previous else "none",
+                {
+                    "kind": "note",
+                    "value": _image_tag(previous["reference"]),
+                    "title": previous["reference"],
+                }
+                if previous
+                else "none",
                 {"kind": "actions", "items": actions}
                 if actions
                 else {
@@ -114,7 +128,11 @@ async def images_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                     "columns": ["Reference", "Harnesses", "Default for", "Digest"],
                     "rows": [
                         [
-                            item.get("reference"),
+                            {
+                                "kind": "note",
+                                "value": _image_tag(item.get("reference") or ""),
+                                "title": item.get("reference"),
+                            },
                             ", ".join(
                                 f"{name} {version}"
                                 for name, version in sorted((item.get("harnesses") or {}).items())
