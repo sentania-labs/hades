@@ -175,7 +175,7 @@ def test_hermes_update_keeps_lock_and_pins_together(
         if mode == "resolver_failure":
             raise subprocess.CalledProcessError(1, command)
 
-    monkeypatch.setattr(harness_pins.subprocess, "run", compile_lock)
+    monkeypatch.setattr(subprocess, "run", compile_lock)
     argv = [
         "harness_pins.py",
         "--harness",

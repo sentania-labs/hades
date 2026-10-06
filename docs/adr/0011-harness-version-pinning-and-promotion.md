@@ -26,6 +26,13 @@ every attempt's behavior unreproducible.
   admin promotes it to default explicitly; one prior known-good image is
   retained.
 
+Hermes update PRs also regenerate `images/worker/requirements.lock` with hashes
+for the worker's Python 3.11 Linux environment and update the wheel download URL.
+The updater verifies that the resolved lock includes the downloaded wheel's
+checksum before writing the lock, Dockerfile, and manifest. Resolution or checksum
+failures stop the update; dry runs and unsupported releases leave the lock and
+pins untouched.
+
 ## Consequences
 
 Worker images are versioned artifacts with their own release cadence.
