@@ -1,5 +1,6 @@
 """The Kubernetes provider's runtime settings, administered (25): the cluster egress
-selectors and the short-role timeout.
+selectors and the short-role timeout, and the worker capacity the namespace quota
+gives (hades #423).
 
 `kubernetes.egress` names the cluster resolver's pods and, when the local model
 endpoint runs inside the cluster, the gateway's pods and port (crucible#91). The
@@ -30,6 +31,23 @@ def _reload(ctx: AdminContext) -> None:
     reload = getattr(provider, "reload_settings", None)
     if callable(reload):
         reload()
+
+
+async def capacity_view(ctx: AdminContext) -> dict[str, Any]:
+    """hades #423: how many worker Pods the Kubernetes provider admits at once and why:
+    the namespace quota's headroom, the Pods kept for Hades's own short-role Pods (gate
+    probe, collector, canary, login, preparer) and the worker capacity that leaves, or
+    the configured fallback when the namespace has no quota. Read from the cluster now;
+    the last reading when the API server does not answer."""
+    provider = ctx.providers.get("kubernetes")
+    reader = getattr(provider, "worker_capacity", None)
+    if provider is None or not callable(reader):
+        return {"provider_enabled": False}
+    try:
+        capacity = await reader()
+    except Exception as exc:  # the page still renders; the reason is in the document
+        return {"provider_enabled": True, "error": f"{type(exc).__name__}: {exc}"}
+    return {"provider_enabled": True, **capacity.as_dict()}
 
 
 def egress_view(ctx: AdminContext, uow: UnitOfWork) -> dict[str, Any]:

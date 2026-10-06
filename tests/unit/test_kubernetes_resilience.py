@@ -24,6 +24,7 @@ from crucible.adapters.execution.kubernetes import (
 from crucible.domain.role_timeouts import parse_role_timeouts
 from crucible.ports.execution import (
     Handle,
+    LaunchWaitError,
     ObservationState,
     ProviderUnavailableError,
 )
@@ -197,21 +198,20 @@ async def test_a_collector_wait_the_api_server_never_answered_is_collected_again
 # ----- a full namespace says so at once ------------------------------------
 
 
-async def test_a_worker_the_quota_refused_fails_at_once_naming_the_quota() -> None:
+async def test_a_worker_the_quota_refused_is_a_wait_naming_the_quota() -> None:
     """The Job controller retries a quota-refused Pod forever and never fails the Job;
-    `observe` reads the `FailedCreate` event and ends the launch now, with the quota's
-    own words, rather than at the end of the launch timeout."""
+    `launch` reads the `FailedCreate` event at once and, since hades #423, ends as a
+    wait with the quota's own words rather than as a running attempt the quota then
+    fails: the Job goes, and the supervisor launches the attempt again later."""
     api, _registry, provider = build(
         config=KubernetesConfig(poll_interval_seconds=0, launch_timeout_seconds=3600)
     )
     launch = spec()
     workspace = await provider.prepare(launch)
     api.quota_refused_roles.add(k8sspec.ROLE_WORKER)
-    handle = await provider.launch(workspace, launch)
-    observation = await provider.observe(handle)
-    assert observation.state is ObservationState.EXITED
-    assert observation.exit_code == 70
-    assert "exceeded quota" in (observation.detail or "")
+    with pytest.raises(LaunchWaitError, match="exceeded quota"):
+        await provider.launch(workspace, launch)
+    assert not [name for kind, name in api.objects if kind == "jobs" and name.startswith("worker")]
 
 
 async def test_a_collector_the_quota_refused_is_a_wait_not_a_verdict() -> None:
@@ -236,7 +236,8 @@ def _quota(api: Any, hard: dict[str, str]) -> None:
 @pytest.mark.parametrize(
     ("hard", "expected"),
     [
-        # The shipped base quota: every limit fits three attempts at the defaults.
+        # The shipped base quota: every limit fits three Pods at the defaults, one of
+        # which is kept for Hades's own short-role Pods (hades #423): two workers.
         (
             {
                 "count/jobs.batch": "17",
@@ -245,11 +246,13 @@ def _quota(api: Any, hard: dict[str, str]) -> None:
                 "limits.cpu": "6",
                 "limits.memory": "12Gi",
             },
-            3,
+            2,
         ),
-        # Jobs for five, memory for two: two, where the Job count alone said five.
-        ({"count/jobs.batch": "25", "limits.memory": "8Gi"}, 2),
-        # CPU requests for one (the default requests half of a 2-CPU limit).
+        # Jobs for five, memory for two Pods: one worker beside the reserved Pod, where
+        # the Job count alone said five.
+        ({"count/jobs.batch": "25", "limits.memory": "8Gi"}, 1),
+        # CPU requests for one (the default requests half of a 2-CPU limit): a lone
+        # attempt's Pods never meet, so one worker still runs.
         ({"count/jobs.batch": "25", "requests.cpu": "1500m"}, 1),
     ],
 )

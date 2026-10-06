@@ -686,6 +686,11 @@ class FakeKubernetesApi:
             "spec": {**dict(template.get("spec") or {}), "nodeName": self.node_name},
         }
         self.objects[("pods", pod_name)] = _Object("pods", pod_name, pod)
+        # The Job controller counts the Pod it created, which is how `launch` knows the
+        # quota admitted it without listing Pods (hades #423).
+        stored = self.objects.get(("jobs", name))
+        if stored is not None:
+            stored.body.setdefault("status", {})["active"] = 1
         self._start_pod(pod, owner=name)
 
     def _start_pod(self, pod: Mapping[str, Any], owner: str | None) -> None:

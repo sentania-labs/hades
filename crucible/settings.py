@@ -120,7 +120,12 @@ class KubernetesSettings(BaseModel):
     role_timeout_seconds: int = 120
     report_size_cap_bytes: int = 10 * 1024 * 1024
     poll_interval_seconds: float = 2.0
+    # The dispatch limit when the workers namespace has no ResourceQuota; with one, the
+    # capacity is derived from the quota and this number is not consulted (hades #423).
     max_concurrency: int = 3
+    # hades #423: how many of Hades's own short-role Pods (gate probe, collector, canary,
+    # login, preparer) the quota-derived capacity keeps room for beside the workers.
+    short_role_pods: int = 1
     # The cluster DNS service address. 26 allows port 53 on this address and nothing
     # else on it, and denies everything else inside the cluster.
     cluster_dns_ip: str = "10.96.0.10"

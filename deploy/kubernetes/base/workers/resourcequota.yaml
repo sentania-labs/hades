@@ -1,7 +1,11 @@
 # The namespace's resource ceiling, and the bound on what one runaway attempt can leave
 # behind: an attempt is one claim and a Job per role, so a namespace that is full refuses
 # a launch rather than wedging. The lab overlay sets the sizes; these fit three
-# concurrent attempts.
+# concurrent Pods of the default shape. The provider keeps one of them for Hades's own
+# short-role Pods (the gate probe, the preparer, the collector, a login; hades #423,
+# `kubernetes.short_role_pods`), so this base admits two workers at once and holds
+# launches past that rather than letting the quota refuse a probe. Size a quota for
+# N + 1 Pods to run N workers.
 #
 # `count/jobs.batch` is five Jobs per attempt: preparer, worker, collector,
 # bundle-verifier and verifier. The provider divides this count by five when it reports
