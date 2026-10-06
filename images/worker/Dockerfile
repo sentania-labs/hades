@@ -99,6 +99,8 @@ ADD --checksum=sha256:${HARNESS_HERMES_SHA256} --chmod=0644 \
 # Qwen Code's npm release is a self-contained JS bundle. Extract only the pinned
 # tarball: no npm dependency resolution or optional native addons in this headless
 # worker. Shell tools use child_process and the image's rg. Node includes npm (#288).
+# Do not execute npm or Qwen while assembling the image. Both may create mutable
+# user state; the package metadata supplies the deterministic version assertion.
 FROM ${BASE_IMAGE} AS fetch-qwen-code
 ARG SOURCE_DATE_EPOCH
 ARG NODE_VERSION=22.16.0
@@ -273,11 +275,8 @@ ARG HARNESS_QWEN_CODE_VERSION=0.25.0
 RUN set -eu; \
     chmod 0755 /opt/qwen-code/cli-entry.js; \
     ln -s /opt/qwen-code/cli-entry.js /usr/local/bin/qwen; \
-    export HOME=/tmp/qwen-version NPM_CONFIG_CACHE=/tmp/qwen-npm; \
     test "$(node --version)" = "v${NODE_VERSION}"; \
-    npm --version; \
-    test "$(qwen --version)" = "${HARNESS_QWEN_CODE_VERSION}"; \
-    rm -rf /tmp/qwen-version /tmp/qwen-npm
+    test "$(node -p \"require('/opt/qwen-code/package.json').version\")" = "${HARNESS_QWEN_CODE_VERSION}"
 COPY --chmod=0755 worker/crucible-qwen-code.py /usr/local/bin/crucible-qwen-code
 COPY --chmod=0755 worker/crucible-hermes.py /usr/local/bin/crucible-hermes
 # FDY-0140: Hermes puts the directory of whichever `hermes` it finds first on the PATH
