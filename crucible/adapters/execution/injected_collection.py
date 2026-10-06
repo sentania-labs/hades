@@ -13,7 +13,7 @@ LIMIT = 8 * 1024 * 1024
 _META = re.compile(rb":[0-7]{6} [0-7]{6} [0-9a-f]{40,64} ([0-9a-f]{40,64}) ([A-Z])")
 
 
-def _fields(path: Path) -> Iterator[bytes]:
+def nul_fields(path: Path) -> Iterator[bytes]:
     """Stream complete NUL fields, bounding individual records rather than the tree."""
     with path.open("rb") as handle:
         pending = b""
@@ -55,7 +55,7 @@ def classify_collected(output: Path) -> tuple[tuple[PathChange, ...], tuple[Path
     def changes(filename: str) -> tuple[PathChange, ...]:
         kept: list[PathChange] = []
         try:
-            fields = iter(_fields(output / filename))
+            fields = iter(nul_fields(output / filename))
             for raw_header in fields:
                 header = raw_header.lstrip(b"\n")
                 if not header:
@@ -82,7 +82,7 @@ def classify_collected(output: Path) -> tuple[tuple[PathChange, ...], tuple[Path
     diff = changes("diff-raw.txt")
     history = changes("commit-raw.txt")
     try:
-        for raw in _fields(output / "base-injected.txt"):
+        for raw in nul_fields(output / "base-injected.txt"):
             raw.decode("utf-8")
         if (output / "injected-error.txt").exists():
             raise ValueError("Git could not export instruction records")

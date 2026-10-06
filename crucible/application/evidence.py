@@ -211,6 +211,10 @@ def _scanner_findings(
         hit = scan_text(outputs.diff_text)
         if hit:
             findings.append({"where": "diff", "pattern": hit})
+    if outputs.diff_findings is not None:
+        # hades #398: the adapter streamed the whole diff and every blob the worker
+        # added or changed through the scanner; each match names its path.
+        findings.extend({"where": m.path, "pattern": m.pattern} for m in outputs.diff_findings)
     for path in outputs.diff_paths:
         hit = scan_text(path)
         if hit:
@@ -290,9 +294,13 @@ def _emit_false_claims(
             )
 
 
+def _diff_read(outputs: CollectedOutputs) -> bool:
+    return outputs.diff_text is not None or outputs.diff_findings is not None
+
+
 def _scanned_inputs(outputs: CollectedOutputs, claim: dict[str, Any] | None) -> list[str]:
     scanned = ["report" if claim is not None or outputs.report_raw else "report:absent"]
-    if outputs.diff_text is not None:
+    if _diff_read(outputs):
         scanned.append("diff")
     scanned.extend(f"diff-path:{p}" for p in outputs.diff_paths)
     if outputs.bundle is not None:
@@ -621,8 +629,10 @@ def record_collection_evidence(
             "findings": findings,
             "scanned": _scanned_inputs(outputs, claim),
             # The gate reports `pass` only when the diff itself was read (11). A
-            # collector that produced no diff leaves this false and the gate waits.
-            "diff_scanned": outputs.diff_text is not None,
+            # collector that produced no diff, or a changed file whose content was not
+            # exported to scan (hades #398), leaves this false and the gate waits.
+            "diff_scanned": _diff_read(outputs) and not outputs.diff_unscanned,
+            "unscanned": list(outputs.diff_unscanned[:50]),
         },
     )
     record_event(

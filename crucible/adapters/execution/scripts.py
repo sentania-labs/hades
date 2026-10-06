@@ -266,9 +266,13 @@ DIFF_ARTIFACT_CAP_BYTES = 4 * 1024 * 1024
 # `report/`, which holds the worker's copied files, so neither can overwrite the other.
 REVIEW_DIFF_DIR = "crucible-review"
 
+# hades #398: every blob the worker added or changed, by object id, for the secret
+# scanner. Unbounded on purpose: every byte the worker added or changed is scanned.
+CHANGED_BLOBS_DIR = "changed-blobs"
+
 # Every diff the collector runs: no textconv, no external diff driver. Never `--text`
-# on the raw diff: a binary must stay "Binary files differ" there, or its bytes push the
-# text after it past the secret scanner's window and fill the output.
+# on the raw diff: a binary must stay "Binary files differ" there, or its bytes fill the
+# output. The secret scanner reads every changed blob itself (hades #398).
 _DIFF_FLAGS = "--no-ext-diff --no-textconv"
 
 # Paths whose `diff` attribute is unset (`-diff`, the `binary` macro) or names a driver:
@@ -285,7 +289,7 @@ _COLLECTOR_OUTPUTS = (
     "commit-paths.txt work_branch.bundle bundle.log commits.txt commit-policy tree "
     "clone.log report copy-rejections.tsv collection-failed.txt checkpoint-refusal.txt "
     "leftover-committed.txt leftover-refusal.txt collector.ok attr-text.patch "
-    f"{REVIEW_DIFF_DIR}"
+    f"{CHANGED_BLOBS_DIR} changed-blob-ids.txt {REVIEW_DIFF_DIR}"
 )
 
 
@@ -620,6 +624,32 @@ def _injected_collection_script() -> str:
   done < "$OUT/injected-blob-ids.sorted"'''
 
 
+def _changed_blobs_script() -> str:
+    """Export each blob the worker added or changed for the secret scanner (hades #398).
+
+    The ids come from the raw diff against the merge base, which names the new blob of
+    every changed path; a deletion has none and a submodule's commit is not content
+    here. `cat-file blob` reads the object as stored: the worker's attributes, textconv
+    and filters never apply, so a path marked binary, or holding a NUL, is scanned as
+    the bytes it holds. The service streams each file through the scanner.
+    """
+    return rf'''mkdir -p "$OUT/{CHANGED_BLOBS_DIR}"
+  # Alternate headers and paths so a header-shaped path remains data.
+  LC_ALL=C awk 'BEGIN {{ RS="\0" }}
+    skip {{ skip=0; next }}
+    {{ sub(/^\n+/, "") }}
+    /^:/ {{
+      skip=1
+      if ($2 != "160000" && $5 !~ /^D/ && $4 ~ /^[0-9a-f]+$/ &&
+          (length($4)==40 || length($4)==64) && $4 !~ /^0+$/)
+        print $4
+    }}' "$OUT/diff-raw.txt" | sort -u > "$OUT/changed-blob-ids.txt" || true
+  while IFS= read -r blob; do
+    {GIT} -C "$REPO" cat-file blob "$blob" > "$OUT/{CHANGED_BLOBS_DIR}/$blob" 2>/dev/null \
+      || rm -f "$OUT/{CHANGED_BLOBS_DIR}/$blob"
+  done < "$OUT/changed-blob-ids.txt"'''
+
+
 def collector_script(
     *,
     base_ref: str,
@@ -787,6 +817,7 @@ if [ -n "$BASE" ]; then
   # #400: classify every raw path before filtering; Git pathspecs cannot normalize
   # Unicode. Read blobs by object id, including those in earlier commits.
   {_injected_collection_script()}
+  {_changed_blobs_script()}
   {GIT} -C "$REPO" bundle create "$OUT/work_branch.bundle" \
     "$BASE..$WORK_BRANCH" > "$OUT/bundle.log" 2>&1 || true
   {GIT} -C "$REPO" rev-list --count "$BASE"..HEAD > "$OUT/commits.txt" \

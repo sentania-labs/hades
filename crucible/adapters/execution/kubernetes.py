@@ -260,7 +260,8 @@ LOG_READ_LIMIT = 4 * 1024 * 1024
 JOB_TAIL_LINES = 2000
 LOG_READ_CEILING = 64 * 1024 * 1024
 # How much of a collected output tar is accepted. The tree is excluded from it, so this
-# is the diff, the bundle, the report copy and the verifier logs.
+# is the diff, the blobs the worker added or changed (hades #398), the bundle, the report
+# copy and the verifier logs.
 OUTPUT_READ_LIMIT = 256 * 1024 * 1024
 # The one line the activity probe prints (FDY-0140).
 ACTIVITY_READ_LIMIT = 4096
@@ -2305,7 +2306,8 @@ class KubernetesProvider:
             stderr_tail=stderr_tail,
             interruption=interruption,
             diff_paths=outputs.diff_paths,
-            diff_text=outputs.diff_text,
+            diff_findings=outputs.diff_findings,
+            diff_unscanned=outputs.diff_unscanned,
             diff_changes=outputs.diff_changes,
             base_paths=outputs.base_paths,
             over_limit=outputs.over_limit,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
 _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -46,6 +46,48 @@ def scan_text(text: str) -> str | None:
     for name, pattern in _PATTERNS:
         if pattern.search(text):
             return name
+    return None
+
+
+# hades #398: how much of what came before each chunk a streamed scan reads again, so a
+# match across a chunk boundary is still found. It is far longer than the shortest text
+# any pattern matches; a match touching the end of a window longer than this is taken
+# as it stands, because the next window cannot see its start.
+SCAN_OVERLAP = 16 * 1024
+
+
+def _window_hit(window: str, pos: int, final: bool, overlap: int) -> str | None:
+    for name, pattern in _PATTERNS:
+        for match in pattern.finditer(window, pos):
+            # A match that ends where the window ends may only look whole because the
+            # text after it is not read yet (a trailing \b); the next window reads it
+            # again with what follows, unless it is too long to fit there.
+            if final or match.end() < len(window) or match.end() - match.start() > overlap:
+                return name
+    return None
+
+
+def scan_chunks(chunks: Iterable[str], overlap: int = SCAN_OVERLAP) -> str | None:
+    """Return the name of the first pattern matching the text the chunks make up, or None.
+
+    The text is never held whole (hades #398): each window is the chunk plus the last
+    `overlap` characters before it, and one character more that is read only as the
+    context a word boundary looks at, so a match is found wherever the chunks split it."""
+    tail = ""
+    pos = 0
+    pending = iter(chunks)
+    chunk = next(pending, None)
+    while chunk is not None:
+        following = next(pending, None)
+        window = tail + chunk
+        hit = _window_hit(window, pos, following is None, overlap)
+        if hit is not None:
+            return hit
+        if len(window) > overlap + 1:
+            tail, pos = window[-(overlap + 1) :], 1
+        else:
+            tail = window
+        chunk = following
     return None
 
 

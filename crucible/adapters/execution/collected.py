@@ -11,9 +11,11 @@ Everything here treats what it reads as data: it is a tree a worker influenced.
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import json
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,8 +23,9 @@ from typing import Any
 import yaml
 
 from crucible.adapters.execution import scripts
-from crucible.adapters.execution.injected_collection import classify_collected
+from crucible.adapters.execution.injected_collection import classify_collected, nul_fields
 from crucible.contracts.evidence import REVIEW_DIFF_NAME, REVIEW_DIFF_TYPE
+from crucible.domain.secrets import SecretMatch, scan_chunks
 from crucible.ports.execution import (
     BranchBundle,
     CollectedArtifact,
@@ -41,6 +44,7 @@ __all__ = [
     "read_path_changes",
     "read_path_list",
     "read_verifications",
+    "scan_changed_content",
     "tail",
     "text",
 ]
@@ -54,7 +58,7 @@ class Outputs:
     stdout_tail: str
     stderr_tail: str
     diff_paths: tuple[str, ...]
-    diff_text: str | None
+    diff_findings: tuple[SecretMatch, ...] | None
     bundle: BranchBundle | None
     artifacts: tuple[CollectedArtifact, ...]
     verifications: tuple[VerificationRun, ...]
@@ -65,6 +69,7 @@ class Outputs:
     diff_changes: tuple[PathChange, ...] | None = None
     base_paths: tuple[str, ...] | None = None
     over_limit: tuple[str, ...] = ()
+    diff_unscanned: tuple[str, ...] = ()
 
 
 TEXT_LIMIT = 8 * 1024 * 1024
@@ -114,7 +119,7 @@ def read_outputs(
     blocked_md = text(blocked) if blocked.is_file() else None
 
     changed = read_path_list(output / "changed.txt")
-    diff_text = text(output / "diff.patch") if (output / "diff.patch").is_file() else None
+    diff_findings, diff_unscanned = scan_changed_content(output)
     commit_paths = read_path_list(output / "commit-paths.txt")
     diff_changes: tuple[PathChange, ...] | None
     commit_changes: tuple[PathChange, ...] | None
@@ -202,7 +207,8 @@ def read_outputs(
         stdout_tail=tail(output / "collector.ok", tail_bytes),
         stderr_tail=tail(output / "bundle.log", tail_bytes),
         diff_paths=changed,
-        diff_text=diff_text,
+        diff_findings=diff_findings,
+        diff_unscanned=diff_unscanned,
         diff_changes=diff_changes,
         base_paths=base_paths,
         over_limit=over_limit,
@@ -214,6 +220,97 @@ def read_outputs(
         leftover_committed=(output / "leftover-committed.txt").is_file(),
         leftover_note=text(output / "leftover-refusal.txt").strip() or None,
     )
+
+
+# hades #398: how much of a collected file the scanner holds at once.
+SCAN_CHUNK = 1024 * 1024
+# A raw diff header: the new mode, the new blob, and the status.
+_CHANGED_META = re.compile(rb":[0-7]{6} ([0-7]{6}) [0-9a-f]{40,64} ([0-9a-f]{40,64}) ([A-Z])[0-9]*")
+
+
+def _file_chunks(path: Path, digest: Any = None) -> Iterator[str]:
+    """A file as text, a chunk at a time; a character split across two reads is decoded
+    whole. `digest`, when given, is fed every byte read."""
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    with path.open("rb") as handle:
+        while block := handle.read(SCAN_CHUNK):
+            if digest is not None:
+                digest.update(block)
+            yield decoder.decode(block)
+    yield decoder.decode(b"", final=True)
+
+
+def _scan_blob(path: Path, blob: str) -> str | bool | None:
+    """The pattern a collected blob matches, None for none, or False when the file is
+    not that blob: missing, not a regular file, or content that does not hash to it."""
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        digest = hashlib.sha1() if len(blob) == 40 else hashlib.sha256()
+        digest.update(b"blob %d\0" % path.stat().st_size)
+        chunks = _file_chunks(path, digest)
+        hit = scan_chunks(chunks)
+        # Read what is left after a match, so the hash covers the whole file.
+        for _ in chunks:
+            pass
+    except OSError:
+        return False
+    return hit if digest.hexdigest() == blob else False
+
+
+def scan_changed_content(
+    output: Path,
+) -> tuple[tuple[SecretMatch, ...] | None, tuple[str, ...]]:
+    """Scan every byte the worker added or changed (hades #398), never the whole at once.
+
+    The whole diff.patch, and every blob the raw diff against the merge base names as
+    added or changed, which the collector exported by object id regardless of the
+    worker's attributes. A match is named by the path (`diff` for the patch). Returns
+    None for the matches when there is no diff.patch, and the changed paths whose
+    content could not be read, so the gate does not claim coverage it lacks."""
+    patch = output / "diff.patch"
+    if not patch.is_file():
+        return None, ()
+    found: list[SecretMatch] = []
+    unscanned: list[str] = []
+    try:
+        hit = scan_chunks(_file_chunks(patch))
+    except OSError:
+        return None, ()
+    if hit is not None:
+        found.append(SecretMatch(path="diff", pattern=hit))
+    raw = output / "diff-raw.txt"
+    if not raw.is_file():
+        # A collector before #398 exported no blobs; the patch is what it gave.
+        return tuple(found), ()
+    blobs = output / scripts.CHANGED_BLOBS_DIR
+    results: dict[str, str | bool | None] = {}
+    try:
+        fields = nul_fields(raw)
+        for raw_header in fields:
+            header = raw_header.lstrip(b"\n")
+            if not header:
+                continue
+            match = _CHANGED_META.fullmatch(header)
+            raw_path = next(fields, None)
+            if match is None or not raw_path:
+                raise ValueError("malformed raw diff record")
+            mode, blob_bytes, status = match.groups()
+            if status == b"D" or mode == b"160000":
+                continue
+            path = raw_path.decode("utf-8", "surrogateescape")
+            shown = path if path.isprintable() else ascii(path)
+            blob = blob_bytes.decode("ascii")
+            if blob not in results:
+                results[blob] = _scan_blob(blobs / blob, blob)
+            result = results[blob]
+            if result is False:
+                unscanned.append(shown)
+            elif isinstance(result, str):
+                found.append(SecretMatch(path=f"diff:{shown}", pattern=result))
+    except (OSError, ValueError):
+        unscanned.append("diff-raw.txt")
+    return tuple(found), tuple(unscanned)
 
 
 _RAW_META = re.compile(r":[0-7]{6} [0-7]{6} ([0-9a-f]{40,64}) ([0-9a-f]{40,64}) ([A-Z])[0-9]*")
