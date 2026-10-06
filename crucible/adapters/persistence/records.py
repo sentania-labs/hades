@@ -487,6 +487,7 @@ class Escalations:
             closed_at=_dt(row.closed_at),
             decision_id=row.decision_id,
             last_wake_at=_dt(row.last_wake_at),
+            reason=row.reason,
         )
 
     def add(self, escalation: Escalation) -> None:
@@ -501,6 +502,7 @@ class Escalations:
                 closed_at=escalation.closed_at,
                 decision_id=escalation.decision_id,
                 last_wake_at=escalation.last_wake_at,
+                reason=escalation.reason,
             )
         )
         self._s.flush()

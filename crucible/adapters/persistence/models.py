@@ -176,6 +176,8 @@ class AttemptRow(Base):
     effective_settings: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     stall_shape: Mapped[str | None] = mapped_column(String(32), nullable=True)
     termination_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    blocked_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    blocked_statement: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class LogChunkRow(Base):
@@ -411,6 +413,7 @@ class EscalationRow(Base):
     closed_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
     decision_id: Mapped[str | None] = mapped_column(ID, nullable=True)
     last_wake_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class DecisionRow(Base):

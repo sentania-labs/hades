@@ -141,8 +141,9 @@ def test_identity_md_is_short_and_carries_no_retired_instructions(tmp_path: Path
         "log file",
     ):
         assert retired not in text, retired
-    # hades #429 added the one-sentence note that Docker, kind and kubectl are CI's.
-    assert len(text.split()) <= 370, len(text.split())
+    # hades #429 added the one-sentence note that Docker, kind and kubectl are CI's;
+    # hades #393 the reason line of blocked.md and the one-paragraph stop rule.
+    assert len(text.split()) <= 450, len(text.split())
 
 
 def test_identity_md_renders_values_as_words_not_python(tmp_path: Path) -> None:

@@ -21,6 +21,7 @@ from crucible.domain.gates import ENFORCED_PRE_PR_GATES, PRE_PR_GATES
 from crucible.ports.execution import IDENTITY_MOUNT, REPO_MOUNT, REPORT_MOUNT
 
 __all__ = [
+    "AMBIGUOUS_CONTRACT_STOP_RULE",
     "IDENTITY_MOUNT",
     "REPORT_MOUNT",
     "REPO_MOUNT",
@@ -35,6 +36,15 @@ __all__ = [
 WORKER_ABSENT_PROGRAMS_SENTENCE = (
     "Docker, kind and kubectl are absent in a worker and are CI's; a missing one is "
     "expected and is not a reason to stop."
+)
+
+# hades #393: the one paragraph of the "If you are stuck" section that tells the worker
+# to stop rather than guess. The operator's words, kept as they were given.
+AMBIGUOUS_CONTRACT_STOP_RULE = (
+    "When the contract is ambiguous, stop rather than pick a reading: a "
+    "workaround that changes the result is not a workaround, it is a wrong answer. A "
+    "blocked attempt is not retried; Hades hands your reason and your words verbatim to "
+    "the person who answers, and a correction brings the answer back."
 )
 
 
@@ -143,8 +153,8 @@ def render_identity_md(
         "## Checks\n\nRun these from the checkout and fix what fails:\n\n"
         + _bullets([_check(v) for v in checks])
         + "\n- If a required command's program is missing from the image, do not "
-        "write a substitute for it; write report/blocked.md naming the program and "
-        "exit 75.\n- " + WORKER_ABSENT_PROGRAMS_SENTENCE
+        "write a substitute for it; write report/blocked.md naming the program, with "
+        "the line `reason: missing_capability`, and exit 75.\n- " + WORKER_ABSENT_PROGRAMS_SENTENCE
     )
     sections.append(
         "## Report\n\n"
@@ -169,7 +179,10 @@ def render_identity_md(
     conditions = [str(c) for c in _items(escalation.get("conditions"))]
     stuck = (
         "## If you are stuck\n\n"
-        f"Write `{REPORT_MOUNT}/blocked.md`: what blocks you and what you tried. Then stop."
+        f"Write `{REPORT_MOUNT}/blocked.md`: a line `reason: missing_capability` (a "
+        "program the image lacks) or `reason: ambiguous_contract` (the contract reads two "
+        "ways), then what blocks you and what you tried, in your own words. Then stop.\n\n"
+        + AMBIGUOUS_CONTRACT_STOP_RULE
     )
     if conditions:
         stuck += f" Stop this way when:\n\n{_bullets(conditions)}"

@@ -908,7 +908,8 @@ class FakeKubernetesApi:
             claim["output/report/report.yaml"] = report
         if behavior == "blocked":
             claim["output/report/blocked.md"] = (
-                f"# Blocked\n\nThe fake worker for {attempt_id} needs a decision.\n"
+                "reason: ambiguous_contract\n\n# Blocked\n\n"
+                f"The fake worker for {attempt_id} needs a decision.\n"
             ).encode()
         self._finish(obj, 0)
 

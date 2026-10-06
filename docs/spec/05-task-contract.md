@@ -84,6 +84,11 @@ escalation:
     - "a required verification command does not exist in the repository"
     - "any change outside allowed_paths appears necessary"
   action: "write report/blocked.md with the question and exit 75"
+  # hades #393: blocked.md opens with a reason line, `reason: missing_capability`
+  # (a program or capability the image does not have) or `reason: ambiguous_contract`
+  # (the contract reads more than one way and the readings differ in result); the
+  # rest is the worker's statement, carried verbatim to the attempt and the escalation.
+  # A blocked attempt is never retried and marks no pool (09, 16).
 
 policy: { name: "default-software", version: 3 }
 
