@@ -26,7 +26,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from functools import partial
-from itertools import chain
 from pathlib import Path
 from typing import Any, ClassVar, Literal, TypeVar
 
@@ -177,6 +176,12 @@ from crucible.ports.publish import Publisher
 from crucible.ports.repository import FencedTokenRejectedError, UnitOfWork, UnitOfWorkFactory
 
 log = logging.getLogger("crucible.supervisor")
+
+# How many seconds the workspace fingerprint walk may spend before giving up.
+# Mirrors ACTIVITY_WALK_SECONDS in scripts.py so the supervisor and the worker
+# use the same budget for their directory walks.
+ACTIVITY_WALK_SECONDS: int = 10
+
 T = TypeVar("T")
 
 TERMINATION_TIMEOUT = "timeout"
@@ -368,14 +373,61 @@ def commands_counted(
     return tuple(counted)
 
 
-def workspace_fingerprint(workspace: Workspace) -> tuple[int, int, int]:
-    """Cheap activity fingerprint for the writable checkout and report trees."""
+def workspace_fingerprint(workspace: Workspace) -> tuple[int, int, int] | None:
+    """Cheap activity fingerprint for the writable checkout and report trees.
+
+    Returns ``(newest_mtime_ns, file_count, total_bytes)`` on a tree small enough to
+    walk within *ACTIVITY_WALK_SECONDS*.  Returns ``None`` when the walk would exceed
+    the budget (the stall clock is never reset from ``None``).
+
+    The ``.git`` subtree is skipped entirely: it dominates the node count on most
+    Git worktrees and has no activity signal we care about.
+    """
     newest_ns = files = total_bytes = 0
+    budget_ns = int(ACTIVITY_WALK_SECONDS * 1_000_000_000)  # seconds -> nanoseconds
+    start_ns = time.monotonic_ns()
+
+    def _walk(root: Path) -> Iterator[Path]:
+        """Yield every entry under *root*, pruning ``.git`` and symlinked dirs.
+
+        Uses an explicit stack so deep nesting never raises ``RecursionError``,
+        and checks ``lstat`` on every entry so directory symlinks (e.g. a
+        worker-controlled symlink pointing at another attempt's workspace) are
+        never descended.
+        """
+        stack: list[Path] = [root]
+        yield root
+        while stack:
+            current = stack.pop()
+            try:
+                entries = sorted(current.iterdir(), key=lambda p: p.name)
+            except OSError:
+                continue
+            dirs: list[Path] = []
+            for child in entries:
+                if child.name == ".git":
+                    # Skip the entire .git tree without descending.
+                    continue
+                yield child
+                try:
+                    child_stat = child.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.S_ISDIR(child_stat.st_mode):
+                    dirs.append(child)
+            stack.extend(dirs)
+
     for root_name in (workspace.checkout_path, workspace.report_path):
         root = Path(root_name)
         try:
-            paths = chain((root,), root.rglob("*"))
-            for path in paths:
+            for path in _walk(root):
+                # Budget check before every stat (cheap monotonic_ns call).
+                if time.monotonic_ns() - start_ns > budget_ns:
+                    log.debug(
+                        "workspace_fingerprint exceeded budget; returning None",
+                        extra={"budget_seconds": ACTIVITY_WALK_SECONDS},
+                    )
+                    return None
                 try:
                     file_stat = path.stat(follow_symlinks=False)
                 except OSError:
@@ -624,7 +676,7 @@ class Supervisor:
         self._workspaces: dict[str, Workspace] = {}
         # The harnesses a login is running for, read once per launch pass (12, 25).
         self._logins_now: frozenset[str] = frozenset()
-        self._workspace_fingerprints: dict[str, tuple[int, int, int]] = {}
+        self._workspace_fingerprints: dict[str, tuple[int, int, int] | None] = {}
         # FDY-0140: when each attempt's provider was last asked for its activity.
         self._activity_asked: dict[str, datetime] = {}
         self._activity_refresh: dict[str, int] = {}

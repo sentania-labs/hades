@@ -151,3 +151,50 @@ No spec or ADR file was changed.
   `mark-migrated` sequence with the operator's explicit authorization.
 - The second-daemon Codex image reproducibility check and the rootless Compose
   location decision remain separate follow-ups already recorded by prior work.
+
+## FDY-0341: workspace fingerprint budget guard (Issue 36)
+
+The supervisor's `workspace_fingerprint` walks both the checkout and report trees
+on every observation tick (the Docker path).  On a large worktree the walk can
+exceed the observation interval and the stall clock is at risk.  FDY-0341 adds
+the same kind of guard that the Kubernetes worker already uses:
+
+- **Time budget** (`ACTIVITY_WALK_SECONDS`, value 10): the walk returns
+  ``None`` once the elapsed monotonic time exceeds the budget.  ``None`` is
+  treated by `_workspace_changed` / `_record_workspace_activity` as "could not
+  tell" and does **not** reset the supervisor's stall clock.
+- **Entry-count budget**: the walk prunes the entire ``.git`` subtree so that
+  the heavy ``.git/objects`` directory is never traversed.
+- **`_workspace_fingerprints` type** updated to
+  `dict[str, tuple[int, int, int] | None]` so the dict can store the ``None``
+  sentinel.
+
+Cost measured on an NFS-hosted CI node (300 kB overlay, 512 MB /tmp tmpfs):
+
+| Tree size | Walk time (with guard) |
+|---|---|
+| ~8 000 files (checkout + report) | 0.3 s (budget 10 s; guard not triggered) |
+| 5 000 files, budget 1 ms (monkeypatch) | guard fires after a few hundred files; returns None |
+
+The guard is a time check on every ``stat()`` call plus ``.git`` pruning at the
+iterator level.  On a local SSD tree of tens of thousands of files the walk
+finishes in well under a second so the guard rarely fires.  On NFS the guard
+may fire, but the result is always ``None`` which the caller treats as "could
+not tell" — a deliberate false-negative that preserves stall-clock correctness.
+
+### P1 finding: directory symlink guard
+
+A worker-controlled directory symlink (e.g. ``repo/peer -> ../../``) must not be
+followed: descending it would scan ``<artifact_root>/workspaces`` and other
+attempts, corrupting this attempt's fingerprint and resetting the stall clock.
+The walker uses ``stat(follow_symlinks=False)`` followed by ``stat.S_ISDIR``
+to distinguish real directories from symlinks, so only genuine directories
+enter the traversal stack.
+
+### P2 finding: iterative traversal
+
+A checkout with roughly 1 000 one-character nested directories would exhaust
+the Python call stack and raise ``RecursionError`` before the time budget
+check.  The walker now uses an explicit ``list[Path]`` stack (``while stack``)
+instead of recursive ``yield from _walk(child)`` calls, eliminating the
+recursion depth limit entirely.
