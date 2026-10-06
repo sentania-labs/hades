@@ -69,6 +69,8 @@ FROZEN_ACTIONS = [
     "login-start",
     "policy-upload",
     "repository-register",
+    # hades #265: the Repositories page's picker registers its ticked repositories together.
+    "repository-register-batch",
     "repository-remove",
     "routing-clear",
     "routing-model",

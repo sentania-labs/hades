@@ -9,6 +9,8 @@ wrapper exists rather than the router calling the legacy service directly.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from crucible.application.admin.context import AdminContext, admin_event, guard_mutation
@@ -107,3 +109,105 @@ def remove(
         repository=name,
     )
     return {"repository": name, "removed": True}
+
+
+# ----- The installation picker's list (crucible#265) ----------------------------------
+
+PICKER_PAGE_SIZE = 25
+PICKER_SORTS = ("name", "registered")
+PICKER_CHOICES = ("any", "yes", "no")
+
+
+@dataclass(frozen=True)
+class PickerFilter:
+    """How one installation's list is narrowed, ordered and cut into pages: a name
+    fragment, three yes/no/any choices, a sort, and a page. Anything unknown in a query
+    falls back to its default rather than refusing the page."""
+
+    name: str = ""
+    registered: str = "any"
+    private: str = "any"
+    archived: str = "any"
+    sort: str = "name"
+    page: int = 1
+    per_page: int = PICKER_PAGE_SIZE
+
+    @classmethod
+    def from_query(cls, values: Mapping[str, str]) -> PickerFilter:
+        def choice(key: str) -> str:
+            value = str(values.get(key) or "any").strip().lower()
+            return value if value in PICKER_CHOICES else "any"
+
+        sort = str(values.get("sort") or "name").strip().lower()
+        try:
+            page = max(1, int(str(values.get("page") or "1")))
+        except ValueError:
+            page = 1
+        return cls(
+            name=str(values.get("name") or "").strip(),
+            registered=choice("registered"),
+            private=choice("private"),
+            archived=choice("archived"),
+            sort=sort if sort in PICKER_SORTS else "name",
+            page=page,
+        )
+
+    def query(self, *, page: int | None = None) -> dict[str, str]:
+        """The query string that shows this filter again, without its defaults."""
+        out = {
+            "name": self.name,
+            "registered": self.registered,
+            "private": self.private,
+            "archived": self.archived,
+            "sort": self.sort,
+            "page": str(page if page is not None else self.page),
+        }
+        defaults = PickerFilter()
+        return {
+            key: value
+            for key, value in out.items()
+            if value and value != str(getattr(defaults, key))
+        }
+
+
+def _wanted(choice: str, value: bool) -> bool:
+    return choice == "any" or (choice == "yes") == value
+
+
+def picker_matches(
+    repositories: Sequence[Mapping[str, Any]], picked: PickerFilter
+) -> list[Mapping[str, Any]]:
+    """Every repository the filter keeps, in its order, across all pages."""
+    needle = picked.name.lower()
+    kept = [
+        repo
+        for repo in repositories
+        if needle in str(repo.get("full_name") or "").lower()
+        and _wanted(picked.registered, bool(repo.get("registered_as")))
+        and _wanted(picked.private, repo.get("private") is True)
+        and _wanted(picked.archived, repo.get("archived") is True)
+    ]
+
+    def by_name(repo: Mapping[str, Any]) -> str:
+        return str(repo.get("full_name") or "").lower()
+
+    kept.sort(key=by_name)
+    if picked.sort == "registered":
+        # Registered first, each half by name.
+        kept.sort(key=lambda repo: not repo.get("registered_as"))
+    return kept
+
+
+def picker_page(repositories: Sequence[Mapping[str, Any]], picked: PickerFilter) -> dict[str, Any]:
+    """One page of the filtered list, and where it sits among the rest."""
+    kept = picker_matches(repositories, picked)
+    pages = max(1, -(-len(kept) // picked.per_page))
+    page = min(picked.page, pages)
+    start = (page - 1) * picked.per_page
+    return {
+        "repositories": kept[start : start + picked.per_page],
+        "matching": len(kept),
+        "total": len(repositories),
+        "page": page,
+        "pages": pages,
+    }

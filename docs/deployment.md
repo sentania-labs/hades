@@ -133,13 +133,15 @@ and is its only writer (crucible#168). No public DNS record is needed: every red
 of your own browser, so the internal hostname you use for the UI is enough, and the App
 has no webhook (Crucible polls). If Crucible sees a different address than your browser
 uses, set it under Return address (`crucible admin github set-external-url`). Then press
-Install on GitHub; GitHub sends you back to the repository picker. Create is the only
+Install on GitHub; GitHub sends you back to the repository picker on Repositories, where
+each installation's repositories can be filtered by name, paged, and ticked to register
+several at once under one policy. Create is the only
 way to connect an App. To change Apps, use Replace the App on the same page, install the
 new App, and register each repository again on Repositories with its new installation.
 A deployment that sealed `crucible-github-app` before this change takes it out of its
 GitOps repository without pruning it, or creates the App again afterwards.
 
-**Private repositories need the App and nothing else** (ADR 0019). The picker registers a
+**Private repositories need the App and nothing else** (ADR 0019). The picker on Repositories registers a
 private repository as private; the Repositories form and `crucible admin repository
 register --private` do the same for one it cannot show, with the installation ID that
 covers it. Registration asks GitHub for a read-only token for that repository and revokes
