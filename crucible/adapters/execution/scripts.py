@@ -406,7 +406,8 @@ fi
             if entry in {"/.hermes/", "/.qwen/"}
         )
         harness_case = (
-            "      " + "|".join(part for path in harness_excludes for part in (path, f"{path}/*"))
+            "      "
+            + "|".join(part for path in harness_excludes for part in (path, f"{path}/*"))
             + ") continue ;;"
             if harness_excludes
             else "      __crucible_no_harness_state__) continue ;;"

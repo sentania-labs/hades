@@ -84,8 +84,7 @@ def test_added_fixture_fails_with_path_rule_and_excerpt(tmp_path: Path) -> None:
             "id": "scan",
             "payload": {
                 "findings": [
-                    {"where": m.path, "pattern": m.pattern, "excerpt": m.excerpt}
-                    for m in findings
+                    {"where": m.path, "pattern": m.pattern, "excerpt": m.excerpt} for m in findings
                 ],
                 "diff_scanned": True,
                 "scanned": ["diff"],

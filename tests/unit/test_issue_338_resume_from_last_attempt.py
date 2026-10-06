@@ -143,9 +143,7 @@ def test_preparer_checks_seal_and_task_ancestry_before_using_bundle(
     else:
         assert result.returncode == 4
         assert (
-            "does not descend from task head"
-            if mode == "divergent"
-            else "does not match its seal"
+            "does not descend from task head" if mode == "divergent" else "does not match its seal"
         ) in result.stderr
         assert not (work / "output" / "prepared-head.txt").exists()
     # Preparing the next attempt never publishes the failed work.
