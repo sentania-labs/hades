@@ -67,6 +67,30 @@ never retry.
 - No `gh` in worker images and no GitHub credential: adapters never
   instruct a worker to push or open a PR.
 
+## Harness version bump checklist (issue 155)
+
+When bumping a harness pin in `images/worker/Dockerfile`, run the
+following steps to keep the transcript fixtures in sync:
+
+1. Run `make e2e-command-timeout` to generate transcript reports in
+   the harnesses' pytest temporary directories (one per harness,
+   beneath `tmp_path`).
+2. Copy the new reports from the temporary directories into
+   `tests/fixtures_data/transcripts/` under the new version name
+   (for example,
+   `claude-code-2.1.281-background-completed.jsonl` replaces
+   `claude-code-2.1.280-background-completed.jsonl`). Remove any old
+   versioned files so the set of fixture versions is exact; a stale
+   file causes the pin-match guard in `tests/unit/test_issue_155_fixture_pin_match.py`
+   to fail.
+3. Verify with `uv run pytest -q tests/unit/test_issue_155_fixture_pin_match.py`
+   that all pins match.
+
+The unit test `test_issue_155_fixture_pin_match.py` asserts that every
+harness with transcript fixtures has those fixtures at the pinned version;
+bumping a pin without renaming the fixtures fails the test with a clear
+"refresh the fixtures" message.
+
 ## Claude Code
 
 - Version floor: `>=2.1.277,<2.2.0`. Claude Code 2.1.277 is the first release
