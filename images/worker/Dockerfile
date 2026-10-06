@@ -276,7 +276,7 @@ RUN set -eu; \
     chmod 0755 /opt/qwen-code/cli-entry.js; \
     ln -s /opt/qwen-code/cli-entry.js /usr/local/bin/qwen; \
     test "$(node --version)" = "v${NODE_VERSION}"; \
-    test "$(node -p \"require('/opt/qwen-code/package.json').version\")" = "${HARNESS_QWEN_CODE_VERSION}"
+    test "$(node -e 'console.log(require("/opt/qwen-code/package.json").version)')" = "${HARNESS_QWEN_CODE_VERSION}"
 COPY --chmod=0755 worker/crucible-qwen-code.py /usr/local/bin/crucible-qwen-code
 COPY --chmod=0755 worker/crucible-hermes.py /usr/local/bin/crucible-hermes
 # FDY-0140: Hermes puts the directory of whichever `hermes` it finds first on the PATH
