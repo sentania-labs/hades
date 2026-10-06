@@ -261,6 +261,11 @@ ATTEMPT_TRANSITIONS: frozenset[tuple[AttemptState, AttemptState]] = frozenset(
         (_A.LAUNCHING, _A.COLLECTED),
         # A pending attempt whose task was cancelled never launches.
         (_A.PENDING, _A.COLLECTED),
+        # hades #423: a launch the provider could not take right now (the namespace
+        # quota refused its Pod) goes back to pending and is launched on a later tick.
+        # Nothing ran, so nothing is recorded against the attempt.
+        (_A.PREPARING, _A.PENDING),
+        (_A.LAUNCHING, _A.PENDING),
     }
 )
 
