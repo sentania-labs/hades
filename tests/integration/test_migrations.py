@@ -1572,7 +1572,8 @@ def test_each_0044_head_upgrades_through_the_0045_merge(
                 {"kind": kind},
             )
         migrate.upgrade(database_url)
-        assert migrate.current_revision(engine) == "0045_merge_0044_heads"
+        # hades #393 put 0046_blocked_reason above the merge; the path still runs it.
+        assert migrate.current_revision(engine) == "0046_blocked_reason"
         ok, detail = migrate.is_current(engine, database_url)
         assert ok, detail
         with engine.begin() as conn:

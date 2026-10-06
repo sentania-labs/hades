@@ -87,6 +87,7 @@ from crucible.contracts.completion_claim import (
     CompletedClaim,
     complete_claim,
     load_report,
+    parse_blocked_md,
     parse_claim,
 )
 from crucible.contracts.evidence import ROLE_RUN_EVIDENCE, EvidenceKind, EvidenceSource
@@ -149,6 +150,7 @@ from crucible.ports.execution import (
     LaunchCancelledError,
     LaunchRefusedError,
     LaunchSpec,
+    LaunchWaitError,
     LogChunk,
     LogOffset,
     Observation,
@@ -198,6 +200,17 @@ ENDS_ATTEMPTS: tuple[TaskState, ...] = (
 # A launch the registry or the provider refused (07): recorded so the retry rule knows
 # not to try the same refusal again.
 TERMINATION_REFUSED = "harness_refused"
+# hades #423: the attempt states that hold one of a provider's worker slots: from the
+# gate probe through collection, every Pod an attempt runs is of the worker's shape and
+# runs inside the slot the attempt took, so the provider's reservation for short-role
+# Pods only has to cover what runs beside attempts (the canary, a login, a publish).
+SLOT_HOLDING_STATES: tuple[AttemptState, ...] = (
+    AttemptState.PREPARING,
+    AttemptState.LAUNCHING,
+    AttemptState.RUNNING,
+    AttemptState.TERMINATING,
+    AttemptState.EXITED,
+)
 
 
 def local_cap_kind(
@@ -225,6 +238,26 @@ def retryable_exit(exit_class: ExitClass, retry_on: Sequence[str]) -> bool:
 def too_big_wake_summary(cap: Literal["turns", "time"]) -> str:
     cap_name = "turn" if cap == "turns" else cap
     return f"split the task: the local attempt hit its {cap_name} cap"
+
+
+# The escalation question when `blocked.md` was there with nothing in it but a reason line
+# (or nothing at all): the worker stopped and said why in no words of its own.
+BLOCKED_WITHOUT_STATEMENT = "the worker stopped without a statement"
+
+
+def blocked_note(blocked_md: str | None) -> tuple[str | None, str | None]:
+    """The reason and the statement of a collected `blocked.md` (hades #393).
+
+    (None, None) when there was no file. The reason is the file's `reason:` line when
+    it names missing_capability or ambiguous_contract, else None. The statement is the
+    rest of the file verbatim, or the redaction marker when the file matches a secret
+    pattern (12): the reason is one of two fixed words and is kept either way."""
+    if blocked_md is None:
+        return None, None
+    note = parse_blocked_md(blocked_md)
+    if find_secrets(blocked_md):
+        return note.reason, "[redacted: secret pattern]"
+    return note.reason, note.statement
 
 
 # 16 defaults, used when the policy names none.
@@ -657,6 +690,9 @@ class Supervisor:
         # The launches in flight, by attempt id. An attempt in here is this process's
         # to finish; nothing else in the tick touches it until its task is done.
         self._launches: dict[str, asyncio.Task[bool]] = {}
+        # hades #423: each provider's worker capacity as read once per launch pass, so a
+        # pass over many pending attempts reads the namespace quota once.
+        self._capacity_now: dict[str, Any] = {}
         # The collections in flight, by attempt id, and the same rule: an attempt in
         # here is its collection's until it ends (lab findings of 2026-09-29).
         self._collects: dict[str, asyncio.Task[bool]] = {}
@@ -1499,6 +1535,7 @@ class Supervisor:
         what does not keeps running and is counted by the tick that sees it end."""
         launched = self._harvest_launches()
         started: list[asyncio.Task[bool]] = []
+        self._capacity_now.clear()
         for item in await self._db(self._list_pending):
             if item.attempt.id in self._launches:
                 continue
@@ -1605,6 +1642,13 @@ class Supervisor:
         # Read per attempt, not per pass: a login started while this pass runs holds
         # back the next launch of its harness rather than racing it (12).
         self._logins_now = await self._logins_in_progress()
+        # hades #423: a provider whose capacity comes from its own ceiling (the namespace
+        # quota) says how many workers it admits at once; a launch past that waits
+        # here, pending and scheduled, rather than being refused by the quota later.
+        capacity_wait = await self._provider_capacity_wait(execution.provider)
+        if capacity_wait is not None:
+            await self._db(partial(self._defer_launch, attempt.id, capacity_wait))
+            return None
         if not review:
             selection = await self._db(partial(self._preview_route, item))
             if selection is None or selection.selected is None or selection.image is None:
@@ -1656,6 +1700,43 @@ class Supervisor:
             return None
         return item, provider
 
+    async def _provider_capacity_wait(self, provider_name: str) -> str | None:
+        """hades #423: why a launch on this provider waits for room, or None. Only a
+        provider that derives its capacity (`worker_capacity`, the Kubernetes provider
+        from the namespace quota, or its configured fallback without one) holds launches
+        here; the attempts already holding a slot are counted from the database, so the
+        launches this tick has begun count too."""
+        provider = self._providers.get(provider_name)
+        reader = getattr(provider, "worker_capacity", None)
+        if provider is None or not callable(reader):
+            return None
+        capacity = self._capacity_now.get(provider_name)
+        if capacity is None:
+            try:
+                capacity = await reader()
+            except ProviderError as exc:
+                log.warning("the provider's worker capacity could not be read: %s", exc)
+                return None
+            self._capacity_now[provider_name] = capacity
+        workers = int(capacity.workers)
+        holding = await self._db(partial(self._slots_held, provider_name))
+        if holding < workers:
+            return None
+        return (
+            f"{provider_name} admits {workers} worker(s) at once ({capacity.source}; "
+            f"{capacity.reserved_pods} Pod(s) kept for Hades's own short-role Pods) and "
+            f"{holding} attempt(s) hold them; the launch waits for one to finish"
+        )
+
+    def _slots_held(self, provider_name: str) -> int:
+        with self._uow_factory() as uow:
+            held = 0
+            for attempt in uow.attempts.list_in_states(list(SLOT_HOLDING_STATES)):
+                execution = uow.executions.get(attempt.execution_id)
+                if execution is not None and execution.provider == provider_name:
+                    held += 1
+            return held
+
     async def _finish_launch(self, item: _Pending, provider: ExecutionProvider) -> bool:
         """The slow half, as a task of its own (hades #190): build the spec, prepare
         the checkout, and start the worker. A cancel is honoured before each step, while
@@ -1691,6 +1772,11 @@ class Supervisor:
             except LaunchRefusedError as exc:
                 await self._db(partial(self._refuse_launch, attempt.id, "prepare", str(exc)))
                 return False
+            except LaunchWaitError as exc:
+                # hades #423: the quota had no room for the probe or the preparer. Back
+                # to pending; a later tick launches it.
+                await self._db(partial(self._return_to_pending, attempt.id, "prepare", str(exc)))
+                return False
             except ProviderError as exc:
                 detail = str(exc)
                 await self._db(partial(self._environment_failure, attempt.id, "prepare", detail))
@@ -1714,6 +1800,13 @@ class Supervisor:
             except LaunchRefusedError as exc:
                 await self._discard(provider, ws, spec)
                 await self._db(partial(self._refuse_launch, attempt.id, "launch", str(exc)))
+                return False
+            except LaunchWaitError as exc:
+                # hades #423: the quota had no room for the worker. Nothing ran; the
+                # attempt goes back to pending, unconsumed, and launches on a later tick.
+                await self._discard(provider, ws, spec)
+                self._forget_workspace(attempt.id)
+                await self._db(partial(self._return_to_pending, attempt.id, "launch", str(exc)))
                 return False
             except WorkerStartError as exc:
                 # Hades #346: the runtime could not start the worker's process. Nothing
@@ -2617,7 +2710,9 @@ class Supervisor:
                 )
             ):
                 error = "probe returned incomplete or invalid results"
-        except LaunchCancelledError:
+        except (LaunchCancelledError, LaunchWaitError):
+            # hades #423: a probe the quota had no room for is launched again later, not
+            # recorded as a check that cannot run.
             raise
         except ProviderError as exc:
             error = str(exc)
@@ -3111,21 +3206,110 @@ class Supervisor:
             return True
 
     def _environment_failure(self, attempt_id: str, stage: str, detail: str) -> None:
+        """A prepare or launch the provider could not carry out (a create the API server
+        refused, a preparer that failed). hades #423: the provider's message is the
+        attempt's recorded failure reason and the wake's summary, so the record says
+        more than the exit class."""
         with self._fenced() as uow:
             attempt = uow.attempts.get(attempt_id, for_update=True)
             assert attempt is not None
             attempt.exit_class = ExitClass.ENVIRONMENT
             attempt.ended_at = self._clock.now()
+            attempt.termination_detail = redact(f"{stage}: {detail}")[:1000]
             move_attempt(
                 uow,
                 self._clock,
                 attempt,
                 AttemptState.COLLECTED,
                 EventKind.ATTEMPT_COLLECTED,
-                payload={"stage": stage, "detail": detail, "exit_class": ExitClass.ENVIRONMENT},
+                payload={
+                    "stage": stage,
+                    "detail": redact(detail)[:1000],
+                    "exit_class": ExitClass.ENVIRONMENT,
+                },
             )
             self._record_bare_evidence(uow, attempt)
-            self._classify_and_finish(uow, attempt, None)
+            self._classify_and_finish(
+                uow,
+                attempt,
+                None,
+                wake_summary=(
+                    f"attempt {attempt.number} ended environment at {stage}: "
+                    f"{attempt.termination_detail}; no retry remaining"
+                ),
+            )
+            uow.commit()
+
+    def _return_to_pending(self, attempt_id: str, stage: str, detail: str) -> None:
+        """hades #423: the provider could not take the attempt's Pod right now (the
+        namespace quota refused the gate probe, the preparer or the worker). Nothing
+        ran, so nothing is recorded against the attempt: it goes back to pending with
+        the reason, the task back to scheduled, the checkout lease is released, and a
+        later tick launches it. A task cancelled meanwhile ends the attempt as a cancel
+        does."""
+        with self._fenced() as uow:
+            attempt = uow.attempts.get(attempt_id, for_update=True)
+            assert attempt is not None
+            task = uow.tasks.get(attempt.task_id, for_update=True)
+            assert task is not None
+            if attempt.state not in (AttemptState.PREPARING, AttemptState.LAUNCHING):
+                # Another supervisor already settled it (a stranded launch, 10).
+                return
+            if task.state in ENDS_ATTEMPTS:
+                self._end_cancelled_launch(uow, attempt, task, stage)
+                uow.commit()
+                return
+            reason = redact(detail)[:1000]
+            attempt.workspace_path = None
+            attempt.identity_sha256 = None
+            attempt.handle = None
+            move_attempt(
+                uow,
+                self._clock,
+                attempt,
+                AttemptState.PENDING,
+                EventKind.HARNESS_LAUNCH_DEFERRED,
+                payload={
+                    "attempt_id": attempt.id,
+                    "stage": stage,
+                    "detail": reason,
+                    "quota_wait": True,
+                },
+            )
+            self._release_checkout_leases(uow, attempt)
+            execution = uow.executions.get(attempt.execution_id)
+            if (
+                task.state is TaskState.RUNNING
+                and execution is not None
+                and execution.role is not ExecutionRole.REVIEW
+            ):
+                # The task returns to the queue where it stood: the queue reads the
+                # newest scheduling event, and a head adoption's resume flag rides along.
+                scheduled = uow.events.latest_for_task_kind(task.id, EventKind.TASK_SCHEDULED.value)
+                move_task(
+                    uow,
+                    self._clock,
+                    task,
+                    TaskState.SCHEDULED,
+                    EventKind.TASK_SCHEDULED,
+                    execution_id=attempt.execution_id,
+                    attempt_id=attempt.id,
+                    payload={
+                        "reason": "quota_wait",
+                        "stage": stage,
+                        "detail": reason,
+                        **(
+                            {"resume_from_work_branch": True}
+                            if scheduled is not None
+                            and scheduled.payload.get("resume_from_work_branch") is True
+                            else {}
+                        ),
+                    },
+                )
+            log.info(
+                "launch waits for room; the attempt is pending again",
+                extra={"stage": stage, "detail": reason},
+            )
             uow.commit()
 
     def _start_failure(self, attempt_id: str, observation: Observation) -> None:
@@ -5044,13 +5228,12 @@ class Supervisor:
                         "differences": [dict(d) for d in completed.differences],
                     },
                 )
-            blocked_text: str | None = None
-            if outputs.blocked_md is not None:
-                blocked_text = (
-                    "[redacted: secret pattern]"
-                    if find_secrets(outputs.blocked_md)
-                    else outputs.blocked_md
-                )
+            blocked_reason, blocked_text = blocked_note(outputs.blocked_md)
+            if attempt.exit_class is ExitClass.BLOCKED:
+                # hades #393: on the attempt record before the evidence and the
+                # classification read it.
+                attempt.blocked_reason = blocked_reason
+                attempt.blocked_statement = blocked_text
             move_attempt(
                 uow,
                 self._clock,
@@ -5062,6 +5245,7 @@ class Supervisor:
                     "report_parsed": claim_ok,
                     "partial_report_kept_unparsed": cancelled and report_present,
                     "blocked_present": outputs.blocked_md is not None,
+                    **({"blocked_reason": blocked_reason} if blocked_reason else {}),
                     # Issue 128: commands the harness was waiting on and cut off at its
                     # exit. A background process left running is not listed (153).
                     **(
@@ -5128,6 +5312,7 @@ class Supervisor:
                 uow,
                 attempt,
                 blocked_text,
+                blocked_reason=blocked_reason,
                 claim_ok=claim_ok,
                 defer_quota=defer_quota,
                 turn_cap_reached=parsed is not None and parsed.limit_reached is not None,
@@ -5924,13 +6109,22 @@ class Supervisor:
         attempt: Attempt,
         blocked_text: str | None,
         *,
+        blocked_reason: str | None = None,
         claim_ok: bool = False,
         defer_quota: bool = False,
         turn_cap_reached: bool = False,
         has_commits: bool = True,
+        wake_summary: str | None = None,
         pool_mark: tuple[PoolExhaustion, bool] | None = None,
     ) -> None:
-        """`pool_mark` is the exhaustion mark this exit wrote and whether it opened the
+        """Move the attempt to its terminal state and the task after it (09, 16).
+
+        hades #393: `blocked_text` is the worker's `blocked.md` statement verbatim and
+        `blocked_reason` the reason line it named (missing_capability or
+        ambiguous_contract, or None). A blocked attempt keeps both, opens the one
+        escalation carrying both, consumes no retry and marks no pool: this returns
+        before the retry count and never reaches pool accounting.
+        `pool_mark` is the exhaustion mark this exit wrote and whether it opened the
         pool's exhaustion (hades #378): the one wake the refusal raises names the pool
         and its reset, whichever path the attempt takes from here."""
         execution = uow.executions.get(attempt.execution_id, for_update=True)
@@ -5960,7 +6154,16 @@ class Supervisor:
                 uow, self._clock, attempt, AttemptState.SUCCEEDED, EventKind.ATTEMPT_SUCCEEDED
             )
         elif exit_class is ExitClass.BLOCKED:
-            move_attempt(uow, self._clock, attempt, AttemptState.BLOCKED, EventKind.ATTEMPT_BLOCKED)
+            attempt.blocked_reason = blocked_reason
+            attempt.blocked_statement = blocked_text
+            move_attempt(
+                uow,
+                self._clock,
+                attempt,
+                AttemptState.BLOCKED,
+                EventKind.ATTEMPT_BLOCKED,
+                payload={"blocked_reason": blocked_reason} if blocked_reason else None,
+            )
         else:
             if exit_class is ExitClass.COMPLETED and not claim_ok:
                 attempt.exit_class = ExitClass.COMPLETED_WITHOUT_REPORT
@@ -5990,16 +6193,25 @@ class Supervisor:
                 task,
                 TaskState.BLOCKED,
                 EventKind.TASK_BLOCKED,
-                payload={**common, "exit_class": exit_class.value, "blocked_md": blocked_text},
+                payload={
+                    **common,
+                    "exit_class": exit_class.value,
+                    "blocked_md": blocked_text,
+                    "blocked_reason": blocked_reason,
+                },
                 **common,
             )
-            # 09: entering `blocked` opens an escalation and creates a wake.
+            # 09: entering `blocked` opens an escalation and creates a wake. hades #393:
+            # the escalation carries the worker's reason and its statement verbatim, and
+            # nothing retries the attempt; the answer comes back as a decision or a
+            # correction.
             open_escalation(
                 uow,
                 self._clock,
                 task=task,
                 attempt_id=attempt.id,
-                question=blocked_text or "the worker exited 75 without a question",
+                question=blocked_text or BLOCKED_WITHOUT_STATEMENT,
+                reason=blocked_reason,
             )
             return
         if local_cap is not None:
@@ -6052,8 +6264,11 @@ class Supervisor:
         if attempt.termination_reason == TERMINATION_REFUSED:
             # 07: a refused launch would be refused again; Foundry has the wake.
             retryable = False
+        # hades #393: a blocked attempt is a question, not a failure, so it consumes no
+        # retry when a decision schedules the same execution again.
         ordinary_attempts = sum(
-            prior.exit_class not in {ExitClass.QUOTA_EXHAUSTED, ExitClass.INFRASTRUCTURE}
+            prior.exit_class
+            not in {ExitClass.QUOTA_EXHAUSTED, ExitClass.INFRASTRUCTURE, ExitClass.BLOCKED}
             and prior.termination_reason not in {"gate_proves_nothing", "check_cannot_run"}
             for prior in uow.attempts.list_for_execution(execution.id)
             if prior.state in ATTEMPT_TERMINAL
@@ -6089,7 +6304,7 @@ class Supervisor:
                 "retry_eligible": retryable,
             },
         )
-        self._task_reported(uow, task, attempt, exit_class, common)
+        self._task_reported(uow, task, attempt, exit_class, common, wake_summary=wake_summary)
 
     def _infrastructure_waits(self) -> list[tuple[str, str, str]]:
         pending: list[tuple[str, str, str]] = []

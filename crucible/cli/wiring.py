@@ -284,6 +284,7 @@ def kubernetes_config(
         role_timeout_seconds=k.role_timeout_seconds,
         report_size_cap_bytes=k.report_size_cap_bytes,
         max_concurrency=k.max_concurrency,
+        short_role_pods=k.short_role_pods,
         poll_interval_seconds=k.poll_interval_seconds,
         api_timeout_seconds=k.api_timeout_seconds,
         cluster_dns_ip=k.cluster_dns_ip,
