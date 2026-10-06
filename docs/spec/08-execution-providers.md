@@ -48,22 +48,44 @@ It is a test fixture: wired only when `test_fixtures` is on (18).
 - Talks to Docker through the socket proxy endpoint, never the raw socket
   (13). API version pinned.
 - `prepare`: the supervisor takes the checkout lease (a fenced row the
-  provider cannot write) before calling `prepare`; `prepare` itself runs
-  in a throwaway preparer container (the Crucible image carries no git,
-  and under rootless Docker the checkout must be created by the
-  container uid that will own it) which performs `git clone --reference
+  provider cannot write) before calling `prepare`. With the reference cache
+  on (`use_reference_cache`, the default) and a remote repository, `prepare`
+  first runs a throwaway **cache refresher** container
+  (`crucible-cache-refresher-<attempt>`, label role `cache-refresher`): it
+  mounts `<artifact_root>/cache` read-write and nothing else (no workspace,
+  no identity bundle, no harness credential), runs on the preparer's network
+  through the egress proxy, and fetches the repository's bare mirror
+  `<cache>/<sha256(url)[:16]>.git` (or clones it when absent), giving the
+  remote 20 seconds to answer a ref listing and otherwise leaving the mirror
+  as it is (hades #191). It is the cache's only writer, and it is removed
+  before the preparer is created. A refresh that fails is logged and the
+  prepare goes on: a stale or absent cache costs time, never correctness.
+  This is the same shape as the Kubernetes refresher Job (26, #55), for the
+  same reason: the cache is the one volume every attempt shares, so a
+  preparer that could write it could poison every later checkout, and
+  having one provider refresh in the preparer gave nothing the separate
+  container does not (hades #137). `prepare` then runs the throwaway
+  preparer container (the Crucible image carries no git, and under rootless
+  Docker the checkout must be created by the container uid that will own
+  it), which mounts the cache read-only and performs `git clone --reference
   <cache> --dissociate` into `<artifact_root>/workspaces/<attempt>/repo`
-  (the cache is a bare repository the same preparer refreshes first; nothing
-  shared is mounted into a worker). A public repository is cloned and
-  refreshed with no credential at all. A private one (ADR 0019) uses a
-  read-only installation token scoped to that repository, which the
-  supervisor mints just before `prepare` and revokes as soon as it returns:
-  the provider writes it to the preparer container's stdin, the script puts
-  it on a tmpfs of that container's own (`/run/crucible-token`, as the
-  publisher's is, 23), and git reads it through a helper that answers only
-  for https on `github.credential_host`; the token and the helper are removed
-  right after the clone and again on every exit, so nothing after the network
-  steps, and no other container, can read it; for a `correct` execution, or a retry of a task
+  (the checkout owns its objects; nothing shared is mounted into a worker;
+  a cache the refresher left absent means a plain clone from the remote).
+  A public repository is cloned and refreshed with no credential at all. A
+  private one (ADR 0019) uses a read-only installation token scoped to that
+  repository, which the supervisor mints just before `prepare` and revokes
+  as soon as it returns: the provider writes it to the stdin of each of the
+  two containers that talk to the remote, the refresher and the preparer,
+  the script puts it on a tmpfs of that container's own
+  (`/run/crucible-token`, as the publisher's is, 23), and git reads it
+  through a helper that answers only for https on `github.credential_host`;
+  the token and the helper are removed right after the fetch or the clone
+  and again on every exit, so nothing after the network steps, and no other
+  container, can read it. The supervisor's `cancelled` check (hades #189) is
+  asked before the refresher is created, on every poll while it runs, before
+  the preparer is created, and on every poll while that runs; a cancel
+  force-removes whichever container is running and creates nothing further.
+  The preparer then, for a `correct` execution, or a retry of a task
   whose branch Crucible already pushed, check out the remote `work_branch`
   head, else create `work_branch` from `base_ref`; record which happened
   as an event; replace the `origin` URL with a placeholder so no push can

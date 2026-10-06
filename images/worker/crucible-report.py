@@ -109,6 +109,42 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ),
 ]
 
+# The closing-keyword and at-mention regexes that publication.py's validate_title
+# uses.  Copied here so the standalone checker enforces the same rules (hades #314).
+_CLOSING_KEYWORDS: tuple[str, ...] = (
+    "close",
+    "closes",
+    "closed",
+    "fix",
+    "fixes",
+    "fixed",
+    "resolve",
+    "resolves",
+    "resolved",
+)
+CLOSING_RE = re.compile(
+    r"\b(" + "|".join(_CLOSING_KEYWORDS) + r")\b(\s*:?\s*)(?=(?:[\w.-]+/[\w.-]+)?#\d+|https?://)",
+    re.IGNORECASE,
+)
+MENTION_RE = re.compile(r"(?<!\w)@(?=[A-Za-z0-9][\w-]*)")
+
+# Length is the publisher's rule, not this checker's (hades #314): a title over the
+# limit still passes here. But publication.py's validate_title shortens the title
+# before it checks for closing keywords and mentions, so a keyword or mention that
+# only exists past the shortened boundary is one the publisher would never see. This
+# checker must decide on the same shortened candidate or it refuses reports the
+# publisher would accept (hades #440 review).
+MAX_TITLE_LENGTH = 72
+
+
+def shorten_title(title: str) -> str:
+    """Mirrors publication.py's shorten_title: cut at the last word boundary that
+    leaves room for "...", or mid-word when the first word alone is too long."""
+    room = MAX_TITLE_LENGTH - len("...")
+    cut = title[: room + 1].rsplit(" ", 1)[0] if " " in title[: room + 1] else ""
+    kept = cut if cut else title[:room]
+    return kept.rstrip(" ,;:-") + "..."
+
 
 def _glob_re(pattern: str) -> re.Pattern[str]:
     """Return a compiled regex that matches * at one level and ** at any depth."""
@@ -409,6 +445,29 @@ def check(
         title = pull_request.get("title")
         if not (isinstance(title, str) and title):
             problems.append("proposed_pull_request.title must be a one-line title, as text.")
+        else:
+            clean_title = " ".join(title.split())
+            if not clean_title:
+                problems.append("proposed_pull_request.title must be a one-line title, as text.")
+            elif "\n" in title.strip() or "\r" in title.strip():
+                problems.append("a pull request title is one line")
+            else:
+                candidate = (
+                    shorten_title(clean_title)
+                    if len(clean_title) > MAX_TITLE_LENGTH
+                    else clean_title
+                )
+                if CLOSING_RE.search(candidate):
+                    problems.append(
+                        "the proposed title carries a closing keyword; only "
+                        "deliverables[].closes may close an issue (23)"
+                    )
+                if MENTION_RE.search(candidate):
+                    problems.append(
+                        "the proposed title carries an at-mention; a mention "
+                        "notifies people and can trigger the external reviewer "
+                        "under Crucible's identity (23)"
+                    )
         if not isinstance(pull_request.get("body"), str):
             problems.append("proposed_pull_request.body must be text.")
         if "closes" in pull_request and not _is_str_list(pull_request["closes"]):

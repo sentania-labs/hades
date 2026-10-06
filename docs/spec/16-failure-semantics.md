@@ -5,7 +5,7 @@
 | Class | Meaning | Default |
 |---|---|---|
 | `completed` | exit 0 and report present | gates |
-| `blocked` | `blocked.md` present on a clean exit: exit 0, or 75 where the harness does not use 75 itself (a model cannot set its harness's exit code, FDY-0140) | escalation, wake, task `blocked` |
+| `blocked` | `blocked.md` present on a clean exit: exit 0, or 75 where the harness does not use 75 itself (a model cannot set its harness's exit code, FDY-0140). The file's reason line, `missing_capability` or `ambiguous_contract`, and its statement verbatim go on the attempt and the escalation (hades #393) | escalation carrying the reason and the statement, wake, task `blocked`; never retried, no retry consumed, no pool marked |
 | `environment` | exit 70, the provider failed before the harness ran, the kernel killed the worker out of memory (exit 137 with the daemon's OOM flag), or the harness was refused | retry if attempts remain; else `failed`. A harness refusal (07, 25) is the exception: it is never retried, because the same refusal would come back |
 | `auth_failure` | harness reported auth problem (adapter classified) | retry per policy (`retry.auth_failure_max`, after `auth_retry_delay_seconds`); wake regardless |
 | `quota_exhausted` | harness reported rate or quota limit | reroute (below): mark the pool, commit WIP, new attempt on the next candidate in the tier; if none, `awaiting_quota` until the earliest reset; caps exceeded or task pinned to the exhausted pool: task `reported` with the class visible, wake |
@@ -66,11 +66,18 @@ step:
    names the attempt, then pushed; the SHA goes in the event. Nothing is
    discarded silently and nothing is left uncommitted. Squash on merge
    removes the WIP commit from `main`.
-2. The attempt's pool is marked exhausted until `reset_at` (05b).
+2. The attempt's pool is marked exhausted until `reset_at` (05b). The one
+   wake the refusal raises names the pool, the reason and the reset time
+   (hades #378): the `reported` or `awaiting_quota` wake of steps 3 and 4
+   carries that sentence when the refusal wrote the mark, and an attempt
+   refused while the mark is already in force extends the mark without a
+   wake of the pool's own.
 3. Selection runs again for the tier with marked pools excluded. A
    candidate: a new attempt on the same contract version, resumed from the
    remote work branch as corrections are, and a `reroute` event naming the
-   pool left, the model chosen, and the ordered candidates. No wake.
+   pool left, the model chosen, and the ordered candidates. One
+   `quota_exhausted` wake naming the pool and its reset when this refusal
+   opened the pool's exhaustion; otherwise no wake.
 4. No candidate: the task moves to `awaiting_quota` with `resume_at` the
    earliest `reset_at` among the tier's pools, and one informational wake
    (17). The supervisor tick relaunches at `resume_at` through step 3. Past

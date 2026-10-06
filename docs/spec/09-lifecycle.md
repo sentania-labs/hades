@@ -291,11 +291,21 @@ the branch bundle, and the parsed report exist. For an attempt classified
 worktree to the work branch as one `wip(crucible):` commit naming the
 attempt, and pushes it, so the next attempt resumes from the remote branch
 (16). Classification:
-`succeeded` requires exit 0 and a parsed report; `blocked` requires exit 75
-and `blocked.md`; everything else is `failed` with the recorded exit class.
+`succeeded` requires exit 0 and a parsed report; `blocked` requires
+`blocked.md` on a clean exit, 0 or 75 (16); everything else is `failed` with
+the recorded exit class.
 The task transition happens on classification: `succeeded` and `failed`
 both lead to task `reported` (unless a retry is permitted), `blocked` leads
 to task `blocked`.
+
+A blocked attempt is a question, not a failure (hades #393). Crucible parses
+the file's reason line, `missing_capability` or `ambiguous_contract`, onto the
+attempt (`blocked_reason`) with the rest of the file verbatim
+(`blocked_statement`), and the escalation it opens carries the same reason
+beside the statement as its question. The attempt is never retried, consumes
+no retry of its execution when a decision schedules it again, and marks no
+pool; the answer comes back as a decision or a correction, and the next
+attempt runs to an ordinary claim.
 
 Lease expiry is not a transition. Loss is decided only by provider
 observation (10).
@@ -335,7 +345,9 @@ delivery for the head until they resolve or the task is terminal.
 
 `open` -> `answered` (a Decision references it) -> `closed`. An escalation
 older than `escalation_stale_hours` produces a repeat wake, not a state
-change.
+change. An escalation a worker opened carries the reason its `blocked.md`
+named (`reason`, hades #393) and its statement verbatim (`question`); the
+`escalation_opened` event and the wake summary repeat the reason.
 
 ## Transition side effects (always in the same transaction)
 
@@ -358,6 +370,6 @@ change.
 | task `head_diverged` | previous head's acceptance, review, and gate results marked `superseded` (rows kept); PR observation continues; wake |
 | task `ready_for_merge` | wake (reason `ready_for_merge`) |
 | task `merged` | merge SHA and merger recorded; wake (informational) |
-| task `blocked` | escalation opened; wake created |
+| task `blocked` | escalation opened, carrying the worker's `blocked.md` reason and statement (hades #393); wake created |
 | task `cancelling` | running attempt terminated (`drain`); leases released when terminal |
 | task `closed` | cleanup pass eligible for all workspaces of the task |

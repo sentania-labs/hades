@@ -232,6 +232,11 @@ jobs:
           enable-cache: true
       - name: the worker image carries the programs the shipped policies' checks need
         run: make images-policy-check
+      # hades #430: a GUI test suite needs Qt's offscreen platform to start in the
+      # worker, with no display server. PySide6 goes into a venv inside the image just
+      # built (the networked step), then QApplication([]) runs offscreen with no network.
+      - name: Qt's offscreen platform starts inside the worker image
+        run: make images-qt-offscreen-check
       # hades #184, FDY-0134: the unit tier as the lab's verification runs it, in the
       # image just built: uid 1000, read-only root, no Docker socket, no network for
       # the tests (only `uv sync` gets one), and setgid fsGroup-style /tmp and

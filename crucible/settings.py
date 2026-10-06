@@ -120,7 +120,12 @@ class KubernetesSettings(BaseModel):
     role_timeout_seconds: int = 120
     report_size_cap_bytes: int = 10 * 1024 * 1024
     poll_interval_seconds: float = 2.0
+    # The dispatch limit when the workers namespace has no ResourceQuota; with one, the
+    # capacity is derived from the quota and this number is not consulted (hades #423).
     max_concurrency: int = 3
+    # hades #423: how many of Hades's own short-role Pods (gate probe, collector, canary,
+    # login, preparer) the quota-derived capacity keeps room for beside the workers.
+    short_role_pods: int = 1
     # The cluster DNS service address. 26 allows port 53 on this address and nothing
     # else on it, and denies everything else inside the cluster.
     cluster_dns_ip: str = "10.96.0.10"
@@ -156,8 +161,9 @@ class KubernetesSettings(BaseModel):
     # 26: a plain `networking.k8s.io/v1` CNI has no FQDN rule, so each allowlisted name
     # is resolved here and the NetworkPolicy carries its addresses. `broad_egress` swaps
     # that for the broad rule (the public internet on 443, minus every denied range),
-    # for a CNI that enforces names some other way (issue 61). Off by default: the broad
-    # rule lets a worker reach GitHub, which 26 says a worker never does.
+    # for a CNI that enforces names some other way (issue 61), for the git and login
+    # roles only: a worker and a verifier always get their resolved allowlist (hades
+    # #425), because the broad rule would let them reach hosts the policy never named.
     broad_egress: bool = False
     # How long a resolved allowlist address stays in a policy before the name is looked
     # up again (issue 61). `gt=0`: zero would resolve every name on every policy write.

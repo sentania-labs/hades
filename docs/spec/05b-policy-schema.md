@@ -39,7 +39,7 @@ resources:
 
 network:
   mode: "egress-proxy"                 # egress-proxy | none
-  egress_allowlist:                    # hostnames the egress proxy permits for workers
+  egress_allowlist:                    # hostnames the egress proxy (13) or the worker's NetworkPolicy (26) permits for workers, as written (hades #425)
     - "github.com"                     # read-only in effect: workers hold no GitHub credential
     - "objects.githubusercontent.com"
     - "pypi.org"
@@ -191,7 +191,11 @@ retention:
 - An attempt counts against the cap until its credential copy has been
   synced back and removed, which is after `exited` (12), so `terminating`
   and `exited` attempts are still busy.
-- `network.egress_allowlist` entries are hostnames, no wildcards in v0.x.
+- `network.egress_allowlist` entries are hostnames, no wildcards in v0.x. The
+  list is what the worker and the verifier may reach, on either provider and
+  as written; the git roles reach GitHub whether or not it is listed (26).
+  Before the harness starts, the launch wrapper probes every listed host and
+  the result is recorded on the attempt (`egress_probe`, hades #425).
 - `external_review.required_rounds: 0` makes the external review gates
   `skipped`; `reviewer_logins` must be non-empty when rounds are above 0.
 - `external_review.accepted_signals` does not carry `comment` by default.

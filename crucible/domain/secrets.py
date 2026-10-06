@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
 _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -47,6 +47,64 @@ def scan_text(text: str) -> str | None:
         if pattern.search(text):
             return name
     return None
+
+
+# hades #398: how much of what came before each chunk a streamed scan reads again, so a
+# match across a chunk boundary is still found. It is far longer than the shortest text
+# any pattern matches.
+SCAN_OVERLAP = 16 * 1024
+# A match that touches the end of what has been read may only look whole because the
+# text after it is not read yet: a trailing \b holds at the end of a string, not after
+# the next letter. Such a match is held, with one character of context before it, until
+# the following text decides it, up to this many characters; held longer, it is taken as
+# it stands (no secret is that long, and the window must stay bounded).
+SCAN_HOLD = 1024 * 1024
+
+
+def _window_hit(window: str, pos: int, final: bool, hold: int) -> tuple[str | None, int | None]:
+    """The first pattern a window decides, and where an undecided match starts.
+
+    A match that ends before the window does is whole: the character after it was read.
+    One that ends where the window ends is whole only when `final`; otherwise it waits
+    for the next chunk and the window is carried from one character before it, so the
+    next window judges it with its left context and what follows it. A waiting match
+    longer than `hold` is taken as it stands."""
+    keep_from: int | None = None
+    for name, pattern in _PATTERNS:
+        for match in pattern.finditer(window, pos):
+            if final or match.end() < len(window) or match.end() - match.start() > hold:
+                return name, None
+            start = max(match.start() - 1, 0)
+            keep_from = start if keep_from is None else min(keep_from, start)
+    return None, keep_from
+
+
+def scan_chunks(
+    chunks: Iterable[str], overlap: int = SCAN_OVERLAP, hold: int = SCAN_HOLD
+) -> str | None:
+    """Return the name of the first pattern matching the text the chunks make up, or None.
+
+    The text is never held whole (hades #398): each window is the chunk plus the last
+    `overlap` characters before it, and one character more that is read only as the
+    context a word boundary looks at, so a match is found wherever the chunks split it.
+    A match that touches the end of a window is not accepted until the next character
+    is read (or the text ends): the window is carried from the match instead, up to
+    `hold` characters, so `ghp_` and a long run of letters that ends in one more letter
+    is no more a match here than it is for `scan_text`."""
+    tail = ""
+    pos = 0
+    for chunk in chunks:
+        window = tail + chunk
+        hit, keep_from = _window_hit(window, pos, False, hold)
+        if hit is not None:
+            return hit
+        cut = max(0, len(window) - (overlap + 1))
+        if keep_from is not None:
+            cut = min(cut, keep_from)
+        tail = window[cut:]
+        pos = 1 if cut > 0 else pos
+    hit, _ = _window_hit(tail, pos, True, hold)
+    return hit
 
 
 def secret_pattern_expressions() -> tuple[str, ...]:

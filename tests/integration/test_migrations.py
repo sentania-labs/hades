@@ -1532,3 +1532,66 @@ def test_0035_to_head_upgrades_a_populated_database(database_url: str) -> None:
             )
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("head", "kind"),
+    [
+        ("0044_attempt_stall_shape", "task_proposed"),
+        ("0044_editor_leftovers_policy", "task_proposed"),
+        ("0044_merge_423_424", "credential_mount_mode_set"),
+    ],
+)
+def test_each_0044_head_upgrades_through_the_0045_merge(
+    database_url: str, head: str, kind: str
+) -> None:
+    """FDY-0385: PRs 426, 438 and 441 each added a 0044 head. A deployed database stands on
+    exactly one of them and holds events of the kinds its own 0043 ancestor allowed. It
+    reaches the current head through 0045 with those rows intact and no drift. From the two heads
+    over 0043_proposed_tasks the path runs 0043_credential_mount_mode over the proposal
+    rows, so that revision has to keep the kinds the live CHECK permits rather than
+    rebuild it from the 0039 kinds alone."""
+    # `downgrade <0044 head>` from 0045 only unapplies 0045 and leaves all three 0044 rows
+    # in alembic_version, so the deployed state is reached from below: back to 0042, then
+    # up to the one head.
+    migrate.downgrade(database_url, "0042_pull_request_mergeable")
+    migrate.upgrade(database_url, head)
+    engine = make_engine(database_url)
+    try:
+        with engine.begin() as conn:
+            versions = {
+                row[0] for row in conn.execute(text("SELECT version_num FROM alembic_version"))
+            }
+            assert versions == {head}
+            conn.execute(
+                text(
+                    "INSERT INTO events (ts, kind, principal, verified, payload) "
+                    "VALUES (now(), :kind, 'tests', true, "
+                    '\'{"marker": "fdy-0385"}\')'
+                ),
+                {"kind": kind},
+            )
+        migrate.upgrade(database_url)
+        # hades #393 put 0046_blocked_reason above the merge and hades #425 put
+        # 0047_attempt_egress_probe above that; the path still runs both.
+        assert migrate.current_revision(engine) == "0047_attempt_egress_probe"
+        ok, detail = migrate.is_current(engine, database_url)
+        assert ok, detail
+        with engine.begin() as conn:
+            kept = (
+                conn.execute(text("SELECT kind FROM events WHERE payload->>'marker' = 'fdy-0385'"))
+                .scalars()
+                .all()
+            )
+            assert kept == [kind]
+            # At head the CHECK permits both 0043 siblings' kinds.
+            for merged_kind in ("task_proposed", "credential_mount_mode_set"):
+                conn.execute(
+                    text(
+                        "INSERT INTO events (ts, kind, principal, verified, payload) "
+                        "VALUES (now(), :kind, 'tests', true, '{}')"
+                    ),
+                    {"kind": merged_kind},
+                )
+    finally:
+        engine.dispose()
