@@ -476,12 +476,9 @@ def _routing_policy_details(
         # Cost, weight, capability, pool, template flags: on request via `columns`
         model_rows.append(row)
 
-    # Build columns - basic columns always present
-    columns = [
-        {"label": "Model", "source": "id"},
-        {"label": "State", "source": "enabled"},
-        {"label": "Harness", "source": "harness"},
-    ]
+    # Build columns - basic columns always present (strings, not dicts;
+    # the template passes column to safe_value which calls key.lower())
+    columns = ["Model", "State", "Harness"]
 
     # One detail section with both documents
     detail_items: list[dict[str, Any]] = []

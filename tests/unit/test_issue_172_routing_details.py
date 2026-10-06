@@ -7,10 +7,11 @@ and the Routing page still uses _document_section for policy documents.
 from __future__ import annotations
 
 import pathlib
+from types import SimpleNamespace
 from typing import Any
 
 from crucible.adapters.ui.pages import routing as routing_module
-from crucible.adapters.ui.render import _routing_policy_details
+from crucible.adapters.ui.render import _routing_policy_details, templates
 
 
 def _routing(**overrides: Any) -> dict[str, Any]:
@@ -176,13 +177,15 @@ class TestRoutingPolicyDetails:
         routing_doc = _routing()
         section = _routing_policy_details(routing_doc)
 
-        columns = {col["source"] for col in section["columns"]}
-        assert "id" in columns, "model id must be present"
-        assert "enabled" in columns, "enabled state must be present"
-        assert "harness" in columns, "harness must be present"
+        columns = section["columns"]
+        assert isinstance(columns, list)
+        assert len(columns) == 3
+        assert "Model" in columns
+        assert "State" in columns
+        assert "Harness" in columns
 
         # Only basic columns by default
-        assert len(section["columns"]) == 3
+        assert len(columns) == 3
 
     def test_model_row_values(self) -> None:
         """Each row has id, 'on'/'off', and harness."""
@@ -239,3 +242,55 @@ class TestRoutingPolicyDetails:
 
         note = section["note"]
         assert "pool is exhausted" in note.lower()
+
+
+class TestRoutingPageTemplateRender:
+    """End-to-end: the full template renders the routing details section without error.
+
+    This covers the template path that crashed on PR 492 / head e075a88:
+    ``safe_value(column, cell)`` where ``column`` was a dict instead of a string.
+    """
+
+    def test_routing_details_section_rendered_by_template(self) -> None:
+        """The routing details section renders without raising through page.html.
+
+        This was failing with ``AttributeError: 'dict' object has no attribute 'lower'``
+        from ``_safe_value`` at ``render.py:245`` when column dicts were passed to the
+        template, which feeds them into ``safe_value(column, cell)``.
+        """
+        routing_doc = _routing()
+        detail_section = _routing_policy_details(routing_doc)
+
+        # Build a minimal section that includes the detail section in its details list
+        section = {
+            "title": "In force",
+            "columns": ["Setting", "Value", ""],
+            "rows": [
+                ["Delivery policy", "default-software version 5", ""],
+            ],
+            "details": [detail_section],
+            "details_label": "View policy JSON",
+        }
+
+        # Render through Jinja2 (same path the page template uses)
+        rendered = templates.get_template("page.html").render(
+            request={"type": "http", "method": "GET", "path": "/ui/routing", "headers": []},
+            title="Routing",
+            active="/ui/routing",
+            nav=(("/ui/routing", "Routing"),),
+            principal=SimpleNamespace(name="admin", role=SimpleNamespace(value="admin")),
+            csrf="fixture-csrf",
+            message=None,
+            heading="Routing",
+            intro="What routes and limits a task.",
+            sections=[section],
+            badge=None,
+        )
+
+        assert isinstance(rendered, str)
+        assert "Routing policy details" in rendered
+        assert "claude-haiku" in rendered
+        assert "anthropic-sub" in rendered
+        assert "run at once" in rendered
+        assert "pool is exhausted" in rendered
+        assert "default-routing" in rendered
