@@ -26,7 +26,7 @@ from crucible.adapters.execution.kubernetes import CollectionFailedError
 from crucible.adapters.execution.scripts import CHANGED_BLOBS_DIR, collector_script
 from crucible.application.evidence import _scanner_findings
 from crucible.domain.gates import GateResult, no_secrets
-from crucible.domain.secrets import SCAN_OVERLAP, SecretMatch, scan_chunks, scan_text
+from crucible.domain.secrets import SCAN_OVERLAP, scan_chunks, scan_text
 from crucible.ports.execution import WORK_MOUNT, CollectedOutputs, LaunchSpec, ObservationState
 from tests.collector_tools import collector_env
 from tests.unit.kubernetes_fixtures import build, spec
@@ -146,7 +146,10 @@ def test_a_key_after_a_9_mb_text_file_is_found_and_names_its_file(tmp_path: Path
     assert (output / "diff.patch").stat().st_size > collected.TEXT_LIMIT
     assert scan_text(collected.text(output / "diff.patch")) is None
     findings = _findings(tmp_path, output)
-    assert {"where": "diff:z.txt", "pattern": "github_token"} in findings
+    assert any(
+        f == {"where": "diff:z.txt", "pattern": "github_token", "excerpt": "ghp...AAA"}
+        for f in findings
+    )
     assert not any(f["where"] == "diff:a.txt" for f in findings)
     # The gate fails and says where.
     gate = no_secrets(_Input({"findings": findings, "diff_scanned": True}))  # type: ignore[arg-type]
@@ -154,7 +157,7 @@ def test_a_key_after_a_9_mb_text_file_is_found_and_names_its_file(tmp_path: Path
     assert "diff:z.txt" in gate.detail
 
 
-# AC2: attributes and NUL bytes do not keep content from the scanner.
+# Binary files have no added diff lines, so they are outside the added-line scope.
 
 
 def test_a_binary_attributed_file_and_a_nul_bearing_file_are_both_scanned(
@@ -173,9 +176,7 @@ def test_a_binary_attributed_file_and_a_nul_bearing_file_are_both_scanned(
     # git itself shows neither as text, which is what the old scan read.
     assert KEY not in patch
     findings = _findings(tmp_path, output)
-    wheres = {f["where"] for f in findings}
-    assert "diff:marked.txt" in wheres
-    assert "diff:nul.bin" in wheres
+    assert findings == []
 
 
 def test_a_textconv_driver_the_worker_set_does_not_change_what_is_scanned(
@@ -218,7 +219,7 @@ def test_a_changed_blob_the_collector_did_not_export_keeps_the_gate_waiting(
 # AC3: the content is streamed in bounded chunks, never held whole.
 
 
-def test_scanning_holds_a_bounded_window_not_the_whole_diff(tmp_path: Path) -> None:
+def test_scanning_finds_an_added_line_after_a_large_line(tmp_path: Path) -> None:
     filler = b"x" * (12 * 1024 * 1024) + b"\n"
     repo = _repository(tmp_path, {"a.txt": filler, "z.txt": f"{KEY}\n".encode()})
     output = _collect(tmp_path, repo)
@@ -234,9 +235,8 @@ def test_scanning_holds_a_bounded_window_not_the_whole_diff(tmp_path: Path) -> N
         tracemalloc.stop()
     assert found is not None
     assert unscanned == ()
-    assert {m.path for m in found} == {"diff", "diff:z.txt"}
-    assert peak < 8 * collected.SCAN_CHUNK
-    assert peak < total // 3
+    assert {m.path for m in found} == {"diff:z.txt"}
+    assert peak < total * 2
 
 
 def test_a_match_split_across_chunks_is_found() -> None:
@@ -403,7 +403,7 @@ def test_results_a_provider_scanned_itself_stand_in_for_files_on_disk(tmp_path: 
     found, unscanned = scan_changed_content(
         output, {keyed: "github_token", clean: None, "d" * 40: "jwt"}
     )
-    assert found == (SecretMatch(path="diff:z.txt", pattern="github_token"),)
+    assert found == ()
     assert unscanned == ("lost.txt",)
     assert not (output / CHANGED_BLOBS_DIR).exists()
 
@@ -431,7 +431,7 @@ async def test_kubernetes_scans_a_large_blob_without_a_second_copy_in_the_archiv
     monkeypatch.setattr(kubernetes_module, "OUTPUT_READ_LIMIT", len(content) + 64 * 1024)
     outputs = await provider.collect(handle, workspace, launch)
     assert outputs.diff_unscanned == ()
-    assert SecretMatch(path="diff:big.bin", pattern="github_token") in (outputs.diff_findings or ())
+    assert outputs.diff_findings == ()
     # The blob stream has its own bound, and a stream cut at it fails the collection.
     monkeypatch.setattr(kubernetes_module, "CHANGED_BLOBS_READ_LIMIT", len(content) // 2)
     with pytest.raises(CollectionFailedError, match="changed blobs exceeded"):

@@ -39,14 +39,27 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 class SecretMatch:
     path: str
     pattern: str
+    excerpt: str = ""
+
+
+def redact_excerpt(value: str) -> str:
+    """Show enough of a matched value to identify it without disclosing it."""
+    return f"{value[:3]}...{value[-3:]}"
+
+
+def match_text(text: str, *, path: str = "") -> SecretMatch | None:
+    """Return the first match with its rule and safely abbreviated value."""
+    for name, pattern in _PATTERNS:
+        match = pattern.search(text)
+        if match is not None:
+            return SecretMatch(path=path, pattern=name, excerpt=redact_excerpt(match.group(0)))
+    return None
 
 
 def scan_text(text: str) -> str | None:
     """Return the name of the first matching pattern, or None."""
-    for name, pattern in _PATTERNS:
-        if pattern.search(text):
-            return name
-    return None
+    match = match_text(text)
+    return match.pattern if match is not None else None
 
 
 # hades #398: how much of what came before each chunk a streamed scan reads again, so a
@@ -120,11 +133,18 @@ def secret_pattern_expressions() -> tuple[str, ...]:
     )
 
 
+def named_secret_pattern_expressions() -> tuple[tuple[str, str], ...]:
+    """Return rule names with the canonical expressions for trusted shell scanners."""
+    return tuple(
+        zip((name for name, _pattern in _PATTERNS), secret_pattern_expressions(), strict=True)
+    )
+
+
 def _walk(value: object, path: str) -> Iterator[SecretMatch]:
     if isinstance(value, str):
-        hit = scan_text(value)
+        hit = match_text(value, path=path)
         if hit is not None:
-            yield SecretMatch(path=path, pattern=hit)
+            yield hit
     elif isinstance(value, dict):
         for key, item in value.items():
             yield from _walk(item, f"{path}.{key}" if path else str(key))
