@@ -497,6 +497,9 @@ class HarnessState:
     last_launch_outcome: str | None = None
     last_auth_failure_at: datetime | None = None
     last_validated_at: datetime | None = None
+    # hades #389: the most recent successful launch time, for credential-state
+    # recovery (last_launch_at moves on failures too, so we track successes).
+    last_successful_launch_at: datetime | None = None
     # The last harness test (crucible#118): when, pass or fail, and each step's result in
     # plain words. Never output: the steps say what was checked and why it failed.
     last_test: dict[str, Any] | None = None

@@ -26,9 +26,12 @@ REPO = Path(__file__).resolve().parents[2]
 MERGE = "0045_merge_0044_heads"
 MERGED = {"0044_attempt_stall_shape", "0044_editor_leftovers_policy", "0044_merge_423_424"}
 # The single head after the merge. hades #393 added 0046 above it and hades #425 added
-# 0047 above that; the next revision moves these names on and nothing else here.
+# 0047 above that; hades #389's migration was renumbered to 0047 on top and chains from
+# 0047_attempt_egress_probe so the graph stays linear. The next revision moves these
+# names on and nothing else here.
 ABOVE = "0046_blocked_reason"
-HEAD = "0047_attempt_egress_probe"
+PROBE = "0047_attempt_egress_probe"
+HEAD = "0047_successful_launch_time"
 
 
 def _script() -> ScriptDirectory:
@@ -51,8 +54,10 @@ def test_the_0045_merge_joins_the_three_0044_heads() -> None:
     assert script.get_current_head() == HEAD
     above = script.get_revision(ABOVE)
     assert above is not None and above.down_revision == MERGE
-    probe = script.get_revision(HEAD)
+    probe = script.get_revision(PROBE)
     assert probe is not None and probe.down_revision == ABOVE
+    head = script.get_revision(HEAD)
+    assert head is not None and head.down_revision == PROBE
 
 
 def test_the_cli_config_sees_the_same_single_head() -> None:
@@ -80,7 +85,7 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
         plan = [step.revision.revision for step in script._upgrade_revs("head", head)]
         assert plan.index("0043_credential_mount_mode") < plan.index("0044_merge_423_424")
         assert plan.index("0044_merge_423_424") < plan.index(MERGE)
-        assert plan[-3:] == [MERGE, ABOVE, HEAD]
+        assert plan[-4:] == [MERGE, ABOVE, PROBE, HEAD]
 
 
 def test_0043_credential_mount_mode_keeps_the_kinds_the_live_check_permits() -> None:

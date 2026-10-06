@@ -715,6 +715,8 @@ class HarnessStateRow(Base):
     last_launch_outcome: Mapped[str | None] = mapped_column(String(48), nullable=True)
     last_auth_failure_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
     last_validated_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    # hades #389: the most recent successful launch time (last_launch_at moves on failures).
+    last_successful_launch_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
     last_test: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(TZ)
     updated_by: Mapped[str] = mapped_column(String(160))
