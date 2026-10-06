@@ -1304,10 +1304,10 @@ async def test_scripted_quota_reroutes_on_kubernetes(
 ) -> None:
     """72: `test_class_routing.py`'s reroute case had no kind counterpart. A real Pod
     runs the scripted quota worker, which exhausts its quota and exits, and the attempt
-    reroutes to a successor that resumes from the remote work branch. Stops at the
-    reroute: the Docker case goes on to prove the checkpoint reaches a local file
-    origin through `DockerProvider.push_quota_checkpoint`, which the Kubernetes
-    provider does not have, so on this tier nothing pushes a local-origin checkpoint."""
+    reroutes to a successor that starts from the base. Local-origin quota checkpoints
+    are Docker-only: the Kubernetes provider cannot push to the supervisor-local
+    file origin, so the supervisor records the skip. Stops at the reroute; the Docker
+    case goes on to prove its checkpoint reaches the local file origin."""
     clock = SystemClock()
     harnesses = application_harnesses(test_fixtures=True)
     ctx = AppContext(
@@ -1397,7 +1397,7 @@ async def test_scripted_quota_reroutes_on_kubernetes(
         first, second = attempts
         assert first["exit_class"] == "quota_exhausted"
         assert first["image"] == resolved.reference
-        assert second["resume_from_remote"] is True
+        assert second["resume_from_remote"] is False
 
 
 # ----- the login Job, the service-owned Secret and the probe (25, 26, ADR 0015) ----------
