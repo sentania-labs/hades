@@ -14,7 +14,6 @@ import html
 import json
 import os
 import re
-import time
 from collections.abc import Iterator
 from datetime import timedelta
 from importlib import import_module
@@ -51,8 +50,22 @@ from crucible.ports.harness import CredentialSource, HarnessGate
 from crucible.settings import Settings
 from tests.admin_cli import admin_main, envelope_data
 from tests.fixtures import FakeClock, contract_document, promote_for_test
+from tests.wait import wait_until
 
 pytestmark = pytest.mark.integration
+
+
+def _wait_for_login_state(client: TestClient, harness: str, *wanted: str) -> dict[str, Any]:
+    def observe() -> dict[str, Any]:
+        state: dict[str, Any] = client.get(f"/v1/admin/credentials/{harness}/login").json()
+        return state if state["state"] in wanted else {}
+
+    return wait_until(
+        observe,
+        timeout=5,
+        describe=f"{harness} login to reach one of {wanted}",
+    )
+
 
 # What the C11 worker image declares: every real harness, each inside its adapter's range.
 WORKER_HARNESSES = {
@@ -1191,6 +1204,7 @@ def test_credentials_rotate_and_remove_through_api_and_cli(
     credential_root: Path,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    clock: FakeClock,
 ) -> None:
     asyncio.run(live_supervisor.tick())
     old_token = (credential_root / "codex" / "auth.json").read_text(encoding="utf-8")
@@ -1221,7 +1235,7 @@ def test_credentials_rotate_and_remove_through_api_and_cli(
     # Retention is 0 h here: the retired directory is shredded by the sweep.
     from crucible.application.admin.credentials import sweep_retired  # noqa: PLC0415
 
-    time.sleep(1.1)
+    clock.advance(1.1)
     with admin_ctx.uow_factory() as uow:
         assert sweep_retired(admin_ctx, uow, principal="crucible-admin") == 1
         uow.commit()
@@ -1274,21 +1288,13 @@ def test_login_through_api_and_cli_against_the_fake_cli(
     ).json()
     assert "captured to oauth-token" in started["window"]
     assert started["retained_as"].startswith("claude_code.retired-")
-    for _ in range(100):
-        state = admin_client.get("/v1/admin/credentials/claude_code/login").json()
-        if state["state"] == "waiting_for_code":
-            break
-        time.sleep(0.05)
+    state = _wait_for_login_state(admin_client, "claude_code", "waiting_for_code")
     assert state["url"] == "https://example.invalid/device", state
     admin_client.post(
         "/v1/admin/credentials/claude_code/login/code",
         json={"code": "ABCD-EFGH", "reason": "complete onboarding"},
     )
-    for _ in range(100):
-        state = admin_client.get("/v1/admin/credentials/claude_code/login").json()
-        if state["state"] in ("finished", "failed"):
-            break
-        time.sleep(0.05)
+    state = _wait_for_login_state(admin_client, "claude_code", "finished", "failed")
     assert state["state"] == "finished", state
     assert state["token_written"] is True
     finished = admin_client.post(
@@ -2444,20 +2450,12 @@ def test_a_read_only_credential_directory_is_still_replaceable(
         assert started.status_code == 200, started.text
         retained = started.json()["retained_as"]
         assert retained.startswith("claude_code.retired-")
-        for _ in range(100):
-            state = admin_client.get("/v1/admin/credentials/claude_code/login").json()
-            if state["state"] == "waiting_for_code":
-                break
-            time.sleep(0.05)
+        state = _wait_for_login_state(admin_client, "claude_code", "waiting_for_code")
         admin_client.post(
             "/v1/admin/credentials/claude_code/login/code",
             json={"code": "ABCD-EFGH", "reason": "complete onboarding"},
         )
-        for _ in range(100):
-            state = admin_client.get("/v1/admin/credentials/claude_code/login").json()
-            if state["state"] in ("finished", "failed"):
-                break
-            time.sleep(0.05)
+        state = _wait_for_login_state(admin_client, "claude_code", "finished", "failed")
         assert state["state"] == "finished", state
         # The credential is at its configured path, and it is the new one.
         new_token = (live / "oauth-token").read_text(encoding="utf-8")
