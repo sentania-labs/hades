@@ -169,6 +169,14 @@ images-policy-check: ## fail when the worker image lacks a program a shipped pol
 	$(UV) sync --frozen --quiet
 	DOCKER="$(DOCKER)" $(UV) run python tools/images/policy_commands.py
 
+# hades #430: Qt's offscreen platform must start in the worker image with no display
+# server, so a GUI test suite can run in a worker. Installs PySide6 into a venv inside the
+# WORKER image images/manifest.env declares (the only networked step), then constructs a
+# QApplication with QT_QPA_PLATFORM=offscreen and no network, as uid 1000 on a read-only
+# root. Needs the image in the daemon.
+images-qt-offscreen-check: ## fail when Qt's offscreen platform cannot start in the worker image; needs `make images` first
+	DOCKER="$(DOCKER)" tools/images/qt_offscreen.sh
+
 # hades #184, FDY-0134: the unit tier as a Kubernetes worker Pod runs it, in the WORKER
 # image images/manifest.env declares: uid 1000, read-only root, no network for the tests,
 # and fsGroup-style setgid /tmp, home and workspace. A test that only passes on a plain
