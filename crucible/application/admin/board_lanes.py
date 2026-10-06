@@ -70,23 +70,52 @@ LANE_BY_STATE: dict[TaskState, str] = {
     _S.REJECTED: "graveyard",
     _S.CANCELLING: "in_progress",
     _S.CANCELLED: "graveyard",
-    _S.CLOSED: "graveyard",
+    # A task reaches `closed` only from accepted, merged or released (lifecycle), so a
+    # closed task is finished work, not a failure.
+    _S.CLOSED: "wins",
 }
 
 COLLAPSED_LANES = frozenset({"wins", "graveyard"})
 DECISION_KINDS = frozenset(
     {"ambiguous_contract", "decision", "design", "design_question", "decision_question"}
 )
-ENTRY_EVENT_BY_STATE = {
-    state: getattr(EventKind, f"TASK_{state.name}", None) for state in TaskState
+# The events that put a task into each state. Most states have one event named for
+# them; a few are entered by more than one (a proposal rejection is
+# `task_proposal_rejected`, an approval submits, a retry or a quota resume schedules).
+_EXTRA_ENTRY_EVENTS: dict[TaskState, tuple[EventKind, ...]] = {
+    _S.REJECTED: (EventKind.TASK_PROPOSAL_REJECTED,),
+    _S.SUBMITTED: (EventKind.TASK_APPROVED,),
+    _S.SCHEDULED: (EventKind.TASK_RETRY_SCHEDULED, EventKind.TASK_QUOTA_RESUMED),
+}
+ENTRY_EVENTS_BY_STATE: dict[TaskState, tuple[EventKind, ...]] = {
+    state: tuple(
+        event
+        for event in (
+            getattr(EventKind, f"TASK_{state.name}", None),
+            *_EXTRA_ENTRY_EVENTS.get(state, ()),
+        )
+        if event is not None
+    )
+    for state in TaskState
 }
 ENTRY_EVENT_KINDS = tuple(
-    event.value for event in ENTRY_EVENT_BY_STATE.values() if event is not None
+    dict.fromkeys(event.value for events in ENTRY_EVENTS_BY_STATE.values() for event in events)
 )
-DETAIL_EVENT_KINDS = (
-    EventKind.GATES_EVALUATED.value,
-    EventKind.CI_CERTIFICATION_RECORDED.value,
-    *ENTRY_EVENT_KINDS,
+# The supervisor takes scheduled work in the order of the event that last scheduled it
+# (`transitions.queue_key`); a launch held for capacity keeps that place.
+DISPATCH_EVENT_KINDS = (
+    EventKind.TASK_SCHEDULED.value,
+    EventKind.TASK_RETRY_SCHEDULED.value,
+)
+DETAIL_EVENT_KINDS = tuple(
+    dict.fromkeys(
+        (
+            EventKind.GATES_EVALUATED.value,
+            EventKind.CI_CERTIFICATION_RECORDED.value,
+            *ENTRY_EVENT_KINDS,
+            *DISPATCH_EVENT_KINDS,
+        )
+    )
 )
 
 
@@ -130,18 +159,39 @@ def _contract_fields(document: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _latest_by(rows: Iterable[Any], key: Any) -> dict[str, Any]:
+def _latest_by(rows: Iterable[Any], key: Any, when: Any) -> dict[str, Any]:
+    """The newest row per key, newest by `when` (attempts are created, escalations
+    are opened; the two entities name that instant differently)."""
     found: dict[str, Any] = {}
     for row in rows:
         name = str(key(row))
         previous = found.get(name)
-        if previous is None or row.created_at > previous.created_at:
+        if previous is None or when(row) > when(previous):
             found[name] = row
     return found
 
 
-def _event_time(event: Any | None, fallback: datetime) -> datetime:
-    return event.ts if event is not None else fallback
+def _entry_event(task: Any, events: dict[tuple[str, str], Any]) -> Any | None:
+    """The latest of the events that put the task in its current state."""
+    found = [
+        event
+        for kind in ENTRY_EVENTS_BY_STATE.get(task.state, ())
+        if (event := events.get((task.id, kind.value))) is not None
+    ]
+    return max(found, key=lambda event: (event.ts, int(event.seq or 0))) if found else None
+
+
+def _dispatch_seq(task: Any, events: dict[tuple[str, str], Any]) -> int | None:
+    """Where a capacity-held launch stands in the supervisor's dispatch order: the
+    sequence of the event that last scheduled it, as `transitions.queue_key` ranks it."""
+    if task.state is not _S.AWAITING_QUOTA:
+        return None
+    seqs = [
+        int(event.seq or 0)
+        for kind in DISPATCH_EVENT_KINDS
+        if (event := events.get((task.id, kind))) is not None
+    ]
+    return max(seqs) if seqs else 0
 
 
 def _waiting_words(
@@ -165,8 +215,7 @@ def _waiting_words(
 
 
 def _recorded_reason(task: Any, events: dict[tuple[str, str], Any]) -> str:
-    kind = ENTRY_EVENT_BY_STATE.get(task.state)
-    event = events.get((task.id, kind.value)) if kind is not None else None
+    event = _entry_event(task, events)
     payload = event.payload if event else {}
     return str(payload.get("reason") or payload.get("summary") or "Reason not recorded")
 
@@ -197,14 +246,16 @@ def board_lanes_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
     )
     attempts = list(uow.attempts.list_in_states(list(AttemptState)))
     attempts.extend(board_imported_attempts(uow, task_ids))
-    current_attempt = _latest_by(attempts, lambda row: row.task_id)
+    current_attempt = _latest_by(attempts, lambda row: row.task_id, lambda row: row.created_at)
     pull_requests = {
         row.task_id: row
         for row in uow.pull_requests.list_in_states(list(PullRequestState))
         if row.task_id in task_ids
     }
     open_escalations = [row for row in uow.escalations.list_open() if row.task_id in task_ids]
-    escalation_by_task = _latest_by(open_escalations, lambda row: row.task_id)
+    escalation_by_task = _latest_by(
+        open_escalations, lambda row: row.task_id, lambda row: row.opened_at
+    )
     events = dict(uow.events.latest_for_tasks_kinds(list(task_ids), DETAIL_EVENT_KINDS))
     tasks_by_external = {task.external_id: task for task in tasks}
 
@@ -217,12 +268,11 @@ def board_lanes_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
         )
         attempt = current_attempt.get(task.id)
         pr = pull_requests.get(task.id)
-        entry_kind = ENTRY_EVENT_BY_STATE.get(task.state)
-        entry = events.get((task.id, entry_kind.value)) if entry_kind is not None else None
+        entry = _entry_event(task, events)
         entered_at = (
             escalation.opened_at
             if lane_key == "waiting_on_scott" and escalation is not None
-            else _event_time(entry, task.closed_at or task.updated_at)
+            else (entry.ts if entry is not None else task.closed_at or task.updated_at)
         )
         fields = _contract_fields(contracts.get(task.id, {}))
         reason = _recorded_reason(task, events) if lane_key == "graveyard" else None
@@ -244,6 +294,7 @@ def board_lanes_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
                 },
                 "reason": reason,
                 "replacement": _replacement(reason, tasks_by_external) if reason else None,
+                "dispatch_seq": _dispatch_seq(task, events),
             }
         )
 
@@ -252,7 +303,15 @@ def board_lanes_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
     for key, name, meaning in LANES:
         ordered = sorted(cards[key], key=lambda card: card["age"]["entered_at"])
         if key == "holding_pen":
-            ordered.sort(key=lambda card: card["age"]["entered_at"])
+            # Dispatch order: launches held for capacity first, in the order the
+            # supervisor will take them, then work not yet scheduled, oldest first.
+            ordered.sort(
+                key=lambda card: (
+                    card["dispatch_seq"] is None,
+                    card["dispatch_seq"] or 0,
+                    card["age"]["entered_at"],
+                )
+            )
         lane_document: dict[str, Any] = {
             "key": key,
             "name": name,

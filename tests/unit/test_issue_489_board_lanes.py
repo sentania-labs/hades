@@ -10,6 +10,7 @@ from typing import Any
 
 from crucible.adapters.ui.pages import board as page
 from crucible.application.admin.board_lanes import LANE_BY_STATE, LANES, board_lanes_view
+from crucible.domain.entities import Escalation, EscalationState
 from crucible.domain.lifecycle import TaskState
 from tests.unit.admin_ui_fixtures import request
 from tests.unit.test_board import NOW, Repo, fake_uow, row
@@ -118,7 +119,6 @@ def test_card_fields_scott_question_and_graveyard_replacement() -> None:
         [
             row(
                 task_id=blocked.id,
-                created_at=NOW,
                 opened_at=NOW - timedelta(minutes=3),
                 kind="design_question",
                 question="Which layout should we use? More context follows.",
@@ -149,6 +149,95 @@ def test_card_fields_scott_question_and_graveyard_replacement() -> None:
         "task_id": replacement.id,
     }
     assert lanes["wins"]["collapsed"] and lanes["graveyard"]["collapsed"]
+
+
+def _lanes(uow: Any) -> dict[str, dict[str, Any]]:
+    return {lane["key"]: lane for lane in board_lanes_view(uow, NOW)["lanes"]}
+
+
+def _event(seq: int, task_id: str, kind: str, ts: Any, **payload: Any) -> Any:
+    return row(seq=seq, task_id=task_id, kind=kind, payload=payload, ts=ts)
+
+
+def test_real_escalations_compare_by_opened_at() -> None:
+    """The domain `Escalation` has `opened_at`, not `created_at`; the board must take the
+    newest open one per task without a synthetic field."""
+    uow, _calls = fixture()
+    blocked = next(item for item in uow.tasks.rows if item.state is TaskState.BLOCKED)
+
+    def escalation(number: int, opened_at: Any, question: str) -> Escalation:
+        return Escalation(
+            id=f"e{number}",
+            task_id=blocked.id,
+            attempt_id=None,
+            state=EscalationState.OPEN,
+            question=question,
+            opened_at=opened_at,
+            reason="ambiguous_contract",
+        )
+
+    uow.escalations = Repo(
+        [
+            escalation(2, NOW - timedelta(minutes=2), "Newer question? Detail."),
+            escalation(1, NOW - timedelta(hours=1), "Older question? Detail."),
+        ]
+    )
+    lanes = _lanes(uow)
+    card = next(card for card in lanes["waiting_on_scott"]["cards"] if card["id"] == blocked.id)
+    assert card["waiting_on"] == "Newer question?"
+    assert card["age"]["entered_at"] == NOW - timedelta(minutes=2)
+
+
+def test_closed_tasks_are_wins_not_graveyard() -> None:
+    """`closed` is reached only from accepted, merged or released."""
+    assert LANE_BY_STATE[TaskState.CLOSED] == "wins"
+    uow, _calls = fixture()
+    closed = next(item for item in uow.tasks.rows if item.state is TaskState.CLOSED)
+    lanes = _lanes(uow)
+    card = next(card for card in lanes["wins"]["cards"] if card["id"] == closed.id)
+    assert card["reason"] is None and card["replacement"] is None
+    assert closed.id not in {card["id"] for card in lanes["graveyard"]["cards"]}
+    assert lanes["wins"]["count_all_time"] == sum(
+        1 for item in uow.tasks.rows if LANE_BY_STATE[item.state] == "wins"
+    )
+
+
+def test_proposal_rejection_reason_and_replacement_are_shown() -> None:
+    uow, _calls = fixture()
+    rejected = next(item for item in uow.tasks.rows if item.state is TaskState.REJECTED)
+    replacement = next(item for item in uow.tasks.rows if item.state is TaskState.SUBMITTED)
+    reason = f"Duplicate of {replacement.external_id}"
+    uow.events = Events(
+        [_event(7, rejected.id, "task_proposal_rejected", NOW - timedelta(hours=3), reason=reason)]
+    )
+    card = next(card for card in _lanes(uow)["graveyard"]["cards"] if card["id"] == rejected.id)
+    assert card["reason"] == reason
+    assert card["replacement"] == {
+        "external_id": replacement.external_id,
+        "task_id": replacement.id,
+    }
+    assert card["age"]["entered_at"] == NOW - timedelta(hours=3)
+
+
+def test_holding_pen_orders_capacity_held_launches_in_dispatch_order() -> None:
+    """Two launches held for capacity: the one scheduled first dispatches first, even when
+    it reached the capacity wait later than the other."""
+    uow, _calls = fixture()
+    first = next(item for item in uow.tasks.rows if item.state is TaskState.AWAITING_QUOTA)
+    second = task(900, TaskState.AWAITING_QUOTA)
+    submitted = next(item for item in uow.tasks.rows if item.state is TaskState.SUBMITTED)
+    uow.tasks.rows.append(second)
+    uow.events = Events(
+        [
+            _event(1, first.id, "task_scheduled", NOW - timedelta(hours=2)),
+            _event(2, second.id, "task_scheduled", NOW - timedelta(hours=1)),
+            _event(3, second.id, "task_awaiting_quota", NOW - timedelta(minutes=50)),
+            _event(4, first.id, "task_awaiting_quota", NOW - timedelta(minutes=5)),
+            _event(5, submitted.id, "task_submitted", NOW - timedelta(days=1)),
+        ]
+    )
+    ordered = [card["id"] for card in _lanes(uow)["holding_pen"]["cards"]]
+    assert ordered.index(first.id) < ordered.index(second.id) < ordered.index(submitted.id)
 
 
 def test_query_render_time_and_html_size_bounds(monkeypatch: Any) -> None:
