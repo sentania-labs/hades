@@ -1,4 +1,4 @@
-"""Out-of-band daemon control for the e2e tier (18).
+"""Out-ofband daemon control for the e2e tier (18).
 
 The tests need a daemon of their own to stand up PostgreSQL and the two proxies, and
 to do the things a test does behind Crucible's back: remove a worker container to
@@ -13,6 +13,7 @@ plain `docker` against the runner's own daemon.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
@@ -73,6 +74,26 @@ def wait_for_port(container: str, port: int, *, attempts: int = 60) -> None:
 
 
 MANIFEST = Path(__file__).resolve().parents[2] / "images" / "manifest.env"
+
+# Issue 135: subnet range 10.100-10.199, 256 /24s available per middle octet.
+# Derive from a seed string and attempt index so retries pick different /24s.
+_SUBNET_BASE = 100
+_SUBNET_MAX = 200  # exclusive: 100..199
+
+
+def derive_subnet(seed: str, attempt: int, *, base: int = _SUBNET_BASE) -> str:
+    """Return a /24 subnet in the 10.100-10.199 range.
+
+    The middle octet is:
+        (int(sha256(seed + str(attempt))) % (_SUBNET_MAX - _SUBNET_BASE))
+        + _SUBNET_BASE
+    The last octet cycles from 0 upward within the /24.  This is deterministic:
+    the same ``(seed, attempt)`` always yields the same subnet, and consecutive
+    attempts spread across the /24s.
+    """
+    h = int(hashlib.sha256(f"{seed}:{attempt}".encode()).hexdigest(), 16)
+    middle = (h % (_SUBNET_MAX - _SUBNET_BASE)) + _SUBNET_BASE
+    return f"10.{middle}.0.0/24"
 
 
 def manifest_pins() -> dict[str, str]:
@@ -137,21 +158,74 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def ensure_network(name: str, *, internal: bool, subnet: str | None = None) -> None:
+def ensure_network(
+    name: str,
+    *,
+    internal: bool,
+    subnet: str | None = None,
+    seed: str | None = None,
+    max_attempts: int = 5,
+) -> str:
+    """Ensure a Docker network exists, returning the subnet that is active.
+
+    Issue 135: when *seed* is provided the function derives subnets and retries
+    on ``subnet overlaps`` errors, returning the subnet that was actually created.
+    When a fixed *subnet* is provided the function creates it directly and
+    returns it without retry.
+    """
     # `docker network inspect` on a missing network prints `[]` and exits non-zero, so
     # the emptiness of the parsed list is the test, never the emptiness of the output.
     out = run("network", "inspect", name, check=False)
     try:
         if json.loads(out or "[]"):
-            return
+            # Network already exists; return the subnet from the existing spec.
+            existing = json.loads(out)[0]
+            return existing["IPAM"]["Config"][0].get("Subnet", "") or ""
     except json.JSONDecodeError:
         pass
+
     args = ["network", "create"]
     if internal:
         args.append("--internal")
-    if subnet:
+
+    if subnet is not None:
+        # Use the provided subnet directly (single attempt).
         args += ["--subnet", subnet]
-    run(*args, name)
+        run(*args, name)
+        return subnet
+
+    # Issue 135: derive subnets and retry on overlap.
+    if seed is None:
+        # No seed or subnet provided - create without --subnet (backward compat).
+        run(*args, name)
+        return ""
+
+    tried: list[str] = []
+    for attempt in range(max_attempts):
+        candidate = derive_subnet(seed, attempt)
+        tried.append(candidate)
+        args_with = [*args, "--subnet", candidate]
+        result = subprocess.run(
+            [*docker_argv(), *args_with, name],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=300.0,
+        )
+        if result.returncode == 0:
+            return candidate
+        # Docker reports overlap as "subnet overlaps" in stderr.
+        err = (result.stderr or "").lower()
+        if "subnet overlaps" not in err:
+            raise RuntimeError(
+                f"docker network create {name} ({candidate}) failed "
+                f"({result.returncode}): {result.stderr.strip() or result.stdout.strip()}"
+            )
+        # Overlap - try next subnet.
+
+    raise RuntimeError(
+        f"all {max_attempts} derived subnets for network {name} overlapped: " + ", ".join(tried)
+    )
 
 
 def remove_network(name: str) -> None:
