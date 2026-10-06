@@ -343,8 +343,8 @@ matters.
 **The egress probe.** Before the harness starts, the launch wrapper the
 worker command is wrapped in (the same wrapper on both providers, 07) tries
 every name in `CRUCIBLE_EGRESS_ALLOWLIST`, which the provider sets to the
-worker's resolved plan: all names at once, `curl` to `https://<host>/` with a
-5 second connect timeout and 10 seconds in all, certificate not checked, the
+worker's resolved plan: each name in order, `curl` to `https://<host>/` with a
+5 second connect timeout and 10 seconds per host, certificate not checked, the
 proxy variables honoured where they exist. A `host:port` entry (a local model
 endpoint) is left alone. It writes one line to stderr,
 `crucible-egress-probe: {"hosts": [...]}`, with per host `reachable` (true

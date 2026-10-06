@@ -386,7 +386,7 @@ def test_a_missing_curl_is_reported_and_never_stops_the_harness(tmp_path: Path) 
     rather than failing the launch, and the harness runs."""
     bin_dir = tmp_path / "nocurl"
     bin_dir.mkdir()
-    for tool in ("sh", "mktemp", "tr", "head", "cat", "rm", "python3"):
+    for tool in ("sh", "jq"):
         found = shutil.which(tool)
         assert found, tool
         (bin_dir / tool).symlink_to(found)
@@ -421,7 +421,7 @@ exit 7
     marker = next(line for line in run.stderr.splitlines() if line.startswith(PROBE_MARKER))
     marker.encode("ascii")
     (probe,) = _probe_lines(run.stderr)
-    assert probe["hosts"][0]["detail"] == "? Gr\u00fcnde"
+    assert probe["hosts"][0]["detail"] == "\ufffd Gr\u00fcnde"
 
 
 def test_the_wrapped_scripted_quota_harness_still_classifies_as_quota_exhausted(

@@ -175,64 +175,47 @@ WORKER_UID = 1000
 # count leaves the file. CRUCIBLE_EGRESS_ALLOWLIST (hades #425) lists the hosts the
 # attempt's egress permits: before the harness starts, `egress_probe` tries each name on
 # 443 the way the harness would (through HTTPS_PROXY when it is set, straight through the
-# NetworkPolicy when it is not), all at once and for at most ten seconds, and writes one
+# NetworkPolicy when it is not), for at most ten seconds per host, and writes one
 # `crucible-egress-probe: {...}` line to stderr (crucible/domain/egress_probe.py), which
 # the supervisor records on the attempt. A host it cannot reach is reported, never a
 # reason not to start; a `host:port` entry is a local endpoint and is left alone.
 LAUNCH_WRAPPER = r"""set -u
-ascii_probe_row() {
-  python3 - "$@" <<'PY'
-import json
-import sys
-
-detail = sys.argv[5].encode("utf-8", "replace").decode("utf-8")
-detail = detail.replace("\n", " ").replace("\r", " ").replace("\t", " ")
-row = {
-    "host": sys.argv[1],
-    "reachable": sys.argv[2] == "true",
-    "curl_exit": int(sys.argv[3]),
-    "ms": int(sys.argv[4]),
-    "detail": detail,
-}
-print(json.dumps(row, ensure_ascii=True, separators=(",", ":")))
-PY
-}
 egress_probe() {
   list=${CRUCIBLE_EGRESS_ALLOWLIST:-}
   [ -n "$list" ] || return 0
-  dir=$(mktemp -d 2>/dev/null) || return 0
-  i=0
-  for host in ${list//,/ }; do
-    case "$host" in *:*) continue;; esac
-    host=$(printf '%s' "$host" | tr -d '"\\')
-    i=$((i + 1))
-    (
-      start=${EPOCHREALTIME:-0}; start=${start/./}
-      detail=$(curl -sS -k -o /dev/null --connect-timeout 5 --max-time 10 "https://$host/" 2>&1)
-      code=$?
-      now=${EPOCHREALTIME:-0}; now=${now/./}
-      ms=$(( (now - start) / 1000 ))
-      [ "$ms" -ge 0 ] || ms=0
-      case "$code" in 0|35|52) reachable=true;; *) reachable=false;; esac
-      detail=$(printf '%s' "$detail" | head -c 200)
-      # Curl's diagnostics are not guaranteed to be UTF-8. Python decodes any bad
-      # bytes with replacement and json.dumps' default ensure_ascii=True keeps the
-      # marker itself ASCII-only, valid JSON, and one line for pods/log.
-      ascii_probe_row \
-        "$host" "$reachable" "$code" "$ms" "$detail" > "$dir/$i"
-    ) &
-  done
-  wait
+  old_ifs=$IFS
+  IFS=,
+  set -- $list
+  IFS=$old_ifs
   rows=
-  j=1
-  while [ "$j" -le "$i" ]; do
-    if [ -s "$dir/$j" ]; then
-      rows="$rows${rows:+,}$(cat "$dir/$j")"
-    fi
-    j=$((j + 1))
+  for host do
+    case "$host" in *:*) continue;; esac
+    result=$(curl -sS -k -o /dev/null --connect-timeout 5 --max-time 10 \
+      -w '\ncrucible_time=%{time_total}' "https://$host/" 2>&1)
+    code=$?
+    case "$result" in
+      *crucible_time=*)
+        seconds=${result##*crucible_time=}
+        detail=${result%crucible_time=*}
+        ;;
+      *) seconds=0; detail=$result;;
+    esac
+    case "$code" in 0|35|52) reachable=true;; *) reachable=false;; esac
+    # jq replaces malformed UTF-8 and --ascii-output keeps the pods/log marker ASCII.
+    # Sequential checks need no temporary-file utilities beyond the guaranteed shell.
+    row=$(jq -acn \
+      --ascii-output \
+      --arg host "$host" \
+      --argjson reachable "$reachable" \
+      --argjson curl_exit "$code" \
+      --arg seconds "$seconds" \
+      --arg detail "$detail" \
+      '{host:$host,reachable:$reachable,curl_exit:$curl_exit,
+        ms:(($seconds | tonumber) * 1000 | round),
+        detail:($detail | gsub("[\\n\\r\\t]"; " ") | .[0:200])}') || continue
+    rows="$rows${rows:+,}$row"
   done
   printf 'crucible-egress-probe: {"hosts":[%s]}\n' "$rows" >&2
-  rm -rf "$dir"
 }
 egress_probe
 if [ -n "${CRUCIBLE_CODEX_CONFIG:-}" ]; then
