@@ -212,8 +212,8 @@ def _github_create_section(*, configured: bool) -> dict[str, Any]:
             if not configured
             else "Create a new App to replace the connected one. The connected App keeps "
             "working until the new one is stored. A new App has new installations: install "
-            "it, then register each repository again on Repositories with the new "
-            "installation, or its deliveries fail."
+            "it, then Crucible rebinds every registered repository the new App can see "
+            "and names any repository left unchanged."
         ),
         "form": {
             "action": "/ui/actions/github-create-app",
