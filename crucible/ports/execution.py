@@ -68,6 +68,36 @@ class ProviderCapabilities:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkerCapacity:
+    """How many worker Pods a provider admits at once, and why (hades #423).
+
+    `workers` is the dispatch limit the supervisor holds launches to. `headroom` is what
+    the provider's own ceiling (a namespace ResourceQuota) admits with nothing held
+    back, and `reserved_pods` and `reservation` the short-role Pods Hades runs beside
+    workers (gate probe, collector, canary, login, preparer) and the shape kept free
+    for them, so a probe always fits while workers are at capacity. `source` says
+    where the number came from: the quota, or a configured fallback when there is
+    none."""
+
+    workers: int
+    source: str
+    headroom: int | None = None
+    reserved_pods: int = 0
+    reservation: Mapping[str, Any] = field(default_factory=dict)
+    detail: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "worker_capacity": self.workers,
+            "capacity_source": self.source,
+            "quota_headroom": self.headroom,
+            "short_role_pods_reserved": self.reserved_pods,
+            "short_role_reservation": dict(self.reservation),
+            "capacity_detail": self.detail,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class LaunchSpec:
     """What a provider runs. Env carries names only, never secret values (07)."""
 
@@ -518,6 +548,14 @@ class LaunchRefusedError(ProviderError):
     """A launch the provider refused on purpose (07, 13): the image's harness version is
     outside the adapter's tested range, or the harness has no credential to run with.
     The supervisor turns this into a wake, not a retry."""
+
+
+class LaunchWaitError(ProviderError):
+    """The provider cannot take the attempt's next Pod right now, and nothing about the
+    attempt is decided by that (hades #423): the namespace quota refused the gate
+    probe, the preparer or the worker. The supervisor puts the attempt back to pending
+    with this message as the reason and launches it on a later tick; the attempt is
+    not consumed and no exit class is recorded."""
 
 
 class WorkerStartError(ProviderError):

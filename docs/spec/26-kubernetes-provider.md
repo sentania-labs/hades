@@ -130,7 +130,10 @@ included the pull. A role Job whose Pod the namespace quota refuses ends at
 once with the quota's own message rather than at its timeout, except the
 publisher's two Jobs, which wait for room until their deadline (a failed
 publication needs an operator's retry, and a full namespace is not a failed
-push), and whose timeout then names the quota.
+push), and whose timeout then names the quota. For the gate probe and the
+preparer that end is a `LaunchWaitError` the supervisor answers by launching
+the attempt again later; for a collection role it is the unavailable path the
+supervisor collects again from (hades #423).
 
 ## Pod shape (every role)
 
@@ -456,7 +459,7 @@ the namespace. A deployment therefore names one exact, pullable reference in
   | exists | Pending past the launch timeout | launch failure, the Pod's conditions as detail (image pull, no schedulable node, PVC unbound), not a stall |
   | exists | terminated container | `exited(code)` |
   | exists | evicted, or its node is gone | `lost` |
-  | exists | none yet, and a `FailedCreate` naming the namespace quota | launch failure at once, with the quota's message (the lab findings of 2026-09-29; the Job controller retries such a Pod forever and never fails the Job) |
+  | exists | none yet, and a `FailedCreate` naming the namespace quota | `running`, waiting for room, with the quota's message as detail; the launch timeout counts from the last refusal (hades #423; `launch` itself ends as a wait when it sees the refusal, and the supervisor launches the attempt again later. Before that it was a launch failure at once, the lab findings of 2026-09-29) |
   | exists | none yet, within the launch timeout | `running` (a Job controller can take a few seconds to create a Pod on a busy node; this is not a loss, 103) |
   | exists | none yet, past the launch timeout | launch failure ("the Job controller never created a Pod") |
   | exists | had one, now gone | `lost` (the Pod existed and disappeared, unlike the row above) |
@@ -628,7 +631,55 @@ namespace's ResourceQuotas: the fewest attempts any one limit admits, with
 `count/jobs.batch` divided by five Jobs an attempt and the CPU and memory
 requests and limits by one Pod's worth at the limits of the last launch (the
 policy defaults before one). Until the lab findings of 2026-09-29 only the Job
-count was read. The admin status page (25) shows the namespace
+count was read.
+
+Since hades #423 that number is the worker capacity, not the quota's raw
+headroom. Hades runs short-role Pods of the worker's shape beside the workers
+(the gate probe, the preparer, the collector and the other collection roles,
+the login Job; the canary is smaller), and a quota that admitted ten Pods with
+ten workers running refused every gate probe and every eleventh worker. The
+provider now keeps `kubernetes.short_role_pods` Pods (one by default) of the
+largest short-role shape out of the headroom: for each counted resource the
+capacity is what the quota admits less the reservation, and the fewest any
+resource admits is the worker capacity (a quota that admits one Pod still
+admits one worker, since a lone attempt's Pods run one after another). An active
+short-role Pod satisfies one place in that reservation because ResourceQuota
+usage already counts it; it is never counted again as room that must stay free.
+The checks on `GET /v1/admin/providers` carry `quota_headroom`,
+`short_role_pods_reserved`, `short_role_reservation` (the shape kept free),
+`worker_capacity`, `capacity_source` (which quota and which resource binds, or
+the configured fallback) and `capacity_detail` in words, beside
+`max_concurrency`; the Routing page's Kubernetes rows show the same.
+`kubernetes.max_concurrency` is the capacity only when the namespace has no
+quota naming a counted resource; with one it is not consulted.
+
+The capacity is a dispatch limit the supervisor holds launches to: before a
+launch begins it reads the provider's capacity (once per launch pass) and
+counts the attempts holding a slot on that provider (preparing through
+exited, since every Pod an attempt runs is inside the slot it took). A launch
+past the capacity stays pending and scheduled with a `harness_launch_deferred`
+event saying why, and begins on a later tick when a worker has finished; its
+gate probe runs then. The per-harness and per-pool caps of the policy stand
+beside this, unchanged.
+
+A quota refusal that reaches the cluster anyway (the canary or a login took
+the reservation, an operator shrank the quota) is a wait, never a failure of
+the attempt. `launch` gives the Job controller a few polls to create the
+worker's Pod; a `FailedCreate` naming the quota in that window, or a 403 on
+the Job itself, deletes the Job and raises `LaunchWaitError`, and the
+supervisor puts the attempt back to pending (the task back to scheduled) with
+the quota's words as the reason, the attempt unconsumed and without an exit
+class. The gate probe and the preparer raise the same when the quota refuses
+their Pod, and a `persistentvolumeclaims` quota refusing the workspace claim
+does too; a refused gate probe is therefore retried on a later tick rather
+than recorded as `check_cannot_run`. A refusal `observe` sees after the launch
+window keeps the attempt running while the controller retries the Pod, and
+the launch timeout counts from the last refusal. Any other create refusal (a
+webhook that denied the Pod, a policy that rejected the spec) ends the
+attempt as `environment` with the API server's message as its
+`termination_detail` and in the wake's summary.
+
+The admin status page (25) shows the namespace
 readiness probe, the CNI egress enforcement result, the pod PID limit, and
 the runtime class in use ("standard" in this version). Attempt evidence
 records the image digest, the Job and Pod names, the node, the effective

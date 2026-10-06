@@ -119,23 +119,28 @@ def test_capabilities_are_26s() -> None:
 
 
 async def test_max_concurrency_comes_from_the_namespace_resource_quota() -> None:
+    """Seven Pods admitted, one kept for Hades's own short-role Pods (hades #423): six
+    workers at once."""
     api, _registry, provider = build()
     api.create("resourcequotas", {"metadata": {"name": "workers"}, "spec": {"hard": {"pods": "7"}}})
     await provider.health()
-    assert provider.capabilities().max_concurrency == 7
+    assert provider.capabilities().max_concurrency == 6
 
 
 async def test_a_job_quota_reports_attempt_capacity_not_raw_jobs() -> None:
+    """Fifteen Jobs: one kept for a short-role Pod's Job, fourteen left is two attempts of
+    five Jobs each, not fifteen workers."""
     api, _registry, provider = build()
     api.create(
         "resourcequotas",
         {"metadata": {"name": "workers"}, "spec": {"hard": {"count/jobs.batch": "15"}}},
     )
     await provider.health()
-    assert provider.capabilities().max_concurrency == 3
+    assert provider.capabilities().max_concurrency == 2
 
 
-# The new base quota (5 * 3 + 2 = 17) also reports three attempts.
+# The new base quota (5 * 3 + 2 = 17) also reports three attempts: sixteen Jobs after
+# the reserved one still hold three attempts' five.
 async def test_the_base_quota_reports_three_attempts() -> None:
     api, _registry, provider = build()
     api.create(
