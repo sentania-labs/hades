@@ -210,9 +210,11 @@ jobs:
       # The candidate's own crane resolves the published worker image on GHCR (108): the
       # same adapter the Kubernetes provider runs, inside the image about to be
       # published, so a service image that cannot resolve a worker image never ships.
-      # A changed worker pin uses the immutable version tag pushed immediately above;
-      # an unchanged pin keeps checking latest. Anonymous: the package is public and no
-      # credential is passed in.
+      # Compare the published build inputs with actual latest, which follows the highest
+      # published version, not the nearest ancestor tag (delayed patch releases differ).
+      # Changed inputs use the immutable version tag pushed immediately above; identical
+      # inputs keep checking latest. The crane check is anonymous: the package is public
+      # and no credential is passed in.
       - name: the image resolves the published worker image through its crane
         run: |
           set -euo pipefail
