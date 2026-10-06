@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -72,6 +72,15 @@ def repositories_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             ],
         }
     ]
+    if admin and (reference := request.query_params.get("batch_result")):
+        result = github.batch_result(uow, reference, principal=principal.name)
+        sections.insert(
+            0,
+            {
+                "title": "Batch registration result",
+                "note": batch_message(result) if result else "Batch result not found.",
+            },
+        )
     if ctx.admin is not None:
         sections.extend(_picker_sections(request, ctx.admin, uow, admin=admin, policies=names))
     if admin:
@@ -507,7 +516,15 @@ async def _action_repository_register_batch(
         reason=reason,
     )
     uow.commit()
-    return _redirect(form, batch_message(result), kind="ok" if result["registered"] else "warn")
+    # The outcome and registrations commit together. Only a bounded reference goes
+    # in Location, so large batches can always follow the redirect to their results.
+    picked = PickerFilter.from_query(dict(parse_qsl(urlsplit(form.get("return_to", "")).query)))
+    return RedirectResponse(
+        _picker_link(installation_id, picked)
+        + "&"
+        + urlencode({"batch_result": result["result_seq"]}),
+        status_code=303,
+    )
 
 
 register("repository-register-batch", _action_repository_register_batch)

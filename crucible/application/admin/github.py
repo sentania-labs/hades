@@ -742,4 +742,32 @@ def add_repositories(
         added.append({**done, "full_name": full_name})
         if identity is not None:
             registered[identity] = name
-    return {"installation_id": installation_id, "registered": added, "skipped": skipped}
+    result = {"installation_id": installation_id, "registered": added, "skipped": skipped}
+    event = admin_event(
+        uow,
+        ctx,
+        EventKind.REPOSITORY_BATCH_REGISTERED,
+        principal=principal,
+        reason=reason,
+        before=None,
+        after=result,
+    )
+    return {**result, "result_seq": event.seq}
+
+
+def batch_result(uow: UnitOfWork, reference: str, *, principal: str) -> dict[str, Any] | None:
+    """Read an exact persisted batch outcome, only for the administrator who ran it."""
+    if not reference.isascii() or not reference.isdigit() or len(reference) > 19:
+        return None
+    seq = int(reference)
+    if not 0 < seq < 2**63:
+        return None
+    events = uow.events.list_global(
+        after_seq=seq - 1,
+        kind=EventKind.REPOSITORY_BATCH_REGISTERED.value,
+        since=None,
+        limit=1,
+    )
+    if not events or events[0].seq != seq or events[0].principal != principal:
+        return None
+    return dict(events[0].payload["after"])

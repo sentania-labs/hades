@@ -52,7 +52,15 @@ def test_repository_form_offers_stored_policy_names_as_a_select(
     ctx = SimpleNamespace(admin=object())
 
     ui_repositories.repositories_page(
-        Request({"type": "http", "method": "GET", "path": "/ui/repositories", "headers": []}),
+        Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/ui/repositories",
+                "headers": [],
+                "query_string": b"",
+            }
+        ),
         cast(Any, ctx),
         cast(Any, uow),
     )

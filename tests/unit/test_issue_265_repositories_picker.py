@@ -11,10 +11,11 @@ token for, and one registered repository the installation no longer covers.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from html import unescape
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from urllib.parse import unquote, urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import pytest
 from fastapi import FastAPI
@@ -120,8 +121,14 @@ class Events:
         self.rows.append(event)
         return event
 
-    def list_global(self, **_: Any) -> list[Event]:
-        return []
+    def list_global(self, *, after_seq: int, kind: str | None, limit: int, **_: Any) -> list[Event]:
+        return [
+            event
+            for event in self.rows
+            if event.seq is not None
+            and event.seq > after_seq
+            and (kind is None or event.kind == kind)
+        ][:limit]
 
 
 class Policies:
@@ -229,7 +236,16 @@ async def _post(ctx: Any, store: Store, form: dict[str, str]) -> str:
         form.get("reason"),
     )
     assert response is not None and response.status_code == 303
-    return unquote(response.headers["location"])
+    location = response.headers["location"]
+    assert len(location) < 200
+    assert "message=" not in location
+    assert "set-cookie" not in response.headers
+    query = dict(parse_qsl(urlsplit(location).query))
+    original = dict(parse_qsl(urlsplit(form.get("return_to", "")).query))
+    for key in ("name", "registered", "private", "archived", "sort", "page"):
+        if key in original:
+            assert query[key] == original[key]
+    return _page(ctx, store, query)
 
 
 def _section(body: str, installation_id: int) -> str:
@@ -275,7 +291,7 @@ async def test_filter_an_installation_by_name_and_register_one(world: tuple[Any,
             "return_to": "/ui/repositories?installation=101&name=GEM",
         },
     )
-    assert location.startswith("/ui/repositories?installation=101&name=GEM&kind=ok&")
+    assert "Batch registration result" in location
     assert "Registered 1: octo/hidden-gem as hidden-gem." in location
     gem = store.repositories.rows["hidden-gem"]
     assert (gem.url, gem.default_branch, gem.installation_id) == (
@@ -404,6 +420,51 @@ async def test_select_all_takes_every_repository_the_filter_matches_on_every_pag
     assert "Registered 60:" in location and "Skipped" not in location
     assert {f"repo-{n:02d}" for n in range(60)} <= set(store.repositories.rows)
     assert "hidden-gem" not in store.repositories.rows
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("select_all", [True, False])
+async def test_large_batch_result_survives_redirect_and_reload(
+    world: tuple[Any, Store], select_all: bool
+) -> None:
+    ctx, store = world
+    names = [f"octo/ordinary-repository-{n:03d}" for n in range(250)]
+    ctx.admin.github_apps.covered[101].extend(_covered(name) for name in names)
+    chosen = [*names, "octo/widgets", "octo/old", "octo/secret"]
+    form = {
+        "installation_id": "101",
+        "attested_all_prs": "true",
+        "reason": "register a large batch",
+    }
+    if select_all:
+        form["select_all"] = "true"
+    else:
+        form.update({f"pick:{name}": "true" for name in chosen})
+    body = unescape(await _post(ctx, store, form))
+    event = store.events.rows[-1]
+    assert event.kind == EventKind.REPOSITORY_BATCH_REGISTERED.value
+    assert store.commits == 1
+    for name in names:
+        assert f"{name} as {name.split('/')[1]}" in body
+        assert name.split("/")[1] in store.repositories.rows
+    for skipped in event.payload["after"]["skipped"]:
+        assert f"{skipped['repository']} ({skipped['reason']})" in body
+    assert len(event.payload["after"]["skipped"]) == 3
+    query = {"batch_result": str(event.seq)}
+    # A fresh application context needs no process-local flash or browser cookie.
+    reloaded = unescape(_page(_context(), store, query))
+    assert repositories_page.batch_message(event.payload["after"]) in reloaded
+    assert store.commits == 1
+    # Another batch must not overwrite the first, including an all-skipped batch.
+    skipped_body = await _post(ctx, store, form)
+    assert "Registered none." in skipped_body
+    assert repositories_page.batch_message(event.payload["after"]) in unescape(
+        _page(ctx, store, query)
+    )
+    for reference in ("invalid", "0", "-1", "9" * 100, "9223372036854775808", "9999", "1"):
+        assert "Batch result not found." in _page(ctx, store, {"batch_result": reference})
+    event.principal = "another-admin"
+    assert "Batch result not found." in _page(ctx, store, query)
 
 
 @pytest.mark.asyncio
