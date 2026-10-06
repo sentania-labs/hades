@@ -13,7 +13,13 @@ from crucible.domain.entities import Principal
 from crucible.ports.repository import UnitOfWork
 
 CAPABILITIES = ("small", "mid", "frontier")
-HARNESS_NAMES = {"codex": "Codex", "claude_code": "Claude Code", "agy": "AGY", "hermes": "Hermes"}
+HARNESS_NAMES = {
+    "codex": "Codex",
+    "claude_code": "Claude Code",
+    "agy": "AGY",
+    "hermes": "Hermes",
+    "qwen_code": "Qwen Code",
+}
 
 
 def routing_controls_view(uow: UnitOfWork) -> dict[str, Any]:

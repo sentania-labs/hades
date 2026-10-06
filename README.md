@@ -2,7 +2,7 @@
 
 Crucible is a deterministic supervisor for AI coding workers. It accepts an
 explicit, versioned task contract, launches a worker harness (Claude Code,
-Codex, or AGY) in an isolated execution environment, records everything the
+Codex, AGY, Hermes, or Qwen Code) in an isolated execution environment, records everything the
 worker does as durable events, logs, artifacts, and evidence, enforces
 mechanical completion gates, and reports state through a versioned HTTP API.
 
@@ -93,14 +93,32 @@ does not permit, rather than letting it fail quietly on the network.
 
 ### The harnesses
 
-Claude Code, Codex and AGY run behind one `HarnessAdapter` port (spec 07), with
-the e2e script harness as the fourth adapter. Each adapter declares the version
+Claude Code, Codex, AGY, Hermes and Qwen Code run behind one `HarnessAdapter`
+port (spec 07), with a separate script harness for e2e tests. Each adapter declares the version
 range it was tested with; the image label carries the installed version, and a
 launch outside the range is refused with a wake. `GET /v1/harnesses` reports
 installed and supported versions, both enable flags with their reasons, and a
 sanitized credential state; `GET /v1/images` lists every labelled image with the
 harnesses it is the default image of. Each harness has its own default image,
 promoted and rolled back on its own (ADR 0018).
+
+| Harness | Routing name | Endpoint |
+| --- | --- | --- |
+| Claude Code | `claude_code` | Subscription |
+| Codex | `codex` | Subscription or local |
+| AGY | `agy` | Subscription |
+| Hermes | `hermes` | Local |
+| Qwen Code 0.25.0 | `qwen_code` | Local |
+
+Qwen Code uses the lab-local gateway key already configured for Hermes. Its
+wrapper writes `~/.qwen/settings.json` before launch: `model.maxToolCallsPerTurn`
+is `0` to prevent the per-turn loop cap from stopping productive runs, and
+`model.generationConfig.contextWindowSize` is the routing model's `context_length`
+(or **131072** tokens when absent). This is the full engine window: Qwen budgets
+its output request inside it rather than adding 32000 output tokens beyond it.
+Set the routing value to the engine's actual capacity. The worker also includes
+Node 22 and npm for repository checks (#288). Promote its image separately with
+`crucible admin images promote <digest> --harness qwen_code`.
 
 A harness credential is a directory Crucible reads (`[credentials.<harness>]`,
 paths only), never the operator's own `~/.claude`, `~/.codex` or `~/.gemini`.

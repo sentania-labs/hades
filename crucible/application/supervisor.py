@@ -128,7 +128,11 @@ from crucible.domain.exit_class import (
     loop_shape,
 )
 from crucible.domain.gates import GateName, GateResult, evaluate_gate
-from crucible.domain.harness_settings import effective_settings, setting_name
+from crucible.domain.harness_settings import (
+    DEFAULT_QWEN_CONTEXT_LENGTH,
+    effective_settings,
+    setting_name,
+)
 from crucible.domain.ids import new_id
 from crucible.domain.lifecycle import (
     ATTEMPT_TERMINAL,
@@ -1887,7 +1891,7 @@ class Supervisor:
                 endpoint_url = route.endpoint_url
             settings_harness = (
                 "hermes"
-                if endpoint == "local" and selected_harness == "codex"
+                if endpoint == "local" and selected_harness in {"codex", "qwen_code"}
                 else selected_harness
             )
             saved = (
@@ -1901,7 +1905,7 @@ class Supervisor:
             declaration = settings_adapter.credential_spec() if settings_adapter else None
             launch_mount_mode = (
                 MountMode.RO
-                if endpoint == "local" and selected_harness == "codex"
+                if endpoint == "local" and selected_harness in {"codex", "qwen_code"}
                 else MountMode(
                     resolve_runtime_setting(
                         route_uow,
@@ -2035,6 +2039,12 @@ class Supervisor:
                 harness_settings,
                 thinking=route.chat_template_kwargs.enable_thinking if route else False,
             )
+        if selected_harness == "qwen_code":
+            effective = attempt.effective_settings or {
+                "context_length": route.context_length
+                if route and route.context_length
+                else DEFAULT_QWEN_CONTEXT_LENGTH
+            }
         if effective is not None:
             harness_settings.update(effective)
         # Issue 128: the policy default, narrowed by the contract, capped at the attempt.
@@ -2075,7 +2085,9 @@ class Supervisor:
         if adapter is None:
             return spec
         credential_harness = (
-            "hermes" if selected_harness == "codex" and endpoint == "local" else selected_harness
+            "hermes"
+            if selected_harness in {"codex", "qwen_code"} and endpoint == "local"
+            else selected_harness
         )
         credential_adapter = self._harnesses.get(credential_harness) if self._harnesses else None
         credential = credential_adapter.credential_spec() if credential_adapter else None
