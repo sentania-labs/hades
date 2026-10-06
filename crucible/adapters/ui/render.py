@@ -42,6 +42,7 @@ NAV = (
     ("", "Work"),
     ("/ui/tasks", "Tasks"),
     ("/ui/board", "Board"),
+    ("/ui/usage", "Usage"),
     ("/ui/workers", "Workers"),
     ("/ui/wakes", "Wakes"),
     ("", "Admin"),

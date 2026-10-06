@@ -30,6 +30,7 @@ FROZEN_ROUTES = [
     ("GET", "/ui/tasks"),
     ("GET", "/ui/tasks/{task_id}"),
     ("GET", "/ui/tokens"),
+    ("GET", "/ui/usage"),
     ("GET", "/ui/wakes"),
     ("GET", "/ui/workers"),
     ("GET", "/ui/workers/{attempt_id}/logs"),

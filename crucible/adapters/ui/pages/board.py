@@ -8,10 +8,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
 from crucible.adapters.threaded_router import ThreadedAPIRouter
-from crucible.adapters.ui.pages.proposals import batch_section
-from crucible.adapters.ui.render import _page, _state_words
+from crucible.adapters.ui.render import _base, _state_words, templates
 from crucible.adapters.ui.session import _require
-from crucible.application.admin.board import board_view
+from crucible.application.admin.board_lanes import board_lanes_view
 
 router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
 
@@ -293,24 +292,13 @@ def board_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     if isinstance(found, RedirectResponse):
         return found
     principal, csrf = found
-    document = board_view(uow, ctx.clock.now())
-    return _page(
-        request,
-        principal,
-        csrf,
-        active="/ui/board",
-        heading="Board",
-        intro=(
-            "Every task in flight as a card in the column for its stage, then the same "
-            "tasks as a list, their routes, usage and recent quality evidence."
-        ),
-        sections=[
-            _kanban_section(document),
-            # hades #424: approve proposals in one action, in the order numbered.
-            *([batch] if (batch := batch_section(uow, principal)) else []),
-            _list_section(document),
-            _routing_section(document),
-            *_tokens_sections(document),
-            *_quality_sections(document),
-        ],
+    document = board_lanes_view(uow, ctx.clock.now())
+    return templates.TemplateResponse(
+        request=request,
+        name="board.html",
+        context={
+            **_base(request, principal, csrf, title="Board", active="/ui/board"),
+            "title": "Board",
+            "lanes": document["lanes"],
+        },
     )

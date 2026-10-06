@@ -74,6 +74,27 @@ details > summary { cursor: pointer; color: var(--accent); }
 .admin-chip--codex, .admin-chip--ci { background: var(--surface); color: var(--ink); }
 .admin-chip--operator { background: var(--warn-soft); color: var(--warn-ink); border-color: transparent; }
 .admin-chip--done { background: var(--ok-soft); color: var(--ok-ink); border-color: transparent; }
+/* hades #489: horizontal lanes, each with a compact row of real task cards. */
+.board-lanes { display: grid; gap: 12px; }
+.board-lane { min-width: 0; padding: 10px; background: var(--surface-sunken); border: 1px solid var(--line-soft); border-radius: var(--radius-lg); }
+.board-lane header > span, .board-lane summary > span { display: flex; align-items: baseline; gap: 8px; }
+.board-lane h2, .board-lane summary b { margin: 0; font-size: 14px; }
+.board-lane header p, .board-lane summary small { display: block; margin: 3px 0 8px; color: var(--ink-muted); font-size: 11px; }
+.board-lane summary { list-style-position: outside; }
+.board-count { color: var(--ink-subtle); font-size: 11px; font-weight: 400; }
+.board-cards { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(250px, 320px); gap: 8px; overflow-x: auto; padding-bottom: 2px; }
+.board-card { display: grid; gap: 5px; padding: 9px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md); font-size: 11px; }
+.board-card-main { display: grid; color: var(--ink); text-decoration: none; }
+.board-card-main:hover strong { color: var(--accent); }
+.board-card-id { color: var(--ink-subtle); font: 10px/1.4 var(--font-mono); }
+.board-card-project { color: var(--ink-muted); }
+.board-card-links { display: flex; gap: 8px; flex-wrap: wrap; }
+.board-card-facts { display: grid; gap: 3px; margin: 2px 0 0; }
+.board-card-facts div { display: grid; grid-template-columns: 62px 1fr; gap: 5px; }
+.board-card-facts dt { color: var(--ink-subtle); }
+.board-card-facts dd { margin: 0; overflow-wrap: anywhere; }
+.board-card-reason { margin: 2px 0 0; }
+@media (max-width: 700px) { .board-cards { grid-auto-flow: row; grid-auto-columns: auto; grid-template-columns: 1fr; overflow-x: visible; } }
 .login-guidance { margin: 0 0 1rem; padding-left: 1.25rem; }
 .login-guidance li { margin-bottom: 0.4rem; }
 .login-url { display: block; overflow-wrap: anywhere; word-break: break-all; font: 11px/1.5 var(--font-mono); }
