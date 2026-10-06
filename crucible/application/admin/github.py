@@ -394,6 +394,26 @@ def _app_id(ctx: AdminContext) -> int:
     return credential.app_id if credential else ctx.github_app.app_id
 
 
+def _repository_identity(url: str) -> tuple[str, str] | None:
+    """Match web and clone URLs, retaining the host to distinguish GitHub instances."""
+    if "://" not in url and "@" in url:
+        # Git's scp-style SSH syntax is not a URL that urlsplit can parse directly.
+        authority, separator, path = url.partition(":")
+        if separator:
+            url = f"ssh://{authority}/{path}"
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+    except ValueError:
+        return None
+    if not host or parsed.scheme not in {"http", "https", "ssh", "git"}:
+        return None
+    path = parsed.path.strip("/").removesuffix(".git").lower()
+    if not path:
+        return None
+    return host.lower(), path
+
+
 def rebind_repositories(
     ctx: AdminContext,
     uow: UnitOfWork,
@@ -411,21 +431,21 @@ def rebind_repositories(
         raise ConflictError("no GitHub App is connected; connect one on the GitHub page")
     try:
         installations = ctx.github_apps.installations()
-        visible: dict[str, int] = {}
+        visible: dict[tuple[str, str], int] = {}
         for installation in sorted(installations, key=lambda item: int(item["id"])):
             installation_id = int(installation["id"])
             for repository in ctx.github_apps.installation_repositories(installation_id):
-                url = str(repository.get("html_url") or "").rstrip("/").removesuffix(".git")
-                if url:
-                    visible.setdefault(url.lower(), installation_id)
+                key = _repository_identity(str(repository.get("html_url") or ""))
+                if key is not None:
+                    visible.setdefault(key, installation_id)
     except (GitHubError, OSError, KeyError, TypeError, ValueError) as exc:
         raise _github_refusal(exc, _app_id(ctx), ctx.github_app.api_base) from None
 
     rebound: list[str] = []
     unavailable: list[str] = []
     for repository in _registered(uow):
-        key = repository.url.rstrip("/").removesuffix(".git").lower()
-        new_installation_id = visible.get(key)
+        key = _repository_identity(repository.url)
+        new_installation_id = visible.get(key) if key is not None else None
         if new_installation_id is None:
             unavailable.append(repository.name)
             continue
