@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -102,6 +105,39 @@ def test_qwen_launch_is_bounded_and_wrapper_writes_fallback_report(tmp_path: Pat
     document = json.loads((report_dir / "report.yaml").read_text(encoding="utf-8"))
     claim, errors = parse_claim(document, criteria=["AC1"])
     assert claim is not None and errors == []
+
+
+def test_qwen_wrapper_fallback_after_a_fake_qwen_run(tmp_path: Path) -> None:
+    fake = tmp_path / "fake-qwen"
+    fake.write_text(
+        '#!/bin/sh\nprintf \'%s\\n\' \'{"type":"result","subtype":"success"}\'\nexit 0\n',
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    identity = tmp_path / "IDENTITY.md"
+    identity.write_text("Acceptance criterion `AC1`", encoding="utf-8")
+    report = tmp_path / "report"
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "CRUCIBLE_QWEN_BINARY": str(fake),
+        "CRUCIBLE_QWEN_CONTEXT_LENGTH": "65536",
+        "CRUCIBLE_QWEN_MAX_OUTPUT_TOKENS": "4096",
+        "CRUCIBLE_QWEN_IDENTITY": str(identity),
+        "CRUCIBLE_QWEN_REPORT_DIR": str(report),
+    }
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "images/worker/crucible-qwen-code.py"), "prompt"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=ROOT,
+    )
+    assert result.returncode == 0
+    document = json.loads((report / "report.yaml").read_text(encoding="utf-8"))
+    assert document["summary"].startswith("Qwen completed")
+    assert parse_claim(document, criteria=["AC1"])[1] == []
 
 
 def test_today_valid_worker_report_remains_valid() -> None:

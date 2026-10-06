@@ -50,7 +50,8 @@ def launch_argv(argv: list[str], identity: Path) -> list[str]:
     text = identity.read_text(encoding="utf-8").strip()
     if not text:
         raise ValueError("Qwen identity must not be empty")
-    return ["/usr/local/bin/qwen", *argv[:-1], f"{text}\n\n{argv[-1]}"]
+    binary = os.environ.get("CRUCIBLE_QWEN_BINARY", "/usr/local/bin/qwen")
+    return [binary, *argv[:-1], f"{text}\n\n{argv[-1]}"]
 
 
 def _commands(transcript: Path) -> list[str]:
