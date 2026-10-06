@@ -2,7 +2,7 @@
 
 Two properties that would be a serious defect to lose and that nothing else asserts: the
 token is not in anything the daemon records about the container, and the push cannot be
-a force push. Both are checked against the real objects the provider sends and the real
+an unleased force push. Both are checked against the real objects the provider sends and the real
 script text it runs, not against a description of them.
 """
 
@@ -102,9 +102,8 @@ def test_the_publisher_refuses_a_bundle_changed_after_collection(
         publisher._stage(tmp_path / "publish", str(bundle), sealed_sha256)
 
 
-def test_the_publisher_script_can_never_force_push(publisher: DockerPublisher) -> None:
-    """23: Crucible never force-pushes. A remote head that is not an ancestor fails the
-    push and is recorded; it is never overwritten."""
+def test_the_publisher_script_requires_an_exact_tip_lease(publisher: DockerPublisher) -> None:
+    """Issue 403 permits only an exact-tip leased replacement of Hades work."""
     script = scripts.publisher_script(
         clone_url="https://github.com/owner/repo.git",
         work_branch="crucible/FDY-0042",
@@ -113,21 +112,21 @@ def test_the_publisher_script_can_never_force_push(publisher: DockerPublisher) -
         author_name="crucible-worker",
         author_email="crucible-worker@users.noreply.github.com",
     )
-    # No force flag anywhere in the script, in any spelling.
-    for forbidden in ("--force", "--force-with-lease", "--mirror", "+refs/", ":+refs/"):
+    assert '--force-with-lease="refs/heads/$WORK_BRANCH:$REMOTE"' in script
+    # No unconditional force flag.
+    for forbidden in ("--force ", "--mirror", "+refs/", ":+refs/"):
         assert forbidden not in script, forbidden
     pushes = [line for line in script.splitlines() if "git push" in line]
     assert len(pushes) == 1, pushes
     push_line = pushes[0]
-    # One push, one refspec, neither forced nor a delete.
+    # One push, one refspec, no deletion.
     assert "refs/heads/crucible-publish:refs/heads/$WORK_BRANCH" in push_line
     for forbidden in ("-f", "--delete", "--prune", "--tags"):
         assert f" {forbidden}" not in push_line, forbidden
 
 
 def test_the_script_has_no_commit_policy_refusal() -> None:
-    """FDY-0143 (operator decision, 2026-09-29): no refusal for a commit's author or
-    trailer. The guarantees before the push are the seal and the accepted head."""
+    """The accepted bundle has seal and head checks, not a commit-policy check."""
     script = scripts.publisher_script(
         clone_url="https://github.com/owner/repo.git",
         work_branch="crucible/FDY-0042",

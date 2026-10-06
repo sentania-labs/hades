@@ -122,7 +122,9 @@ def republish_task(
             "reason": request.reason,
             "retry_number": retry_number,
             "publish_retry_max": retry_max,
-            "resume_step": str(failure.payload.get("step") or "publish"),
+            # Re-fetch and re-check ownership even after a post-push failure: a
+            # checkpoint may have reached the work branch since then (#403).
+            "resume_step": "push",
         },
     )
     return task
