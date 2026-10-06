@@ -1117,6 +1117,7 @@ def publisher_script(
     credential_host: str = "github.com",
     token_source: str = "stdin",
     bundle_sha256: str = "",
+    owned_remote_heads: tuple[str, ...] = (),
 ) -> str:
     """Fetch the base from the remote and the branch from the bundle, then push (23).
 
@@ -1156,6 +1157,7 @@ BASE_REF={_quote(base_ref)}
 EXPECTED={_quote(expected_head)}
 CLONE_URL={_quote(clone_url)}
 SEAL={_quote(bundle_sha256)}
+OWNED_HEADS={_quote(" ".join(owned_remote_heads))}
 drop_token() {{ {drop}; }}
 mkdir -p "$OUT"
 # A retried publication of the same attempt writes into the same directory; nothing a
@@ -1215,18 +1217,39 @@ if [ "$HEAD_SHA" != "$EXPECTED" ]; then
   echo "the bundle head $HEAD_SHA is not the collected head $EXPECTED" > "$OUT/error.txt"
   echo head-mismatch > "$OUT/step.txt"; exit 4
 fi
-echo ls-remote > "$OUT/step.txt"
-git ls-remote origin "refs/heads/$WORK_BRANCH" > "$OUT/ls-remote-before.txt" \
-  2>> "$OUT/publisher.log" || true
-awk '{{print $1}}' "$OUT/ls-remote-before.txt" | head -n 1 > "$OUT/remote-head-before.txt"
-# The operator's decision of 2026-09-29: the publisher does not refuse a push for a
-# commit's author or trailer. What it guarantees is the bundle: sealed, verified, and
-# at the reviewed and accepted head. The author is shown to the reviewer at collection
-# (the `commit_policy` gate) instead.
+echo fetch-work-branch > "$OUT/step.txt"
+# Listing errors are not evidence that the branch is absent.
+git ls-remote --heads origin "refs/heads/$WORK_BRANCH" > "$OUT/ls-remote-before.txt" \
+  2>> "$OUT/publisher.log"
+REMOTE=""
+if [ -s "$OUT/ls-remote-before.txt" ]; then
+  git fetch --quiet --no-tags origin "refs/heads/$WORK_BRANCH" \
+    >> "$OUT/publisher.log" 2>&1
+  REMOTE=$(git rev-parse FETCH_HEAD)
+fi
+printf '%s\n' "$REMOTE" > "$OUT/remote-head-before.txt"
+if [ -n "$REMOTE" ]; then
+  echo remote-ownership > "$OUT/step.txt"
+  OWNED=no
+  case " $OWNED_HEADS " in *" $REMOTE "*) OWNED=yes ;; esac
+  if git show -s --format='%(trailers:key=Crucible-Attempt,valueonly)' "$REMOTE" \
+      | grep -q '[^[:space:]]'; then
+    OWNED=yes
+  fi
+  if [ "$OWNED" != yes ]; then
+    AUTHOR=$(git show -s --format='%an <%ae>' "$REMOTE")
+    printf 'foreign remote commit %s by %s; no Hades push record or attempt trailer\n' \
+      "$REMOTE" "$AUTHOR" > "$OUT/error.txt"
+    drop_token; exit 5
+  fi
+fi
 echo push > "$OUT/step.txt"
-# No force, ever. A remote head that is not an ancestor of the bundle head fails here,
-# which is exactly what 23 asks for: record it, wake Foundry, never overwrite.
+# Hades owns its work branches (issue 403): a tip it pushed, such as a quota checkpoint
+# of ungated partial work, is replaced by the accepted head whether or not the head
+# descends from it. An empty lease requires the branch to remain absent; an exact tip
+# protects against every writer racing the fetch, including another Hades checkpoint.
 if git push --quiet origin "refs/heads/crucible-publish:refs/heads/$WORK_BRANCH" \
+    --force-with-lease="refs/heads/$WORK_BRANCH:$REMOTE" \
     2> "$OUT/push.err"; then
   echo ok > "$OUT/push.txt"
 else
@@ -1268,7 +1291,7 @@ def merge_main_script(
 ) -> str:
     """Merge `base_ref` into the remote work branch tip and push it, or report conflicts.
 
-    hades #411: the one push Crucible makes with a lease rather than a fast-forward. The
+    hades #411: merge the remote work branch with an exact-tip lease. The
     work branch is fetched from the remote, not from any bundle, and must still be at
     `expected_head`, the head Crucible pushed or adopted; anything else stops here (exit
     4). The merge resolves nothing: a conflict writes the conflicting paths to
