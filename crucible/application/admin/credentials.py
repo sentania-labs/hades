@@ -1013,16 +1013,26 @@ def _http_status(url: str, *, bearer: str | None, timeout: float) -> int:
     return _http_get(url, bearer=bearer, timeout=timeout)[0]
 
 
-def model_ids(body: bytes) -> list[str]:
+def model_ids(body: bytes, *, strict: bool = False) -> list[str]:
     """The model ids of an OpenAI-compatible `/models` answer, `{"data": [{"id": ...}]}`,
-    in the order the gateway lists them. Anything else is no models."""
+    in the order the gateway lists them. Strict mode rejects inconclusive listings;
+    otherwise anything else is no models."""
     try:
-        document = json.loads(body.decode("utf-8", "replace"))
+        document = json.loads(body.decode("utf-8", "strict" if strict else "replace"))
     except ValueError:
+        if strict:
+            raise ValueError("invalid models response") from None
         return []
     items = document.get("data") if isinstance(document, dict) else None
     if not isinstance(items, list):
+        if strict:
+            raise ValueError("invalid models response")
         return []
+    if strict and any(
+        not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"].strip()
+        for item in items
+    ):
+        raise ValueError("invalid models response")
     ids = [str(item["id"]) for item in items if isinstance(item, dict) and item.get("id")]
     return list(dict.fromkeys(ids))
 
