@@ -22,7 +22,7 @@ the PR; a correction can be attached on the operator's word. It is not a gate.
 | `tasks` | id ULID PK, external_id, principal_id, project, title, state, contract_version, policy_name, policy_version, head_sha (current collected head), created_at, updated_at, closed_at; UNIQUE (principal_id, external_id) |
 | `task_contracts` | id, task_id, version, document JSONB, sha256, submitted_at; UNIQUE (task_id, version) |
 | `executions` | id, task_id, role (implement, correct, review), contract_version, harness, model, effort, provider, image, policy snapshot JSONB, state, created_at, ended_at |
-| `attempts` | id, execution_id, number, state, workspace_path, handle (provider ref), identity_sha256, image_digest, started_at, ended_at, exit_code, exit_class, timeout_at, drain_deadline, killed_at, termination_reason, stall_shape and termination_detail (issue 278: the shape and reason of a stall ended before the time limit) |
+| `attempts` | id, execution_id, number, state, workspace_path, handle (provider ref), identity_sha256, image_digest, started_at, ended_at, exit_code, exit_class, timeout_at, drain_deadline, killed_at, termination_reason, stall_shape and termination_detail (issue 278: the shape and reason of a stall ended before the time limit), blocked_reason and blocked_statement (hades #393: the reason line of `blocked.md`, missing_capability or ambiguous_contract, and the rest of the file verbatim) |
 | `workers` | attempt_id PK, state, last_signal_at, last_signal |
 | `leases` | id, kind, key, holder, fenced_token BIGINT, expires_at; UNIQUE (kind, key) |
 | `heartbeats` | id BIGSERIAL, attempt_id, ts, signal, detail |
@@ -34,7 +34,7 @@ the PR; a correction can be attached on the operator's word. It is not a gate.
 | `gate_results` | id, attempt_id, phase (pre_pr, publication, post_pr), gate, result, evaluated_at, evidence_ids BIGINT[], detail |
 | `acceptance_results` | id, task_id, head_sha, principal_id, verdict, reasoning, superseded_at, created_at |
 | `decisions` | id, task_id, escalation_id, principal_id, verbatim TEXT, resolves, created_at |
-| `escalations` | id, task_id, attempt_id, state, question, opened_at, closed_at |
+| `escalations` | id, task_id, attempt_id, state, question, opened_at, closed_at, decision_id, last_wake_at, reason (hades #393: the `blocked.md` reason, when the worker named one) |
 | `wakes` | id, principal_id, task_id, reason, payload JSONB, created_at, delivered_at, acked_at, attempts |
 | `supervisor_status` | singleton: holder, last_tick_at, last_success_at, last_error, consecutive_failures, tick_ms, counts JSONB |
 | `idempotency_keys` | (principal_id, key) PK, request_sha256, response JSONB, created_at |

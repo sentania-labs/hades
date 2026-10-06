@@ -62,14 +62,16 @@ def control_sections(uow: UoW, *, admin: bool) -> list[dict[str, Any]]:
                             "selected": "true" if model["enabled"] else "false",
                             "options": [("true", "Enabled"), ("false", "Disabled")],
                         },
-                        "reason": "optional",
+                        "reason": True,
                     },
                 ]
                 for model in view["models"]
             ],
             "note": (
-                "Choose Enabled or Disabled for any model. When disabling, type the reason "
-                "in the reason box. Enabling clears its disabled reason."
+                "Choose Enabled or Disabled for any model. Enabling or disabling a model "
+                "publishes a new routing version for every project that follows routing "
+                "unpinned, so the reason names the decision it supersedes; it is the "
+                "disabled reason too. Enabling clears its disabled reason."
             ),
         }
     )

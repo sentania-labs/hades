@@ -59,7 +59,8 @@ the worker is told what to do, not how Crucible checks it. In order:
 7. **Checks.** The `required_verification` commands, verbatim, to run and fix
    what fails; an artifact entry is the file to write in the report directory.
    Then two lines: a program a required command needs that is missing from the
-   image is not substituted for, it is `blocked.md` naming the program; and the
+   image is not substituted for, it is `blocked.md` naming the program with the
+   line `reason: missing_capability` (hades #393); and the
    sentence CONTRIBUTING.md shares, "Docker, kind and kubectl are absent in a
    worker and are CI's; a missing one is expected and is not a reason to stop."
    (hades #429). The two do not meet: a contract whose required check needs
@@ -76,9 +77,19 @@ the worker is told what to do, not how Crucible checks it. In order:
    per criterion id, which it lists, hades #187), `proposed_pull_request`, and
    the four lists; then run `crucible-report check` and fix every problem it
    prints (hades #215).
-9. **If you are stuck.** Write `/crucible/report/blocked.md` saying what
-   blocks you and what you tried, then stop; with the contract's
-   `escalation.conditions` listed as the cases to stop in.
+9. **If you are stuck.** Write `/crucible/report/blocked.md`: a first line
+   `reason: missing_capability` (the task needs a program or capability the
+   image does not have) or `reason: ambiguous_contract` (the contract reads
+   more than one way and the readings differ in result), then what blocks you
+   and what you tried, in your own words; then stop. One paragraph follows,
+   the operator's words (hades #393): when the contract is ambiguous, stop
+   rather than pick a reading, because "a workaround that changes the result
+   is not a workaround, it is a wrong answer"; a blocked attempt is not
+   retried, Hades hands the reason and the words verbatim to the person who
+   answers, and a correction brings the answer back. Then the contract's
+   `escalation.conditions`, listed as the cases to stop in. Crucible parses the reason line
+   (`contracts.completion_claim.parse_blocked_md`) onto the attempt record and
+   the escalation (09, 14); a reason it does not know stays in the statement.
 
 No exit codes (a model cannot set its harness's exit code; `blocked.md` on a
 clean exit is the escalation, 16), no precedence list, no author line (the

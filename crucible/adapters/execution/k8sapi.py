@@ -500,7 +500,12 @@ class KubernetesClient:
                 # 400 is what a Pod that has not started a container answers.
                 return []
             raise
-        return [LogFrame("stdout", raw)] if raw else []
+        if not raw:
+            return []
+        # Hades #425: kubelet and containerd may return non-UTF-8 bytes in a Pod log.
+        # Normalize at the one pods/log ingress so every text consumer is safe.
+        safe = raw.decode("utf-8", "replace").encode("utf-8")
+        return [LogFrame("stdout", safe)]
 
     def pod_exec(
         self,

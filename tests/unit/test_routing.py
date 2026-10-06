@@ -142,6 +142,9 @@ def _routing_setup(
     uow.routing_policies.get.return_value = MagicMock(document=routing.model_dump(mode="json"))
     supervisor = object.__new__(Supervisor)
     supervisor._clock = FakeClock(NOW)
+    # hades #423: no provider here derives a capacity, so no launch waits for room.
+    supervisor._providers = {}
+    supervisor._capacity_now = {}
     monkeypatch.setattr(supervisor, "_fenced", lambda: nullcontext(uow))
     monkeypatch.setattr(supervisor, "_uow_factory", lambda: nullcontext(uow), raising=False)
     supervisor._harnesses = None

@@ -11,18 +11,25 @@ Everything here treats what it reads as data: it is a tree a worker influenced.
 
 from __future__ import annotations
 
+import codecs
+import contextlib
 import hashlib
 import json
+import os
 import re
+import tarfile
+import threading
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import yaml
 
 from crucible.adapters.execution import scripts
-from crucible.adapters.execution.injected_collection import classify_collected
+from crucible.adapters.execution.injected_collection import classify_collected, nul_fields
 from crucible.contracts.evidence import REVIEW_DIFF_NAME, REVIEW_DIFF_TYPE
+from crucible.domain.secrets import SecretMatch, scan_chunks
 from crucible.ports.execution import (
     BranchBundle,
     CollectedArtifact,
@@ -33,6 +40,7 @@ from crucible.ports.execution import (
 )
 
 __all__ = [
+    "BlobTarScan",
     "Outputs",
     "lists_over_limit",
     "read_base_paths",
@@ -41,6 +49,8 @@ __all__ = [
     "read_path_changes",
     "read_path_list",
     "read_verifications",
+    "scan_blob",
+    "scan_changed_content",
     "tail",
     "text",
 ]
@@ -54,7 +64,7 @@ class Outputs:
     stdout_tail: str
     stderr_tail: str
     diff_paths: tuple[str, ...]
-    diff_text: str | None
+    diff_findings: tuple[SecretMatch, ...] | None
     bundle: BranchBundle | None
     artifacts: tuple[CollectedArtifact, ...]
     verifications: tuple[VerificationRun, ...]
@@ -65,6 +75,7 @@ class Outputs:
     diff_changes: tuple[PathChange, ...] | None = None
     base_paths: tuple[str, ...] | None = None
     over_limit: tuple[str, ...] = ()
+    diff_unscanned: tuple[str, ...] = ()
 
 
 TEXT_LIMIT = 8 * 1024 * 1024
@@ -98,7 +109,14 @@ def read_outputs(
     collector_exit: int,
     verifications: tuple[VerificationRun, ...],
     tail_bytes: int,
+    changed_blobs: Mapping[str, str | bool | None] | None = None,
 ) -> Outputs:
+    """Read what the collector left under `output` and the verifier under `verify`.
+
+    `changed_blobs` is what a provider that scanned the exported blobs itself, as they
+    streamed past, found for each object id (hades #398): a Kubernetes reader hands them
+    over without ever writing them to local disk. None means the blobs are files under
+    `output` and are scanned from there."""
     report_dir = output / "report"
     report: dict[str, Any] | None = None
     report_raw: str | None = None
@@ -114,7 +132,7 @@ def read_outputs(
     blocked_md = text(blocked) if blocked.is_file() else None
 
     changed = read_path_list(output / "changed.txt")
-    diff_text = text(output / "diff.patch") if (output / "diff.patch").is_file() else None
+    diff_findings, diff_unscanned = scan_changed_content(output, changed_blobs)
     commit_paths = read_path_list(output / "commit-paths.txt")
     diff_changes: tuple[PathChange, ...] | None
     commit_changes: tuple[PathChange, ...] | None
@@ -202,7 +220,8 @@ def read_outputs(
         stdout_tail=tail(output / "collector.ok", tail_bytes),
         stderr_tail=tail(output / "bundle.log", tail_bytes),
         diff_paths=changed,
-        diff_text=diff_text,
+        diff_findings=diff_findings,
+        diff_unscanned=diff_unscanned,
         diff_changes=diff_changes,
         base_paths=base_paths,
         over_limit=over_limit,
@@ -214,6 +233,190 @@ def read_outputs(
         leftover_committed=(output / "leftover-committed.txt").is_file(),
         leftover_note=text(output / "leftover-refusal.txt").strip() or None,
     )
+
+
+# hades #398: how much of a collected file the scanner holds at once.
+SCAN_CHUNK = 1024 * 1024
+# A raw diff header: the new mode, the new blob, and the status.
+_CHANGED_META = re.compile(rb":[0-7]{6} ([0-7]{6}) [0-9a-f]{40,64} ([0-9a-f]{40,64}) ([A-Z])[0-9]*")
+_BLOB_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def _stream(handle: IO[bytes]) -> Iterator[bytes]:
+    while block := handle.read(SCAN_CHUNK):
+        yield block
+
+
+def _file_chunks(path: Path) -> Iterator[bytes]:
+    with path.open("rb") as handle:
+        yield from _stream(handle)
+
+
+def _decoded(chunks: Iterable[bytes]) -> Iterator[str]:
+    """Bytes as text, a chunk at a time; a character split across two reads is decoded
+    whole."""
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    for block in chunks:
+        yield decoder.decode(block)
+    yield decoder.decode(b"", final=True)
+
+
+def scan_blob(blob: str, size: int, chunks: Iterable[bytes]) -> str | bool | None:
+    """Stream one exported blob through the scanner, never holding it whole.
+
+    Returns the pattern the content matches, None for none, or False when the bytes are
+    not that blob: they do not hash, as `blob <size>\\0` plus the content, to its object
+    id. A copy a worker could have replaced, or a stream cut short, is therefore never
+    taken as scanned."""
+    digest = hashlib.sha1() if len(blob) == 40 else hashlib.sha256()
+    digest.update(b"blob %d\0" % size)
+
+    def hashed() -> Iterator[bytes]:
+        for block in chunks:
+            digest.update(block)
+            yield block
+
+    text_chunks = _decoded(hashed())
+    hit = scan_chunks(text_chunks)
+    # Read what is left after a match, so the hash covers the whole blob.
+    for _ in text_chunks:
+        pass
+    return hit if digest.hexdigest() == blob else False
+
+
+def _scan_blob_file(path: Path, blob: str) -> str | bool | None:
+    """`scan_blob` over a file the collector left on disk; False when it is missing, not
+    a regular file, or unreadable."""
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        return scan_blob(blob, path.stat().st_size, _file_chunks(path))
+    except OSError:
+        return False
+
+
+class BlobTarScan:
+    """A sink for a tar stream of exported blobs that scans each as it arrives.
+
+    The Kubernetes reader hands the collected output back as a tar (26). The blobs the
+    worker added or changed are in the bundle already, so they are not in that archive
+    a second time (hades #398 review): the reader streams `output/changed-blobs` on its
+    own, into this sink, which keeps the verdict for each blob and none of the bytes.
+    `write` is what the exec stream calls; `close` ends the stream and returns the
+    results, by object id: the pattern matched, None for none, False for content that
+    is not that blob. A member that never arrived is simply absent, and the gate waits
+    on it."""
+
+    def __init__(self, directory: str) -> None:
+        self._prefix = f"output/{directory}/"
+        self.results: dict[str, str | bool | None] = {}
+        self.error: str | None = None
+        read_fd, write_fd = os.pipe()
+        self._reader: IO[bytes] = os.fdopen(read_fd, "rb")
+        self._writer: IO[bytes] | None = os.fdopen(write_fd, "wb")
+        self._thread = threading.Thread(target=self._scan, name="crucible-blob-scan", daemon=True)
+        self._thread.start()
+
+    def write(self, data: bytes) -> int:
+        if self._writer is None:
+            return len(data)
+        try:
+            self._writer.write(data)
+        except (BrokenPipeError, ValueError):
+            # The scanner stopped (a malformed stream); let the exec drain and finish.
+            self._writer = None
+        return len(data)
+
+    def close(self) -> dict[str, str | bool | None]:
+        if self._writer is not None:
+            with contextlib.suppress(OSError, ValueError):
+                self._writer.close()
+            self._writer = None
+        self._thread.join()
+        return dict(self.results)
+
+    def _scan(self) -> None:
+        try:
+            with tarfile.open(fileobj=self._reader, mode="r|") as tar:
+                for member in tar:
+                    if not member.name.startswith(self._prefix):
+                        continue
+                    blob = member.name[len(self._prefix) :]
+                    if not _BLOB_ID.fullmatch(blob):
+                        continue
+                    handle = tar.extractfile(member) if member.isreg() else None
+                    if handle is None:
+                        self.results[blob] = False
+                        continue
+                    with handle:
+                        self.results[blob] = scan_blob(blob, member.size, _stream(handle))
+        except (tarfile.TarError, OSError, EOFError, ValueError) as exc:
+            self.error = f"{type(exc).__name__}: {exc}"
+        finally:
+            # Closing the read end turns a writer still blocked on the pipe loose.
+            with contextlib.suppress(OSError):
+                self._reader.close()
+
+
+def scan_changed_content(
+    output: Path, blobs: Mapping[str, str | bool | None] | None = None
+) -> tuple[tuple[SecretMatch, ...] | None, tuple[str, ...]]:
+    """Scan every byte the worker added or changed (hades #398), never the whole at once.
+
+    The whole diff.patch, and every blob the raw diff against the merge base names as
+    added or changed, which the collector exported by object id regardless of the
+    worker's attributes. `blobs` is what a provider that scanned them as they streamed
+    found per object id (`BlobTarScan`); None reads them from under `output`. A match is
+    named by the path (`diff` for the patch). Returns None for the matches when there is
+    no diff.patch, and the changed paths whose content could not be read, so the gate
+    does not claim coverage it lacks."""
+    patch = output / "diff.patch"
+    if not patch.is_file():
+        return None, ()
+    found: list[SecretMatch] = []
+    unscanned: list[str] = []
+    try:
+        hit = scan_chunks(_decoded(_file_chunks(patch)))
+    except OSError:
+        return None, ()
+    if hit is not None:
+        found.append(SecretMatch(path="diff", pattern=hit))
+    raw = output / "diff-raw.txt"
+    if not raw.is_file():
+        # A collector before #398 exported no blobs; the patch is what it gave.
+        return tuple(found), ()
+    exported = output / scripts.CHANGED_BLOBS_DIR
+    results: dict[str, str | bool | None] = {}
+    try:
+        fields = nul_fields(raw)
+        for raw_header in fields:
+            header = raw_header.lstrip(b"\n")
+            if not header:
+                continue
+            match = _CHANGED_META.fullmatch(header)
+            raw_path = next(fields, None)
+            if match is None or not raw_path:
+                raise ValueError("malformed raw diff record")
+            mode, blob_bytes, status = match.groups()
+            if status == b"D" or mode == b"160000":
+                continue
+            path = raw_path.decode("utf-8", "surrogateescape")
+            shown = path if path.isprintable() else ascii(path)
+            blob = blob_bytes.decode("ascii")
+            if blob not in results:
+                results[blob] = (
+                    blobs.get(blob, False)
+                    if blobs is not None
+                    else _scan_blob_file(exported / blob, blob)
+                )
+            result = results[blob]
+            if result is False:
+                unscanned.append(shown)
+            elif isinstance(result, str):
+                found.append(SecretMatch(path=f"diff:{shown}", pattern=result))
+    except (OSError, ValueError):
+        unscanned.append("diff-raw.txt")
+    return tuple(found), tuple(unscanned)
 
 
 _RAW_META = re.compile(r":[0-7]{6} [0-7]{6} ([0-9a-f]{40,64}) ([0-9a-f]{40,64}) ([A-Z])[0-9]*")

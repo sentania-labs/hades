@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -391,6 +392,79 @@ def apps_view(ctx: AdminContext, uow: UnitOfWork) -> dict[str, Any]:
 def _app_id(ctx: AdminContext) -> int:
     _, credential = _stored(ctx)
     return credential.app_id if credential else ctx.github_app.app_id
+
+
+def _repository_identity(url: str) -> tuple[str, str] | None:
+    """Match web and clone URLs, retaining the host to distinguish GitHub instances."""
+    if "://" not in url and "@" in url:
+        # Git's scp-style SSH syntax is not a URL that urlsplit can parse directly.
+        authority, separator, path = url.partition(":")
+        if separator:
+            url = f"ssh://{authority}/{path}"
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+    except ValueError:
+        return None
+    if not host or parsed.scheme not in {"http", "https", "ssh", "git"}:
+        return None
+    path = parsed.path.strip("/").removesuffix(".git").lower()
+    if not path:
+        return None
+    return host.lower(), path
+
+
+def rebind_repositories(
+    ctx: AdminContext,
+    uow: UnitOfWork,
+    *,
+    principal: str,
+) -> dict[str, list[str]]:
+    """Bind registered repositories to the installations of the newly installed App.
+
+    GitHub sends the browser to the setup URL after installation. At that point the
+    replacement credential is active and its installation list is authoritative. Read
+    the complete list before changing anything, then audit each changed repository.
+    Repositories absent from every installation stay exactly as they were.
+    """
+    if ctx.github_apps is None:
+        raise ConflictError("no GitHub App is connected; connect one on the GitHub page")
+    try:
+        installations = ctx.github_apps.installations()
+        visible: dict[tuple[str, str], int] = {}
+        for installation in sorted(installations, key=lambda item: int(item["id"])):
+            installation_id = int(installation["id"])
+            for repository in ctx.github_apps.installation_repositories(installation_id):
+                key = _repository_identity(str(repository.get("html_url") or ""))
+                if key is not None:
+                    visible.setdefault(key, installation_id)
+    except (GitHubError, OSError, KeyError, TypeError, ValueError) as exc:
+        raise _github_refusal(exc, _app_id(ctx), ctx.github_app.api_base) from None
+
+    rebound: list[str] = []
+    unavailable: list[str] = []
+    for repository in _registered(uow):
+        key = _repository_identity(repository.url)
+        new_installation_id = visible.get(key) if key is not None else None
+        if new_installation_id is None:
+            unavailable.append(repository.name)
+            continue
+        if repository.installation_id == new_installation_id:
+            continue
+        before = {"repository": repository.name, "installation_id": repository.installation_id}
+        uow.repositories.upsert(replace(repository, installation_id=new_installation_id))
+        admin_event(
+            uow,
+            ctx,
+            EventKind.REPOSITORY_REBOUND,
+            principal=principal,
+            reason="new GitHub App installation",
+            before=before,
+            after={"repository": repository.name, "installation_id": new_installation_id},
+            repository=repository.name,
+        )
+        rebound.append(repository.name)
+    return {"rebound": sorted(rebound), "unavailable": sorted(unavailable)}
 
 
 def add_repository(

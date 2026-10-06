@@ -1,0 +1,91 @@
+name: harness-pins
+
+on:
+  schedule:
+    - cron: "17 15 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Look up and report releases without changing files or opening PRs
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: [claude_code, codex, agy, hermes]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@b75a909f75acd358c2196fb9a5f1299a9a8868a4 # v6.7.0
+        with:
+          enable-cache: true
+      - name: look up and rewrite the pin
+        id: lookup
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          args=(--harness "${{ matrix.harness }}" --body "$RUNNER_TEMP/pr-body.md")
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          uv run python tools/images/harness_pins.py "${args[@]}"
+      - name: update the worker image tag
+        if: >-
+          steps.lookup.outputs.changed == 'true' &&
+          steps.lookup.outputs.supported == 'true' &&
+          !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        run: |
+          set -euo pipefail
+          if ! output=$(images/check-manifest.sh 2>&1); then
+            tag=$(sed -n "s/.*expected '\([^']*\)'.*/\1/p" <<<"$output" | head -1)
+            test -n "$tag"
+            sed -i "s|^WORKER=.*|WORKER=$tag|" images/manifest.env
+          fi
+      - uses: peter-evans/create-pull-request@6cd32fd93684475c31847837f87bb135d40a2b508 # v7.0.8
+        if: >-
+          steps.lookup.outputs.changed == 'true' &&
+          steps.lookup.outputs.supported == 'true' &&
+          !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        with:
+          token: ${{ github.token }}
+          branch: automation/harness-${{ matrix.harness }}
+          delete-branch: true
+          commit-message: Update ${{ matrix.harness }} harness pin
+          title: Update ${{ matrix.harness }} harness pin
+          body-path: ${{ runner.temp }}/pr-body.md
+          labels: dependencies
+      - name: report an unsupported release without changing its pin
+        if: >-
+          steps.lookup.outputs.changed == 'true' &&
+          steps.lookup.outputs.supported == 'false' &&
+          !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          HARNESS: ${{ matrix.harness }}
+          VERSION: ${{ steps.lookup.outputs.version }}
+          BODY: ${{ runner.temp }}/pr-body.md
+        run: |
+          set -euo pipefail
+          branch="automation/harness-$HARNESS"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git switch -c "$branch"
+          git commit --allow-empty -m "Report unsupported $HARNESS $VERSION release"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPOSITORY}.git" "$branch" --force
+          if ! gh pr view "$branch" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            gh pr create --repo "$REPOSITORY" --head "$branch" \
+              --base "${{ github.event.repository.default_branch }}" \
+              --title "Review unsupported $HARNESS $VERSION release" --body-file "$BODY"
+          fi

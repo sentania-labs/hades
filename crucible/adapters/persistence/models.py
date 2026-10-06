@@ -174,8 +174,11 @@ class AttemptRow(Base):
     resume_from_remote: Mapped[bool] = mapped_column(Boolean, default=False)
     routing_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     effective_settings: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    egress_probe: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     stall_shape: Mapped[str | None] = mapped_column(String(32), nullable=True)
     termination_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    blocked_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    blocked_statement: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class LogChunkRow(Base):
@@ -411,6 +414,7 @@ class EscalationRow(Base):
     closed_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
     decision_id: Mapped[str | None] = mapped_column(ID, nullable=True)
     last_wake_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class DecisionRow(Base):
@@ -711,6 +715,8 @@ class HarnessStateRow(Base):
     last_launch_outcome: Mapped[str | None] = mapped_column(String(48), nullable=True)
     last_auth_failure_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
     last_validated_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    # hades #389: the most recent successful launch time (last_launch_at moves on failures).
+    last_successful_launch_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
     last_test: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(TZ)
     updated_by: Mapped[str] = mapped_column(String(160))

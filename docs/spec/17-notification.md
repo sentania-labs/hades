@@ -31,7 +31,8 @@ Only when judgment is required or work has stopped needing it:
 | `checkpoint_after_finish` | an escalation: a quota checkpoint was pushed to the branch of a task that finished while it was pushed (merged, rejected, cancelled or closed); nothing was merged by it, and the push is not recorded (23) |
 | `release_gates_failed`, `release_succeeded`, `release_workflow_failed` | release lifecycle (24) |
 | `attempt_failed`, `timed_out`, `lost` with no retry remaining | `reported` |
-| `quota_exhausted`, `auth_failure` | any |
+| `quota_exhausted`, `auth_failure` | any. A quota refusal raises one wake naming the pool, the reason and the reset time (16 step 2, hades #378): the `reported` or `awaiting_quota` wake when the task ends or waits, else a `quota_exhausted` wake of the pool's own, once per exhaustion, linking `/v1/routing/usage` |
+| `routing_changed` | any, no task: a routing publish enabled or disabled a model or changed a pool cap; the summary lists the models enabled and disabled, the pool cap and tier order changes, the projects that follow routing unpinned, who published it and the reason, which names the decision it supersedes (hades #437). One wake per publish, raised for the orchestrator principal, linking `/ui/routing` |
 | `harness_unavailable` | launch refused: the harness is unknown, disabled by either gate (25), outside the adapter's tested version range, or has no credential. Terminal for the attempt; the retry rule skips it because the same refusal would come back |
 | `escalation_stale` | repeat |
 | `supervisor_takeover` | informational, once |

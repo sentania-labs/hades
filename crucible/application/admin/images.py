@@ -21,6 +21,7 @@ from crucible.application.harness_views import image_list
 from crucible.domain.entities import HarnessImage
 from crucible.domain.events import EventKind
 from crucible.ports.execution import ImageInfo
+from crucible.ports.harness import parse_version
 from crucible.ports.repository import UnitOfWork
 
 
@@ -44,6 +45,54 @@ def _entry(reference: str | None, digest: str | None, version: str | None) -> di
     return {"reference": reference or "", "digest": digest or "", "version": version or ""}
 
 
+def _image_tag(reference: str) -> str:
+    """Return the tag portion of a reference (after the last colon)."""
+    name = reference.rsplit("/", 1)[-1]
+    if ":" in name:
+        return name.rsplit(":", 1)[1]
+    return "latest"
+
+
+def _label_for_digest(
+    group: list[dict[str, str]],
+) -> tuple[dict[str, str], tuple[int, int, int]]:
+    """Given a group of images that share one digest, pick the best label.
+
+    Returns a (label-dict, sort-key) tuple.  The highest-release version
+    is the label; if there is only one member the label is just the
+    reference with no parenthetical suffix.
+    """
+
+    def _sort_key(e: dict[str, str]) -> tuple[int, int, int]:
+        tag = _image_tag(e["reference"])
+        try:
+            return parse_version(tag)
+        except ValueError:
+            return (0, 0, 0)
+
+    sorted_group = sorted(group, key=_sort_key)
+    best = sorted_group[-1]
+    if len(sorted_group) == 1:
+        return best, _sort_key(best)
+    # Others (excluding the best), in descending version order so newest listed first.
+    others = [
+        _image_tag(e["reference"])
+        for e in sorted(
+            [e for e in sorted_group if e is not best],
+            key=_sort_key,
+            reverse=True,
+        )
+    ]
+    return (
+        {
+            "reference": f"{_image_tag(best['reference'])} (same image as {', '.join(others)})",
+            "digest": best["digest"],
+            "version": _image_tag(best["reference"]),
+        },
+        _sort_key(best),
+    )
+
+
 async def defaults(ctx: AdminContext, uow: UnitOfWork) -> list[dict[str, Any]]:
     """One row per harness: its default image, the image a rollback returns to, and the
     images it may be promoted to (they carry it at a version inside its adapter's
@@ -52,29 +101,41 @@ async def defaults(ctx: AdminContext, uow: UnitOfWork) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for adapter in ctx.harnesses:
         current = uow.harness_images.get(adapter.name)
-        seen: set[str] = set()
-        choices: list[dict[str, str]] = []
+        digest_groups: dict[str, list[dict[str, str]]] = {}
         for _, image in images:
             version = image.version_of(adapter.name)
             if (
                 version is None
-                or image.digest in seen
                 or not adapter.supported_versions.supports(version)
                 or not offered_tag(image.reference)
             ):
                 continue
-            seen.add(image.digest)
-            choices.append(_entry(image.reference, image.digest, version))
-        choices.sort(key=lambda c: c["reference"])
+            digest_groups.setdefault(image.digest, []).append(
+                _entry(image.reference, image.digest, version)
+            )
+        # One entry per digest, labelled with highest release, sorted newest first.
+        labelled: list[tuple[dict[str, str], tuple[int, int, int]]] = [
+            _label_for_digest(g) for g in digest_groups.values()
+        ]
+        labelled.sort(key=lambda t: t[1], reverse=True)
+        # Map digest → grouped label for the current-image cell.
+        digest_to_label: dict[str, dict[str, str]] = {}
+        for label, _sk in labelled:
+            digest_to_label[label["digest"]] = label
+
+        # Build the current-image cell using the grouped label when applicable.
+        current_label: dict[str, str] | None = None
+        if current is not None:
+            if current.digest in digest_to_label:
+                current_label = digest_to_label[current.digest]
+            else:
+                current_label = _entry(current.reference, current.digest, current.version)
+
         rows.append(
             {
                 "harness": adapter.name,
                 "supported_versions": adapter.supported_versions.text,
-                "current": (
-                    _entry(current.reference, current.digest, current.version)
-                    if current is not None
-                    else None
-                ),
+                "current": current_label,
                 "previous": (
                     _entry(
                         current.previous_reference,
@@ -84,7 +145,7 @@ async def defaults(ctx: AdminContext, uow: UnitOfWork) -> list[dict[str, Any]]:
                     if current is not None and current.previous_digest
                     else None
                 ),
-                "choices": choices,
+                "choices": [label for label, _sk in labelled],
             }
         )
     return rows

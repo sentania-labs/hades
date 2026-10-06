@@ -57,6 +57,8 @@ class WakeReason(StrEnum):
     # hades #424: the operator sent a proposed task back with a note, or rejected it.
     SENT_BACK = "sent_back"
     PROPOSAL_REJECTED = "proposal_rejected"
+    # hades #437: a routing version enabled or disabled a model or changed a pool cap.
+    ROUTING_CHANGED = "routing_changed"
 
 
 class WakeTask(StrictModel):

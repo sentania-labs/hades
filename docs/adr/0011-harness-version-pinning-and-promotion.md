@@ -18,12 +18,20 @@ every attempt's behavior unreproducible.
   keep that digest unless Foundry explicitly authorizes a change.
 - Each adapter declares its tested version range; the API reports
   installed and supported versions and refuses unsupported combinations.
-- Promotion: Renovate opens weekly update PRs; CI builds a digest-pinned
+- Promotion: the weekly and on-demand `harness-pins.yml` workflow opens one
+  update PR per harness, with the release changelog and adapter range result; CI builds a digest-pinned
   candidate; adapter contract tests run; a bounded live canary runs
   outside CI; a person reviews flags, output, auth, and parsing; the
   supported range is updated; the image publishes to GHCR on release; an
   admin promotes it to default explicitly; one prior known-good image is
   retained.
+
+Hermes update PRs also regenerate `images/worker/requirements.lock` with hashes
+for the worker's Python 3.11 Linux environment and update the wheel download URL.
+The updater verifies that the resolved lock includes the downloaded wheel's
+checksum before writing the lock, Dockerfile, and manifest. Resolution or checksum
+failures stop the update; dry runs and unsupported releases leave the lock and
+pins untouched.
 
 ## Consequences
 

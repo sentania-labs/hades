@@ -29,6 +29,7 @@ ADMIN_KINDS: frozenset[str] = frozenset(
         EventKind.PRINCIPAL_REVOKED.value,
         EventKind.PRINCIPAL_RENAMED.value,
         EventKind.REPOSITORY_REGISTERED.value,
+        EventKind.REPOSITORY_REBOUND.value,
         EventKind.REPOSITORY_REMOVED.value,
         EventKind.REPOSITORY_ATTESTATION_RECORDED.value,
         EventKind.POLICY_UPLOADED.value,

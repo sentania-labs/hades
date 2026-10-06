@@ -115,9 +115,11 @@ class ClaudeCodeAdapter:
     def quota_reset_at(self, stdout_tail: str, stderr_tail: str) -> datetime | None:
         return base.quota_reset_at(stdout_tail, stderr_tail, quota=QUOTA_PATTERNS)
 
-    def provider_quota_event(self, stdout_tail: str, stderr_tail: str) -> ProviderQuotaEvent | None:
+    def provider_quota_event(
+        self, stdout_tail: str, stderr_tail: str, now: datetime | None = None
+    ) -> ProviderQuotaEvent | None:
         return base.provider_quota_event(
-            stdout_tail, stderr_tail, predicate=_provider_quota_refusal
+            stdout_tail, stderr_tail, predicate=_provider_quota_refusal, now=now
         )
 
     def provider_quota_exhausted(self, stdout_tail: str, stderr_tail: str) -> bool:

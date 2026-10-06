@@ -252,6 +252,7 @@ def _attempt_summary(a: Attempt, reroute_from_attempt_id: str | None = None) -> 
         pool=a.selected_pool,
         routing_version=a.routing_version,
         effective_settings=a.effective_settings,
+        egress_probe=a.egress_probe,
         ordered_candidates=a.ordered_candidates,
         reroute_from_attempt_id=reroute_from_attempt_id,
         resume_from_remote=a.resume_from_remote,
@@ -577,10 +578,13 @@ def attempt_view(uow: UnitOfWork, attempt_id: str) -> AttemptView:
         pool=a.selected_pool,
         routing_version=a.routing_version,
         effective_settings=a.effective_settings,
+        egress_probe=a.egress_probe,
         ordered_candidates=a.ordered_candidates,
         resume_from_remote=a.resume_from_remote,
         stall_shape=a.stall_shape,
         termination_detail=a.termination_detail,
+        blocked_reason=a.blocked_reason,
+        blocked_statement=a.blocked_statement,
     )
 
 
@@ -672,6 +676,7 @@ def _escalation_view(e: Escalation) -> EscalationView:
         opened_at=e.opened_at,
         closed_at=e.closed_at,
         decision_id=e.decision_id,
+        reason=e.reason,
     )
 
 

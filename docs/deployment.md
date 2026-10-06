@@ -196,8 +196,9 @@ prunes them.
 
 ### ResourceQuota sizing
 
-The base quota fits three concurrent attempts at the default policy (2 CPU limit, 0.5
-CPU request fraction, 4 GiB memory limit). Its `count/jobs.batch` is 5 x 3 + 2 = 17: five
+The base quota fits three concurrent Pods at the default policy (2 CPU limit, 0.5
+CPU request fraction, 4 GiB memory limit); the provider keeps one of them for Hades's own
+short-role Pods, so it runs two workers at once (see below). Its `count/jobs.batch` is 5 x 3 + 2 = 17: five
 Jobs per attempt (preparer, worker, collector, bundle-verifier, verifier) plus two
 headroom Jobs for the Kubernetes publisher (issue #226). The provider divides
 `count/jobs.batch` by five when reporting capacity, so this base quota advertises three
@@ -220,6 +221,18 @@ Worked example for N = 10 (the lab's default): 52 Jobs, 40 claims, 10 CPU reques
 CPU limit, 40 GiB memory. The quota is the deployer's overlay to set; the provider
 advertises capacity from it, so a stale quota shows up as a smaller max_concurrency on
 the Providers page, never as an unbounded launch.
+
+The provider keeps room out of that quota for the short-role Pods Hades runs beside
+the workers (the gate probe, the preparer, the collector, a login; hades #423):
+`kubernetes.short_role_pods` Pods of the worker's shape, one by default. A quota sized
+for N Pods therefore admits N minus one workers at once, and the N-th slot is what a
+gate probe or a collector runs in while the workers are at capacity. Size the quota for
+N + 1 to run N workers. A short-role Pod already running satisfies that reservation;
+the quota counts its usage, so the provider does not also keep a second slot free for
+it. The Providers page and the Routing page show the quota's
+headroom, the reservation and the resulting worker capacity; a launch past the
+capacity waits, scheduled, for a worker to finish rather than being refused by the
+quota. `kubernetes.max_concurrency` only applies when the namespace has no quota.
 
 ## Applying it
 

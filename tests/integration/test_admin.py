@@ -1089,18 +1089,24 @@ def test_local_endpoint_and_hermes_key_are_saved_without_exposing_the_key(
         gateway_page = browser.get("/ui/gateway?models=1")
         assert 'name="model.0.id" value="coder"' in gateway_page.text
         assert 'name="model.0.enabled"' in gateway_page.text
+        picks = {
+            "csrf": csrf,
+            "model.0.id": "coder",
+            "model.0.enabled": "true",
+            "model.0.thinking": "true",
+            "model.0.capability": "mid",
+            "max_concurrency": "2",
+            "reason": "save through browser form",
+            "return_to": "/ui/gateway",
+        }
+        # hades #437: the first post shows what the save publishes; nothing is saved.
+        preview = browser.post("/ui/actions/gateway-models", data=picks, follow_redirects=False)
+        assert preview.status_code == 200, preview.text
+        assert "What saving publishes" in preview.text
+        assert 'name="confirm" value="true"' in preview.text
         ui_models = browser.post(
             "/ui/actions/gateway-models",
-            data={
-                "csrf": csrf,
-                "model.0.id": "coder",
-                "model.0.enabled": "true",
-                "model.0.thinking": "true",
-                "model.0.capability": "mid",
-                "max_concurrency": "2",
-                "reason": "save through browser form",
-                "return_to": "/ui/gateway",
-            },
+            data={**picks, "confirm": "true"},
             follow_redirects=False,
         )
         assert ui_models.status_code == 303, ui_models.text

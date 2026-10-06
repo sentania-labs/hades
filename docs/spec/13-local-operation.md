@@ -360,7 +360,12 @@ declared endpoints, the hostnames of every enabled local model
 `endpoint_url` in the routing policy (05b), and the policy
 `egress_allowlist`; Crucible refuses
 to launch an attempt whose effective allowlist exceeds what the proxy
-was configured with, and a per-attempt proxy is a later hardening. Worker
+was configured with, and a per-attempt proxy is a later hardening. On this
+provider a worker reaches an allowlisted host through those proxy variables
+and only through them (the network has no default route), so a program that
+ignores `HTTPS_PROXY` reaches nothing; the launch wrapper's egress probe
+(26, hades #425) uses `curl`, which honours them, and so records the same
+path the harness and its package installs take. Worker
 `/tmp` is mounted without `noexec` in v0.x because no evidence exists yet
 that the real harnesses never execute from it. C5a did not test it; the
 test against each real harness is carried forward and this section is

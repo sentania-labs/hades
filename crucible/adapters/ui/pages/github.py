@@ -212,8 +212,8 @@ def _github_create_section(*, configured: bool) -> dict[str, Any]:
             if not configured
             else "Create a new App to replace the connected one. The connected App keeps "
             "working until the new one is stored. A new App has new installations: install "
-            "it, then register each repository again on Repositories with the new "
-            "installation, or its deliveries fail."
+            "it, then Crucible rebinds every registered repository the new App can see "
+            "and names any repository left unchanged."
         ),
         "form": {
             "action": "/ui/actions/github-create-app",
@@ -345,7 +345,29 @@ def github_installed(request: Request, ctx: Ctx, uow: UoW) -> Response:
     bounced = _github_return(request, ctx, uow)
     if bounced is not None:
         return bounced
-    return _to_github_page("Installed on GitHub. Pick the repositories below.")
+    found = _session(request, ctx, uow)
+    assert found is not None
+    principal, _ = found
+    try:
+        _admin(principal)
+        if ctx.admin is None:
+            raise ConflictError("the administrative surface is not configured")
+        result = github.rebind_repositories(ctx.admin, uow, principal=principal.name)
+        uow.commit()
+    except ApplicationError as exc:
+        return _to_github_page(exc.detail, "bad")
+    parts = ["Installed on GitHub."]
+    if result["rebound"]:
+        parts.append("Rebound repositories: " + ", ".join(result["rebound"]) + ".")
+    if result["unavailable"]:
+        parts.append(
+            "Not visible to the new App and left unchanged: "
+            + ", ".join(result["unavailable"])
+            + "."
+        )
+    if not result["rebound"] and not result["unavailable"]:
+        parts.append("No registered repositories needed rebinding.")
+    return _to_github_page(" ".join(parts))
 
 
 async def _action_github_create_app(

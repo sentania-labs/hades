@@ -28,6 +28,7 @@ from crucible.application.admin.routing import (
     active_documents,
     gateway_url,
     local_endpoint_view,
+    publish_delta,
     publish_routing,
 )
 from crucible.application.errors import ConflictError, ContractValidationError, NotFoundError
@@ -388,10 +389,14 @@ async def save_models(
     models: list[dict[str, Any]],
     max_concurrency: int | None,
     reason: str | None,
+    preview: bool = False,
 ) -> dict[str, Any]:
     """Create or update the local model entries from the operator's picks, in a new
     routing policy version. The gateway is asked what it offers at the moment of the
-    save, so a pick is valid when it is made (crucible#121)."""
+    save, so a pick is valid when it is made (crucible#121).
+
+    With `preview`, nothing is written: the answer is the delta the save would publish
+    and the projects following routing unpinned that would get it (hades #437)."""
     reason = guard_mutation(ctx, uow, reason, principal=principal.name, operation="gateway models")
     endpoint, _ = gateway_url(uow)
     if endpoint is None:
@@ -525,6 +530,12 @@ async def save_models(
             f"the routing policy these picks would make is not valid: {exc}",
             errors=[{"path": "models", "message": str(exc)}],
         ) from None
+    if preview:
+        return {
+            "preview": True,
+            "routing_policy": {"name": routing.name, "version": routing.version},
+            "delta": publish_delta(uow, policy=policy, routing=routing, routing_document=document),
+        }
     policy_version, routing_version = publish_routing(
         ctx,
         uow,
