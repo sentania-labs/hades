@@ -407,11 +407,16 @@ def _routing_policy_details(
         models_by_harness.setdefault(harness, []).append(m)
         model_name_map[m.get("id", "")] = m.get("model_name", m.get("id", ""))
 
-    # Which gateway (unique endpoint_url)
-    endpoints = {m.get("endpoint_url") for m in models_list if m.get("endpoint_url")}
-    gateway = sorted(endpoints)[0] if len(endpoints) == 1 else None
-
     # Per-harness sentences
+    # Derive the gateway text from each harness's own endpoint (crucible/FDY-0417):
+    # a model without an endpoint_url is not "on" the local gateway.
+    endpoints_by_harness: dict[str, set[str]] = {}
+    for m in models_list:
+        harness = m.get("harness", "unknown")
+        ep = m.get("endpoint_url")
+        if ep:
+            endpoints_by_harness.setdefault(harness, set()).add(ep)
+
     for harness in sorted(models_by_harness.keys()):
         harness_models = models_by_harness[harness]
         enabled = [m for m in harness_models if m.get("enabled")]
@@ -421,8 +426,9 @@ def _routing_policy_details(
         if disabled:
             disabled_ids = ", ".join(m["id"] for m in disabled)
             line += f"; disabled: {disabled_ids}"
-        if gateway:
-            line += f" on {gateway}"
+        harness_endpoints = endpoints_by_harness.get(harness)
+        if harness_endpoints and len(harness_endpoints) == 1:
+            line += f" on {sorted(harness_endpoints)[0]}"
         lines.append(line)
 
     # Pool concurrency sentences
@@ -444,13 +450,17 @@ def _routing_policy_details(
             exhaust = (
                 f"pool {pool_name}: {at_once} run at once "
                 f"(window {window}, {budget}{soft_str}); "
-                "when the pool is exhausted routing waits for a run to finish"
+                "when the pool is exhausted the pool is excluded and routing "
+                "reroutes to another candidate; if none is available, routing "
+                "waits until the mark resets"
             )
         else:
             exhaust = (
                 f"pool {pool_name}: no concurrency cap "
                 f"(window {window}, {budget}{soft_str}); "
-                "when the pool is exhausted routing waits for a run to finish"
+                "when the pool is exhausted the pool is excluded and routing "
+                "reroutes to another candidate; if none is available, routing "
+                "waits until the mark resets"
             )
         lines.append(exhaust)
 
