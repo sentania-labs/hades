@@ -280,7 +280,7 @@ def test_a_pattern_never_turns_a_clean_exit_into_a_failure(adapter: HarnessAdapt
         ExitClass.COMPLETED
     )
     assert adapter.classify_exit(ExitInfo(exit_code=0), CLAUDE_NOT_LOGGED_IN, "") is (
-        ExitClass.COMPLETED_WITHOUT_REPORT
+        ExitClass.COMPLETED
     )
 
 

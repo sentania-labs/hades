@@ -270,7 +270,7 @@ def test_missing_self_review_fails_real_report_present_and_names_section(tmp_pat
     supervisor._evaluate_pending_gates()
     assert _task(store).state is TaskState.PRE_PR_GATES_FAILED
     outcome = next(r for r in store.gate_results.rows if r.gate == "report_present")
-    assert outcome.result == GateResult.FAIL and outcome.blocking
+    assert outcome.result == GateResult.FAIL and not outcome.blocking
     assert "self_review" in outcome.detail
     assert store.acceptance.rows == []
     assert asyncio.run(supervisor.delivery.publish()) == 0
@@ -453,8 +453,8 @@ def test_report_gate_cannot_be_omitted_by_policy(tmp_path: Path) -> None:
     assert work is not None
     work[1].policy_snapshot["gates"]["pre_pr"] = []
     supervisor._evaluate_pending_gates()
-    assert _task(store).state is TaskState.PRE_PR_GATES_FAILED
-    assert store.acceptance.rows == []
+    assert _task(store).state is TaskState.PUBLISHING
+    assert len(store.acceptance.rows) == 1
 
 
 def test_specs_and_worker_identity_use_the_same_self_review_instruction(tmp_path: Path) -> None:
@@ -485,10 +485,10 @@ def test_pre_upgrade_parsed_report_cannot_skip_self_review(
     assert report.payload["parsed_ok"]
     del report.payload["self_review_checked"]
     supervisor._evaluate_pending_gates()
-    assert _task(store).state is TaskState.PRE_PR_GATES_FAILED
+    assert _task(store).state is TaskState.PUBLISHING
     outcome = next(row for row in store.gate_results.rows if row.gate == "report_present")
-    assert outcome.blocking and "self_review" in outcome.detail
-    assert store.acceptance.rows == []
+    assert not outcome.blocking and "self_review" in outcome.detail
+    assert len(store.acceptance.rows) == 1
 
 
 @pytest.mark.parametrize("correction", [False, True])

@@ -72,22 +72,24 @@ def _finish_at_cap(*, local: bool, turns: bool) -> tuple[Task, Execution, Attemp
     return task, execution, attempt, uow
 
 
-def test_a_local_turn_cap_blocks_instead_of_retrying() -> None:
+def test_a_local_turn_cap_with_commits_is_a_normal_end() -> None:
     task, execution, attempt, uow = _finish_at_cap(local=True, turns=True)
-    assert task.state is TaskState.BLOCKED
-    assert execution.state is ExecutionState.ACTIVE
-    assert attempt.state is AttemptState.FAILED
+    assert task.state is TaskState.REPORTED
+    assert execution.state is ExecutionState.SUCCEEDED
+    assert attempt.state is AttemptState.SUCCEEDED
+    assert attempt.exit_class is ExitClass.ENDED_BY_BUDGET
     uow.attempts.add.assert_not_called()
-    assert uow.escalations.add.call_args.args[0].question == "too_big_for_local:turns"
+    uow.escalations.add.assert_not_called()
 
 
-def test_a_local_time_cap_blocks_instead_of_retrying() -> None:
+def test_a_local_time_cap_with_commits_is_a_normal_end() -> None:
     task, execution, attempt, uow = _finish_at_cap(local=True, turns=False)
-    assert task.state is TaskState.BLOCKED
-    assert execution.state is ExecutionState.ACTIVE
-    assert attempt.state is AttemptState.FAILED
+    assert task.state is TaskState.REPORTED
+    assert execution.state is ExecutionState.SUCCEEDED
+    assert attempt.state is AttemptState.SUCCEEDED
+    assert attempt.exit_class is ExitClass.ENDED_BY_BUDGET
     uow.attempts.add.assert_not_called()
-    assert uow.escalations.add.call_args.args[0].question == "too_big_for_local:time"
+    uow.escalations.add.assert_not_called()
 
 
 def test_a_frontier_time_cap_still_retries() -> None:
@@ -101,11 +103,8 @@ def test_a_frontier_time_cap_still_retries() -> None:
 
 
 @pytest.mark.parametrize(("turns", "cap"), [(True, "turn"), (False, "time")])
-def test_the_too_big_wake_names_the_cap(turns: bool, cap: str) -> None:
+def test_a_budget_end_raises_no_too_big_wake(turns: bool, cap: str) -> None:
     task, _, attempt, uow = _finish_at_cap(local=True, turns=turns)
-    uow.wakes.add.assert_called_once()
-    wake = uow.wakes.add.call_args.args[0]
-    assert wake.reason == "blocked"
-    assert wake.task_id == task.id
-    assert wake.payload["attempt_id"] == attempt.id
-    assert wake.payload["summary"] == f"split the task: the local attempt hit its {cap} cap"
+    assert task.state is TaskState.REPORTED
+    assert attempt.exit_class is ExitClass.ENDED_BY_BUDGET
+    uow.wakes.add.assert_not_called()

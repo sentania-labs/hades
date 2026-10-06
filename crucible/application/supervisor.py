@@ -5528,27 +5528,28 @@ class Supervisor:
                 completed=completed,
                 unparsed_errors=unparsed_errors,
             )
-            composed = compose_completion_record(
-                uow,
-                task=task,
-                contract=stored.document if stored is not None else {},
-                outputs=outputs,
-                worker_report=(
-                    outputs.report
-                    if outputs.report is not None and not find_secrets(outputs.report)
-                    else None
-                ),
-                worker_report_parsed=claim_ok,
-                worker_report_errors=errors or (unparsed_errors or []),
-            )
-            uow.claims.put(
-                CompletionClaimRecord(
-                    attempt_id=attempt.id,
-                    document=composed,
-                    parsed_ok=True,
-                    parse_errors=[],
+            if not cancelled:
+                composed = compose_completion_record(
+                    uow,
+                    task=task,
+                    contract=stored.document if stored is not None else {},
+                    outputs=outputs,
+                    worker_report=(
+                        outputs.report
+                        if outputs.report is not None and not find_secrets(outputs.report)
+                        else None
+                    ),
+                    worker_report_parsed=claim_ok,
+                    worker_report_errors=errors or (unparsed_errors or []),
                 )
-            )
+                uow.claims.put(
+                    CompletionClaimRecord(
+                        attempt_id=attempt.id,
+                        document=composed,
+                        parsed_ok=True,
+                        parse_errors=[],
+                    )
+                )
             # hades #360: a correction ended by a merge never reaches the PR, so its head
             # is evidence on the attempt and not the merged task's head.
             if head and task.state is not TaskState.MERGED:
