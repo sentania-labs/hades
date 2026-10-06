@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 from dataclasses import replace
 from pathlib import Path
@@ -63,3 +64,29 @@ def test_kubernetes_github_origin_still_uses_delivery_checkpoint_push(
 
     supervisor.delivery.push_quota_checkpoint.assert_awaited_once_with(attempt.id, required=False)
     finish.assert_called_once_with(attempt.id, True, "checkpoint pushed")
+
+
+def test_kind_local_origin_reroute_expects_base_resume() -> None:
+    """Keep the CI-only kind expectation aligned with the local-origin contract."""
+    path = Path(__file__).resolve().parents[1] / "e2e" / "test_kind.py"
+    tree = ast.parse(path.read_text())
+    test = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "test_scripted_quota_reroutes_on_kubernetes"
+    )
+    expectations = [
+        node.test
+        for node in ast.walk(test)
+        if isinstance(node, ast.Assert)
+        and isinstance(node.test, ast.Compare)
+        and ast.unparse(node.test.left) == "second['resume_from_remote']"
+    ]
+    assert len(expectations) == 1
+    expectation = expectations[0]
+    assert len(expectation.ops) == 1 and isinstance(expectation.ops[0], ast.Is)
+    expected = expectation.comparators[0]
+    assert isinstance(expected, ast.Constant) and expected.value is False, (
+        "Kubernetes skips local-origin checkpoints, so kind must expect a base reroute"
+    )
