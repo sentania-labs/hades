@@ -351,7 +351,7 @@ change.
 | legacy task `awaiting_internal_review` | re-evaluate the report and gates; the orchestrator review no longer blocks publication |
 | task `gates_passed` / `pre_pr_gates_failed` | wake created for the submitting principal |
 | task `publishing` | publisher job enqueued: mint installation token, push bundle head, open or update PR, render body; events before and after each GitHub call |
-| task `publish_failed` to `publishing` | an orchestrator or operator supplies a reason through `republish`; the same accepted head and sealed bundle resume at the failed step, subject to `limits.publish_retry_max`; no tick retries automatically |
+| task `publish_failed` to `publishing` | an orchestrator or operator supplies a reason through `republish`; the same accepted head and sealed bundle retry through the remote ownership and containment checks (23), subject to `limits.publish_retry_max`; no tick retries automatically |
 | task `awaiting_external_review` | PR observation registered (polling and webhook routing) |
 | task `external_feedback_received` | ExternalReview and comment rows written; wake |
 | task `ci_certification_failed` | CICertification row with captured check, workflow, job, log pointers, head SHA; wake; no retry, no correction |

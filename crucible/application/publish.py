@@ -7,7 +7,7 @@ one 23 fixes, and each step is an event before and after:
 1. `publish_started` with the head SHA and the bundle it will push;
 2. mint a repository-scoped installation token;
 3. run the publisher container, which verifies the bundle, asserts the head, and pushes
-   without force (it checks no commit author or trailer: operator, 2026-09-29);
+   with a lease on a fetched Hades-owned tip whose work the accepted head contains;
 4. from Crucible, confirm the remote head (`branch_pushed_at_head`);
 5. open the PR, or leave the existing one whose head just moved, with a body rendered
    from the contract and verified evidence only;
@@ -54,6 +54,7 @@ from crucible.domain.publication import (
     TitleRefusedError,
     VerifiedCheck,
     body_sha256,
+    publication_owned_heads,
     render_body,
     validate_title,
 )
@@ -198,6 +199,7 @@ class PublishPlan:
     resume_step: str = ""
     retry_number: int = 0
     publish_retry_max: int = 3
+    owned_remote_heads: tuple[str, ...] = ()
 
 
 def repository_slug(repository: Repository) -> str:
@@ -388,7 +390,17 @@ def build_plan(uow: UnitOfWork, task: Task, work: tuple[Attempt, Execution]) -> 
     retry_limit = publishing_payload.get("publish_retry_max")
     if retry_limit is None:
         retry_limit = policy.get("limits", {}).get("publish_retry_max", 3)
+    owned_heads: set[str] = set()
+    after = 0
+    while events := uow.events.list_for_task(task.id, after_seq=after, limit=1000):
+        owned_heads.update(
+            publication_owned_heads(
+                events, work_branch=work_branch, repository=repository_slug(repository)
+            )
+        )
+        after = int(events[-1].seq or after)
     return PublishPlan(
+        owned_remote_heads=tuple(sorted(owned_heads)),
         task_id=task.id,
         external_id=task.external_id,
         principal_id=task.principal_id,

@@ -16,6 +16,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from crucible.domain.entities import Event
+from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
 from crucible.domain.secrets import redact, scan_text
 
 MAX_TITLE_LENGTH = 72
@@ -304,3 +306,25 @@ def _cell(text: str) -> str:
 
 def body_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def publication_owned_heads(
+    events: Sequence[Event], *, work_branch: str, repository: str
+) -> tuple[str, ...]:
+    """Only confirmed Hades pushes on this task's repository and branch authorize a lease."""
+    return tuple(
+        sorted(
+            {
+                str(event.payload["head_sha"])
+                for event in events
+                if event.kind == EventKind.BRANCH_PUSHED.value
+                and event.principal == PRINCIPAL_CRUCIBLE
+                and event.verified
+                and event.payload.get("work_branch") == work_branch
+                and event.payload.get("repository") == repository
+                and re.fullmatch(
+                    r"[0-9a-f]{40}|[0-9a-f]{64}", str(event.payload.get("head_sha", ""))
+                )
+            }
+        )
+    )

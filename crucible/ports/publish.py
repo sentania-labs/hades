@@ -40,6 +40,7 @@ class PublishRequest:
     policy: Mapping[str, object] = field(default_factory=dict)
     author_name: str = "crucible-worker"
     author_email: str = "crucible-worker@users.noreply.github.com"
+    owned_remote_heads: tuple[str, ...] = ()
     timeout_seconds: int = 600
 
 

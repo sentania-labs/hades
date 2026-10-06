@@ -1,5 +1,5 @@
 """Crucible puts the attempt trailer on the worker's commits as a courtesy, the collector
-records who authored them for the reviewer, and nothing refuses a commit for either
+records who authored them for the reviewer, and accepted commits need neither
 (hades FDY-0135, FDY-0143: the operator's decision of 2026-09-29).
 
 These run real git against a scratch repository: the hook as the identity bundle writes
@@ -297,8 +297,7 @@ def test_an_unfinished_check_reads_as_not_checked(tmp_path: Path) -> None:
 
 
 def test_the_publisher_runs_no_commit_check() -> None:
-    """FDY-0143: the collector's author check is the only one, and the publisher has no
-    refusal for an author or a trailer."""
+    """Accepted commits have no author or trailer check. Issue 403 checks the remote tip."""
     publisher = scripts.publisher_script(
         clone_url="https://github.com/o/r.git",
         work_branch="crucible/test",
@@ -312,7 +311,7 @@ def test_the_publisher_runs_no_commit_check() -> None:
     )
     assert "commit_policy_check" not in publisher
     assert "TRAILER" not in publisher
-    assert "%(trailers" not in publisher
+    assert '%(trailers:key=Crucible-Attempt,valueonly)\' "$REMOTE"' in publisher
     assert "exit 6" not in publisher
     assert scripts._commit_policy_check(scripts.GIT + ' -C "$REPO"') in collector
 
