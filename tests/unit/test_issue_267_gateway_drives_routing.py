@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import Any, Iterator, cast
+from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
@@ -136,7 +137,7 @@ def test_listing_error_or_timeout_does_not_publish(
     async def db(call: Any) -> Any:
         return call()
 
-    supervisor._db = db  # type: ignore[method-assign]
+    supervisor._db = db  # type: ignore[assignment]
     monkeypatch.setattr(credentials, "read_api_key", lambda *_args: "key-a")
     monkeypatch.setattr(gateway, "fetch_models", Mock(side_effect=failure))
 
@@ -163,16 +164,25 @@ def test_returning_model_never_enables_a_disabled_route(monkeypatch: pytest.Monk
     assert uow.events.rows == [] and uow.commits == 0
 
 
-def test_gateway_page_model_view_only_returns_models_in_successful_listing(
+def test_restored_model_returns_to_gateway_view_unticked_and_stale_models_stay_hidden(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    entries = _document()["models"]
+    entries = _document(enabled=False)["models"]
+    entries.append(
+        {
+            "id": "model-z",
+            "harness": "hermes",
+            "endpoint": "local",
+            "enabled": False,
+        }
+    )
     monkeypatch.setattr(gateway, "gateway_url", lambda _uow: (LOCAL_URL, "routing"))
     monkeypatch.setattr(gateway, "_local_entries", lambda _uow: (entries, {}))
     monkeypatch.setattr(credentials, "read_api_key", lambda *_args: "key-a")
-    monkeypatch.setattr(gateway, "fetch_models", lambda *_args: ["model-b"])
+    monkeypatch.setattr(gateway, "fetch_models", lambda *_args: ["model-a"])
 
     view = asyncio.run(gateway.models_view(_context(), cast(Any, object())))
 
-    assert [row["id"] for row in view["models"]] == ["model-b"]
+    assert [row["id"] for row in view["models"]] == ["model-a"]
     assert view["models"][0]["enabled"] is False
+    assert view["models"][0]["codex_enabled"] is False
