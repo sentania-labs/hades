@@ -639,11 +639,9 @@ def _capacity_words(capacity: dict[str, Any]) -> str:
         )
     parts = [f"{workers} worker(s) at once: the quota admits {headroom} Pod(s)"]
     # AC3: show the quota row and the shape source that produced the capacity
-    if "the active policy" in source or "the last launch" in source:
-        parts.append(source.split("shape from ")[1].split(";")[0].strip())
-    elif "policy " in source:
-        # Source names a specific policy: "policy <name> v<version>"
-        parts.append(f"shape from {source.split(';')[0]}")
+    if "shape from " in source:
+        shape_segment = source.split("shape from ")[1].split(";")[0].strip()
+        parts.append(f"shape from {shape_segment}")
     parts.append(f"{reserved} kept for short-role Pods")
     return ", ".join(parts)
 

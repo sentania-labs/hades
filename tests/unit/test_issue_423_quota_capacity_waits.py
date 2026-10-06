@@ -585,8 +585,8 @@ async def test_the_kubernetes_admin_view_shows_headroom_reservation_and_capacity
     assert view["short_role_pods_reserved"] == 1
     assert view["worker_capacity"] == 9
     assert _capacity_words(view) == (
-        "9 worker(s) at once: the quota admits 10 Pod(s), the active policy, "
-        "1 kept for short-role Pods"
+        "9 worker(s) at once: the quota admits 10 Pod(s), "
+        "shape from the active policy, 1 kept for short-role Pods"
     )
 
 

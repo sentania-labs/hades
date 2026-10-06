@@ -1752,6 +1752,11 @@ class Supervisor:
         # Read per attempt, not per pass: a login started while this pass runs holds
         # back the next launch of its harness rather than racing it (12).
         self._logins_now = await self._logins_in_progress()
+        # hades #478: update the Kubernetes provider's active policy so its quota
+        # read divides by the correct shape, not the last launch.
+        self._set_provider_policy(
+            provider_name=execution.provider, policy=execution.policy_snapshot
+        )
         # hades #423: a provider whose capacity comes from its own ceiling (the namespace
         # quota) says how many workers it admits at once; a launch past that waits
         # here, pending and scheduled, rather than being refused by the quota later.
@@ -1809,6 +1814,15 @@ class Supervisor:
             await self._db(partial(self._refuse_launch, item.attempt.id, "registry", refusal))
             return None
         return item, provider
+
+    def _set_provider_policy(self, provider_name: str, policy: dict[str, Any] | None) -> None:
+        """hades #478: update a provider's active policy so capacity and launch
+        shape come from the policy, not the last launch."""
+        provider = self._providers.get(provider_name)
+        setter = getattr(provider, "set_policy", None)
+        if provider is None or not callable(setter):
+            return
+        setter(policy or {})
 
     async def _provider_capacity_wait(self, provider_name: str) -> str | None:
         """hades #423: why a launch on this provider waits for room, or None. Only a
