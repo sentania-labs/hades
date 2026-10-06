@@ -345,7 +345,29 @@ def github_installed(request: Request, ctx: Ctx, uow: UoW) -> Response:
     bounced = _github_return(request, ctx, uow)
     if bounced is not None:
         return bounced
-    return _to_github_page("Installed on GitHub. Pick the repositories below.")
+    found = _session(request, ctx, uow)
+    assert found is not None
+    principal, _ = found
+    try:
+        _admin(principal)
+        if ctx.admin is None:
+            raise ConflictError("the administrative surface is not configured")
+        result = github.rebind_repositories(ctx.admin, uow, principal=principal.name)
+        uow.commit()
+    except ApplicationError as exc:
+        return _to_github_page(exc.detail, "bad")
+    parts = ["Installed on GitHub."]
+    if result["rebound"]:
+        parts.append("Rebound repositories: " + ", ".join(result["rebound"]) + ".")
+    if result["unavailable"]:
+        parts.append(
+            "Not visible to the new App and left unchanged: "
+            + ", ".join(result["unavailable"])
+            + "."
+        )
+    if not result["rebound"] and not result["unavailable"]:
+        parts.append("No registered repositories needed rebinding.")
+    return _to_github_page(" ".join(parts))
 
 
 async def _action_github_create_app(
