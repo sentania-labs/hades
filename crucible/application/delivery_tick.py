@@ -1216,7 +1216,14 @@ class DeliveryCoordinator:
             completed = [row for row in checks if row.source != "check_suite"]
             if not completed or any(row.status != "completed" for row in completed):
                 return
-            failed = [row for row in completed if row.conclusion not in {"success", "skipped"}]
+            # Cancelled is not a verdict: workflow concurrency cancels older runs when a
+            # newer merge lands on main. Treat cancelled as no verdict and wait for the
+            # next completed run on that commit.
+            failed = [
+                row
+                for row in completed
+                if row.conclusion not in {"success", "skipped", "cancelled"}
+            ]
             if failed:
                 raw = await asyncio.to_thread(
                     self._github.ci_failure_log,
@@ -1292,6 +1299,11 @@ class DeliveryCoordinator:
                     }
                 )
             else:
+                # main_tip is None when the run was cancelled (no real verdict).
+                # Do not treat a cancelled run as green: keep it in watching so
+                # a re-run on the same SHA can still be judged.
+                if main_tip is None:
+                    return
                 clears = not held_sha or plan.merge_sha in (held_sha, main_tip)
                 if clears:
                     document.update(
@@ -1361,6 +1373,33 @@ class DeliveryCoordinator:
         repository_section["work_branch"] = f"crucible/{external_id}"
         repository_section["base_ref"] = plan.base_ref
         document["repository"] = repository_section
+        # The contract is a deep copy of the source task's contract, so its
+        # required_verification still names the source task's new test file. That file
+        # already passes on main, so it would trip gate_proves_nothing. Replace the
+        # new-test check with one named for the failure so the fix is what must be tested.
+        merge_sha7 = plan.merge_sha[:7]
+        sha7_test = f"tests/unit/test_fix_main_{merge_sha7}.py"
+        has_new_test_check = False
+        required = document.get("required_verification")
+        if required:
+            for check in required:
+                if isinstance(check, dict) and check.get("command"):
+                    # Detect the new-test check: it runs pytest against a test file
+                    # that does not already exist on main (the source task's test).
+                    test_path = check["command"].split()[-1] if check["command"].split() else ""
+                    if test_path.startswith("tests/unit/test_") and test_path != sha7_test:
+                        check["command"] = f"uv run pytest -q {sha7_test}"
+                        check["id"] = f"V-fix-{merge_sha7}"
+                        has_new_test_check = True
+                        break  # Only replace the first matching check.
+            if not has_new_test_check:
+                required.append(
+                    {
+                        "id": f"V-fix-{merge_sha7}",
+                        "command": f"uv run pytest -q {sha7_test}",
+                        "expect_exit": 0,
+                    }
+                )
         now = self._clock.now()
         task = Task(
             id=new_id(),
