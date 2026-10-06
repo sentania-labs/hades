@@ -163,7 +163,7 @@ async def test_the_fewest_workers_any_resource_admits_binds() -> None:
     capacity = await provider.worker_capacity()
     assert capacity.headroom == 6
     assert capacity.workers == 5
-    assert capacity.source.endswith("hades-workers limits.memory binds")
+    assert capacity.source.endswith("hades-workers limits.memory binds; shape from the last launch")
 
 
 # ----- a quota refusal on create is a wait, never a failure ---------------------------
@@ -586,7 +586,8 @@ async def test_the_kubernetes_admin_view_shows_headroom_reservation_and_capacity
     assert view["short_role_pods_reserved"] == 1
     assert view["worker_capacity"] == 9
     assert _capacity_words(view) == (
-        "9 worker(s) at once: the quota admits 10 Pod(s), 1 kept for short-role Pods"
+        "9 worker(s) at once: the quota admits 10 Pod(s), shape from the last launch, "
+        "1 kept for short-role Pods"
     )
 
 

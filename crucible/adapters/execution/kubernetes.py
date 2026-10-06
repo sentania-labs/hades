@@ -712,6 +712,9 @@ class KubernetesProvider:
         # One Pod's limits as the most recent launch asked for them, which is what the
         # quota's CPU and memory are divided by for the advertised capacity.
         self._last_limits: Limits | None = None
+        # The active delivery policy document; used by _read_quota to derive the
+        # per-attempt resource shape when no launch has happened yet (hades #423 / #478).
+        self._policy: dict[str, Any] = {}
         self._pull_auths_loaded = False
         self._resolved: dict[str, tuple[float, tuple[str, ...]]] = {}
         # Registry reads run crane and wait on another host; they get threads of their
@@ -805,6 +808,20 @@ class KubernetesProvider:
 
     def _limits(self, spec: LaunchSpec) -> Limits:
         return k8sspec.limits_from_policy(spec.policy)
+
+    def _fallback_shape(self) -> Limits:
+        """hades #478: the Limits derived from the active policy, or the policy
+        store's default. Used by the capacity source string when no quota exists."""
+        return k8sspec.limits_from_policy(self._policy)
+
+    def set_policy(self, policy: dict[str, Any]) -> None:
+        """hades #478: record the active delivery policy so the quota read can use it.
+
+        The policy document is set by the supervisor from the current execution's
+        policy_snapshot; _read_quota uses it to derive the per-attempt resource shape
+        when no launch has happened yet, so the quota is never overstated.
+        """
+        self._policy = policy
 
     def _image_allowlist(self, spec: LaunchSpec) -> list[str]:
         return [
@@ -5318,7 +5335,11 @@ class KubernetesProvider:
             return self._quota
         return WorkerCapacity(
             workers=self.config.max_concurrency,
-            source="kubernetes.max_concurrency (no ResourceQuota in the namespace)",
+            source=(
+                "kubernetes.max_concurrency (no ResourceQuota in the namespace; "
+                f"policy shape {self._fallback_shape().cpu_request} CPU / "
+                f"{self._fallback_shape().memory_request} memory)"
+            ),
             reserved_pods=self.config.short_role_pods,
             detail=(
                 f"no ResourceQuota names a counted resource in {self.config.namespace}; "
@@ -5344,7 +5365,7 @@ class KubernetesProvider:
         count was read; before hades #423 nothing was reserved, so with workers at
         capacity every probe was refused. None when no quota names a counted resource."""
         rows = await self._call(self.client.list_objects, "resourcequotas")
-        limits = self._last_limits or k8sspec.limits_from_policy({})
+        limits = self._last_limits or k8sspec.limits_from_policy(self._policy)
         reserved = max(0, self.config.short_role_pods - await self._active_short_role_pods())
         # Per attempt, and per reserved short-role Pod (one Job, one Pod, the worker's
         # shape), for each resource a quota may count.
@@ -5380,6 +5401,12 @@ class KubernetesProvider:
                     binding = f"{name} {key}".strip()
         if headroom is None or workers is None:
             return None
+        limits_source = "the active policy" if self._last_limits is None else "the last launch"
+        shape_source = (
+            f"policy {limits.cpu_request} CPU / {limits.memory_request} memory "
+            if self._last_limits is None
+            else "launch shape"
+        )
         shape = {
             "cpu": limits.cpu,
             "memory": limits.memory,
@@ -5389,14 +5416,14 @@ class KubernetesProvider:
         }
         return WorkerCapacity(
             workers=workers,
-            source=f"ResourceQuota {', '.join(names)}; {binding} binds",
+            source=f"ResourceQuota {', '.join(names)}; {binding} binds; shape from {limits_source}",
             headroom=headroom,
             reserved_pods=reserved,
             reservation={"pods": reserved, "each": shape},
             detail=(
-                f"the quota admits {headroom} Pod(s) of the worker's shape; {reserved} kept "
-                f"for Hades's short-role Pods (gate probe, collector, canary, login, "
-                f"preparer) leaves {workers} worker(s) at once"
+                f"shape from {shape_source}; the quota admits {headroom} Pod(s) of the worker's "
+                f"shape; {reserved} kept for Hades's short-role Pods (gate probe, collector, "
+                f"canary, login, preparer) leaves {workers} worker(s) at once"
             ),
         )
 

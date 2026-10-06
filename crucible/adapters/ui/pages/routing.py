@@ -592,7 +592,8 @@ def _versions_section(uow: UoW, name: str) -> dict[str, Any]:
 
 
 def _capacity_words(capacity: dict[str, Any]) -> str:
-    """hades #423: the worker capacity in one line: headroom, reservation, result."""
+    """hades #423, #478: the worker capacity in one line: headroom, reservation, result,
+    and the quota row that produced the number."""
     if not capacity.get("provider_enabled"):
         return "not in use: the Kubernetes provider is off"
     if capacity.get("error"):
@@ -600,15 +601,20 @@ def _capacity_words(capacity: dict[str, Any]) -> str:
     workers = capacity.get("worker_capacity")
     headroom = capacity.get("quota_headroom")
     reserved = capacity.get("short_role_pods_reserved") or 0
+    source = capacity.get("capacity_source", "")
     if headroom is None:
         return (
             f"{workers} worker(s) at once from kubernetes.max_concurrency; "
             "no quota in the namespace"
         )
-    return (
-        f"{workers} worker(s) at once: the quota admits {headroom} Pod(s), "
-        f"{reserved} kept for short-role Pods"
-    )
+    parts = [f"{workers} worker(s) at once: the quota admits {headroom} Pod(s)"]
+    # AC3: show the quota row and the shape source that produced the capacity
+    if "the active policy" in source:
+        parts.append("shape from the active policy")
+    elif "the last launch" in source:
+        parts.append("shape from the last launch")
+    parts.append(f"{reserved} kept for short-role Pods")
+    return ", ".join(parts)
 
 
 def _milliseconds(form: dict[str, str], name: str) -> int | None:
