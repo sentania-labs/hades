@@ -48,7 +48,7 @@ from urllib.parse import urlsplit
 
 from crucible.adapters.execution import identity as identity_bundle
 from crucible.adapters.execution import k8sspec, scripts, workspace
-from crucible.adapters.execution.collected import read_outputs, read_verifications
+from crucible.adapters.execution.collected import BlobTarScan, read_outputs, read_verifications
 from crucible.adapters.execution.create_policy import image_allowed
 from crucible.adapters.execution.endpoint_health import probe_model_endpoint
 from crucible.adapters.execution.k8sapi import (
@@ -259,9 +259,15 @@ LIST_IMAGES_SKIP_PREFIX = "ci-"
 LOG_READ_LIMIT = 4 * 1024 * 1024
 JOB_TAIL_LINES = 2000
 LOG_READ_CEILING = 64 * 1024 * 1024
-# How much of a collected output tar is accepted. The tree is excluded from it, so this
-# is the diff, the bundle, the report copy and the verifier logs.
+# How much of a collected output tar is accepted. The tree and the exported blobs are
+# excluded from it, so this is the diff, the bundle, the report copy and the verifier
+# logs.
 OUTPUT_READ_LIMIT = 256 * 1024 * 1024
+# hades #398: the blobs the worker added or changed come off the claim as their own tar,
+# streamed through the secret scanner and never written to local disk, so they do not
+# count against the archive above (the bundle already carries each of them once). The
+# same bound, counted on its own: a stream cut at it is a collection failure, as above.
+CHANGED_BLOBS_READ_LIMIT = OUTPUT_READ_LIMIT
 # The one line the activity probe prints (FDY-0140).
 ACTIVITY_READ_LIMIT = 4096
 
@@ -2283,7 +2289,7 @@ class KubernetesProvider:
         verifications = () if interrupted else await self._run_verifier(spec, limits)
         with tempfile.TemporaryDirectory(prefix="crucible-k8s-") as scratch:
             root = Path(scratch)
-            await self._read_workspace(spec, root, limits)
+            changed_blobs = await self._read_workspace(spec, root, limits)
             outputs = read_outputs(
                 root / "output",
                 root / "verify",
@@ -2294,6 +2300,7 @@ class KubernetesProvider:
                     verifications, root / "verify", spec, self.config.verifier_timeout_seconds
                 ),
                 tail_bytes=self.config.log_tail_bytes,
+                changed_blobs=changed_blobs,
             )
         state = await self._workspace_state(spec.attempt_id)
         return CollectedOutputs(
@@ -2304,7 +2311,8 @@ class KubernetesProvider:
             stderr_tail=stderr_tail,
             interruption=interruption,
             diff_paths=outputs.diff_paths,
-            diff_text=outputs.diff_text,
+            diff_findings=outputs.diff_findings,
+            diff_unscanned=outputs.diff_unscanned,
             diff_changes=outputs.diff_changes,
             base_paths=outputs.base_paths,
             over_limit=outputs.over_limit,
@@ -4630,13 +4638,20 @@ class KubernetesProvider:
                     out[path] = data
         return out
 
-    async def _read_workspace(self, spec: LaunchSpec, into: Path, limits: Limits) -> None:
+    async def _read_workspace(
+        self, spec: LaunchSpec, into: Path, limits: Limits
+    ) -> dict[str, str | bool | None]:
         """The collected output and the verifier's logs, as a tar off the claim.
 
         `output/tree` is excluded: it is a git clone the verifier already ran against
         and nothing on the Crucible side reads it. The tar is written to a scratch file
         beside `into` as it arrives and extracted from there, so the supervisor never
-        holds the archive in memory (lab findings of 2026-09-29)."""
+        holds the archive in memory (lab findings of 2026-09-29).
+
+        `output/changed-blobs` is excluded too (hades #398): the bundle carries each of
+        those blobs already, and a second copy of a large binary change would push the
+        archive past its bound. The reader streams them separately, through the secret
+        scanner as they arrive, and what comes back is the verdict per object id."""
         archive = into.parent / f".{into.name}-collected.tar"
         try:
             async with self._reader(spec, limits) as pod:
@@ -4656,38 +4671,33 @@ class KubernetesProvider:
                     raise CollectionFailedError(
                         f"the collected output could not be written to local disk: {exc}"
                     ) from exc
-            if result.exit_code is None:
-                # The API server never sent the error channel: the stream ended early.
-                # Accepting it would let a partial tar through `_extract`, which
-                # suppresses tar errors; the claim still holds everything, so it is
-                # read again later rather than failing the attempt.
-                raise CollectionUnavailableError(
-                    "the reader Pod's output stream ended before the command reported "
-                    f"a status: {result.stderr.decode('utf-8', 'replace')[:400]}"
-                )
-            if result.exit_code != 0 or result.stderr:
-                # A report or a diff quietly missing files is a wrong gate result
-                # rather than a visible failure.
-                raise CollectionFailedError(
-                    "the reader Pod could not hand the collected output back "
-                    f"(exit {result.exit_code}): "
-                    f"{result.stderr.decode('utf-8', 'replace')[:400]}"
-                )
-            if result.stdout_size >= OUTPUT_READ_LIMIT:
-                # 16: outputs Crucible could not read whole are an environment failure.
-                # A partial extraction would give the gates a diff and a report quietly
-                # missing files, which is worse than failing the attempt.
-                raise CollectionFailedError(
-                    f"the collected output exceeded {OUTPUT_READ_LIMIT} bytes and was truncated"
-                )
+                _check_read_back(result, OUTPUT_READ_LIMIT, "the collected output")
+                scan = BlobTarScan(scripts.CHANGED_BLOBS_DIR)
+                try:
+                    blobs_result = await self._call(
+                        self.client.pod_exec_to,
+                        pod,
+                        ["sh", "-c", _CHANGED_BLOBS_TAR_SCRIPT],
+                        scan,
+                        container=k8sspec.CONTAINER_NAME,
+                        limit=CHANGED_BLOBS_READ_LIMIT,
+                    )
+                finally:
+                    blobs = scan.close()
+                _check_read_back(blobs_result, CHANGED_BLOBS_READ_LIMIT, "the changed blobs")
+                if scan.error is not None:
+                    raise CollectionFailedError(
+                        f"the changed blobs could not be read back as a tar: {scan.error}"
+                    )
             if not result.stdout_size:
-                return
+                return blobs
             try:
                 await asyncio.to_thread(_extract, archive, into)
             except OSError as exc:
                 raise CollectionFailedError(
                     f"the collected output could not be extracted on local disk: {exc}"
                 ) from exc
+            return blobs
         finally:
             with contextlib.suppress(OSError):
                 archive.unlink(missing_ok=True)
@@ -5452,6 +5462,33 @@ def _merge_verifications(
     return runs
 
 
+def _check_read_back(result: ExecResult, limit: int, what: str) -> None:
+    """What makes a reader Pod's stream a result: a status, a clean exit, and a size
+    under its bound."""
+    if result.exit_code is None:
+        # The API server never sent the error channel: the stream ended early.
+        # Accepting it would let a partial tar through `_extract`, which
+        # suppresses tar errors; the claim still holds everything, so it is
+        # read again later rather than failing the attempt.
+        raise CollectionUnavailableError(
+            "the reader Pod's output stream ended before the command reported "
+            f"a status: {result.stderr.decode('utf-8', 'replace')[:400]}"
+        )
+    if result.exit_code != 0 or result.stderr:
+        # A report or a diff quietly missing files is a wrong gate result
+        # rather than a visible failure.
+        raise CollectionFailedError(
+            f"the reader Pod could not hand {what} back "
+            f"(exit {result.exit_code}): "
+            f"{result.stderr.decode('utf-8', 'replace')[:400]}"
+        )
+    if result.stdout_size >= limit:
+        # 16: outputs Crucible could not read whole are an environment failure.
+        # A partial extraction would give the gates a diff and a report quietly
+        # missing files, which is worse than failing the attempt.
+        raise CollectionFailedError(f"{what} exceeded {limit} bytes and was truncated")
+
+
 def _extract(archive: Path, into: Path) -> None:
     """Extract the reader Pod's tar from the file it was streamed to. `filter="data"`
     refuses an absolute path, a `..` component, a device, a symlink out of the tree, and
@@ -5632,7 +5669,14 @@ set --
 [ -d output ] && set -- "$@" output
 [ -d verify ] && set -- "$@" verify
 [ $# -eq 0 ] && exit 0
-exec tar cf - --exclude=output/tree "$@"
+exec tar cf - --exclude=output/tree --exclude=output/{scripts.CHANGED_BLOBS_DIR} "$@"
+"""
+
+# hades #398: the blobs the worker added or changed, as their own stream for the
+# scanner (`BlobTarScan`). An absent directory is an older collector, and no output.
+_CHANGED_BLOBS_TAR_SCRIPT = f"""cd {WORK_MOUNT} || exit 1
+[ -d output/{scripts.CHANGED_BLOBS_DIR} ] || exit 0
+exec tar cf - output/{scripts.CHANGED_BLOBS_DIR}
 """
 
 # The canary of 26: it must fail to reach the API server, and it reports the node's pod

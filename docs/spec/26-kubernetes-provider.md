@@ -481,7 +481,13 @@ the namespace. A deployment therefore names one exact, pullable reference in
   by the supervisor from the PVC through a short-lived reader Pod, never by
   mounting the PVC into the Crucible pods. The reader's tar is streamed to a
   scratch file and extracted from there, so the supervisor never holds the
-  collected archive (up to 256 MiB) in memory. A step the cluster could not
+  collected archive (up to 256 MiB) in memory. The blobs the worker added or
+  changed, which the collector exports for the secret scanner (hades #398), are
+  not in that archive: the bundle carries each of them once already, and a
+  second copy of a large binary change would push the archive past its bound.
+  The reader streams `output/changed-blobs` as a tar of its own, bounded the
+  same way, into a sink that scans each blob as it arrives and keeps only the
+  verdict per object id, never the bytes (11). A step the cluster could not
   take or answer (an API server that refused, reset or timed out a
   connection or answered 429 or 5xx, a quota-refused role Pod, a reader Pod
   that did not start, an exec stream that ended before its status) raises
