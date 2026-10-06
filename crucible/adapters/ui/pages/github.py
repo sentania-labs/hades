@@ -4,10 +4,11 @@ import json
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, Request
+from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.adapters.ui.actions import register
 from crucible.adapters.ui.render import (
     _base,
@@ -29,7 +30,7 @@ from crucible.application.errors import (
 from crucible.domain.entities import Principal, Role
 from crucible.ports.repository import UnitOfWork
 
-router = APIRouter(prefix="/ui", include_in_schema=False)
+router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
 
 
 @router.get("/github", response_class=HTMLResponse)

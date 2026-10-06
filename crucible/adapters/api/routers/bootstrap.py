@@ -8,14 +8,15 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Query, Response
+from fastapi import Body, Query, Response
 
 from crucible.adapters.api.deps import Admin, Ctx, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.application.admin import bootstrap
 from crucible.application.admin.context import AdminContext
 from crucible.application.errors import ConflictError
 
-router = APIRouter()
+router = ThreadedAPIRouter()
 
 
 def _admin(ctx: Ctx) -> AdminContext:

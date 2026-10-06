@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 from collections.abc import Awaitable, Callable
 
-from fastapi import APIRouter, Request
+from fastapi import Request
 from fastapi.responses import RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.adapters.ui.render import _redirect
 from crucible.adapters.ui.session import _admin, _csrf, _form, _require
 from crucible.application.errors import (
@@ -15,7 +16,7 @@ from crucible.application.errors import (
 )
 from crucible.domain.entities import Principal
 
-router = APIRouter(prefix="/ui", include_in_schema=False)
+router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
 
 
 ActionHandler = Callable[

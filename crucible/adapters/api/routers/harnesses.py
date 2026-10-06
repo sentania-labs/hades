@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter
-
 from crucible.adapters.api.deps import Ctx, Reader, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.application.harness_views import harness_list, image_list
 from crucible.contracts.api import HarnessList, ImageList
 from crucible.ports.execution import ImageInfo, ProviderError
 
-router = APIRouter()
+router = ThreadedAPIRouter()
 
 # How long a request waits for one provider's image listing. The Kubernetes provider
 # bounds its listing below this (LIST_IMAGES_DEADLINE), so it ends first (108).

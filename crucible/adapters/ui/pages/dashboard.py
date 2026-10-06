@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 import crucible
 from crucible.adapters.api.deps import Ctx, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.adapters.ui.render import _operator_label, _page, _panel, _safe_value
 from crucible.adapters.ui.session import _require
 from crucible.application.admin import (
@@ -16,7 +17,7 @@ from crucible.application.errors import (
     ConflictError,
 )
 
-router = APIRouter(prefix="/ui", include_in_schema=False)
+router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
 
 
 def _first_run_path(readiness: dict[str, Any]) -> list[dict[str, Any]]:

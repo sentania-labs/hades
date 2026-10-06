@@ -15,7 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Header, Request
+from fastapi import Header, Request
 
 from crucible.adapters.api.deps import Ctx, UoW
 from crucible.adapters.github.webhook import (
@@ -27,6 +27,7 @@ from crucible.adapters.github.webhook import (
     normalize_delivery,
     verify_signature,
 )
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.application.errors import ForbiddenError, UnauthorizedError
 from crucible.application.github_ingress import (
     record_rejection,
@@ -35,7 +36,7 @@ from crucible.application.github_ingress import (
 )
 from crucible.contracts.api import WebhookAck
 
-router = APIRouter(prefix="/github")
+router = ThreadedAPIRouter(prefix="/github")
 
 # GitHub's own limit is 25 MiB; nothing Crucible reads from a delivery is anywhere near
 # it. The body is read before the signature can be checked (the HMAC is over the raw

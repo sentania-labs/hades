@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from crucible.application.admin import credentials
+from crucible.application.admin import credentials, status_cache
 from crucible.application.admin.context import (
     AdminContext,
     guard_mutation,
@@ -13,12 +13,19 @@ from crucible.application.admin.context import (
 from crucible.application.errors import NotFoundError
 from crucible.application.harness_views import harness_list
 from crucible.application.harnesses import set_harness_enabled
-from crucible.domain.lifecycle import AttemptState
 from crucible.ports.execution import ImageInfo
 from crucible.ports.repository import UnitOfWork
 
 
 async def list_images(ctx: AdminContext) -> list[tuple[str, ImageInfo]]:
+    """Return the supervisor-owned snapshot; never contact a provider from a request."""
+    if not getattr(ctx, "status_cache_enabled", False):
+        return await refresh_images(ctx)
+    return list(status_cache.read(ctx).images)
+
+
+async def refresh_images(ctx: AdminContext) -> list[tuple[str, ImageInfo]]:
+    """Refresh registry discovery. Only the supervisor calls this function."""
     out: list[tuple[str, ImageInfo]] = []
     for name, provider in ctx.providers.items():
         try:
@@ -29,21 +36,7 @@ async def list_images(ctx: AdminContext) -> list[tuple[str, ImageInfo]]:
 
 
 def _concurrency(uow: UnitOfWork) -> dict[str, int]:
-    live = uow.attempts.list_in_states(
-        [
-            AttemptState.PREPARING,
-            AttemptState.LAUNCHING,
-            AttemptState.RUNNING,
-            AttemptState.TERMINATING,
-            AttemptState.EXITED,
-        ]
-    )
-    counts: dict[str, int] = {}
-    for attempt in live:
-        execution = uow.executions.get(attempt.execution_id)
-        if execution is not None:
-            counts[execution.harness] = counts.get(execution.harness, 0) + 1
-    return counts
+    return dict(uow.attempts.concurrency_by_harness())
 
 
 async def read_harnesses(

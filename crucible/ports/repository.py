@@ -148,6 +148,19 @@ class TaskRepository(Protocol):
 
     def list_by_state(self, state: TaskState, *, for_update: bool = False) -> Sequence[Task]: ...
 
+    def ids_for_principals(self, principal_ids: Sequence[str]) -> Sequence[str]: ...
+
+    def count_by_state(
+        self,
+        *,
+        principal_id: str | None = None,
+        principal_ids: Sequence[str] | None = None,
+    ) -> Mapping[TaskState, int]: ...
+
+    def list_in_states(
+        self, states: Sequence[TaskState], *, principal_id: str | None = None
+    ) -> Sequence[Task]: ...
+
     def search(
         self,
         *,
@@ -213,6 +226,10 @@ class AttemptRepository(Protocol):
         them; `list_for_task` and `list_for_execution` still return it."""
         ...
 
+    def worker_rows(self, *, principal_id: str | None = None) -> Sequence[Mapping[str, Any]]: ...
+
+    def concurrency_by_harness(self) -> Mapping[str, int]: ...
+
     def list_cleaned_unreleased(self, retention_kind: str, *, limit: int) -> Sequence[Attempt]:
         """Supervised attempts whose cleanup kept their workspace (the cleanup event's
         `workspace` was not `delete`) and that have no retention action of
@@ -227,6 +244,10 @@ class EventRepository(Protocol):
     def latest_for_task_kind(self, task_id: str, kind: str) -> Event | None:
         """The most recent event of one kind, so a busy task's request is still found."""
         ...
+
+    def latest_for_tasks_kinds(
+        self, task_ids: Sequence[str], kinds: Sequence[str]
+    ) -> Mapping[tuple[str, str], Event]: ...
 
     def list_for_task(self, task_id: str, *, after_seq: int, limit: int) -> Sequence[Event]: ...
 
@@ -354,6 +375,8 @@ class GateResultRepository(Protocol):
     def list_for_attempt(self, attempt_id: str) -> Sequence[GateResultRecord]: ...
 
     def list_for_task(self, task_id: str) -> Sequence[GateResultRecord]: ...
+
+    def list_for_tasks(self, task_ids: Sequence[str]) -> Sequence[GateResultRecord]: ...
 
 
 class AcceptanceRepository(Protocol):
@@ -509,6 +532,10 @@ class WakeRepository(Protocol):
     def count_unacked(self) -> int: ...
 
     def count_unacked_for_principal(self, principal_id: str) -> int: ...
+
+    def pending_summary(
+        self, *, principal_id: str | None = None
+    ) -> tuple[Mapping[str, int], datetime | None, int]: ...
 
     def list_acked_before(self, cutoff: datetime, limit: int) -> Sequence[Wake]:
         """Wakes acked before the cutoff, oldest first. The caller applies each one's

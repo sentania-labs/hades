@@ -4,10 +4,19 @@ from __future__ import annotations
 
 from typing import Any
 
+from crucible.application.admin import status_cache
 from crucible.application.admin.context import AdminContext
 
 
 async def providers_status(ctx: AdminContext) -> list[dict[str, Any]]:
+    """Return cached health; request paths never probe a provider."""
+    if not getattr(ctx, "status_cache_enabled", False):
+        return await refresh_providers_status(ctx)
+    return [dict(item) for item in status_cache.read(ctx).providers]
+
+
+async def refresh_providers_status(ctx: AdminContext) -> list[dict[str, Any]]:
+    """Probe provider health for the supervisor-owned status snapshot."""
     out: list[dict[str, Any]] = []
     for name, provider in ctx.providers.items():
         try:

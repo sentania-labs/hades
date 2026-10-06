@@ -311,6 +311,9 @@ class AdminSettings(BaseModel):
     proxy_config_path: str | None = None
     proxy_subnet: str = "10.88.0.0/24"
     proxy_reload_timeout_seconds: float = 0
+    # Provider health and registry discovery are refreshed by the supervisor. Pages
+    # only read the resulting snapshot, so a slow registry cannot stall the UI.
+    status_cache_ttl_seconds: float = Field(default=60.0, gt=0)
 
 
 class Settings(BaseSettings):

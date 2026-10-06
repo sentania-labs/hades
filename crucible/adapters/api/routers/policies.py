@@ -5,9 +5,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Query
+from fastapi import Body, Query
 
 from crucible.adapters.api.deps import Admin, Ctx, Reader, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.application.admin import credentials
 from crucible.application.errors import NotFoundError
 from crucible.application.policies import (
@@ -24,7 +25,7 @@ from crucible.contracts.api import (
     RoutingUsageView,
 )
 
-router = APIRouter()
+router = ThreadedAPIRouter()
 
 
 @router.get("/policies/{name}/{version}", response_model=PolicyView)
