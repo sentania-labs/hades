@@ -313,6 +313,10 @@ def harness_readiness(
         if is_test_fixture(ctx, name):
             continue
         if not item["enabled_by_configuration"] and not item.get("decided_by_administrator"):
+            # Preserve default_image and images from the source so the
+            # first-run path can inspect image promotion state (crucible#169).
+            default_image = item.get("default_image")
+            images = item.get("images")
             harnesses.append(
                 {
                     "name": name,
@@ -323,6 +327,8 @@ def harness_readiness(
                         "to use it"
                     ),
                     "steps": [],
+                    "default_image": default_image,
+                    "images": images,
                 }
             )
             continue
@@ -335,12 +341,18 @@ def harness_readiness(
             unreachable=unreachable,
             secret=(secrets or {}).get(name),
         )
+        # Preserve default_image and images from the source so the
+        # first-run path can inspect image promotion state (crucible#169).
+        default_image = item.get("default_image")
+        images = item.get("images")
         harnesses.append(
             {
                 "name": name,
                 "state": "not_ready" if harness_steps else "ready",
                 "note": "" if harness_steps else "ready for a task",
                 "steps": harness_steps,
+                "default_image": default_image,
+                "images": images,
             }
         )
     return harnesses
