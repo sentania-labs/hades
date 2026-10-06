@@ -116,7 +116,7 @@ def test_the_worker_image_declares_every_real_harness_and_its_pin(tmp_path: Path
     dockerfile = (REPOSITORY / "images" / "worker" / "Dockerfile").read_text(encoding="utf-8")
     for name, version in carried.items():
         assert f"ARG HARNESS_{name.upper()}_VERSION={version}\n" in dockerfile
-    assert set(carried) == {"agy", "claude_code", "codex", "hermes"}
+    assert set(carried) == {"agy", "claude_code", "codex", "hermes", "qwen_code"}
 
 
 def test_a_changed_harness_pin_drifts_only_the_worker_image(tmp_path: Path) -> None:

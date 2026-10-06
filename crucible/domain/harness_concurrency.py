@@ -27,5 +27,6 @@ HARNESS_CONCURRENCY: dict[str, HarnessConcurrency] = {
     # Google does not rotate refresh tokens on ordinary access-token renewal.
     "agy": HarnessConcurrency("rw-narrow", True),
     "hermes": HarnessConcurrency("ro"),
+    "qwen_code": HarnessConcurrency("ro"),
     "script-harness": HarnessConcurrency("ro"),
 }

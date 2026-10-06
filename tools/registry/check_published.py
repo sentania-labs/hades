@@ -7,11 +7,21 @@ harness this release knows except the script harness, which ships in its own e2e
 the worker image carries all the others (the operator's decision of 2026-09-22). No
 credential is used or needed; the package is public.
 
-CI runs it with the pinned crane on PATH (`make registry-check`). The release runs it
-inside the service image it has just built, so it also proves the image ships crane:
+CI mode: `make registry-check` passes --expect-image-harnesses with the pinned crane
+on PATH. The expected harness list comes from the published image's own manifest
+config (the crucible.harnesses label), read at its resolved digest. Each declared
+harness must have a version. A branch may add a harness before the next release,
+so this mode does not require unpublished harnesses from the branch's registry.
+An empty declaration still fails.
+
+Release mode: without that flag, require every production harness in the code
+registry. The release runs this inside the service image it has just built, also
+proving that image ships crane. Keep this strict default for release verification.
+For an explicit expected set, repeat --expect-harness; it cannot be combined with
+--expect-image-harnesses.
 
     python tools/registry/check_published.py \\
-      --reference ghcr.io/sentania-labs/crucible-worker:latest
+      --reference ghcr.io/sentania-labs/crucible-worker:latest --expect-image-harnesses
 """
 
 from __future__ import annotations
@@ -33,7 +43,13 @@ def worker_image_harnesses() -> list[str]:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--reference", required=True)
-    parser.add_argument("--expect-harness", action="append", default=None)
+    expected = parser.add_mutually_exclusive_group()
+    expected.add_argument("--expect-harness", action="append", default=None)
+    expected.add_argument(
+        "--expect-image-harnesses",
+        action="store_true",
+        help="check the published image's declared harnesses instead of the code registry",
+    )
     parser.add_argument("--timeout", type=float, default=60.0)
     args = parser.parse_args(argv)
 
@@ -53,7 +69,12 @@ def main(argv: list[str]) -> int:
         problems.append(f"the digest {info.digest!r} is not a sha256 digest")
     if not info.harnesses:
         problems.append("the image carries no crucible.harnesses label")
-    for harness in args.expect_harness or worker_image_harnesses():
+    harnesses = (
+        list(info.harnesses)
+        if args.expect_image_harnesses
+        else args.expect_harness or worker_image_harnesses()
+    )
+    for harness in harnesses:
         if not info.version_of(harness):
             problems.append(f"no version label for the {harness} harness")
     for problem in problems:

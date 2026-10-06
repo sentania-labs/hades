@@ -278,10 +278,17 @@ def kind_schemas() -> dict[str, dict[str, Any]]:
         "github_status": _obj("the GitHub App's health", {"configured": BOOL}),
         "github_check": _obj("the per-repository token check", {}),
         "github_installations": _obj(
-            "the repository picker: the App, its install link, and each installation's "
-            "repositories grouped by account",
+            "the repository picker: the App, its install link, whether it is public, "
+            "an install-on-another-account link, and each installation's repositories "
+            "grouped by account (crucible#266)",
             {"connected": BOOL, "installations": {"type": "array"}},
-            {"app": ANY_OBJ, "install_url": NSTR, "error": NSTR},
+            {
+                "app": ANY_OBJ,
+                "app_public": BOOL,
+                "install_url": NSTR,
+                "install_target_url": NSTR,
+                "error": NSTR,
+            },
         ),
         "github_external_url": _obj(
             "the github.external_url setting: where GitHub sends the browser back when "

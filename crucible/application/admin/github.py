@@ -255,6 +255,19 @@ def _install_url(app: dict[str, Any], api_base: str = "https://api.github.com") 
     return None
 
 
+def _install_target_url(
+    app: dict[str, Any], api_base: str = "https://api.github.com"
+) -> str | None:
+    """The App's installation target selection page: lets the operator pick which
+    account or organization to install on. Only emitted for public Apps."""
+    html_url = app.get("html_url")
+    if not isinstance(html_url, str):
+        return None
+    if html_url.startswith("https://") or html_url.startswith(web_base(api_base) + "/"):
+        return html_url.rstrip("/") + "/installations/select_target"
+    return None
+
+
 def is_rsa(pem: bytes) -> bool:
     """GitHub App keys are RSA and JWTs are RS256; any other key is refused plainly here
     rather than failing later inside the signature."""
@@ -338,10 +351,35 @@ def keep(
     return done
 
 
+def _is_public(ctx: AdminContext) -> bool:
+    """Whether the App is public: an unauthenticated GET to the App answers 404 when
+    it is private. Returns True when the App is reachable without credentials,
+    False when it is private and unreachable, or when a private key is not present
+    to authenticate."""
+    if ctx.github is None:
+        return True
+    configured = getattr(ctx.github, "configured", None)
+    if callable(configured) and not configured():
+        return True
+    try:
+        import requests  # noqa: PLC0415
+
+        api_base = ctx.github_app.api_base
+        health_url = f"{api_base.rstrip('/')}/app"
+        resp = requests.head(health_url, timeout=5.0)
+        return resp.status_code != 404
+    except Exception:
+        return True
+
+
 def apps_view(ctx: AdminContext, uow: UnitOfWork) -> dict[str, Any]:
     """The picker: the App, its install link, and each installation's repositories,
     grouped by the account or organization it is installed on. Each repository says
-    whether it is registered already, and under which name. Reads only."""
+    whether it is registered already, and under which name. Reads only.
+
+    Adds `app_public` (bool) and `install_target_url` (str | None) so the page can
+    guide the operator to install the App on another account or explain why that
+    is not available for a private App (crucible#266)."""
     configured = getattr(ctx.github, "configured", None)
     connected = (
         ctx.github is not None and (not callable(configured) or bool(configured()))
@@ -349,7 +387,9 @@ def apps_view(ctx: AdminContext, uow: UnitOfWork) -> dict[str, Any]:
     view: dict[str, Any] = {
         "connected": connected,
         "app": None,
+        "app_public": True,
         "install_url": None,
+        "install_target_url": None,
         "error": None,
         "installations": [],
     }
@@ -364,7 +404,9 @@ def apps_view(ctx: AdminContext, uow: UnitOfWork) -> dict[str, Any]:
         view["error"] = _github_refusal(exc, _app_id(ctx), ctx.github_app.api_base).detail
         return view
     view["app"] = app
+    view["app_public"] = _is_public(ctx)
     view["install_url"] = _install_url(app, ctx.github_app.api_base)
+    view["install_target_url"] = _install_target_url(app, ctx.github_app.api_base)
     registered = {
         repo.url.rstrip("/").removesuffix(".git").lower(): repo.name for repo in _registered(uow)
     }

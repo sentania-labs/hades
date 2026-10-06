@@ -190,7 +190,7 @@ def _harness_steps(
     fixes it, each naming the page that fixes it. Read from the same state the
     Harnesses, Credentials, Local gateway, Routing and Images pages show."""
     name = str(item["name"])
-    hermes = name == credentials.HERMES
+    hermes = name in {credentials.HERMES, "qwen_code"}
     credential_page = "/ui/gateway" if hermes else "/ui/credentials"
     model_page = "/ui/gateway" if hermes else "/ui/routing"
     steps: list[dict[str, str]] = []

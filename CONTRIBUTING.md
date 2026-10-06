@@ -125,3 +125,16 @@ runs one shard. Every test's time is in the job log (`--durations=0`), which is 
 data for rebalancing. CI runs on every push, main included: the run on main proves the
 squashed result and builds the images from scratch, saving the BuildKit cache branches
 restore.
+
+## Harness changes
+
+The worker carries five production harnesses: Claude Code (`claude_code`), Codex
+(`codex`), AGY (`agy`), Hermes (`hermes`) and Qwen Code (`qwen_code`). The script
+harness is only a test fixture. See the [README harness table](README.md#the-harnesses).
+Qwen Code 0.25.0 uses Node 22 and the same read-only gateway credential as Hermes.
+Its wrapper writes `model.maxToolCallsPerTurn: 0` and
+`model.generationConfig.contextWindowSize` in `~/.qwen/settings.json` before exec.
+The latter is the routing entry's positive `context_length`, default 131072,
+so Qwen budgets output within the engine window. Keep settings and stream-json
+fixtures aligned with the pinned release. Image builds and version smoke checks
+run in CI; leave digest lines to CI and promote each harness separately on Images.
