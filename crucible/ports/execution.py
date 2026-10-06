@@ -11,6 +11,7 @@ from typing import Any, Literal, Protocol
 from crucible.domain.endpoints import validate_endpoint
 from crucible.domain.gates import SHIM_IDENTITY_MOUNT
 from crucible.domain.infrastructure import Interruption
+from crucible.domain.secrets import SecretMatch
 from crucible.ports.github import InstallationToken
 
 # Where the workspace appears inside every Crucible-created container (06, 08).
@@ -63,6 +64,36 @@ class ProviderCapabilities:
             "shared_disk": self.shared_disk,
             "supports_harnesses": sorted(self.supports_harnesses),
             "max_concurrency": self.max_concurrency,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerCapacity:
+    """How many worker Pods a provider admits at once, and why (hades #423).
+
+    `workers` is the dispatch limit the supervisor holds launches to. `headroom` is what
+    the provider's own ceiling (a namespace ResourceQuota) admits with nothing held
+    back, and `reserved_pods` and `reservation` the short-role Pods Hades runs beside
+    workers (gate probe, collector, canary, login, preparer) and the shape kept free
+    for them, so a probe always fits while workers are at capacity. `source` says
+    where the number came from: the quota, or a configured fallback when there is
+    none."""
+
+    workers: int
+    source: str
+    headroom: int | None = None
+    reserved_pods: int = 0
+    reservation: Mapping[str, Any] = field(default_factory=dict)
+    detail: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "worker_capacity": self.workers,
+            "capacity_source": self.source,
+            "quota_headroom": self.headroom,
+            "short_role_pods_reserved": self.reserved_pods,
+            "short_role_reservation": dict(self.reservation),
+            "capacity_detail": self.detail,
         }
 
 
@@ -309,6 +340,13 @@ class CollectedOutputs:
     # path list (11), so a collector that cannot produce it leaves this None and the
     # no_secrets gate refuses to report `pass`.
     diff_text: str | None = None
+    # hades #398: the scanner's matches over the whole diff and over every blob the
+    # worker added or changed, read in bounded chunks while the collected files exist,
+    # each named by its path (`diff` for the patch). None when the adapter did not scan,
+    # as a fake that hands diff_text instead. `diff_unscanned` names the changed paths
+    # whose content the collector did not export: coverage the gate cannot claim.
+    diff_findings: tuple[SecretMatch, ...] | None = None
+    diff_unscanned: tuple[str, ...] = ()
     # hades #369: `git diff --raw` against the same merge base as diff_paths. None when
     # the collector did not record it.
     diff_changes: tuple[PathChange, ...] | None = None
@@ -510,6 +548,14 @@ class LaunchRefusedError(ProviderError):
     """A launch the provider refused on purpose (07, 13): the image's harness version is
     outside the adapter's tested range, or the harness has no credential to run with.
     The supervisor turns this into a wake, not a retry."""
+
+
+class LaunchWaitError(ProviderError):
+    """The provider cannot take the attempt's next Pod right now, and nothing about the
+    attempt is decided by that (hades #423): the namespace quota refused the gate
+    probe, the preparer or the worker. The supervisor puts the attempt back to pending
+    with this message as the reason and launches it on a later tick; the attempt is
+    not consumed and no exit class is recorded."""
 
 
 class WorkerStartError(ProviderError):

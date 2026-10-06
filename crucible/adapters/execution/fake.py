@@ -709,7 +709,11 @@ class FakeProvider:
             return CollectedOutputs(
                 report=None,
                 report_raw=None,
-                blocked_md=f"# Blocked\n\nFake worker for {spec.external_id} needs a decision.\n",
+                # hades #393: a reason line, as a real worker writes it.
+                blocked_md=(
+                    "reason: ambiguous_contract\n\n# Blocked\n\n"
+                    f"Fake worker for {spec.external_id} needs a decision.\n"
+                ),
             )
         return CollectedOutputs(report=None, report_raw=None, blocked_md=None)
 

@@ -158,7 +158,7 @@ is always advisory.
 | `commits_present` | blocking | the collected `work_branch` has at least one commit beyond `base_ref`, the bundle verifies, and the bundle names its head. The head is the bundle's; a reported `head_sha` that differs is noted in the gate's detail and does not fail it (hades #187, 2026-09-28) | branch bundle from `collect` |
 | `scope_contained` | advisory, except a prohibited path | every changed path matches `allowed_paths` and none matches `prohibited_paths`. A path matching `prohibited_paths` stops the task even when the gate is advisory; a path merely outside `allowed_paths` is for the reviewer | diff path list from `collect` |
 | `no_injected_files` | blocking | no instruction additions, harness paths or normalized shim content in the diff or any commit on `work_branch`; unclassifiable evidence fails closed (details below) | normalized path records, base paths and blob classifications from the collector |
-| `no_secrets` | always blocking | secret scanner over the diff, every commit message, and the report finds nothing | scanner output artifact |
+| `no_secrets` | always blocking | secret scanner over the diff, every blob the worker added or changed, every commit message, and the report finds nothing; `pending` when a changed path's content was not exported to scan (details below) | scanner output artifact |
 | `verification_ran` | blocking | for each `required_verification` command: Crucible itself re-ran the command after exit, in a fresh verifier container from the collected tree (same image, `network` per policy), and its exit matches `expect_exit`. The worker's own check logs are stored as a claim and shown to Foundry, never consumed by the gate. A check the worker's report says passed and the re-run failed is also recorded as the advisory finding "the worker reported V3 passing; Crucible's re-run failed it" (ADR 0024) | verifier exit and log (verified) |
 | `run_evidence_present` | advisory | each `kind: artifact` verification path exists and is non-empty | artifacts |
 | `criteria_mapped` | advisory | every `acceptance_criteria.id` appears in `acceptance_mapping` with a status | report |
@@ -192,6 +192,25 @@ report artifacts or the verifier tree. Undecodable names, unreadable or undecoda
 blobs, malformed records and incomplete lists fail closed with a reason. Instruction
 blobs above the 8 MiB classification limit also fail closed. Older evidence without
 content classifications retains its conservative path/status and exact-blob checks.
+
+`no_secrets` scans every byte the worker added or changed (hades #398). The collector
+exports each blob the raw diff against the merge base names as added or modified, by
+object id with `git cat-file blob`, so the worker's `.gitattributes`, textconv and
+filters never decide what is read: a path marked binary, or holding a NUL byte, is
+scanned as the bytes it holds. The service streams the whole `diff.patch` and each
+blob through the scanner in 1 MiB chunks, each read with the 16 KiB before it so a
+match across a chunk boundary is found, and never holds a file whole. A match that
+touches the end of what has been read is not taken until the next character is read,
+since a trailing word boundary holds at the end of a string and not after one more
+letter: the scanner carries the match into the next chunk, up to 1 MiB, and judges it
+with what follows, exactly as a scan of the whole text would; carried longer than that
+it is taken as it stands (no secret is that long, and the window stays bounded). A
+match names its path (`diff:<path>`; `diff` for the patch). A blob that is missing or
+does not hash to its object id leaves the gate `pending` and names the path. The review
+copy of the diff keeps its own size bound for people; the scan does not read it. On
+Kubernetes the blobs never reach the supervisor's disk: the reader Pod streams them
+through the scanner, apart from the output archive (26); the Docker provider scans them
+from the output directory.
 
 `commit_policy` is evaluated whatever `gates.pre_pr` lists, and a policy may
 not name it, so the reviewer always sees who authored the commits and a

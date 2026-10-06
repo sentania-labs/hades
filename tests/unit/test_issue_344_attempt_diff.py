@@ -228,7 +228,8 @@ def _scan(tmp_path: Path, output: Path) -> list[dict[str, str]]:
             report_raw=None,
             blocked_md=None,
             diff_paths=collected.diff_paths,
-            diff_text=collected.diff_text,
+            diff_findings=collected.diff_findings,
+            diff_unscanned=collected.diff_unscanned,
             artifacts=collected.artifacts,
         ),
         None,
@@ -436,7 +437,8 @@ def test_the_review_diff_has_its_own_role_and_is_not_run_evidence(tmp_path: Path
         report_raw=None,
         blocked_md=None,
         diff_paths=collected.diff_paths,
-        diff_text=collected.diff_text,
+        diff_findings=collected.diff_findings,
+        diff_unscanned=collected.diff_unscanned,
         artifacts=collected.artifacts,
     )
     uow: Any = SimpleNamespace(evidence=_Evidence(), artifacts=_Artifacts(), events=_Events())
