@@ -26,7 +26,7 @@ from crucible.domain.entities import Artifact, Attempt, EvidenceRecord, Task
 from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
 from crucible.domain.gates import injected_name
 from crucible.domain.ids import new_id
-from crucible.domain.secrets import find_secrets, redact, scan_text
+from crucible.domain.secrets import find_secrets, match_text, redact, scan_text
 from crucible.ports.artifacts import ArtifactStore, SecretInArtifactError
 from crucible.ports.clock import Clock
 from crucible.ports.execution import (
@@ -192,42 +192,51 @@ def _scanner_findings(
     findings: list[dict[str, str]] = []
     if claim is not None:
         findings.extend(
-            {"where": f"report.{m.path}" if m.path else "report", "pattern": m.pattern}
+            {
+                "where": f"report.{m.path}" if m.path else "report",
+                "pattern": m.pattern,
+                "excerpt": m.excerpt,
+            }
             for m in find_secrets(claim)
         )
     elif outputs.report_raw:
         # A report that did not parse is still the worker's text, and its parse error
         # goes to the reviewer (ADR 0024).
-        hit = scan_text(outputs.report_raw)
+        hit = match_text(outputs.report_raw, path="report")
         if hit:
-            findings.append({"where": "report", "pattern": hit})
+            findings.append({"where": hit.path, "pattern": hit.pattern, "excerpt": hit.excerpt})
     if outputs.blocked_md:
-        hit = scan_text(outputs.blocked_md)
+        hit = match_text(outputs.blocked_md, path="report/blocked.md")
         if hit:
-            findings.append({"where": "report/blocked.md", "pattern": hit})
+            findings.append({"where": hit.path, "pattern": hit.pattern, "excerpt": hit.excerpt})
     if outputs.diff_text is not None:
         # The content, not the path list: a credential committed into a file is what
         # this gate exists to catch (11).
-        hit = scan_text(outputs.diff_text)
+        hit = match_text(outputs.diff_text, path="diff")
         if hit:
-            findings.append({"where": "diff", "pattern": hit})
+            findings.append({"where": hit.path, "pattern": hit.pattern, "excerpt": hit.excerpt})
     if outputs.diff_findings is not None:
         # hades #398: the adapter streamed the whole diff and every blob the worker
         # added or changed through the scanner; each match names its path.
-        findings.extend({"where": m.path, "pattern": m.pattern} for m in outputs.diff_findings)
+        findings.extend(
+            {"where": m.path, "pattern": m.pattern, "excerpt": m.excerpt}
+            for m in outputs.diff_findings
+        )
     for path in outputs.diff_paths:
-        hit = scan_text(path)
+        hit = match_text(path, path=f"diff-path:{path}")
         if hit:
-            findings.append({"where": f"diff-path:{path}", "pattern": hit})
+            findings.append({"where": hit.path, "pattern": hit.pattern, "excerpt": hit.excerpt})
     if outputs.bundle is not None:
         for index, message in enumerate(outputs.bundle.commit_messages):
-            hit = scan_text(message)
+            hit = match_text(message, path=f"commit[{index}].message")
             if hit:
-                findings.append({"where": f"commit[{index}].message", "pattern": hit})
+                findings.append({"where": hit.path, "pattern": hit.pattern, "excerpt": hit.excerpt})
     for artifact in outputs.artifacts:
-        hit = scan_text(artifact.content.decode("utf-8", "replace"))
+        hit = match_text(
+            artifact.content.decode("utf-8", "replace"), path=f"artifact:{artifact.name}"
+        )
         if hit:
-            findings.append({"where": f"artifact:{artifact.name}", "pattern": hit})
+            findings.append({"where": hit.path, "pattern": hit.pattern, "excerpt": hit.excerpt})
     return findings
 
 

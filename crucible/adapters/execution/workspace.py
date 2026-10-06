@@ -19,11 +19,21 @@ from crucible.ports.execution import ProviderError
 # The origin URL a worker sees. It resolves nowhere, so a push cannot even start (S4).
 ORIGIN_PLACEHOLDER = "crucible-no-remote://this-checkout-cannot-push"
 SHIM_NAMES: tuple[str, ...] = ("AGENTS.md",)
+HARNESS_PRIVATE_ENTRIES: tuple[str, ...] = ("/.hermes/", "/.qwen/")
 EXCLUDE_ENTRIES: tuple[str, ...] = (
-    "# Written by Crucible at prepare; these are shims, not work (06, 11).",
+    "# Written by Crucible at prepare; these are shims and harness state, not work (06, 11).",
     "/AGENTS.md",
     "/.crucible/",
+    *HARNESS_PRIVATE_ENTRIES,
 )
+
+
+def harness_private_path(path: str) -> bool:
+    """Whether a repository-relative path belongs to local harness runtime state."""
+    return any(
+        path == entry.strip("/") or path.startswith(entry.lstrip("/"))
+        for entry in HARNESS_PRIVATE_ENTRIES
+    )
 
 
 class WorkspaceError(Exception):

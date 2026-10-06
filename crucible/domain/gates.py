@@ -567,7 +567,9 @@ def no_secrets(gi: GateInput) -> GateOutcome:
     findings = item.payload.get("findings") or []
     if findings:
         # Findings carry the location and the pattern name, never the matched value.
-        where = [f"{f.get('where')}:{f.get('pattern')}" for f in findings][:10]
+        where = [
+            f"{f.get('where')}:{f.get('pattern')}:{f.get('excerpt', '')}" for f in findings
+        ][:10]
         return GateOutcome(GateResult.FAIL, f"secret pattern matched at {where}", (item.id,))
     scanned = item.payload.get("scanned") or []
     unscanned = item.payload.get("unscanned") or []

@@ -27,9 +27,10 @@ from typing import IO, Any
 import yaml
 
 from crucible.adapters.execution import scripts
+from crucible.adapters.execution.workspace import harness_private_path
 from crucible.adapters.execution.injected_collection import classify_collected, nul_fields
 from crucible.contracts.evidence import REVIEW_DIFF_NAME, REVIEW_DIFF_TYPE
-from crucible.domain.secrets import SecretMatch, scan_chunks
+from crucible.domain.secrets import SecretMatch, match_text, scan_chunks
 from crucible.ports.execution import (
     BranchBundle,
     CollectedArtifact,
@@ -361,26 +362,32 @@ class BlobTarScan:
 def scan_changed_content(
     output: Path, blobs: Mapping[str, str | bool | None] | None = None
 ) -> tuple[tuple[SecretMatch, ...] | None, tuple[str, ...]]:
-    """Scan every byte the worker added or changed (hades #398), never the whole at once.
+    """Scan only lines added relative to the prepared base.
 
-    The whole diff.patch, and every blob the raw diff against the merge base names as
-    added or changed, which the collector exported by object id regardless of the
-    worker's attributes. `blobs` is what a provider that scanned them as they streamed
-    found per object id (`BlobTarScan`); None reads them from under `output`. A match is
-    named by the path (`diff` for the patch). Returns None for the matches when there is
-    no diff.patch, and the changed paths whose content could not be read, so the gate
-    does not claim coverage it lacks."""
+    A zero-context decision is made from the collected patch: context and deleted lines
+    are repository content the attempt did not add. Exported blobs remain integrity
+    coverage for newly added files, but their complete contents are not judged because
+    doing so would make an edit beside old secret-shaped fixture data fail (#488).
+    """
     patch = output / "diff.patch"
     if not patch.is_file():
         return None, ()
     found: list[SecretMatch] = []
     unscanned: list[str] = []
+    current_path = "diff"
+    excluded = False
     try:
-        hit = scan_chunks(_decoded(_file_chunks(patch)))
+        with patch.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.startswith("+++ b/"):
+                    current_path = line[6:].rstrip("\n")
+                    excluded = harness_private_path(current_path)
+                elif line.startswith("+") and not line.startswith("+++") and not excluded:
+                    hit = match_text(line[1:], path=f"diff:{current_path}")
+                    if hit is not None:
+                        found.append(hit)
     except OSError:
         return None, ()
-    if hit is not None:
-        found.append(SecretMatch(path="diff", pattern=hit))
     raw = output / "diff-raw.txt"
     if not raw.is_file():
         # A collector before #398 exported no blobs; the patch is what it gave.
@@ -402,7 +409,13 @@ def scan_changed_content(
                 continue
             path = raw_path.decode("utf-8", "surrogateescape")
             shown = path if path.isprintable() else ascii(path)
+            if harness_private_path(path):
+                continue
             blob = blob_bytes.decode("ascii")
+            # Only a new path's blob consists entirely of worker-added lines. For an
+            # edit, the patch above is the authority and the old parts must not count.
+            if status != b"A":
+                continue
             if blob not in results:
                 results[blob] = (
                     blobs.get(blob, False)
@@ -412,8 +425,7 @@ def scan_changed_content(
             result = results[blob]
             if result is False:
                 unscanned.append(shown)
-            elif isinstance(result, str):
-                found.append(SecretMatch(path=f"diff:{shown}", pattern=result))
+            # Findings come from added patch lines so they include a safe excerpt.
     except (OSError, ValueError):
         unscanned.append("diff-raw.txt")
     return tuple(found), tuple(unscanned)

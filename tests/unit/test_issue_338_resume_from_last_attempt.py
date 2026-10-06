@@ -133,16 +133,18 @@ def test_preparer_checks_seal_and_task_ancestry_before_using_bundle(
         .replace("/tmp/gitconfig", str(tmp_path / "gitconfig"))
     )
     result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False)
-    if mode == "descendant":
+    if mode in {"descendant", "secret"}:
         assert result.returncode == 0, result.stderr
         assert _git(work / "repo", "rev-parse", "HEAD") == failed
+        if mode == "secret":
+            assert "path=credential.txt" in result.stderr
+            assert "rule=github_installation_token" in result.stderr
+            assert "excerpt=ghs...AAA" in result.stderr
     else:
         assert result.returncode == 4
         assert (
             "does not descend from task head"
             if mode == "divergent"
-            else "contains a secret pattern"
-            if mode == "secret"
             else "does not match its seal"
         ) in result.stderr
         assert not (work / "output" / "prepared-head.txt").exists()
