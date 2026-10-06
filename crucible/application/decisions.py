@@ -46,10 +46,15 @@ def open_escalation(
     question: str,
     wake_reason: WakeReason = WakeReason.BLOCKED,
     summary: str | None = None,
+    reason: str | None = None,
 ) -> Escalation:
     """09: entering `blocked` opens an escalation and creates a wake. The supervisor
     opens one the same way for a publication that cannot start (23), with its own wake
-    reason and summary."""
+    reason and summary.
+
+    hades #393: `reason` is the one the worker's `blocked.md` named (missing_capability
+    or ambiguous_contract) and `question` is its statement verbatim; both go on the
+    escalation and its event, and the wake summary names the reason."""
     now = clock.now()
     escalation = Escalation(
         id=new_id(),
@@ -59,6 +64,7 @@ def open_escalation(
         question=question,
         opened_at=now,
         last_wake_at=now,
+        reason=reason,
     )
     uow.escalations.add(escalation)
     record_event(
@@ -68,14 +74,24 @@ def open_escalation(
         principal=PRINCIPAL_CRUCIBLE,
         task_id=task.id,
         attempt_id=attempt_id,
-        payload={"escalation_id": escalation.id, "question": question},
+        payload={
+            "escalation_id": escalation.id,
+            "question": question,
+            **({"reason": reason} if reason else {}),
+        },
     )
+    if summary is None:
+        summary = (
+            f"the worker stopped ({reason}) and opened escalation {escalation.id}"
+            if reason
+            else f"the worker blocked and opened escalation {escalation.id}"
+        )
     create_wake(
         uow,
         clock,
         principal_id=task.principal_id,
         reason=wake_reason,
-        summary=summary or f"the worker blocked and opened escalation {escalation.id}",
+        summary=summary,
         task=task,
         attempt_id=attempt_id,
         extra_links={"decisions": f"/v1/tasks/{task.id}/decisions"},

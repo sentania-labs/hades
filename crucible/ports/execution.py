@@ -11,6 +11,7 @@ from typing import Any, Literal, Protocol
 from crucible.domain.endpoints import validate_endpoint
 from crucible.domain.gates import SHIM_IDENTITY_MOUNT
 from crucible.domain.infrastructure import Interruption
+from crucible.domain.secrets import SecretMatch
 from crucible.ports.github import InstallationToken
 
 # Where the workspace appears inside every Crucible-created container (06, 08).
@@ -339,6 +340,13 @@ class CollectedOutputs:
     # path list (11), so a collector that cannot produce it leaves this None and the
     # no_secrets gate refuses to report `pass`.
     diff_text: str | None = None
+    # hades #398: the scanner's matches over the whole diff and over every blob the
+    # worker added or changed, read in bounded chunks while the collected files exist,
+    # each named by its path (`diff` for the patch). None when the adapter did not scan,
+    # as a fake that hands diff_text instead. `diff_unscanned` names the changed paths
+    # whose content the collector did not export: coverage the gate cannot claim.
+    diff_findings: tuple[SecretMatch, ...] | None = None
+    diff_unscanned: tuple[str, ...] = ()
     # hades #369: `git diff --raw` against the same merge base as diff_paths. None when
     # the collector did not record it.
     diff_changes: tuple[PathChange, ...] | None = None
