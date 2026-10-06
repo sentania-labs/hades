@@ -102,28 +102,65 @@ def github_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             sections.append({"title": "Installations", "note": picker["error"]})
         if picker["install_url"]:
             installed = bool(picker["installations"])
-            sections.append(
-                {
-                    "title": "Install the App" if not installed else "Install it somewhere else",
-                    "note": (
-                        "GitHub asks which account or organization, and which of its "
-                        "repositories, the App may see, then sends you back here to pick "
-                        "them."
-                        if not installed
-                        else "To deliver to another account or organization, or to more of "
-                        "its repositories, install or configure the App there; GitHub sends "
-                        "you back here."
-                    ),
-                    "button": {"href": picker["install_url"], "label": "Install on GitHub"},
-                    "columns": ["App", "Install link"],
-                    "rows": [
-                        [
-                            (picker["app"] or {}).get("name") or (picker["app"] or {}).get("slug"),
-                            {"href": picker["install_url"], "label": picker["install_url"]},
-                        ]
-                    ],
-                }
-            )
+            install_section: dict[str, Any] = {
+                "title": "Install the App" if not installed else "Install it somewhere else",
+                "note": (
+                    "GitHub asks which account or organization, and which of its "
+                    "repositories, the App may see, then sends you back here to pick "
+                    "them."
+                    if not installed
+                    else "To deliver to another account or organization, or to more of "
+                    "its repositories, install or configure the App there; GitHub sends "
+                    "you back here."
+                ),
+                "button": {"href": picker["install_url"], "label": "Install on GitHub"},
+                "columns": ["App", "Install link"],
+                "rows": [
+                    [
+                        (picker["app"] or {}).get("name") or (picker["app"] or {}).get("slug"),
+                        {"href": picker["install_url"], "label": picker["install_url"]},
+                    ]
+                ],
+            }
+            # AC2: show whether the App is public or private
+            app_info: list[list[Any]] = [
+                [
+                    "App visibility",
+                    {"kind": "note", "value": "public" if picker.get("app_public") else "private"},
+                ]
+            ]
+            if picker.get("app_public") and picker.get("install_target_url"):
+                # AC1: install-on-another-account link
+                app_info.append(
+                    [
+                        "Install on another account",
+                        {
+                            "kind": "link",
+                            "href": picker["install_target_url"],
+                            "label": "Select another account or organization",
+                        },
+                    ]
+                )
+            else:
+                # AC2: make-public guidance for private Apps
+                app_info.append(
+                    [
+                        "Install on another account",
+                        {
+                            "kind": "note",
+                            "value": (
+                                "The App is private and can only be installed on one account. "
+                                "Anyone with the App's private key can install it on a public "
+                                "account or organization. Making the App public exposes its name, "
+                                "slug, description, URL, and permissions to everyone. Hades acts "
+                                "only on registered repositories, so nothing outside those is "
+                                "affected by a public installation."
+                            ),
+                        },
+                    ]
+                )
+            install_section["rows"] = app_info + install_section["rows"]
+            sections.append(install_section)
         for installation in picker["installations"]:
             title = (
                 f"{installation.get('account')} ({installation.get('account_type') or 'account'}), "
