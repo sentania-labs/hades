@@ -181,3 +181,20 @@ iterator level.  On a local SSD tree of tens of thousands of files the walk
 finishes in well under a second so the guard rarely fires.  On NFS the guard
 may fire, but the result is always ``None`` which the caller treats as "could
 not tell" — a deliberate false-negative that preserves stall-clock correctness.
+
+### P1 finding: directory symlink guard
+
+A worker-controlled directory symlink (e.g. ``repo/peer -> ../../``) must not be
+followed: descending it would scan ``<artifact_root>/workspaces`` and other
+attempts, corrupting this attempt's fingerprint and resetting the stall clock.
+The walker uses ``stat(follow_symlinks=False)`` followed by ``stat.S_ISDIR``
+to distinguish real directories from symlinks, so only genuine directories
+enter the traversal stack.
+
+### P2 finding: iterative traversal
+
+A checkout with roughly 1 000 one-character nested directories would exhaust
+the Python call stack and raise ``RecursionError`` before the time budget
+check.  The walker now uses an explicit ``list[Path]`` stack (``while stack``)
+instead of recursive ``yield from _walk(child)`` calls, eliminating the
+recursion depth limit entirely.
