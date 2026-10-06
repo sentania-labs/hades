@@ -34,6 +34,7 @@ from crucible.ports.execution import (
 
 __all__ = [
     "ACTIVITY_SCRIPT",
+    "ACTIVITY_WALK_SECONDS",
     "BUNDLE_MOUNT",
     "BUNDLE_VERIFY_SCRIPT",
     "COMMIT_HOOK_DIR",
