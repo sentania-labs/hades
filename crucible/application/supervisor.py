@@ -386,16 +386,34 @@ def workspace_fingerprint(workspace: Workspace) -> tuple[int, int, int] | None:
     start_ns = time.monotonic_ns()
 
     def _walk(root: Path) -> Iterator[Path]:
-        """Yield every entry under *root*, pruning ``.git`` directories early."""
+        """Yield every entry under *root*, pruning ``.git`` and symlinked dirs.
+
+        Uses an explicit stack so deep nesting never raises ``RecursionError``,
+        and checks ``lstat`` on every entry so directory symlinks (e.g. a
+        worker-controlled symlink pointing at another attempt's workspace) are
+        never descended.
+        """
+        stack: list[Path] = [root]
         yield root
-        try:
-            for child in root.iterdir():
+        while stack:
+            current = stack.pop()
+            try:
+                entries = sorted(current.iterdir(), key=lambda p: p.name)
+            except OSError:
+                continue
+            dirs: list[Path] = []
+            for child in entries:
                 if child.name == ".git":
                     # Skip the entire .git tree without descending.
                     continue
-                yield from _walk(child)
-        except OSError:
-            return
+                yield child
+                try:
+                    child_stat = child.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.S_ISDIR(child_stat.st_mode):
+                    dirs.append(child)
+            stack.extend(dirs)
 
     for root_name in (workspace.checkout_path, workspace.report_path):
         root = Path(root_name)
