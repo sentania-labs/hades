@@ -66,6 +66,7 @@ from crucible.adapters.execution.k8sspec import (
 )
 from crucible.adapters.execution.scripts import (
     ACTIVITY_MARKER,
+    CHANGED_BLOBS_DIR,
     MERGE_MAIN_MARKER,
     PUBLISH_BUNDLE_LEAF,
     PUBLISH_LEAF,
@@ -624,6 +625,8 @@ class FakeKubernetesApi:
         if ACTIVITY_MARKER in script:
             return self._activity(name, claim)
         if "tar cf -" in script:
+            if f"output/{CHANGED_BLOBS_DIR}" in script and "--exclude" not in script:
+                return ExecResult(_changed_blobs_tar(claim), b"", 0)
             return ExecResult(_tar(claim), b"", 0)
         match = re.match(r"^p='(?P<path>[^']*)'", script)
         if match is None:
@@ -1202,11 +1205,27 @@ def _merge(target: dict[str, Any], patch: Mapping[str, Any]) -> None:
 
 
 def _tar(claim: Mapping[str, bytes]) -> bytes:
-    """What the reader Pod's `tar cf -` produces off the claim, minus `output/tree`."""
+    """What the reader Pod's `tar cf -` produces off the claim, minus `output/tree` and
+    the exported blobs (hades #398), which come back as their own stream."""
+    return _tar_of(
+        claim,
+        lambda path: (
+            path.startswith(("output/", "verify/"))
+            and not path.startswith(("output/tree/", f"output/{CHANGED_BLOBS_DIR}/"))
+        ),
+    )
+
+
+def _changed_blobs_tar(claim: Mapping[str, bytes]) -> bytes:
+    """The reader's second stream: `output/changed-blobs` alone, for the scanner."""
+    return _tar_of(claim, lambda path: path.startswith(f"output/{CHANGED_BLOBS_DIR}/"))
+
+
+def _tar_of(claim: Mapping[str, bytes], wanted: Callable[[str], bool]) -> bytes:
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w") as tar:
         for path, content in sorted(claim.items()):
-            if not path.startswith(("output/", "verify/")) or path.startswith("output/tree/"):
+            if not wanted(path):
                 continue
             info = tarfile.TarInfo(path)
             info.size = len(content)

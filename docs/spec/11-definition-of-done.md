@@ -199,10 +199,18 @@ object id with `git cat-file blob`, so the worker's `.gitattributes`, textconv a
 filters never decide what is read: a path marked binary, or holding a NUL byte, is
 scanned as the bytes it holds. The service streams the whole `diff.patch` and each
 blob through the scanner in 1 MiB chunks, each read with the 16 KiB before it so a
-match across a chunk boundary is found, and never holds a file whole. A match names
-its path (`diff:<path>`; `diff` for the patch). A blob that is missing or does not hash
-to its object id leaves the gate `pending` and names the path. The review copy of the
-diff keeps its own size bound for people; the scan does not read it.
+match across a chunk boundary is found, and never holds a file whole. A match that
+touches the end of what has been read is not taken until the next character is read,
+since a trailing word boundary holds at the end of a string and not after one more
+letter: the scanner carries the match into the next chunk, up to 1 MiB, and judges it
+with what follows, exactly as a scan of the whole text would; carried longer than that
+it is taken as it stands (no secret is that long, and the window stays bounded). A
+match names its path (`diff:<path>`; `diff` for the patch). A blob that is missing or
+does not hash to its object id leaves the gate `pending` and names the path. The review
+copy of the diff keeps its own size bound for people; the scan does not read it. On
+Kubernetes the blobs never reach the supervisor's disk: the reader Pod streams them
+through the scanner, apart from the output archive (26); the Docker provider scans them
+from the output directory.
 
 `commit_policy` is evaluated whatever `gates.pre_pr` lists, and a policy may
 not name it, so the reviewer always sees who authored the commits and a

@@ -8,19 +8,28 @@ through the scanner in chunks that overlap."""
 
 from __future__ import annotations
 
+import hashlib
+import io
+import shutil
 import subprocess
+import tarfile
 import tracemalloc
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from crucible.adapters.execution import collected
-from crucible.adapters.execution.collected import read_outputs, scan_changed_content
+from crucible.adapters.execution import kubernetes as kubernetes_module
+from crucible.adapters.execution.collected import BlobTarScan, read_outputs, scan_changed_content
+from crucible.adapters.execution.kubernetes import CollectionFailedError
 from crucible.adapters.execution.scripts import CHANGED_BLOBS_DIR, collector_script
 from crucible.application.evidence import _scanner_findings
 from crucible.domain.gates import GateResult, no_secrets
-from crucible.domain.secrets import SCAN_OVERLAP, scan_chunks, scan_text
-from crucible.ports.execution import CollectedOutputs, LaunchSpec
+from crucible.domain.secrets import SCAN_OVERLAP, SecretMatch, scan_chunks, scan_text
+from crucible.ports.execution import WORK_MOUNT, CollectedOutputs, LaunchSpec, ObservationState
 from tests.collector_tools import collector_env
+from tests.unit.kubernetes_fixtures import build, spec
 
 GIT_USER = ["-c", "user.name=test", "-c", "user.email=test@example.invalid"]
 # Built here at runtime; no secret-shaped literal is ever committed (12).
@@ -248,3 +257,182 @@ def test_a_chunk_boundary_does_not_invent_a_word_boundary() -> None:
     run_on = "AKIA" + "A" * 17 + " "
     assert scan_text(run_on) is None
     assert scan_chunks([run_on[:20], run_on[20:]], overlap=SCAN_OVERLAP) is None
+
+
+# Review of the first attempt: a match that touches a chunk boundary waits for the next
+# character, as `scan_text` sees it, instead of being taken when it is long.
+
+
+def test_a_long_run_that_ends_at_a_chunk_boundary_waits_for_the_next_character() -> None:
+    run = "gh" + "p_" + "A" * (SCAN_OVERLAP + 100)
+    # A letter after the run: no trailing word boundary, so no match, whole or chunked.
+    assert scan_text(run + "é") is None
+    assert scan_chunks([run, "é" + "x" * 10]) is None
+    assert scan_chunks([run, "_" + "x" * 10]) is None
+    # A space, the end of the text, or more of the run and then a space: a match.
+    assert scan_chunks([run, " x"]) == "github_token"
+    assert scan_chunks([run]) == "github_token"
+    assert scan_chunks([run, "BBBB", "BBBB", " x"]) == "github_token"
+    assert scan_chunks([run, "BBBB", "BBBB", "éx"]) is None
+    # The same with the run split so that every boundary falls inside it.
+    pieces = [run[i : i + 1000] for i in range(0, len(run), 1000)]
+    assert scan_chunks([*pieces, "é"]) is None
+    assert scan_chunks([*pieces, " "]) == "github_token"
+
+
+def test_a_held_match_is_bounded_and_taken_as_it_stands_past_the_hold() -> None:
+    # Under the hold the next character decides; past it the match stands (no secret is
+    # that long, and the window must stay bounded).
+    head = "gh" + "p_" + "A" * 100
+    assert scan_chunks([head, "A" * 100, "é"], overlap=64, hold=256) is None
+    assert scan_chunks([head, "A" * 100, " "], overlap=64, hold=256) == "github_token"
+    assert scan_chunks([head, "A" * 200, "é"], overlap=64, hold=256) == "github_token"
+
+
+# Review of the first attempt: the exported blobs are not a second copy of the bundle's
+# content in the Kubernetes output archive; the reader streams them through the scanner.
+
+
+def _blob_id(content: bytes) -> str:
+    return hashlib.sha1(b"blob %d\0" % len(content) + content).hexdigest()
+
+
+def _raw_record(blob: str, path: str) -> bytes:
+    return f":000000 100644 {'0' * 40} {blob} A\0{path}\0".encode()
+
+
+def test_the_reader_scripts_keep_the_blobs_out_of_the_archive_and_stream_them_alone(
+    tmp_path: Path,
+) -> None:
+    work = tmp_path / "work"
+    (work / "output" / CHANGED_BLOBS_DIR).mkdir(parents=True)
+    (work / "output" / "tree").mkdir()
+    (work / "verify").mkdir()
+    content = b"\0\0binary " + KEY.encode() + b"\n"
+    blob = _blob_id(content)
+    (work / "output" / CHANGED_BLOBS_DIR / blob).write_bytes(content)
+    (work / "output" / "diff.patch").write_bytes(b"diff\n")
+    (work / "output" / "tree" / "x").write_bytes(b"clone\n")
+    (work / "verify" / "V1.log").write_bytes(b"ok\n")
+
+    def run(script: str) -> bytes:
+        done = subprocess.run(
+            ["sh", "-c", script.replace(WORK_MOUNT, str(work))], capture_output=True, check=False
+        )
+        assert done.returncode == 0, done.stderr
+        return done.stdout
+
+    with tarfile.open(fileobj=io.BytesIO(run(kubernetes_module._OUTPUT_TAR_SCRIPT))) as tar:
+        names = set(tar.getnames())
+    assert "output/diff.patch" in names and "verify/V1.log" in names
+    assert not any(
+        name.startswith(("output/tree", f"output/{CHANGED_BLOBS_DIR}")) for name in names
+    )
+
+    stream = run(kubernetes_module._CHANGED_BLOBS_TAR_SCRIPT)
+    with tarfile.open(fileobj=io.BytesIO(stream)) as tar:
+        regular = {m.name for m in tar.getmembers() if m.isreg()}
+    assert regular == {f"output/{CHANGED_BLOBS_DIR}/{blob}"}
+    # The sink scans the stream as it arrives, in whatever pieces the exec hands it.
+    scan = BlobTarScan(CHANGED_BLOBS_DIR)
+    for at in range(0, len(stream), 777):
+        scan.write(stream[at : at + 777])
+    assert scan.close() == {blob: "github_token"}
+    assert scan.error is None
+    # Without the directory the second script has nothing to say.
+    shutil.rmtree(work / "output" / CHANGED_BLOBS_DIR)
+    assert run(kubernetes_module._CHANGED_BLOBS_TAR_SCRIPT) == b""
+
+
+def test_the_blob_sink_keeps_verdicts_not_bytes_and_refuses_what_is_not_the_blob() -> None:
+    clean = b"x" * (12 * collected.SCAN_CHUNK) + b"\n"
+    keyed = b"y" * (8 * collected.SCAN_CHUNK) + b" " + KEY.encode() + b"\n"
+    swapped = b"not what the id says\n"
+    members = {
+        _blob_id(clean): clean,
+        _blob_id(keyed): keyed,
+        _blob_id(b"the real content\n"): swapped,
+        "not-a-blob-id": b"ignored\n",
+    }
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(f"output/{CHANGED_BLOBS_DIR}/{name}")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        link = tarfile.TarInfo(f"output/{CHANGED_BLOBS_DIR}/{'f' * 40}")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "/etc/passwd"
+        tar.addfile(link)
+    stream = buffer.getvalue()
+    tracemalloc.start()
+    try:
+        scan = BlobTarScan(CHANGED_BLOBS_DIR)
+        for at in range(0, len(stream), 64 * 1024):
+            scan.write(stream[at : at + 64 * 1024])
+        results = scan.close()
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert results == {
+        _blob_id(clean): None,
+        _blob_id(keyed): "github_token",
+        _blob_id(b"the real content\n"): False,
+        "f" * 40: False,
+    }
+    # A few chunks, whatever the stream's size: the bytes are never kept.
+    assert peak < 8 * collected.SCAN_CHUNK
+    assert peak < len(stream) // 2
+    # A stream cut short: the blob it cut does not hash and is not scanned, and the ones
+    # that never arrived are absent, so the gate waits on both.
+    scan = BlobTarScan(CHANGED_BLOBS_DIR)
+    scan.write(stream[: len(stream) // 2])
+    cut = scan.close()
+    assert cut.get(_blob_id(clean), False) is False
+    assert _blob_id(keyed) not in cut
+
+
+def test_results_a_provider_scanned_itself_stand_in_for_files_on_disk(tmp_path: Path) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "diff.patch").write_bytes(b"diff\n")
+    keyed, clean, gone = "a" * 40, "b" * 40, "c" * 40
+    (output / "diff-raw.txt").write_bytes(
+        _raw_record(keyed, "z.txt") + _raw_record(clean, "a.txt") + _raw_record(gone, "lost.txt")
+    )
+    found, unscanned = scan_changed_content(
+        output, {keyed: "github_token", clean: None, "d" * 40: "jwt"}
+    )
+    assert found == (SecretMatch(path="diff:z.txt", pattern="github_token"),)
+    assert unscanned == ("lost.txt",)
+    assert not (output / CHANGED_BLOBS_DIR).exists()
+
+
+async def test_kubernetes_scans_a_large_blob_without_a_second_copy_in_the_archive(
+    monkeypatch: Any,
+) -> None:
+    """The bundle carries a new blob once. A 130 MiB clean binary used to fit the 256 MiB
+    archive; a second copy under changed-blobs pushed it over before no_secrets ran."""
+    api, _registry, provider = build()
+    launch = spec()
+    workspace = await provider.prepare(launch)
+    handle = await provider.launch(workspace, launch)
+    observation = await provider.observe(handle)
+    while observation.state is ObservationState.RUNNING:
+        observation = await provider.observe(handle)
+    content = bytes(range(256)) * 2400 + KEY.encode() + b"\n"
+    blob = _blob_id(content)
+    claim = api.claims["ws-01attempt0000000000000000a"]
+    claim["output/work_branch.bundle"] = b"\xff" * len(content)
+    claim[f"output/{CHANGED_BLOBS_DIR}/{blob}"] = content
+    claim["output/diff-raw.txt"] = _raw_record(blob, "big.bin")
+    # The archive holds the bundle and the small files; the archive and the blob
+    # together would not fit.
+    monkeypatch.setattr(kubernetes_module, "OUTPUT_READ_LIMIT", len(content) + 64 * 1024)
+    outputs = await provider.collect(handle, workspace, launch)
+    assert outputs.diff_unscanned == ()
+    assert SecretMatch(path="diff:big.bin", pattern="github_token") in (outputs.diff_findings or ())
+    # The blob stream has its own bound, and a stream cut at it fails the collection.
+    monkeypatch.setattr(kubernetes_module, "CHANGED_BLOBS_READ_LIMIT", len(content) // 2)
+    with pytest.raises(CollectionFailedError, match="changed blobs exceeded"):
+        await provider.collect(handle, workspace, launch)

@@ -267,7 +267,9 @@ DIFF_ARTIFACT_CAP_BYTES = 4 * 1024 * 1024
 REVIEW_DIFF_DIR = "crucible-review"
 
 # hades #398: every blob the worker added or changed, by object id, for the secret
-# scanner. Unbounded on purpose: every byte the worker added or changed is scanned.
+# scanner. Unbounded on purpose: every byte the worker added or changed is scanned. The
+# bundle carries each of these once already, so the Kubernetes reader keeps them out of
+# the output archive and streams them through the scanner on their own (26).
 CHANGED_BLOBS_DIR = "changed-blobs"
 
 # Every diff the collector runs: no textconv, no external diff driver. Never `--text`
