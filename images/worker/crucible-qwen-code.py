@@ -26,7 +26,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-QWEN = "/usr/local/bin/qwen"
+# The CLI the image installs; a unit test points this at a fake binary.
+QWEN = os.environ.get("CRUCIBLE_QWEN_BINARY") or "/usr/local/bin/qwen"
 DEFAULT_REPORT_DIR = "/crucible/report"
 MAX_COMMANDS = 50
 MAX_COMMITS = 50
@@ -69,7 +70,7 @@ def write_settings(
     }
     if max_output_tokens > 0:
         generation["samplingParams"] = {"max_tokens": max_output_tokens}
-    settings = {
+    settings: dict[str, object] = {
         "tools": {
             "shell": {"enableInteractiveShell": False},
             "useBuiltinRipgrep": False,

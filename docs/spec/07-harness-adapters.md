@@ -23,9 +23,12 @@ values, only names that the provider resolves from mounts), mounts, working
 dir, user, resource limits, network mode, expected exit semantics.
 
 `ExitClass` is the one enum used by contracts, policies, and 16:
-`completed`, `completed_without_report`, `blocked`, `environment`,
+`completed`, `completed_without_report`, `ended_by_budget`, `blocked`, `environment`,
 `auth_failure`, `infrastructure`, `provider_error`, `quota_exhausted`, `timeout`, `stalled`,
-`killed`, `crashed`, `lost`, `incomplete`, `unknown`. `infrastructure` (hades #353, #346) is
+`killed`, `crashed`, `lost`, `incomplete`, `unknown`. `ended_by_budget` (hades #498) is
+a stop on the attempt's time limit or the harness's turn limit with commits on the
+branch: a normal end, collected and gated like a completed run; the class only says
+how the run ended. `infrastructure` (hades #353, #346) is
 a model call the gateway or provider failed (502, 503, 504, refused, reset, at capacity)
 as each adapter reads it from its own CLI's error events, or a worker whose container
 never started; it is retried under its own budget, never consumes an attempt, and is
@@ -294,8 +297,9 @@ bumping a pin without renaming the fixtures fails the test with a clear
 
 `/crucible/report/report.yaml` is parsed against `CompletionClaimV1` from
 the collector's copy (08), after Crucible has filled the fact fields from its
-own evidence (11, hades #215). A missing file with exit 0 is
-`completed_without_report`. A file that is present but does not parse is
+own evidence (11, hades #215). A missing file with exit 0 and no commit is
+`completed_without_report`; with commits on the branch the exit is `completed` and
+the missing report is advisory (hades #498). A file that is present but does not parse is
 recorded as `report_parse_failed` with the parser's errors and
 `report_present` true; it is never recorded as "no report". Either way the
 report gate fails hard and neither is a success; what differs is that the
@@ -425,7 +429,7 @@ launch, credential synchronization, and its concurrency cap of one are unchanged
 ### Qwen Code (`qwen_code`, 0.25.0)
 
 The local-only adapter launches `crucible-qwen-code`, which writes settings and
-execs `qwen --yolo --auth-type openai --advisor off --output-format stream-json
+runs `qwen --yolo --auth-type openai --advisor off --output-format stream-json
 --max-session-turns 300 "<IDENTITY>"`. The full IDENTITY.md precedes the pointer
 prompt, including the requirement to write `report.yaml` as CompletionClaimV1.
 CLI success prose is never substituted for that report. `OPENAI_BASE_URL` names
@@ -433,7 +437,21 @@ the gateway and `OPENAI_MODEL` the routed lane (`model_name` when configured).
 The adapter mounts Hermes's existing `api-key` read-only and resolves it as
 `OPENAI_API_KEY` at container start, with no credential sync-back.
 
-The fresh home gets `~/.qwen/settings.json` with two model settings:
+The wrapper passes Qwen's stream-json stdout through line by line (the provider's
+launch wrapper is still the transcript writer), forwards SIGTERM and SIGINT, and
+keeps Qwen's exit status. After the run (hades #498) it looks in
+`CRUCIBLE_QWEN_REPORT_DIR` (the report mount) for `report.yaml` or `blocked.md`
+and, finding neither, writes a minimal `report.yaml` from the run log: how the run
+ended (the result event's subtype and the exit code), the shell commands the model
+ran, and the commits made during the run (`git log` from the head at start). It
+carries `schema_version`, `summary` and one `limitations` line and nothing judged,
+so Hades lists it for the reviewer under `report_present` and composes the
+completion record from its own evidence. The wrapper never writes over a report or
+a `blocked.md` the model left.
+
+The fresh home gets `~/.qwen/settings.json`, mirroring the Hermes launch
+(`--ignore-rules --safe-mode --toolsets terminal,file`, thinking and
+`model.max_tokens`):
 
 - `model.maxToolCallsPerTurn: 0` disables the per-turn tool-call cap that stopped
   10 of the 44 replay runs in #448.
@@ -441,7 +459,22 @@ The fresh home gets `~/.qwen/settings.json` with two model settings:
   routing entry's positive integer `context_length`, or **131072** by default.
   Qwen 0.25.0 clamps output to the room left in this window, including its safety
   margin, preventing a 32000-token output reservation beyond the engine limit.
-  The effective value is recorded on the attempt and reused on reconstruction.
+- `model.generationConfig.enable_thinking: false` (`CRUCIBLE_QWEN_THINKING`, always
+  `false` for Qwen) and `model.generationConfig.samplingParams.max_tokens`
+  (`CRUCIBLE_QWEN_MAX_OUTPUT_TOKENS`, the saved Local gateway `max_output_tokens`,
+  default **32000**): thinking off and the response cap (hades #498).
+- `tools.core` allows the file and shell tools only (`list_directory`, `read_file`,
+  `read_many_files`, `glob`, `search_file_content`, `write_file`, `edit`/`replace`,
+  `run_shell_command`) and `tools.exclude` names `task` (sub-agents), `skill`,
+  `save_memory`, `web_fetch`, `web_search` and `todo_write`; no MCP server is
+  configured in the fresh home.
+- `context.fileName` names a file no checkout carries, so `QWEN.md` and `AGENTS.md`
+  are not loaded as rules, and `context.loadMemoryFromIncludeDirectories` is false:
+  the identity is the only instruction source, as under Hermes's `--ignore-rules`.
+
+The window, the response cap and the thinking setting are resolved once per attempt
+and recorded as the attempt's `effective_settings`, the same three keys the Hermes
+record carries; a later spec of the same attempt reuses the record.
 
 Shell execution uses child_process rather than optional native PTY addons; search
 uses the image's pinned ripgrep. The npm bundle is extracted without resolving

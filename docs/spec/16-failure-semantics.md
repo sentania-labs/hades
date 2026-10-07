@@ -9,12 +9,13 @@
 | `environment` | exit 70, the provider failed before the harness ran, the kernel killed the worker out of memory (exit 137 with the daemon's OOM flag), or the harness was refused | retry if attempts remain; else `failed`. A harness refusal (07, 25) is the exception: it is never retried, because the same refusal would come back |
 | `auth_failure` | harness reported auth problem (adapter classified) | retry per policy (`retry.auth_failure_max`, after `auth_retry_delay_seconds`); wake regardless |
 | `quota_exhausted` | harness reported rate or quota limit | reroute (below): mark the pool, commit WIP, new attempt on the next candidate in the tier; if none, `awaiting_quota` until the earliest reset; caps exceeded or task pinned to the exhausted pool: task `reported` with the class visible, wake |
-| `timeout` | contract timeout | no retry; gates run on what exists; wake |
+| `timeout` | contract timeout with no commit on the branch; with commits the exit is `ended_by_budget` (hades #498) | no retry; gates run on what exists; wake |
+| `ended_by_budget` | the attempt's time limit or the harness's turn limit stopped the run with commits on the branch (hades #498) | a normal end, not a failure: the bundle is collected and the same gates run as for `completed`; passing gates publish, failing ones go to correction; no retry consumed, no wake for the stop itself |
 | `stalled` | Crucible ended the worker for a stall (below) | as `timeout`: no retry; gates run on what exists; wake (`timed_out`) |
 | `killed` | terminated by request | `cancelled` |
 | `crashed` | non-zero exit not otherwise classified | no retry by default; wake |
 | `lost` | provider cannot find the worker | retry if attempts remain and policy allows `lost`; else `failed` |
-| `completed_without_report` | exit 0, no report | report gate fails; no retry; wake |
+| `completed_without_report` | exit 0, no report and no commit on the branch; with commits the exit is `completed` and the missing report is advisory (hades #498) | the work gates fail (`commits_present`); no retry; wake |
 | `incomplete` | the harness exited cleanly while its own transcript shows a command it was waiting on cut off by the exit (07, issue 128): today only Claude Code's auto-background, a Bash call the CLI moved to the background on its own | attempt `failed`, never a completion, whatever the report claims; the cut-off commands are on `attempt_collected` as `work_in_flight`; no retry, as for `crashed`. A background process the worker chose to leave running (a server, a Codex session it did not poll, a Hermes `background=true` process) is not `incomplete` and is not recorded: it dies with the sandbox, and unfinished work is caught by the pre-PR gates and CI (issue 153) |
 
 A stall is `stalled`, with termination reason `stall` (FDY-0140; it was
