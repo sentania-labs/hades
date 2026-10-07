@@ -27,7 +27,7 @@ from crucible.application.errors import ConflictError, ContractValidationError
 from crucible.application.policies import put_policy, put_routing_policy
 from crucible.domain.cluster_egress import format_labels, parse_labels
 from crucible.domain.entities import Principal, Role
-from crucible.domain.gates import ALWAYS_BLOCKING_GATES, PRE_PR_GATES
+from crucible.domain.gates import ALWAYS_ADVISORY_GATES, ALWAYS_BLOCKING_GATES, PRE_PR_GATES
 from crucible.domain.secrets import scan_text
 
 router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
@@ -419,7 +419,9 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                             "kind": "checkbox",
                             "value": gate in classes["advisory"],
                         }
-                        for gate in sorted(PRE_PR_GATES - ALWAYS_BLOCKING_GATES)
+                        for gate in sorted(
+                            PRE_PR_GATES - ALWAYS_BLOCKING_GATES - ALWAYS_ADVISORY_GATES
+                        )
                     ]
                     + [{"name": "reason", "label": "Reason", "required": True}],
                 },

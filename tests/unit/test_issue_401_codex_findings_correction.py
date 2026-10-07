@@ -241,10 +241,12 @@ def test_failed_report_does_not_record_dispositions_or_reply_before_retry(
 
 
 @pytest.mark.parametrize("conflicting", [False, True])
-def test_duplicate_finding_ids_are_rejected_with_ids_named(
+def test_duplicate_finding_ids_are_advisory_and_not_recorded(
     monkeypatch: pytest.MonkeyPatch, conflicting: bool
 ) -> None:
-
+    """hades #498: a finding dispositioned twice is named for the reviewer and none of
+    its dispositions is recorded; the attempt still succeeds and the other finding's
+    disposition is recorded."""
     supervisor, pending, uow, _, dispositions = _report_attempt(monkeypatch)
     reported = _dispositions()
     reported.append(
@@ -258,10 +260,17 @@ def test_duplicate_finding_ids_are_rejected_with_ids_named(
         CollectedOutputs(report=_report(reported), report_raw=None, blocked_md=None),
     )
     claim = uow.claims.get(pending.attempt.id)
-    assert not claim.parsed_ok
-    assert any("duplicate ids: finding-1" in error["msg"] for error in claim.parse_errors)
-    assert pending.attempt.state is AttemptState.FAILED
-    assert dispositions == []
+    assert claim.parsed_ok and claim.parse_errors == []
+    assert pending.attempt.state is AttemptState.SUCCEEDED
+    assert [d.review_comment_id for d in dispositions] == ["finding-2"]
+    row = next(
+        row
+        for row in uow.evidence.list_for_attempt(pending.attempt.id)
+        if row.payload.get("role") == "completion_claim"
+    )
+    assert row.payload["advisory"] == [
+        "the report dispositions finding-1 more than once; Hades recorded none of those"
+    ]
 
 
 def test_connector_refusal_wakes_without_scheduling_a_correction(

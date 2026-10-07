@@ -3051,7 +3051,7 @@ def test_advisory_gates_through_api_cli_and_ui(
         "run_evidence_present",
         "scope_contained",
     ]
-    assert first["always_advisory"] == ["commit_policy"]
+    assert first["always_advisory"] == ["commit_policy", "report_present"]
     assert "no_secrets" in first["blocking"] and "internal_review_recorded" in first["blocking"]
     start = first["policy"]["version"]
 
@@ -3064,7 +3064,8 @@ def test_advisory_gates_through_api_cli_and_ui(
     assert not saved.json()["default"]
     assert "scope_contained" in saved.json()["blocking"]
     stored = admin_client.get(f"/v1/policies/default-software/{start + 1}").json()["document"]
-    assert stored["gates"]["advisory"] == ["report_present"]
+    # hades #498: report_present is always advisory and is not stored in the list.
+    assert stored["gates"]["advisory"] == []
     previous = admin_client.get(f"/v1/policies/default-software/{start}").json()["document"]
 
     def rest(document: dict[str, Any]) -> dict[str, Any]:
@@ -3118,6 +3119,7 @@ def test_advisory_gates_through_api_cli_and_ui(
         assert 'name="advisory_ci_unchanged" value="true" checked' in page.text
         assert 'name="advisory_internal_review_recorded"' not in page.text
         assert 'name="advisory_no_secrets"' not in page.text
+        assert 'name="advisory_report_present"' not in page.text
         ui_saved = browser.post(
             "/ui/actions/gate-classes",
             data={
@@ -3165,7 +3167,8 @@ async def test_the_tasks_page_marks_each_gate_and_lists_what_is_for_the_reviewer
         client, "crucible-worker:fake-out-of-scope", deliverables=ARTIFACTS_DELIVERABLE
     )
     supervisor = make_supervisor(ctx, provider)
-    assert await run_to_settled(supervisor, client, task_id) == "pre_pr_gates_failed"
+    # hades #498: both failures are advisory, so the task waits for its reviewer.
+    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
     with TestClient(create_app(ctx)) as browser:
         ui_sign_in(browser, tokens["admin"])
         page = html.unescape(browser.get("/ui/tasks").text)
