@@ -769,8 +769,12 @@ Recorded here so the prerequisite is a checklist, not folklore; each item
 is verified by the namespace readiness probe or the e2e tier and shown on
 the status page.
 
-1. The two namespaces exist; `crucible-workers` has Pod Security admission
-   at `restricted` and a default-deny NetworkPolicy.
+1. The namespaces exist; `crucible-workers` has Pod Security admission
+   at `restricted` and a default-deny NetworkPolicy. `crucible-buildkit` (hades
+   #475) holds Hades's own rootless BuildKit alone, at `privileged` because its
+   documented Pod is unconfined, with an ingress policy that admits only
+   `crucible-workers`; a worker reaches it through the per-attempt rule below
+   only when its contract requires both image checks.
 2. The CNI enforces egress NetworkPolicy (the canary must fail to reach the
    API server), and the worker rules match on it: the canary must resolve a
    cluster name and reach the enabled local endpoint. On a CNI that translates

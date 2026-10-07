@@ -387,7 +387,8 @@ def test_worker_node_and_qwen_pins_are_checksum_verified() -> None:
     builder = (root / "images/build.sh").read_text()
     for name in ("NODE_VERSION", "NODE_SHA256"):
         assert f"ARG {name}={pins[name]}" in dockerfile
-        assert f'--build-arg "{name}=${name}"' in builder
+        # hades #475: one `arg_names` list feeds both builders' --build-arg flags.
+        assert name in builder.split("arg_names=(", 1)[1].split(")", 1)[0].split()
     assert pins["NODE_VERSION"].startswith("22.")
     assert "ARG HARNESS_QWEN_CODE_VERSION=0.25.0" in dockerfile
     assert "ADD --checksum=sha256:${NODE_SHA256}" in dockerfile

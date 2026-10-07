@@ -1,12 +1,36 @@
-# Hades's private image builder. The image is the BUILDKIT_IMAGE pin from
-# images/pins.env; TLS is intentionally disabled because only attempt NetworkPolicies
-# selected by Hades can reach this ClusterIP.
+# Hades's private image builder (hades #475): the BuildKit a worker or a verifier Pod
+# builds the worker images through when its contract requires `make images-check`, so
+# the reproducibility check runs inside Hades and not on the lab's shared CI builder.
+#
+# The image is the BUILDKIT_ROOTLESS_IMAGE pin from images/pins.env: the `-rootless`
+# variant of the BuildKit release the worker's `buildctl` comes from, which starts
+# buildkitd through RootlessKit as uid 1000. The plain daemon image CI's
+# docker-container builder runs (BUILDKIT_IMAGE) expects to be root and cannot start
+# under this security context.
+#
+# The security context is the one BuildKit documents for Kubernetes
+# (examples/kubernetes/*.rootless.yaml upstream): non-root uid 1000, seccomp and AppArmor
+# unconfined because RootlessKit unshares user and mount namespaces and mounts overlays,
+# `--oci-worker-no-process-sandbox` because a PID namespace cannot be unshared without
+# `privileged`, and never `privileged`. Privilege escalation stays allowed on this one
+# container: newuidmap and newgidmap are setuid and are how RootlessKit maps /etc/subuid,
+# so a build can create files owned by other users (apt's _apt, dpkg's package owners).
+# Nothing here reaches the node: no hostPath, no host namespace, no Docker socket.
+#
+# TLS is off on purpose. The port is a ClusterIP in a namespace whose own NetworkPolicy
+# admits only `crucible-workers`, and a worker reaches it only through the per-attempt
+# egress rule the provider writes (26), so the policies are the trust boundary.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: crucible-buildkit-cache
-  namespace: crucible
+  namespace: crucible-buildkit
+  labels:
+    app.kubernetes.io/name: crucible-buildkit
 spec:
+  # The layer cache. 50 GiB is the documented default (docs/deployment.md): the two
+  # worker images and their fetch stages, with room for a pin bump beside the last
+  # build. A deployer sizes it in the overlay; BuildKit prunes within what it has.
   accessModes: [ReadWriteOnce]
   resources:
     requests:
@@ -16,7 +40,9 @@ apiVersion: v1
 kind: Service
 metadata:
   name: crucible-buildkit
-  namespace: crucible
+  namespace: crucible-buildkit
+  labels:
+    app.kubernetes.io/name: crucible-buildkit
 spec:
   type: ClusterIP
   selector:
@@ -30,9 +56,14 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: crucible-buildkit
-  namespace: crucible
+  namespace: crucible-buildkit
+  labels:
+    app.kubernetes.io/name: crucible-buildkit
 spec:
   replicas: 1
+  # One daemon owns the cache claim; a rollout stops the old one first.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: crucible-buildkit
@@ -41,6 +72,7 @@ spec:
       labels:
         app.kubernetes.io/name: crucible-buildkit
       annotations:
+        # The pre-1.30 spelling of the container's appArmorProfile below.
         container.apparmor.security.beta.kubernetes.io/buildkitd: unconfined
     spec:
       automountServiceAccountToken: false
@@ -49,20 +81,30 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: Unconfined
       containers:
         - name: buildkitd
-          image: moby/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
-          args: [--addr, tcp://0.0.0.0:1234, --oci-worker-no-process-sandbox]
+          # images/pins.env BUILDKIT_ROOTLESS_IMAGE; a unit test keeps the two equal.
+          image: moby/buildkit:v0.33.0-rootless
+          args:
+            - --addr
+            - tcp://0.0.0.0:1234
+            - --oci-worker-no-process-sandbox
           ports:
             - name: buildkit
               containerPort: 1234
           readinessProbe:
             exec:
               command: [buildctl, --addr, tcp://127.0.0.1:1234, debug, workers]
-            initialDelaySeconds: 3
-            periodSeconds: 5
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: [buildctl, --addr, tcp://127.0.0.1:1234, debug, workers]
+            initialDelaySeconds: 30
+            periodSeconds: 30
           resources:
             requests:
               cpu: 500m
@@ -72,11 +114,9 @@ spec:
               memory: 8Gi
           securityContext:
             privileged: false
-            allowPrivilegeEscalation: false
+            allowPrivilegeEscalation: true
             appArmorProfile:
               type: Unconfined
-            capabilities:
-              drop: [ALL]
           volumeMounts:
             - name: cache
               mountPath: /home/user/.local/share/buildkit

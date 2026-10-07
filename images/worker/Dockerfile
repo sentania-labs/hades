@@ -155,8 +155,9 @@ ADD --checksum=sha256:${CRANE_SHA256} --chmod=0644 \
     https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz \
     /fetch/crane.tar.gz
 # The archives' own entry mtimes are pinned by their sha256, so what is extracted from
-# them is fixed; the two binaries moved into place are touched to the epoch like every
-# other fetched binary, and nothing keeps the archive's owner.
+# them is fixed; the binaries moved into place are touched to the epoch like every
+# other fetched binary, and nothing keeps the archive's owner. buildctl and crane
+# (hades #475) are what `make images-check` and `make registry-check` run in a worker.
 RUN set -eu; \
     mkdir -p /fetch/bin /fetch/opt; \
     tar -xzf /fetch/uv.tar.gz -C /fetch --no-same-owner uv-x86_64-unknown-linux-gnu/uv; \
@@ -164,14 +165,14 @@ RUN set -eu; \
     tar -xzf /fetch/gitleaks.tar.gz -C /fetch/bin --no-same-owner gitleaks; \
     tar -xzf /fetch/buildkit.tar.gz -C /fetch --no-same-owner bin/buildctl; \
     tar -xzf /fetch/crane.tar.gz -C /fetch/bin --no-same-owner crane; \
-    mv /fetch/bin/buildctl /fetch/bin/buildctl.tmp; \
-    mv /fetch/bin/buildctl.tmp /fetch/bin/buildctl; \
     chmod 0755 /fetch/bin/uv /fetch/bin/gitleaks /fetch/bin/buildctl /fetch/bin/crane; \
     touch -h -d "@${SOURCE_DATE_EPOCH}" /fetch/bin/uv /fetch/bin/gitleaks /fetch/bin/buildctl /fetch/bin/crane; \
     tar -xzf /fetch/cpython.tar.gz -C /fetch/opt --no-same-owner; \
     test "$(/fetch/opt/python/bin/python3.12 -B -c 'import platform; print(platform.python_version())')" = "${CPYTHON_VERSION}"; \
     test "$(/fetch/bin/uv --version | cut -d' ' -f2)" = "${UV_VERSION}"; \
-    test "$(/fetch/bin/gitleaks version)" = "${GITLEAKS_VERSION}"
+    test "$(/fetch/bin/gitleaks version)" = "${GITLEAKS_VERSION}"; \
+    test "$(/fetch/bin/buildctl --version | cut -d' ' -f3)" = "v${BUILDCTL_VERSION}"; \
+    test "$(/fetch/bin/crane version)" = "${CRANE_VERSION}"
 
 FROM ${BASE_IMAGE}
 # Declared here so it reaches the RUN below: useradd stamps /etc/shadow with

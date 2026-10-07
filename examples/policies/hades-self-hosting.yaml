@@ -17,6 +17,16 @@
 # before that field existed, such as the lab's version 1, has no list and takes the same
 # default when it is read, so it behaves as this file does without being rewritten.
 #
+# Version 2 (hades #475, 2026-10-07) lists the image_checks_required pre-PR gate: a
+# diff under images/ or tools/images/ fails unless the contract's required_verification
+# names both `make images-check` and `make registry-check`, which a worker runs against
+# Hades's own rootless BuildKit. It is a new version because a referenced version is
+# immutable: an installation that ran a task under its version 1 uploads this document
+# as the next number it has free (the path below), and a version from before the gate
+# existed keeps its stored gate list, so a contract admitted under it is never judged by
+# the gate retroactively. required_programs gains buildctl and crane for the same
+# reason.
+#
 # routing.policy must name the routing policy the default-software in force names, or
 # this policy routes against an older model roster. Read it and fill it in at upload:
 #
@@ -28,11 +38,13 @@
 # version of this policy too.
 schema_version: '1.0'
 name: hades-self-hosting
-version: 1
+version: 2
 description: 'Tasks against sentania-labs/hades from a worker (hades #184): the required
   checks are make lint, make test-unit and make scan, which run in the worker image with
   no Docker and no Postgres. The integration and e2e tiers need both and are left to
-  branch CI, which stays the full proof of record (operator decision, 2026-09-28).'
+  branch CI, which stays the full proof of record (operator decision, 2026-09-28). Version
+  2 (hades #475) adds the image_checks_required gate: a change under images/ must also
+  require make images-check and make registry-check, run against Hades''s own BuildKit.'
 limits:
   timeout_seconds:
     min: 300

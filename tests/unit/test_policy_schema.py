@@ -123,7 +123,8 @@ def test_the_self_hosting_policy_is_default_software_with_the_worker_checks() ->
     document = yaml.safe_load(SELF_HOSTING.read_text())
     policy = parse_policy(document)
     document = _without_advisory(document)
-    assert (policy.name, policy.version) == ("hades-self-hosting", 1)
+    # Version 2 since hades #475: a referenced version is immutable, and the gate is new.
+    assert (policy.name, policy.version) == ("hades-self-hosting", 2)
     assert policy.repository.required_checks == ["make lint", "make test-unit", "make scan"]
     assert {"uv", "python3.12", "gitleaks"} <= set(policy.repository.required_programs)
     assert {"pypi.org", "files.pythonhosted.org"} <= set(policy.network.egress_allowlist)

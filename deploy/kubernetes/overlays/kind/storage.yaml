@@ -41,3 +41,15 @@ spec:
         resources:
           requests:
             storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: crucible-buildkit-cache
+  namespace: crucible-buildkit
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 10Gi

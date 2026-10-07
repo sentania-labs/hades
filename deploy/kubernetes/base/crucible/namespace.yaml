@@ -14,9 +14,7 @@ metadata:
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: control-plane
-    # Rootless BuildKit needs unconfined seccomp and AppArmor, scoped to that Pod.
-    # Baseline admits that documented rootless shape while still refusing privileged.
-    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: latest
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/audit-version: latest

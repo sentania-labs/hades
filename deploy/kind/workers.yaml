@@ -1,28 +1,56 @@
+# Hades's own rootless BuildKit on the kind tier (hades #475): the same namespace,
+# admission labels, ingress policy, claim, Service and Deployment as
+# deploy/kubernetes/base/buildkit, with kind's `standard` storage class and a smaller
+# claim. The image is the BUILDKIT_ROOTLESS_IMAGE pin from images/pins.env; the node
+# pulls it from Docker Hub through the mirror tools/kind/cluster.sh configures.
+# tests/e2e/test_kind_self_hosting.py waits for this rollout before it submits the task
+# whose worker runs `make images-check` against it.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: crucible
+  name: crucible-buildkit
   labels:
-    pod-security.kubernetes.io/enforce: baseline
+    app.kubernetes.io/name: crucible
+    app.kubernetes.io/component: buildkit
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: crucible-buildkit
+  namespace: crucible-buildkit
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: crucible-buildkit}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: crucible-workers}
+      ports: [{protocol: TCP, port: 1234}]
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: crucible-buildkit-cache
-  namespace: crucible
+  namespace: crucible-buildkit
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: standard
   resources:
     requests:
-      storage: 50Gi
+      storage: 10Gi
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: crucible-buildkit
-  namespace: crucible
+  namespace: crucible-buildkit
 spec:
+  type: ClusterIP
   selector: {app.kubernetes.io/name: crucible-buildkit}
   ports: [{name: buildkit, port: 1234, targetPort: buildkit}]
 ---
@@ -30,9 +58,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: crucible-buildkit
-  namespace: crucible
+  namespace: crucible-buildkit
 spec:
   replicas: 1
+  strategy: {type: Recreate}
   selector:
     matchLabels: {app.kubernetes.io/name: crucible-buildkit}
   template:
@@ -47,24 +76,24 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile: {type: Unconfined}
       containers:
         - name: buildkitd
-          image: moby/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+          image: moby/buildkit:v0.33.0-rootless
           args: [--addr, tcp://0.0.0.0:1234, --oci-worker-no-process-sandbox]
           ports: [{name: buildkit, containerPort: 1234}]
           readinessProbe:
             exec: {command: [buildctl, --addr, tcp://127.0.0.1:1234, debug, workers]}
-            initialDelaySeconds: 3
-            periodSeconds: 5
+            initialDelaySeconds: 5
+            periodSeconds: 10
           resources:
             requests: {cpu: 500m, memory: 1Gi}
             limits: {cpu: "4", memory: 8Gi}
           securityContext:
             privileged: false
-            allowPrivilegeEscalation: false
+            allowPrivilegeEscalation: true
             appArmorProfile: {type: Unconfined}
-            capabilities: {drop: [ALL]}
           volumeMounts:
             - {name: cache, mountPath: /home/user/.local/share/buildkit}
       volumes:
