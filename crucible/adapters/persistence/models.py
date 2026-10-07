@@ -432,6 +432,21 @@ class DecisionRow(Base):
     created_at: Mapped[datetime] = mapped_column(TZ)
 
 
+class TaskNoteRow(Base):
+    """An operator's note on a task (hades #489, 0051_task_notes)."""
+
+    __tablename__ = "task_notes"
+    __table_args__ = (Index("ix_task_notes_task_created", "task_id", "created_at"),)
+    id: Mapped[str] = mapped_column(ID, primary_key=True)
+    task_id: Mapped[str] = mapped_column(ID, ForeignKey("tasks.id"))
+    principal_id: Mapped[str] = mapped_column(ID, ForeignKey("principals.id"))
+    author: Mapped[str] = mapped_column(String(128))
+    # Declared before `text`, whose name shadows SQLAlchemy's `text()` in this body.
+    verbatim: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TZ)
+
+
 class ReviewDispositionRow(Base):
     __tablename__ = "review_dispositions"
     __table_args__ = (

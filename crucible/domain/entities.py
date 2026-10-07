@@ -386,6 +386,21 @@ class Decision:
 
 
 @dataclass(slots=True)
+class TaskNote:
+    """An operator's note on a task (hades #489): who wrote it, when, and the words as
+    typed. `verbatim` says the text is the operator's own words rather than a summary
+    Hades wrote; a note an action applies is the verbatim of that decision in the audit."""
+
+    id: str
+    task_id: str
+    principal_id: str
+    author: str
+    text: str
+    created_at: datetime
+    verbatim: bool = True
+
+
+@dataclass(slots=True)
 class Escalation:
     id: str
     task_id: str

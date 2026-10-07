@@ -28,13 +28,15 @@ MERGED = {"0044_attempt_stall_shape", "0044_editor_leftovers_policy", "0044_merg
 # The single head after the merge. hades #393 added 0046 above it and hades #425 added
 # 0047 above that; hades #389's migration was renumbered to 0047 on top and chains from
 # 0047_attempt_egress_probe so the graph stays linear. hades #176 adds 0048 on top,
-# hades #265 adds 0049 for persisted batch outcomes, then #485 adds 0050 for the cache TTL.
+# hades #265 adds 0049 for persisted batch outcomes, then #485 adds 0050 for the cache TTL,
+# and #489 adds 0051 for operator notes on a task.
 ABOVE = "0046_blocked_reason"
 PROBE = "0047_attempt_egress_probe"
 LAUNCH = "0047_successful_launch_time"
 REBOUND = "0048_repository_rebound"
 BATCH = "0049_repository_batch"
-HEAD = "0050_status_cache"
+CACHE = "0050_status_cache"
+HEAD = "0051_task_notes"
 
 
 def _script() -> ScriptDirectory:
@@ -66,7 +68,9 @@ def test_the_0045_merge_joins_the_three_0044_heads() -> None:
     assert rebound is not None and rebound.down_revision == LAUNCH
     batch = script.get_revision(BATCH)
     assert batch is not None and batch.down_revision == REBOUND
-    assert head is not None and head.down_revision == BATCH
+    cache = script.get_revision(CACHE)
+    assert cache is not None and cache.down_revision == BATCH
+    assert head is not None and head.down_revision == CACHE
 
 
 def test_the_cli_config_sees_the_same_single_head() -> None:
@@ -94,7 +98,7 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
         plan = [step.revision.revision for step in script._upgrade_revs("head", head)]
         assert plan.index("0043_credential_mount_mode") < plan.index("0044_merge_423_424")
         assert plan.index("0044_merge_423_424") < plan.index(MERGE)
-        assert plan[-7:] == [MERGE, ABOVE, PROBE, LAUNCH, REBOUND, BATCH, HEAD]
+        assert plan[-8:] == [MERGE, ABOVE, PROBE, LAUNCH, REBOUND, BATCH, CACHE, HEAD]
 
 
 def test_0043_credential_mount_mode_keeps_the_kinds_the_live_check_permits() -> None:
