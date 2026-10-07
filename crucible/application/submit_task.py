@@ -92,14 +92,16 @@ def _check_routing(
             harness=pinned_harness.value,
             model_id=pinned_model,
         )
-        entry = routing.model(pinned_model)
+        entry = routing.model(pinned_model, pinned_harness.value)
         if (
             entry is not None
             and (entry.endpoint == "local" or entry.pool in routing.local_pools())
             and not task_specific_checks(to_document(contract), policy.document)
         ):
             problems.append(_problem("execution_request.model", "no task-specific check"))
-        quota = check_quota(uow, routing, model_id=pinned_model, now=clock.now())
+        quota = check_quota(
+            uow, routing, model_id=pinned_model, harness=pinned_harness.value, now=clock.now()
+        )
         if quota is not None:
             problems.append(quota)
         image = image_for_harness(uow, pinned_harness.value, request.provider.value)

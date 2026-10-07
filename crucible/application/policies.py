@@ -176,7 +176,13 @@ def get_policy(uow: UnitOfWork, *, name: str, version: int) -> Policy:
     return policy
 
 
-def validate_routing_policy(document: object, *, name: str, version: int) -> RoutingPolicyV1:
+def validate_routing_policy(
+    document: object,
+    *,
+    name: str,
+    version: int,
+    local_model_listing: list[str] | None = None,
+) -> RoutingPolicyV1:
     try:
         routing = RoutingPolicyV1.model_validate(document)
     except ValidationError as exc:
@@ -188,6 +194,19 @@ def validate_routing_policy(document: object, *, name: str, version: int) -> Rou
         problems.append({"path": "name", "message": f"the path says {name!r}"})
     if routing.version != version:
         problems.append({"path": "version", "message": f"the path says {version}"})
+    if local_model_listing is not None:
+        listed = set(local_model_listing)
+        for index, entry in enumerate(routing.models):
+            if entry.endpoint == "local" and entry.model not in listed:
+                problems.append(
+                    {
+                        "path": f"models.{index}.model",
+                        "message": (
+                            f"unknown local model {entry.model!r}; the gateway listing "
+                            f"checked at publish time was {sorted(listed)!r}"
+                        ),
+                    }
+                )
     if problems:
         raise ContractValidationError("routing policy failed validation", errors=problems)
     return routing
@@ -203,9 +222,12 @@ def put_routing_policy(
     document: object,
     reason: str | None = None,
     extra: Mapping[str, Any] | None = None,
+    local_model_listing: list[str] | None = None,
 ) -> RoutingPolicyRecord:
     """`extra` joins the event payload: a publish records its delta there (hades #437)."""
-    routing = validate_routing_policy(document, name=name, version=version)
+    routing = validate_routing_policy(
+        document, name=name, version=version, local_model_listing=local_model_listing
+    )
     existing = uow.routing_policies.get(name, version)
     if existing is not None and uow.routing_policies.is_referenced(name, version):
         raise ConflictError(
