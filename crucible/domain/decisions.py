@@ -17,6 +17,8 @@ from crucible.domain.waivers import WAIVER_KINDS
 # ``release_authorization`` authorizes a release (04, 09).
 # ``accept`` accepts the head (04, 09).
 # ``recollect`` recollects the head (09).
+# ``task_cancelled`` / ``task_closed`` are system-recorded kinds used by
+#   cancel_task / close_task to close open escalations when a task ends.
 ACCEPTED_DECISION_KINDS: frozenset[str] = frozenset(
     {
         *WAIVER_KINDS,
@@ -24,6 +26,8 @@ ACCEPTED_DECISION_KINDS: frozenset[str] = frozenset(
         "release_authorization",
         "accept",
         "recollect",
+        "task_cancelled",
+        "task_closed",
     }
 )
 
