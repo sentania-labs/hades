@@ -172,7 +172,11 @@ def _repo(tmp_path: Path, *, agents_md: bool = True) -> Path:
     _commit(repo, "base")
     output = tmp_path / "output"
     output.mkdir()
-    (output / "prepared-base.txt").write_text(_git(repo, "rev-parse", "HEAD"))
+    head = _git(repo, "rev-parse", "HEAD")
+    (output / "prepared-base.txt").write_text(head)
+    # Stand in for the preparer's trusted commit_policy start (hades #230): no prior
+    # work_branch to resume from, so it is the same commit as the base.
+    (output / "prepared-policy-from.txt").write_text(head)
     _git(repo, "checkout", "-q", "-b", "crucible/test")
     return repo
 
