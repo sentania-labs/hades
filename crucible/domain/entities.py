@@ -66,6 +66,11 @@ class Repository:
     # ADR 0019: cloned with a read-only GitHub App installation token rather than with no
     # credential. The picker takes it from GitHub; the registration form states it.
     private: bool = False
+    # hades #343: when the connector last refused a round here. Set the first time a
+    # refusal is observed on any task against this repository; cleared only by an
+    # operator. While set, Crucible stops posting the App's trigger comment on this
+    # repository and wakes the orchestrator instead.
+    codex_review_refused_at: datetime | None = None
 
 
 @dataclass(slots=True)

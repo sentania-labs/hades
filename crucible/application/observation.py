@@ -67,6 +67,7 @@ from crucible.domain.external_review import (
     final_sha_satisfied,
     head_at,
     is_accepted,
+    is_codex_refusal,
     required_rounds,
     reviewer_logins,
 )
@@ -145,9 +146,6 @@ class ObservationResult:
     state: str = ""
     notes: list[str] = field(default_factory=list)
     review_refusal: bool = False
-
-
-CODEX_ACCOUNT_REFUSAL = "to use codex here, create a codex account"
 
 
 def policy_for(uow: UnitOfWork, task: Task) -> dict[str, Any]:
@@ -515,6 +513,18 @@ def record_reviews(
     return signals
 
 
+def mark_codex_refusal_seen(uow: UnitOfWork, clock: Clock, *, pull_request: PullRequest) -> None:
+    """hades #343: the refusal is the provider's repository configuration, not this
+    task's, so it is remembered on the repository, which stops the App's trigger there
+    until an operator clears it. Idempotent: the first refusal records the time, every
+    later one on the same repository is a no-op."""
+    repository = uow.repositories.get(pull_request.repository_id)
+    if repository is None or repository.codex_review_refused_at is not None:
+        return
+    repository.codex_review_refused_at = clock.now()
+    uow.repositories.upsert(repository)
+
+
 def record_comments(
     uow: UnitOfWork,
     clock: Clock,
@@ -557,7 +567,7 @@ def record_comments(
         connector_refusal = (
             comment.kind == "issue_comment"
             and comment.login in allowlist
-            and CODEX_ACCOUNT_REFUSAL in comment.body.lower()
+            and is_codex_refusal(comment.body)
         )
         existing = uow.review_comments.get_by_github(
             pull_request.id, comment.kind, comment.github_id
@@ -657,7 +667,11 @@ def record_comments(
         result.changed = True
         if connector_refusal:
             result.review_refusal = True
-            result.notes.append("the Codex connector refused the review because no account exists")
+            result.notes.append(
+                "the Codex connector's reply was not a review; the round is refused, "
+                "not a comment to disposition"
+            )
+            mark_codex_refusal_seen(uow, clock, pull_request=pull_request)
             continue
         if (
             comment.kind == "review_comment"
@@ -1647,10 +1661,10 @@ def advance_delivery(
             uow,
             clock,
             principal_id=task.principal_id,
-            reason=WakeReason.EXTERNAL_FEEDBACK_RECEIVED,
+            reason=WakeReason.EXTERNAL_REVIEW_TRIGGER_NEEDED,
             summary=(
-                f"external review failed on #{pull_request.number}: the Codex connector "
-                "refused the round because the repository has no Codex account"
+                f"external review failed on {pull_request.url}: the Codex connector's "
+                "reply was not a review; the round must be requested by a person"
             ),
             task=task,
             extra_links={"pull_request": f"/v1/tasks/{task.id}/pull-request"},

@@ -285,6 +285,13 @@ class ExternalReview(StrictModel):
     components: list[str] = Field(default_factory=lambda: ["code"])
     round_counting: str = Field(min_length=1)
     wait_timeout_hours: int = Field(ge=1)
+    # hades #343: whether this repository's provider review starts on its own, with no
+    # person requesting it. False stops Crucible from posting the App's trigger comment
+    # at publication, which the provider only refuses again; Crucible wakes the
+    # orchestrator to ask a person instead. Absent (a version written before the field
+    # existed) reads as the default, automatic, which is what every deployed policy
+    # before hades #343 assumed.
+    automatic: bool = True
 
     @model_validator(mode="after")
     def _logins_when_required(self) -> ExternalReview:

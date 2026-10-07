@@ -49,6 +49,7 @@ from crucible.application.publish import (
     hold_publishing,
     open_review_cycle,
     push_url_for,
+    record_external_review_needs_person,
     record_external_review_requested,
     record_publish_started,
     record_token_minted,
@@ -617,7 +618,7 @@ class DeliveryCoordinator:
                 return False
             await self._host._db(lambda: self._record_pull_request(plan, resolved))
             trigger = external_review_trigger(plan.policy)
-            if trigger is not None:
+            if trigger is not None and not plan.external_review_needs_person:
                 github_step = "external_review_request"
                 previous = await self._host._db(lambda: self._external_review_request(plan))
                 comment = await asyncio.to_thread(
@@ -632,6 +633,11 @@ class DeliveryCoordinator:
                     await self._host._db(
                         lambda: self._record_external_review_request(plan, resolved, comment)
                     )
+            elif plan.external_review_needs_person:
+                # hades #343: the repository's Codex review does not start on its own,
+                # or a refusal was already seen there; Crucible never posts the App's
+                # trigger, which the provider would only refuse again.
+                await self._host._db(lambda: self._record_review_needs_person(plan, resolved))
             await self._host._db(lambda: self._finish(plan, ref=resolved, others=others))
             return True
         except GitHubError as exc:
@@ -920,6 +926,19 @@ class DeliveryCoordinator:
                 plan=plan,
                 pull_request_number=ref.number,
                 comment=comment,
+            )
+            uow.commit()
+
+    def _record_review_needs_person(self, plan: PublishPlan, ref: Any) -> None:
+        with self._host._fenced() as uow:
+            task = uow.tasks.get(plan.task_id, for_update=True)
+            if task is None or task.state is not TaskState.PUBLISHING:
+                return
+            pull_request = uow.pull_requests.get_for_task(task.id)
+            if pull_request is None:
+                return
+            record_external_review_needs_person(
+                uow, self._clock, task=task, pull_request=pull_request
             )
             uow.commit()
 
