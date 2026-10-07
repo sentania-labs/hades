@@ -35,15 +35,15 @@ LANES: tuple[tuple[str, str, str], ...] = (
     (
         "holding_pen",
         "Holding pen",
-        "Approved and proposed work waits here in dispatch order for capacity.",
+        "Approved work waits here in dispatch order for capacity.",
     ),
-    ("inbox", "Inbox", "New intake will arrive here in a later step."),
+    ("inbox", "Inbox", "Proposed work waits here for an operator to approve it."),
     ("wins", "Wins", "Work accepted or merged, with today's wins first."),
     ("graveyard", "Graveyard", "Work that ended without shipping, with its reason."),
 )
 
 LANE_BY_STATE: dict[TaskState, str] = {
-    _S.PROPOSED: "holding_pen",
+    _S.PROPOSED: "inbox",
     _S.SENT_BACK: "holding_pen",
     _S.SUBMITTED: "holding_pen",
     _S.SCHEDULED: "in_progress",
@@ -237,7 +237,7 @@ def board_lanes_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
     rows_by_lane = {
         key: list(uow.tasks.list_in_states(_states_for_lane(key)))
         for key, _name, _meaning in LANES
-        if key not in {"waiting_on_scott", "inbox"}
+        if key != "waiting_on_scott"
     }
     tasks = [task for rows in rows_by_lane.values() for task in rows]
     task_ids = {task.id for task in tasks}

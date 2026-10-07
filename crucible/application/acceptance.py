@@ -82,8 +82,8 @@ def deliverable_kinds(uow: UnitOfWork, task: Task) -> list[str]:
 def record_acceptance(
     uow: UnitOfWork, clock: Clock, *, principal: Principal, task_id: str, request: AcceptRequest
 ) -> Task:
-    if principal.role not in (Role.ORCHESTRATOR, Role.OPERATOR):
-        raise ForbiddenError("only an orchestrator or operator principal records acceptance")
+    if principal.role not in (Role.ORCHESTRATOR, Role.OPERATOR, Role.ADMIN):
+        raise ForbiddenError("only an orchestrator, operator, or admin principal records acceptance")
     task = uow.tasks.get(task_id, for_update=True)
     if task is None:
         raise NotFoundError(f"task {task_id} not found")

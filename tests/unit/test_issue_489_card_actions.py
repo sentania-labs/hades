@@ -747,6 +747,15 @@ def test_the_default_move_table_is_the_published_one() -> None:
 
 def test_next_phase_applies_the_default_move_for_the_lane() -> None:
     clock = FakeClock(NOW)
+    proposed = store_for(_S.PROPOSED)
+    card = board_card_view(proposed.uow(), TASK_ID, NOW)
+    assert card["lane"]["key"] == "inbox" and card["default_move"] == "approve"
+    result = next_phase(
+        proposed.uow(), clock, principal=OPERATOR, task_id=TASK_ID, note_text=NOTE
+    )
+    assert result.lane == "inbox" and result.move.key == "approve"
+    assert result.task.state is _S.SCHEDULED
+
     stuck = stuck_fixture()
     result = next_phase(stuck.uow(), clock, principal=OPERATOR, task_id=TASK_ID, note_text=NOTE)
     assert result.lane == "stuck" and result.move.key == "correct_remote"
@@ -774,6 +783,20 @@ def test_next_phase_applies_the_default_move_for_the_lane() -> None:
     done = store_for(_S.MERGED)
     with pytest.raises(ConflictError, match="Wins lane has no next phase"):
         next_phase(done.uow(), clock, principal=OPERATOR, task_id=TASK_ID, note_text=NOTE)
+
+
+def test_admin_can_apply_the_accept_move_offered_on_the_card() -> None:
+    store, clock = store_for(_S.AWAITING_ACCEPTANCE), FakeClock(NOW)
+    card = board_card_view(store.uow(), TASK_ID, NOW)
+    assert "accept" in [move["key"] for move in card["moves"]]
+
+    result = apply_move(
+        store.uow(), clock, principal=ADMIN, task_id=TASK_ID, move="accept", note_text=NOTE
+    )
+
+    assert result.task.state is _S.PUBLISHING
+    assert result.note.author == "root"
+    assert _payloads(store, EventKind.ACCEPTANCE_RECORDED)[0]["reasoning"] == NOTE
 
 
 # ----- AC1: the card for a stuck task --------------------------------------------------

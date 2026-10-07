@@ -245,7 +245,7 @@ def test_query_render_time_and_html_size_bounds(monkeypatch: Any) -> None:
     started = time.perf_counter()
     document = board_lanes_view(uow, NOW)
     assert time.perf_counter() - started < 1
-    assert calls == {"counts": 1, "lanes": 5}
+    assert calls == {"counts": 1, "lanes": 6}
 
     live = [
         card
