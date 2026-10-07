@@ -23,6 +23,7 @@ from crucible.application.admin import credentials, gateway, routing
 from crucible.application.admin.context import AdminContext
 from crucible.application.errors import ContractValidationError
 from crucible.application.wakes import wake_document
+from crucible.contracts.policy import RoutingModel
 from crucible.contracts.wake import WakeReason
 from crucible.domain.entities import Event, Principal, Role, Wake
 from crucible.domain.events import EventKind
@@ -197,11 +198,19 @@ def stored(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[dict[str, Any]]]:
     return saved
 
 
-def _publish(uow: Any, policy: Any, route: Any, document: dict[str, Any], reason: str) -> None:
+def _publish(
+    uow: Any,
+    policy: Any,
+    route: Any,
+    document: dict[str, Any],
+    reason: str,
+    *,
+    role: Role = Role.ADMIN,
+) -> None:
     routing.publish_routing(
         _context(),
         uow,
-        principal=_principal(),
+        principal=_principal(role=role),
         policy=policy,
         routing=route,
         routing_document=document,
@@ -219,8 +228,8 @@ def test_delta_names_models_caps_and_tier_order() -> None:
     delta = routing.routing_delta(before, after)
 
     assert delta == {
-        "models_enabled": ["qwen-local"],
-        "models_disabled": ["codex-sub"],
+        "models_enabled": ["hermes:qwen-local"],
+        "models_disabled": ["codex:codex-sub"],
         "pool_caps": [{"pool": "lab-local", "before": 2, "after": 6}],
         "tier_pool_order": [{"tier": "trivial", "before": None, "after": ["lab-local"]}],
     }
@@ -244,7 +253,14 @@ def test_publish_that_flips_a_model_or_cap_without_a_reason_is_refused(
     uow, policy, route = _world(_routing_document())
 
     with pytest.raises(ContractValidationError) as refused:
-        _publish(uow, policy, route, _routing_document(**change), reason)
+        _publish(
+            uow,
+            policy,
+            route,
+            _routing_document(**change),
+            reason,
+            role=Role.ORCHESTRATOR,
+        )
 
     assert "supersedes" in refused.value.detail
     assert refused.value.errors == [
@@ -268,8 +284,8 @@ def test_publish_with_a_reason_raises_one_routing_changed_wake(
     assert wake.reason == WakeReason.ROUTING_CHANGED.value == "routing_changed"
     assert wake.principal_id == "orchestrator-id"
     summary = wake.payload["summary"]
-    assert "enables qwen-local" in summary
-    assert "disables codex-sub" in summary
+    assert "enables hermes:qwen-local" in summary
+    assert "disables codex:codex-sub" in summary
     assert "pool lab-local max_concurrency 2 to 6" in summary
     assert "projects following routing unpinned: foundry, hades" in summary
     assert "frozen" not in summary
@@ -300,24 +316,29 @@ def test_a_tier_order_change_needs_no_reason_and_wakes_nobody(
     ]
 
 
-def test_local_endpoint_save_that_re_enables_local_models_needs_a_reason(
+def test_local_endpoint_save_that_re_enables_local_models_accepts_no_reason(
+    monkeypatch: pytest.MonkeyPatch,
     stored: dict[str, list[dict[str, Any]]],
 ) -> None:
     uow, _policy_row, _route = _world(_routing_document())
 
-    with pytest.raises(ContractValidationError) as refused:
-        routing.save_local_endpoint(
-            _context(),
-            uow,
-            principal=_principal(),
-            endpoint_url=LOCAL_URL,
-            models=[{"id": "qwen-local", "enabled": True}],
-            max_concurrency=2,
-            reason=None,
-        )
+    uow.provider_settings.put = lambda _value: None
+    monkeypatch.setattr(
+        RoutingModel,
+        "model_validate",
+        lambda value: SimpleNamespace(model_dump=lambda **_kwargs: value),
+    )
+    routing.save_local_endpoint(
+        _context(),
+        uow,
+        principal=_principal(),
+        endpoint_url=LOCAL_URL,
+        models=[{"id": "qwen-local", "enabled": True}],
+        max_concurrency=2,
+        reason=None,
+    )
 
-    assert "enables qwen-local" in refused.value.detail
-    assert stored["routing"] == [] and uow.wakes.rows == []
+    assert len(stored["routing"]) == 1
 
 
 def test_routing_page_shows_each_versions_delta_publisher_and_reason(
@@ -339,7 +360,7 @@ def test_routing_page_shows_each_versions_delta_publisher_and_reason(
     newest, first = section["rows"]
     assert newest[0] == "8" and newest[2] == "operator"
     assert newest[3] == "supersedes keeping local models off"
-    assert "enables qwen-local" in newest[4]
+    assert "enables hermes:qwen-local" in newest[4]
     assert "projects following routing unpinned: foundry, hades" in newest[4]
     assert first[0] == "7" and first[4] == "first version"
 
@@ -367,7 +388,7 @@ def test_gateway_model_save_previews_the_delta_before_publishing(
     )
 
     assert stored["routing"] == [] and uow.wakes.rows == []
-    assert preview["delta"]["models_enabled"] == ["qwen-local"]
+    assert preview["delta"]["models_enabled"] == ["hermes:qwen-local"]
     assert preview["delta"]["unpinned_projects"] == ["foundry", "hades"]
 
     shown: dict[str, Any] = {}
@@ -384,7 +405,7 @@ def test_gateway_model_save_previews_the_delta_before_publishing(
     assert (
         "every project that follows routing unpinned: projects foundry, hades" in (section["note"])
     )
-    assert ["enables qwen-local"] in section["rows"]
+    assert ["enables hermes:qwen-local"] in section["rows"]
     fields = {field["name"]: field for field in section["form"]["fields"]}
     assert fields["confirm"]["value"] == "true"
     assert fields["model.0.enabled"] == {

@@ -7,6 +7,8 @@ a principal (operator-only fields) live in the application layer.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import Field, StrictBool, field_validator, model_validator
@@ -425,9 +427,9 @@ class ChatTemplateKwargs(StrictModel):
 class RoutingModel(StrictModel):
     # Full engine window for Qwen Code; absent uses its documented 131072 default.
     context_length: int | None = Field(default=None, gt=0, strict=True)
-    # Gateway alias when two harnesses share one model but need distinct routing IDs.
-    model_name: str | None = Field(default=None, min_length=1)
-    id: str = Field(min_length=1)
+    # The exact model name sent to the endpoint.  A routing entry is identified by the
+    # (harness, model) pair; there is deliberately no second, operator-visible route id.
+    model: str = Field(min_length=1)
     harness: str = Field(min_length=1)
     endpoint: Literal["subscription", "local"]
     endpoint_url: str | None = None
@@ -438,22 +440,51 @@ class RoutingModel(StrictModel):
     weight: int = Field(ge=0)
     enabled: bool
     disabled_reason: str | None = None
+    vanished_at: datetime | None = None
     chat_template_kwargs: ChatTemplateKwargs = Field(default_factory=ChatTemplateKwargs)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _read_legacy_model_name(cls, value: object) -> object:
+        """Read immutable pre-0051 documents without confusing their route id for a
+        provider model.  Migration 0051 rewrites stored versions; this compatibility is
+        also needed while a process started before the migration finishes a read."""
+        if not isinstance(value, dict) or "model" in value:
+            return value
+        migrated = dict(value)
+        migrated["model"] = migrated.get("model_name") or migrated.get("id")
+        migrated.pop("model_name", None)
+        migrated.pop("id", None)
+        return migrated
+
+    @property
+    def id(self) -> str:
+        """Compatibility for internal selection code; this is the endpoint model."""
+        return self.model
+
+    @property
+    def model_name(self) -> str:
+        """Compatibility alias for callers being migrated from the split fields."""
+        return self.model
+
+    @model_name.setter
+    def model_name(self, value: str) -> None:
+        self.model = value
 
     @model_validator(mode="after")
     def _local_needs_endpoint(self) -> RoutingModel:
         if self.endpoint == "local" and not self.endpoint_url and self.enabled:
-            raise ValueError(f"local model {self.id!r} must carry endpoint_url")
+            raise ValueError(f"local model {self.model!r} must carry endpoint_url")
         if self.endpoint == "local" and not self.endpoint_url and not self.disabled_reason:
             raise ValueError(
-                f"disabled local model {self.id!r} without endpoint_url must record why"
+                f"disabled local model {self.model!r} without endpoint_url must record why"
             )
         if self.endpoint == "local" and self.endpoint_url:
             validate_endpoint("local", self.endpoint_url)
         if self.endpoint == "subscription" and self.endpoint_url:
-            raise ValueError(f"subscription model {self.id!r} must not carry endpoint_url")
+            raise ValueError(f"subscription model {self.model!r} must not carry endpoint_url")
         if self.enabled and self.disabled_reason:
-            raise ValueError(f"enabled model {self.id!r} must not carry disabled_reason")
+            raise ValueError(f"enabled model {self.model!r} must not carry disabled_reason")
         return self
 
 
@@ -521,9 +552,11 @@ class RoutingPolicyV1(StrictModel):
 
     @model_validator(mode="after")
     def _coherent(self) -> RoutingPolicyV1:
-        ids = [m.id for m in self.models]
-        if len(set(ids)) != len(ids):
-            raise ValueError("duplicate model id")
+        pairs = [(m.harness, m.model) for m in self.models]
+        if len(set(pairs)) != len(pairs):
+            raise ValueError(
+                "duplicate model id for harness; duplicate routing entry (harness, model)"
+            )
         unknown_pools = sorted({m.pool for m in self.models} - set(self.pools))
         if unknown_pools:
             raise ValueError(f"models reference pools the policy does not define: {unknown_pools}")
@@ -537,8 +570,15 @@ class RoutingPolicyV1(StrictModel):
                 raise ValueError(f"tier {tier} lists a preferred pool twice")
         return self
 
-    def model(self, model_id: str) -> RoutingModel | None:
-        return next((m for m in self.models if m.id == model_id), None)
+    def model(self, model: str, harness: str | None = None) -> RoutingModel | None:
+        return next(
+            (
+                entry
+                for entry in self.models
+                if entry.model == model and (harness is None or entry.harness == harness)
+            ),
+            None,
+        )
 
     def local_pools(self) -> list[str]:
         """Pools holding a model on a local endpoint (Hermes on the gateway), by name."""
@@ -562,6 +602,11 @@ def parse_policy(document: object) -> PolicyV1:
 
 def parse_routing_policy(document: object) -> RoutingPolicyV1:
     return RoutingPolicyV1.model_validate(document)
+
+
+def routing_model_name(entry: Mapping[str, Any]) -> str:
+    """Return the endpoint model from a current or immutable legacy document."""
+    return str(entry.get("model") or entry.get("model_name") or entry.get("id") or "")
 
 
 def window_seconds(window: str) -> int:

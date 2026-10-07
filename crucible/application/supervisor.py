@@ -98,7 +98,7 @@ from crucible.contracts.completion_claim import (
     parse_claim,
 )
 from crucible.contracts.evidence import ROLE_RUN_EVIDENCE, EvidenceKind, EvidenceSource
-from crucible.contracts.policy import RoutingPolicyV1, window_seconds
+from crucible.contracts.policy import RoutingPolicyV1, routing_model_name, window_seconds
 from crucible.contracts.task_contract import TaskContractV1
 from crucible.contracts.wake import WakeReason
 from crucible.domain.command_timeout import effective_command_timeout_ms
@@ -1101,12 +1101,13 @@ class Supervisor:
             for entry in document.get("models") or []:
                 if entry.get("endpoint") != "local" or entry.get("enabled") is not True:
                     continue
-                model_name = str(entry.get("model_name") or entry.get("id") or "")
+                model_name = routing_model_name(entry)
                 if model_name in offered_set:
                     continue
                 entry["enabled"] = False
                 entry["disabled_reason"] = admin_gateway.NOT_OFFERED
-                disabled.append(str(entry.get("id") or model_name))
+                entry["vanished_at"] = self._clock.now().isoformat()
+                disabled.append(f"{entry.get('harness')}:{model_name}")
                 gateway_models.add(model_name)
             if not disabled:
                 return
@@ -2027,7 +2028,13 @@ class Supervisor:
             routing = load_attempt_routing(
                 route_uow, execution.policy_snapshot or {}, attempt.routing_version
             )
-            route = routing.model(selected_model) if routing is not None else None
+            if routing is None:
+                route = None
+            else:
+                try:
+                    route = routing.model(selected_model, selected_harness)
+                except TypeError:  # lightweight test doubles and pre-0051 readers
+                    route = routing.model(selected_model)
             if route is not None:
                 endpoint = route.endpoint
                 endpoint_url = route.endpoint_url
@@ -2359,7 +2366,9 @@ class Supervisor:
     ) -> str | None:
         policy = execution.policy_snapshot or {}
         routing = load_attempt_routing(uow, policy, routing_version)
-        selected = routing.model(execution.model) if routing is not None else None
+        selected = (
+            routing.model(execution.model, execution.harness) if routing is not None else None
+        )
         local_codex = (
             execution.harness == "codex" and selected is not None and selected.endpoint == "local"
         )
@@ -2655,7 +2664,7 @@ class Supervisor:
             for candidate in candidates:
                 if not candidate.get("eligible"):
                     continue
-                model = routing.model(str(candidate["model"]))
+                model = routing.model(str(candidate["model"]), str(candidate["harness"]))
                 assert model is not None
                 execution.model = model.id
                 execution.harness = model.harness
@@ -3106,6 +3115,7 @@ class Supervisor:
             routing = load_attempt_routing(
                 uow, execution.policy_snapshot or {}, attempt.routing_version
             )
+            # Resolve by model first so the refusal can name a mismatched harness.
             entry = routing.model(execution.model) if routing is not None else None
             refusal = self._review_route_refusal(routing, entry, execution)
             if refusal is None:
@@ -4996,7 +5006,13 @@ class Supervisor:
                     uow, execution.policy_snapshot or {}, attempt.routing_version
                 )
                 model = attempt.selected_model or execution.model
-                route = routing.model(model) if routing is not None else None
+                if routing is None:
+                    route = None
+                else:
+                    try:
+                        route = routing.model(model, harness)
+                    except TypeError:  # lightweight test doubles and pre-0051 readers
+                        route = routing.model(model)
                 watch.local = route is not None and route.endpoint == "local"
             except Exception:
                 # Issue 278 must not cost the attempt its command tracking (issue 152):
@@ -5330,7 +5346,12 @@ class Supervisor:
                     uow, execution.policy_snapshot or {}, attempt.routing_version
                 )
                 model = (
-                    routing.model(attempt.selected_model or execution.model) if routing else None
+                    routing.model(
+                        attempt.selected_model or execution.model,
+                        attempt.selected_harness or execution.harness,
+                    )
+                    if routing
+                    else None
                 )
                 interruption_payload = {
                     "interruption_message": redact(interruption_detail),
@@ -6018,7 +6039,7 @@ class Supervisor:
         if context is None:
             return
         routing = context[0]
-        entry = routing.model(execution.model)
+        entry = routing.model(execution.model, execution.harness)
         if entry is None or entry.endpoint != "local":
             return
         since = self._clock.now() - timedelta(
@@ -6074,7 +6095,10 @@ class Supervisor:
         # Only the pool of the route the attempt was verified to launch on is marked:
         # its model's entry in the attempt's routing version, paired with the harness
         # that ran and whose output was read (hades #359).
-        entry = routing.model(attempt.selected_model or execution.model)
+        entry = routing.model(
+            attempt.selected_model or execution.model,
+            attempt.selected_harness or execution.harness,
+        )
         if (
             entry is None
             or entry.pool != attempt.selected_pool
@@ -6659,7 +6683,14 @@ class Supervisor:
             routing = load_attempt_routing(
                 uow, execution.policy_snapshot or {}, attempt.routing_version
             )
-            model = routing.model(attempt.selected_model or execution.model) if routing else None
+            model = (
+                routing.model(
+                    attempt.selected_model or execution.model,
+                    attempt.selected_harness or execution.harness,
+                )
+                if routing
+                else None
+            )
             endpoint_url = model.endpoint_url if model is not None else None
             # The first block waits for the endpoint's health probe and may resume on
             # its own once; the second needs a person and opens the one escalation.
@@ -6748,7 +6779,11 @@ class Supervisor:
             uow, execution.policy_snapshot or {}, attempt.routing_version
         )
         model = attempt.selected_model or execution.model
-        entry = routing.model(model) if routing is not None else None
+        entry = (
+            routing.model(model, attempt.selected_harness or execution.harness)
+            if routing is not None
+            else None
+        )
         return local_cap_kind(
             entry.endpoint if entry is not None else None, exit_class, turn_cap_reached
         )

@@ -196,7 +196,9 @@ def require_reason(
             f"a reason is required for {operation}" if operation else "a reason is required",
             errors=[{"path": "reason", "message": "must not be empty"}],
         )
-    cleaned = reason.strip()
+    # Preserve the operator's words exactly. Whitespace is used only to decide whether
+    # a reason was supplied; audit is not an editor.
+    cleaned = reason
     try:
         refuse_secret_shaped(cleaned, field="reason")
     except ContractValidationError:

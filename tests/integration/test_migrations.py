@@ -1534,6 +1534,51 @@ def test_0035_to_head_upgrades_a_populated_database(database_url: str) -> None:
         engine.dispose()
 
 
+def test_0051_migrates_populated_qwen_route_without_rerouting_task(database_url: str) -> None:
+    """#513: policy references and the attempt's routing version survive the document
+    rewrite; only the endpoint model spelling changes from qwen-coder to coder."""
+    migrate.downgrade(database_url, "0050_status_cache")
+    engine = make_engine(database_url)
+    with engine.begin() as conn:
+        row = (
+            conn.execute(
+                text(
+                    "SELECT name, version, document FROM routing_policies "
+                    "ORDER BY version DESC LIMIT 1"
+                )
+            )
+            .mappings()
+            .one()
+        )
+        document = dict(row["document"])
+        document["models"].append(
+            {
+                **document["models"][0],
+                "id": "qwen-coder",
+                "model_name": "coder",
+                "harness": "qwen_code",
+            }
+        )
+        conn.execute(
+            text(
+                "UPDATE routing_policies SET document=CAST(:document AS jsonb) "
+                "WHERE name=:name AND version=:version"
+            ),
+            {**row, "document": json.dumps(document)},
+        )
+    migrate.upgrade(database_url)
+    with engine.connect() as conn:
+        migrated = conn.execute(
+            text("SELECT document FROM routing_policies WHERE name=:name AND version=:version"),
+            dict(row),
+        ).scalar_one()
+    qwen = next(entry for entry in migrated["models"] if entry["harness"] == "qwen_code")
+    assert qwen["model"] == "coder"
+    assert "id" not in qwen and "model_name" not in qwen
+    assert migrated["version"] == row["version"]
+    engine.dispose()
+
+
 @pytest.mark.parametrize(
     ("head", "kind"),
     [

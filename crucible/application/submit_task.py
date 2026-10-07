@@ -92,7 +92,7 @@ def _check_routing(
             harness=pinned_harness.value,
             model_id=pinned_model,
         )
-        entry = routing.model(pinned_model)
+        entry = routing.model(pinned_model, pinned_harness.value)
         if (
             entry is not None
             and (entry.endpoint == "local" or entry.pool in routing.local_pools())

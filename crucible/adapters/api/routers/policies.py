@@ -7,10 +7,11 @@ from typing import Annotated, Any
 
 from fastapi import Body, Query
 
-from crucible.adapters.api.deps import Admin, Ctx, Reader, UoW
+from crucible.adapters.api.deps import Admin, Ctx, Mutator, Reader, UoW
 from crucible.adapters.threaded_router import ThreadedAPIRouter
-from crucible.application.admin import credentials
-from crucible.application.errors import NotFoundError
+from crucible.application.admin import credentials, gateway
+from crucible.application.admin.routing import gateway_url
+from crucible.application.errors import ContractValidationError, NotFoundError
 from crucible.application.policies import (
     get_policy,
     get_routing_policy,
@@ -24,6 +25,7 @@ from crucible.contracts.api import (
     RoutingPolicyView,
     RoutingUsageView,
 )
+from crucible.domain.entities import Role
 
 router = ThreadedAPIRouter()
 
@@ -134,9 +136,26 @@ def upload_routing(
     version: int,
     ctx: Ctx,
     uow: UoW,
-    principal: Admin,
+    principal: Mutator,
     document: Annotated[dict[str, Any], Body()],
+    reason: Annotated[str | None, Query()] = None,
 ) -> RoutingPolicyView:
+    if principal.role is Role.ORCHESTRATOR and not (reason or "").strip():
+        raise ContractValidationError(
+            "an orchestrator routing publish requires a reason",
+            errors=[{"path": "reason", "message": "must not be empty"}],
+        )
+    listing: list[str] | None = None
+    if any(item.get("endpoint") == "local" for item in document.get("models", [])):
+        endpoint, _source = gateway_url(uow)
+        admin = ctx.admin
+        bearer = credentials.read_api_key(admin) if admin is not None else None
+        if endpoint is None or bearer is None:
+            raise ContractValidationError(
+                "local routing publish requires the gateway listing for its key",
+                errors=[{"path": "models", "message": "the gateway could not be listed"}],
+            )
+        listing = gateway.fetch_models(endpoint, bearer)
     routing = put_routing_policy(
         uow,
         ctx.clock,
@@ -144,6 +163,8 @@ def upload_routing(
         name=name,
         version=version,
         document=document,
+        reason=reason,
+        local_model_listing=listing,
     )
     uow.commit()
     return RoutingPolicyView(

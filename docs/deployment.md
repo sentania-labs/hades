@@ -328,6 +328,12 @@ Secret, creating it if it is absent, and tests both: unauthenticated
 `/health/readiness` must return 200, then authenticated `/v1/models` decides. The key is
 never shown again; the page and `GET /v1/admin/credentials/hermes` report only
 `key_set`. The committed lab CA is already installed in the worker image trust store.
+The model list is one row per name returned by that authenticated request, with the
+harnesses using the model as controls beneath it. Routing publishes may reference only
+names in that listing. The same `model` value is used by task launches, credential
+probes, and the Harnesses page Test. If the gateway later drops a name, the supervisor's
+scheduled listing disables every harness route under it, records the disappearance time,
+and raises an orchestrator wake.
 
 The operator's own daily-use harness directories are never read, copied or referenced
 (12). These are dedicated Crucible logins.

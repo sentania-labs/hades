@@ -129,7 +129,7 @@ def check_selection(
                 "message": f"tier {tier!r} is not in routing policy {routing.name}",
             }
         )
-    entry = routing.model(model_id)
+    entry = routing.model(model_id, harness)
     if entry is None:
         problems.append(
             {
@@ -141,13 +141,6 @@ def check_selection(
     if not entry.enabled:
         problems.append(
             {"path": "execution_request.model", "message": f"model {model_id!r} is disabled"}
-        )
-    if entry.harness != harness:
-        problems.append(
-            {
-                "path": "execution_request.harness",
-                "message": f"the routing policy pairs {model_id!r} with harness {entry.harness!r}",
-            }
         )
     if tier_rule is not None and entry.capability not in tier_rule.allowed_capability:
         problems.append(
