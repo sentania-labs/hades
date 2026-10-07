@@ -165,6 +165,8 @@ def _inside_declared_network(
 
 
 PROVIDER_NAME = "kubernetes"
+BUILDKIT_HOST = "tcp://crucible-buildkit.crucible.svc:1234"
+IMAGE_CHECK_COMMANDS = frozenset({"make images-check", "make registry-check"})
 
 # A name to the addresses a NetworkPolicy may name.
 Resolver = Callable[[str], list[str]]
@@ -3709,6 +3711,10 @@ class KubernetesProvider:
             **spec.env,
             **launch_env,
         }
+        if {
+            str(v.get("command")) for v in spec.contract.get("required_verification", [])
+        } >= IMAGE_CHECK_COMMANDS:
+            env["BUILDKIT_HOST"] = BUILDKIT_HOST
         mounts = [
             *k8sspec.base_mounts(),
             # 26's mount layout, with the paths the identity bundle names (06): the
@@ -4011,6 +4017,22 @@ class KubernetesProvider:
         hosts = tuple(h for h in wanted if ":" not in h)
         endpoints = tuple(h for h in wanted if ":" in h)
         plan = EgressPlan(hosts=hosts, endpoints=endpoints)
+        checks = {
+            str(v.get("command"))
+            for v in spec.contract.get("required_verification", [])
+            if str(v.get("kind", "command")) == "command"
+        }
+        if checks >= IMAGE_CHECK_COMMANDS and role in (
+            k8sspec.ROLE_WORKER,
+            k8sspec.ROLE_VERIFIER,
+        ):
+            plan = replace(
+                plan,
+                hosts=tuple(dict.fromkeys((*plan.hosts, "ghcr.io"))),
+                buildkit_selector=PeerSelector.of(
+                    "crucible", {"app.kubernetes.io/name": "crucible-buildkit"}
+                ),
+            )
         if role == k8sspec.ROLE_WORKER:
             plan = self._local_endpoint_plan(plan, spec.endpoint_url)
         return plan
@@ -4718,7 +4740,18 @@ class KubernetesProvider:
             ],
             volumes=[self._claim_volume(spec.attempt_id)],
             limits=limits,
-            env=PACKAGE_CACHE_ENV,
+            env={
+                **PACKAGE_CACHE_ENV,
+                **(
+                    {"BUILDKIT_HOST": BUILDKIT_HOST}
+                    if {
+                        str(v.get("command"))
+                        for v in spec.contract.get("required_verification", [])
+                    }
+                    >= IMAGE_CHECK_COMMANDS
+                    else {}
+                ),
+            },
             timeout=self.config.verifier_timeout_seconds,
             plan=self._egress_plan(spec, k8sspec.ROLE_VERIFIER),
         )

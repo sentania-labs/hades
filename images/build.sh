@@ -12,6 +12,8 @@
 #                   is never a build input and never changes a digest.
 #   BUILDER=<name>  buildx docker-container builder to use or create (default crucible-images)
 #   DOCKER=<command> Docker CLI command or rootless service-user wrapper (default docker)
+#   BUILDKIT_HOST=<address> use buildctl against Hades's remote BuildKit. When unset,
+#                          CI keeps the docker-container buildx path above.
 #
 # Two kinds of image directory:
 #   worker/          carries several harnesses. Each is an `ARG HARNESS_<NAME>_VERSION`
@@ -63,6 +65,8 @@ case "${NO_CACHE:-0}" in 0|"") ;; *) no_cache="--no-cache" ;; esac
   "${SOURCE_DATE_EPOCH:?}" "${BUILDKIT_IMAGE:?}" "${UV_VERSION:?}" "${UV_SHA256:?}" \
   "${CPYTHON_VERSION:?}" "${CPYTHON_BUILD:?}" "${CPYTHON_SHA256:?}" \
   "${GITLEAKS_VERSION:?}" "${GITLEAKS_SHA256:?}" "${RIPGREP_VERSION:?}" \
+  "${BUILDCTL_VERSION:?}" "${BUILDCTL_SHA256:?}" \
+  "${CRANE_VERSION:?}" "${CRANE_SHA256:?}" \
   "${LIBGL1_VERSION:?}" "${LIBEGL1_VERSION:?}" "${LIBXKBCOMMON0_VERSION:?}" \
   "${LIBDBUS_1_3_VERSION:?}" "${LIBFONTCONFIG1_VERSION:?}" "${LIBFREETYPE6_VERSION:?}" \
   "${LIBGLIB2_0_0_VERSION:?}" "${LIBX11_6_VERSION:?}" "${LIBXCB1_VERSION:?}" \
@@ -85,7 +89,9 @@ stale=$(find "$here" -path "$here/out" -prune -o -type f ! -newermt "@$SOURCE_DA
 # docker-container builder with a pinned BuildKit.
 # An existing builder must run the pinned BuildKit, since the pin is part of
 # the build inputs the tag is named after. A stale one is refused, not reused.
-if info=$("${docker_cmd[@]}" buildx inspect "$builder" 2>/dev/null); then
+if [ -n "${BUILDKIT_HOST:-}" ]; then
+    command -v buildctl >/dev/null || { echo "build.sh: buildctl is not on PATH" >&2; exit 2; }
+elif info=$("${docker_cmd[@]}" buildx inspect "$builder" 2>/dev/null); then
     if ! grep -q -F "$BUILDKIT_IMAGE" <<<"$info"; then
         echo "build.sh: builder '$builder' exists but does not run $BUILDKIT_IMAGE; remove it (docker buildx rm $builder) or set BUILDER" >&2
         exit 2
@@ -171,53 +177,98 @@ for image in "${images[@]}"; do
         cache+=(--cache-to "type=local,dest=$CACHE_DIR/$image.new,mode=max")
     fi
 
-    # shellcheck disable=SC2086
-    "${docker_cmd[@]}" buildx --builder "$builder" build $no_cache --platform linux/amd64 \
-        --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
-        --build-arg "BASE_IMAGE=$BASE_IMAGE" \
-        --build-arg "DEBIAN_SNAPSHOT=$DEBIAN_SNAPSHOT" \
-        --build-arg "GIT_VERSION=$GIT_VERSION" \
-        --build-arg "CURL_VERSION=$CURL_VERSION" \
-        --build-arg "JQ_VERSION=$JQ_VERSION" \
-        --build-arg "MAKE_VERSION=$MAKE_VERSION" \
-        --build-arg "CA_CERTIFICATES_VERSION=$CA_CERTIFICATES_VERSION" \
-        --build-arg "LAB_CA_SHA256=$LAB_CA_SHA256" \
-        --build-arg "PYTHON3_VERSION=$PYTHON3_VERSION" \
-        --build-arg "PYTHON3_VENV_VERSION=$PYTHON3_VENV_VERSION" \
-        --build-arg "RIPGREP_VERSION=$RIPGREP_VERSION" \
-        --build-arg "LIBGL1_VERSION=$LIBGL1_VERSION" \
-        --build-arg "LIBEGL1_VERSION=$LIBEGL1_VERSION" \
-        --build-arg "LIBXKBCOMMON0_VERSION=$LIBXKBCOMMON0_VERSION" \
-        --build-arg "LIBDBUS_1_3_VERSION=$LIBDBUS_1_3_VERSION" \
-        --build-arg "LIBFONTCONFIG1_VERSION=$LIBFONTCONFIG1_VERSION" \
-        --build-arg "LIBFREETYPE6_VERSION=$LIBFREETYPE6_VERSION" \
-        --build-arg "LIBGLIB2_0_0_VERSION=$LIBGLIB2_0_0_VERSION" \
-        --build-arg "LIBX11_6_VERSION=$LIBX11_6_VERSION" \
-        --build-arg "LIBXCB1_VERSION=$LIBXCB1_VERSION" \
-        --build-arg "NODE_VERSION=$NODE_VERSION" \
-        --build-arg "NODE_SHA256=$NODE_SHA256" \
-        --build-arg "UV_VERSION=$UV_VERSION" \
-        --build-arg "UV_SHA256=$UV_SHA256" \
-        --build-arg "CPYTHON_VERSION=$CPYTHON_VERSION" \
-        --build-arg "CPYTHON_BUILD=$CPYTHON_BUILD" \
-        --build-arg "CPYTHON_SHA256=$CPYTHON_SHA256" \
-        --build-arg "GITLEAKS_VERSION=$GITLEAKS_VERSION" \
-        --build-arg "GITLEAKS_SHA256=$GITLEAKS_SHA256" \
-        --label "org.opencontainers.image.version=$version-$build" \
-        --label "org.opencontainers.image.created=$created" \
-        --label "org.opencontainers.image.source=https://github.com/sentania-labs/crucible" \
-        "${labels[@]}" \
-        --label "crucible.build_inputs=sha256:$inputs" \
-        ${cache[@]+"${cache[@]}"} \
-        --provenance=false --sbom=false \
-        --output "type=oci,rewrite-timestamp=true,dest=$stem.oci.tar" \
-        --output "type=docker,rewrite-timestamp=true,dest=$stem.docker.tar" \
-        -f "$dockerfile" -t "$tag" "$here"
+    arg_names=(SOURCE_DATE_EPOCH BASE_IMAGE DEBIAN_SNAPSHOT GIT_VERSION CURL_VERSION
+        JQ_VERSION MAKE_VERSION CA_CERTIFICATES_VERSION LAB_CA_SHA256 PYTHON3_VERSION
+        PYTHON3_VENV_VERSION RIPGREP_VERSION LIBGL1_VERSION LIBEGL1_VERSION
+        LIBXKBCOMMON0_VERSION LIBDBUS_1_3_VERSION LIBFONTCONFIG1_VERSION LIBFREETYPE6_VERSION
+        LIBGLIB2_0_0_VERSION LIBX11_6_VERSION LIBXCB1_VERSION NODE_VERSION NODE_SHA256
+        UV_VERSION UV_SHA256 CPYTHON_VERSION CPYTHON_BUILD CPYTHON_SHA256 GITLEAKS_VERSION
+        GITLEAKS_SHA256 BUILDCTL_VERSION BUILDCTL_SHA256 CRANE_VERSION CRANE_SHA256)
+    buildctl_opts=(--opt platform=linux/amd64)
+    buildx_opts=(--platform linux/amd64)
+    for arg_name in "${arg_names[@]}"; do
+        buildctl_opts+=(--opt "build-arg:$arg_name=${!arg_name}")
+        buildx_opts+=(--build-arg "$arg_name=${!arg_name}")
+    done
+    label_values=("org.opencontainers.image.version=$version-$build" \
+        "org.opencontainers.image.created=$created" \
+        "org.opencontainers.image.source=https://github.com/sentania-labs/crucible" \
+        "crucible.build_inputs=sha256:$inputs")
+    for ((label_index=1; label_index<${#labels[@]}; label_index+=2)); do
+        label_values+=("${labels[$label_index]}")
+    done
+    for label in "${label_values[@]}"; do
+        buildctl_opts+=(--opt "label:$label")
+        buildx_opts+=(--label "$label")
+    done
+    if [ -n "${BUILDKIT_HOST:-}" ]; then
+        remote_no_cache=()
+        [ -z "$no_cache" ] || remote_no_cache=(--no-cache)
+        remote_cache=()
+        for ((cache_index=0; cache_index<${#cache[@]}; cache_index+=2)); do
+            flag=${cache[$cache_index]/--cache-from/--import-cache}
+            flag=${flag/--cache-to/--export-cache}
+            remote_cache+=("$flag" "${cache[$((cache_index + 1))]}")
+        done
+        buildctl --addr "$BUILDKIT_HOST" build --frontend dockerfile.v0 "${remote_no_cache[@]}" \
+            --local "context=$here" --local "dockerfile=$dir" --opt filename=Dockerfile \
+            "${buildctl_opts[@]}" \
+            --output "type=oci,rewrite-timestamp=true,dest=$stem.oci.tar" \
+            --output "type=docker,rewrite-timestamp=true,dest=$stem.docker.tar" \
+            ${remote_cache[@]+"${remote_cache[@]}"}
+    else
+        # shellcheck disable=SC2086
+        "${docker_cmd[@]}" buildx --builder "$builder" build $no_cache --platform linux/amd64 \
+            --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
+            --build-arg "BASE_IMAGE=$BASE_IMAGE" \
+            --build-arg "DEBIAN_SNAPSHOT=$DEBIAN_SNAPSHOT" \
+            --build-arg "GIT_VERSION=$GIT_VERSION" \
+            --build-arg "CURL_VERSION=$CURL_VERSION" \
+            --build-arg "JQ_VERSION=$JQ_VERSION" \
+            --build-arg "MAKE_VERSION=$MAKE_VERSION" \
+            --build-arg "CA_CERTIFICATES_VERSION=$CA_CERTIFICATES_VERSION" \
+            --build-arg "LAB_CA_SHA256=$LAB_CA_SHA256" \
+            --build-arg "PYTHON3_VERSION=$PYTHON3_VERSION" \
+            --build-arg "PYTHON3_VENV_VERSION=$PYTHON3_VENV_VERSION" \
+            --build-arg "RIPGREP_VERSION=$RIPGREP_VERSION" \
+            --build-arg "LIBGL1_VERSION=$LIBGL1_VERSION" \
+            --build-arg "LIBEGL1_VERSION=$LIBEGL1_VERSION" \
+            --build-arg "LIBXKBCOMMON0_VERSION=$LIBXKBCOMMON0_VERSION" \
+            --build-arg "LIBDBUS_1_3_VERSION=$LIBDBUS_1_3_VERSION" \
+            --build-arg "LIBFONTCONFIG1_VERSION=$LIBFONTCONFIG1_VERSION" \
+            --build-arg "LIBFREETYPE6_VERSION=$LIBFREETYPE6_VERSION" \
+            --build-arg "LIBGLIB2_0_0_VERSION=$LIBGLIB2_0_0_VERSION" \
+            --build-arg "LIBX11_6_VERSION=$LIBX11_6_VERSION" \
+            --build-arg "LIBXCB1_VERSION=$LIBXCB1_VERSION" \
+            --build-arg "NODE_VERSION=$NODE_VERSION" \
+            --build-arg "NODE_SHA256=$NODE_SHA256" \
+            --build-arg "UV_VERSION=$UV_VERSION" \
+            --build-arg "UV_SHA256=$UV_SHA256" \
+            --build-arg "CPYTHON_VERSION=$CPYTHON_VERSION" \
+            --build-arg "CPYTHON_BUILD=$CPYTHON_BUILD" \
+            --build-arg "CPYTHON_SHA256=$CPYTHON_SHA256" \
+            --build-arg "GITLEAKS_VERSION=$GITLEAKS_VERSION" \
+            --build-arg "GITLEAKS_SHA256=$GITLEAKS_SHA256" \
+            --build-arg "BUILDCTL_VERSION=$BUILDCTL_VERSION" \
+            --build-arg "BUILDCTL_SHA256=$BUILDCTL_SHA256" \
+            --build-arg "CRANE_VERSION=$CRANE_VERSION" \
+            --build-arg "CRANE_SHA256=$CRANE_SHA256" \
+            "${buildx_opts[@]:70}" ${cache[@]+"${cache[@]}"} --provenance=false --sbom=false \
+            --output "type=oci,rewrite-timestamp=true,dest=$stem.oci.tar" \
+            --output "type=docker,rewrite-timestamp=true,dest=$stem.docker.tar" \
+            -f "$dockerfile" -t "$tag" "$here"
+    fi
 
     digest=$(tar -xOf "$stem.oci.tar" index.json | jq -r '.manifests[0].digest')
     config=$(tar -xOf "$stem.oci.tar" "blobs/sha256/${digest#sha256:}" | jq -r '.config.digest')
-    "${docker_cmd[@]}" load -q -i "$stem.docker.tar" >/dev/null
-    id=$("${docker_cmd[@]}" image inspect -f '{{.Id}}' "$tag")
+    if [ -n "${BUILDKIT_HOST:-}" ]; then
+        id=$config
+        size=$(wc -c < "$stem.docker.tar")
+    else
+        "${docker_cmd[@]}" load -q -i "$stem.docker.tar" >/dev/null
+        id=$("${docker_cmd[@]}" image inspect -f '{{.Id}}' "$tag")
+        size=$("${docker_cmd[@]}" image inspect -f '{{.Size}}' "$tag")
+    fi
     # The image the daemon now holds under the tag must be the one the OCI archive
     # describes: its ID is the config digest (the manifest digest on a containerd
     # image store), never something else loaded under the same name.
@@ -225,7 +276,6 @@ for image in "${images[@]}"; do
         echo "build.sh: $tag loaded as $id, but the OCI archive describes $digest (config $config)" >&2
         exit 1
     fi
-    size=$("${docker_cmd[@]}" image inspect -f '{{.Size}}' "$tag")
     printf '%s digest=%s id=%s size=%s\n' "$tag" "$digest" "$id" "$size"
     if [ -n "${CACHE_DIR:-}" ]; then
         # A local cache export only ever grows; replacing it keeps what the next run

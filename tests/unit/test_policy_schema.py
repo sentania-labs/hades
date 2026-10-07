@@ -129,8 +129,9 @@ def test_the_self_hosting_policy_is_default_software_with_the_worker_checks() ->
     assert {"pypi.org", "files.pythonhosted.org"} <= set(policy.network.egress_allowlist)
     assert "branch CI" in policy.description and "2026-09-28" in policy.description
     assert policy.ci_certification.require_green_on_final_sha
+    assert "image_checks_required" in document["gates"]["pre_pr"]
     seed = seeded_policy_v3()
-    ignored = {"name", "version", "description", "repository", "network", "routing"}
+    ignored = {"name", "version", "description", "repository", "network", "routing", "gates"}
     assert {k: v for k, v in document.items() if k not in ignored} == {
         k: v for k, v in seed.items() if k not in ignored
     }

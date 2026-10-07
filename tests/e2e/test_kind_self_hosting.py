@@ -63,7 +63,13 @@ MODEL_NAMESPACE = "crucible-kind-model"
 MODEL_PORT = 8765
 MODEL_LABELS = {"app": "stub-model"}
 ENDPOINT = f"http://stub-model.{MODEL_NAMESPACE}.svc.cluster.local:{MODEL_PORT}/v1"
-CHECKS = ("make lint", "make test-unit", "make scan")
+CHECKS = (
+    "make lint",
+    "make test-unit",
+    "make scan",
+    "make images-check",
+    "make registry-check",
+)
 SETTLED = {
     "accepted",
     "pre_pr_gates_failed",
@@ -78,6 +84,10 @@ SETTLED = {
 # fills the facts, section 7 of the identity bundle).
 CHANGE = r"""set -eu
 cd /crucible/repo
+# Issue 475: the worker itself reaches Hades's rootless BuildKit and GHCR through its
+# per-attempt policy. The verifier repeats these required checks from the collected tree.
+make images-check
+make registry-check
 printf '\n%s\n' 'A worker in the combined image wrote this for the hades 184 kind proof.' \
   >> docs/roadmap.md
 git add docs/roadmap.md

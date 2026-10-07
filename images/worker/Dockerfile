@@ -135,6 +135,10 @@ ARG CPYTHON_BUILD=20260310
 ARG CPYTHON_SHA256=7e08911171bd1ea2af43ae9d54917d9b2179d2cba4057057e0fd3c8ac1469368
 ARG GITLEAKS_VERSION=8.30.1
 ARG GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+ARG BUILDCTL_VERSION=0.33.0
+ARG BUILDCTL_SHA256=b6242896d343100808dcbe37565caf381e0a444a6a83d7255926bb1519248ead
+ARG CRANE_VERSION=0.22.1
+ARG CRANE_SHA256=0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
 ADD --checksum=sha256:${UV_SHA256} --chmod=0644 \
     https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz \
     /fetch/uv.tar.gz
@@ -144,6 +148,12 @@ ADD --checksum=sha256:${CPYTHON_SHA256} --chmod=0644 \
 ADD --checksum=sha256:${GITLEAKS_SHA256} --chmod=0644 \
     https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz \
     /fetch/gitleaks.tar.gz
+ADD --checksum=sha256:${BUILDCTL_SHA256} --chmod=0644 \
+    https://github.com/moby/buildkit/releases/download/v${BUILDCTL_VERSION}/buildkit-v${BUILDCTL_VERSION}.linux-amd64.tar.gz \
+    /fetch/buildkit.tar.gz
+ADD --checksum=sha256:${CRANE_SHA256} --chmod=0644 \
+    https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz \
+    /fetch/crane.tar.gz
 # The archives' own entry mtimes are pinned by their sha256, so what is extracted from
 # them is fixed; the two binaries moved into place are touched to the epoch like every
 # other fetched binary, and nothing keeps the archive's owner.
@@ -152,8 +162,12 @@ RUN set -eu; \
     tar -xzf /fetch/uv.tar.gz -C /fetch --no-same-owner uv-x86_64-unknown-linux-gnu/uv; \
     mv /fetch/uv-x86_64-unknown-linux-gnu/uv /fetch/bin/uv; \
     tar -xzf /fetch/gitleaks.tar.gz -C /fetch/bin --no-same-owner gitleaks; \
-    chmod 0755 /fetch/bin/uv /fetch/bin/gitleaks; \
-    touch -h -d "@${SOURCE_DATE_EPOCH}" /fetch/bin/uv /fetch/bin/gitleaks; \
+    tar -xzf /fetch/buildkit.tar.gz -C /fetch --no-same-owner bin/buildctl; \
+    tar -xzf /fetch/crane.tar.gz -C /fetch/bin --no-same-owner crane; \
+    mv /fetch/bin/buildctl /fetch/bin/buildctl.tmp; \
+    mv /fetch/bin/buildctl.tmp /fetch/bin/buildctl; \
+    chmod 0755 /fetch/bin/uv /fetch/bin/gitleaks /fetch/bin/buildctl /fetch/bin/crane; \
+    touch -h -d "@${SOURCE_DATE_EPOCH}" /fetch/bin/uv /fetch/bin/gitleaks /fetch/bin/buildctl /fetch/bin/crane; \
     tar -xzf /fetch/cpython.tar.gz -C /fetch/opt --no-same-owner; \
     test "$(/fetch/opt/python/bin/python3.12 -B -c 'import platform; print(platform.python_version())')" = "${CPYTHON_VERSION}"; \
     test "$(/fetch/bin/uv --version | cut -d' ' -f2)" = "${UV_VERSION}"; \
@@ -298,6 +312,8 @@ COPY --from=fetch-agy /fetch/agy /usr/local/bin/agy
 # Hermes wrapper and anything else that runs `python3` is unchanged.
 COPY --from=fetch-toolchain /fetch/bin/uv /usr/local/bin/uv
 COPY --from=fetch-toolchain /fetch/bin/gitleaks /usr/local/bin/gitleaks
+COPY --from=fetch-toolchain /fetch/bin/buildctl /usr/local/bin/buildctl
+COPY --from=fetch-toolchain /fetch/bin/crane /usr/local/bin/crane
 COPY --from=fetch-toolchain /fetch/opt/python /opt/python3.12
 RUN ln -s /opt/python3.12/bin/python3.12 /usr/local/bin/python3.12
 

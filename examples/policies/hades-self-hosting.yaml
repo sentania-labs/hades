@@ -105,6 +105,8 @@ repository:
   - jq
   - tar
   - sha256sum
+  - buildctl
+  - crane
 gates:
   pre_pr:
   - report_present
@@ -120,6 +122,7 @@ gates:
   - dependencies_unchanged
   - ci_unchanged
   - workspace_clean
+  - image_checks_required
   - internal_review_recorded
   publication:
   - branch_pushed_at_head

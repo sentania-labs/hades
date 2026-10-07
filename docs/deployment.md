@@ -19,6 +19,8 @@ deploy/kubernetes/
   base/crucible/         the api and supervisor Deployments, PostgreSQL, the settings
                          ConfigMap, the artifact claim, the migration Job, the Service
                          and the Ingress
+  base/buildkit/         Hades's rootless BuildKit Deployment, ClusterIP Service and
+                         persistent layer-cache claim
   base/workers/          the crucible-workers namespace: Pod Security admission at
                          restricted, the default-deny NetworkPolicy, the worker account,
                          the supervisor Role and RoleBinding, the ResourceQuota and the
@@ -56,6 +58,7 @@ Spec 26's checklist, made concrete. Each row is either a placeholder in
 | 1 | Nothing: the two namespaces, the `restricted` admission labels and the default-deny NetworkPolicy are in `base/workers` and are applied by this Application | - |
 | 2 | A CNI that enforces egress NetworkPolicy, on which the worker DNS and local endpoint rules match | verified by the readiness canary, shown on the status page; on Cilium with kube-proxy replacement, see "Cilium and an in-cluster LiteLLM" below |
 | 3 | A `ReadWriteOnce` storage class for PostgreSQL, the reference cache and the attempt workspaces | `REPLACE_ME_STORAGE_CLASS_RWO` |
+| 3a | Capacity for Hades's own rootless BuildKit cache. The base requests 50 GiB; size the claim differently or replace the component with a compatible private BuildKit endpoint in the deployer's overlay | `base/buildkit/buildkit.yaml` |
 | 3b | A `ReadWriteMany` storage class for the artifact root | `REPLACE_ME_STORAGE_CLASS_RWX` |
 | 4 | A pod PID limit configured on every node that can run a `crucible-workers` Pod (the kubelet's `podPidsLimit`; Kubernetes has no per-pod PID field, issue 60) | reported on the status page when the canary can see it; the provider refuses to launch without a confirmed one (95: on a runtime that isolates the pod's cgroup from the container, the canary cannot see it at all, and lab-admin attests to it with `kubernetes.pod_pid_limit_override` instead) |
 | 5 | The cluster can pull `ghcr.io/sentania-labs/crucible` and `ghcr.io/sentania-labs/crucible-worker` (the release publishes both); a pull secret if the packages are private. The api and supervisor Pods also read the worker registry themselves, to resolve a tag to a digest and its harness labels before a launch and to list images for promotion: they run `crane`, which the service image ships, with the same pull Secret, so nothing else is configured. They need HTTPS egress to the registry and to the host it redirects blob downloads to (for GHCR, `pkg-containers.githubusercontent.com`). A registry must be named by a host name it serves HTTPS on: one named by a private IP address is refused, because crane would read it over plain HTTP | `REPLACE_ME_IMAGE_PULL_SECRET` |
@@ -64,6 +67,17 @@ Spec 26's checklist, made concrete. Each row is either a placeholder in
 | 8 | Nothing: public DNS is the operator's alone (below) | - |
 
 ### Every placeholder, and what goes in it
+
+### Hades's image builder
+
+Hades deploys `crucible-buildkit` in the `crucible` namespace as its own dependency.
+It is not the lab's shared CI builder. It runs the pinned rootless BuildKit image,
+without privilege, and keeps layers in a 50 GiB `ReadWriteOnce` claim. A deployer may
+resize that documented default or replace the component with an equivalently isolated
+BuildKit service. TLS is off on the cluster-only port 1234: the workers namespace's
+default deny and the per-attempt NetworkPolicy are the trust boundary. Only contracts
+requiring both `make images-check` and `make registry-check` receive a rule to that
+Service and HTTPS egress to `ghcr.io`.
 
 | Placeholder | File | Value |
 |---|---|---|

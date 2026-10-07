@@ -150,6 +150,18 @@ publishes only a build that reproduces it. Project-specific toolchains come from
 image the task contract names, built `FROM` the worker image; the
 provider's image allowlist controls what may run.
 
+Kubernetes deployments include Hades's own dedicated rootless BuildKit dependency,
+`crucible-buildkit.crucible.svc:1234`; it is not a shared CI builder. Its pinned image
+comes from `BUILDKIT_IMAGE`, and its persistent layer cache defaults to 50 GiB. A
+deployer may resize the claim or replace the service. TLS is deliberately off inside
+the cluster because the workers namespace default deny and Hades's per-attempt policy
+are the boundary. The worker image carries `buildctl` and `crane`, each pinned by
+release version and SHA256. When `BUILDKIT_HOST` is present, `images/build.sh` uses
+buildctl while
+retaining the same build arguments, labels, OCI and Docker outputs and digest check;
+without it CI retains the docker-container buildx path. Only contracts requiring both
+image checks receive BuildKit and `ghcr.io` egress.
+
 Rules:
 
 - Harness CLIs never update themselves inside a running worker. The image

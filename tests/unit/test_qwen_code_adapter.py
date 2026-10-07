@@ -372,7 +372,7 @@ async def test_images_workflow_offers_qwen_its_own_promotion(
     ]
     rendered = _image_rows([qwen], admin=True)
     action = rendered[0][-1]["items"][0]
-    assert action["action"] == "/ui/actions/image-promote"
+    assert action["action"] == "/ui/actions/image-change"
     assert action["hidden"] == {"harness": "qwen_code"}
 
 

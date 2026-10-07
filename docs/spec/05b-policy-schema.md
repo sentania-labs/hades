@@ -169,6 +169,11 @@ retention:
 - Every field present with the listed types; unknown fields rejected.
 - `gates.pre_pr`, `publication`, `post_pr`, and `skipped` partition the gate
   set defined in 11 and 23; a gate in none of them is an error.
+- `image_checks_required` is an optional pre-PR gate added by issue 475. Policies
+  created before it existed may omit it and retain their stored behavior. The shipped
+  `hades-self-hosting` policy enables it: a collected diff under `images/` or
+  `tools/images/` fails unless the contract names both `make images-check` and
+  `make registry-check` in `required_verification`.
 - `retry.eligible_classes` is a subset of the `ExitClass` enum (07).
 - `concurrency.per_harness` may exceed 1 for read-only adapters or adapters declaring
   `parallel_attempts_safe`. Writable adapters without that declaration are refused
