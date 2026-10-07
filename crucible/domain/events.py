@@ -162,6 +162,9 @@ class EventKind(StrEnum):
     GITHUB_DELIVERY_RECEIVED = "github_delivery_received"
     GITHUB_DELIVERY_REJECTED = "github_delivery_rejected"
     GITHUB_RATE_LIMITED = "github_rate_limited"
+    # hades #443: the images-digest workflow's own commit on the work branch is Hades's
+    # head move, not divergence; the publisher builds on it.
+    DIGEST_COMMIT_OBSERVED = "digest_commit_observed"
     # harness administration and credentials (07, 12, 25)
     HARNESS_REFUSED = "harness_refused"
     HARNESS_LAUNCH_DEFERRED = "harness_launch_deferred"

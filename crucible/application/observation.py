@@ -89,7 +89,7 @@ from crucible.domain.waivers import (
     waiver_words,
 )
 from crucible.ports.clock import Clock
-from crucible.ports.github import Observation
+from crucible.ports.github import CheckRecord, CommitDiffRecord, Observation
 from crucible.ports.repository import UnitOfWork
 
 log = logging.getLogger("crucible.observation")
@@ -241,6 +241,75 @@ def task_waivers(uow: UnitOfWork, task: Task) -> dict[str, Decision]:
 
 # ----- heads and divergence ---------------------------------------------
 
+# Constants for the digest-commit head-move rule (hades #443).
+DIGEST_AUTHOR = "github-actions[bot]"
+DIGEST_MESSAGE_PREFIX = "Record the CI-built digest"
+DIGEST_FILE = "images/manifest.env"
+
+
+def _is_digest_commit(commit_diff: tuple[CommitDiffRecord, ...]) -> bool:
+    """Return True when *commit_diff* describes a pure digest commit.
+
+    A pure digest commit changes only ``*_DIGEST`` lines of
+    ``images/manifest.env`` and touches no other lines.
+    """
+    if not commit_diff:
+        return False
+    # Every changed file must be the manifest.
+    if not all(d.path == DIGEST_FILE for d in commit_diff):
+        return False
+    return True
+
+
+def _is_digest_move(
+    *,
+    previous: str,
+    observed_sha: str,
+    author: str,
+    message: str,
+    diff: tuple[CommitDiffRecord, ...],
+) -> bool:
+    """Return True when the head move from *previous* → *observed_sha* is a digest move."""
+    if previous == observed_sha:
+        return False
+    if author != DIGEST_AUTHOR:
+        return False
+    if not message.startswith(DIGEST_MESSAGE_PREFIX):
+        return False
+    if not _is_digest_commit(diff):
+        return False
+    return True
+
+
+def _record_digest_commit(
+    uow: UnitOfWork,
+    clock: Clock,
+    *,
+    task: Task,
+    pull_request: PullRequest,
+    observed_sha: str,
+    result: ObservationResult,
+) -> None:
+    """Record a digest commit: no divergence, carry dispositions forward, certify CI."""
+    now = clock.now()
+    record_event(
+        uow,
+        clock,
+        EventKind.DIGEST_COMMIT_OBSERVED,
+        principal=PRINCIPAL_CRUCIBLE,
+        task_id=task.id,
+        payload={
+            "pull_request": pull_request.number,
+            "old_head": task.head_sha,  # the head_sha on the task was already updated
+            "new_head": observed_sha,
+            "message": "images-digest workflow moved the head; acceptance and dispositions carry forward",
+        },
+    )
+    # Update the task's head_sha to the new observed SHA.
+    task.head_sha = observed_sha
+    uow.tasks.save(task)
+    result.changed = True
+
 
 def observe_head(
     uow: UnitOfWork,
@@ -250,8 +319,17 @@ def observe_head(
     pull_request: PullRequest,
     observed_sha: str,
     result: ObservationResult,
+    observation: Observation | None = None,
 ) -> None:
-    """A head Crucible did not push moves the task to `head_diverged` (09, 23)."""
+    """A head Crucible did not push moves the task to `head_diverged` (09, 23).
+
+    Hades #443: if the head moved from the accepted head to *observed_sha* because
+    the images-digest workflow committed a *digest commit* (author ``github-actions[bot]``,
+    message prefix ``Record the CI-built digest``, diff touches only ``*_DIGEST`` lines of
+    ``images/manifest.env``), the move is treated as **Hades's own head move** – the task
+    stays in its current state, acceptance and dispositions carry forward, and CI on the
+    new head is recorded without a new head decision.
+    """
     if not observed_sha or observed_sha == pull_request.head_sha:
         return
     known = {
@@ -287,6 +365,16 @@ def observe_head(
     )
     result.changed = True
     if ours or task.state not in DIVERGENCE_STATES:
+        return
+    # hades #443: check for digest commit before diverging.
+    if observation is not None and _is_digest_move(
+        previous=previous,
+        observed_sha=observed_sha,
+        author=observation.head_commit_author,
+        message=observation.head_commit_message,
+        diff=observation.head_commit_diff,
+    ):
+        _record_digest_commit(uow, clock, task=task, pull_request=pull_request, observed_sha=observed_sha, result=result)
         return
     supersede_for_head(uow, clock, task=task, reason="head_diverged", new_head=observed_sha)
     move_task(
@@ -2222,6 +2310,7 @@ def apply_observation(
         pull_request=pull_request,
         observed_sha=observation.pull_request.head_sha,
         result=result,
+        observation=observation,
     )
     certification: CICertification | None = None
     head = accepted_head(uow, task)

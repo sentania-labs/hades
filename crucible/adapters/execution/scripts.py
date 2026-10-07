@@ -1187,6 +1187,9 @@ EXPECTED={_quote(expected_head)}
 CLONE_URL={_quote(clone_url)}
 SEAL={_quote(bundle_sha256)}
 OWNED_HEADS={_quote(" ".join(owned_remote_heads))}
+# hades #443: digest-commit author and message prefix for remote-branch checks.
+DIGEST_AUTHOR={_quote(DIGEST_AUTHOR_LOGIN)}
+DIGEST_MSG_PREFIX={_quote(DIGEST_MESSAGE_PREFIX)}
 drop_token() {{ {drop}; }}
 mkdir -p "$OUT"
 # A retried publication of the same attempt writes into the same directory; nothing a
@@ -1265,6 +1268,28 @@ if [ -n "$REMOTE" ]; then
       | grep -q '[^[:space:]]'; then
     OWNED=yes
   fi
+  # hades #443: if the remote is ahead only by digest commits, treat it as owned.
+  if [ "$OWNED" != yes ]; then
+    # Count commits between EXPECTED and REMOTE; if all are digest commits, OWNED=yes.
+    SPOOLS=$(git log --oneline --no-merges "$EXPECTED".."$REMOTE" 2>/dev/null || echo "")
+    DIGEST_OK=yes
+    if [ -n "$SPOOLS" ]; then
+      for COMMIT in $SPOOLS; do
+        COMMIT_SHA=${{COMMIT%% *}}
+        AUTHOR=$(git show -s --format='%an' "$COMMIT_SHA" 2>/dev/null || echo "")
+        MSG=$(git show -s --format='%s' "$COMMIT_SHA" 2>/dev/null || echo "")
+        if [ "$AUTHOR" != "$DIGEST_AUTHOR" ] || \
+           ! printf '%s' "$MSG" | grep -q "^${{DIGEST_MSG_PREFIX}}"; then
+          DIGEST_OK=no
+          break
+        fi
+      done
+    fi
+    if [ "$DIGEST_OK" = yes ]; then
+      OWNED=yes
+      REMOTE="$REMOTE"
+    fi
+  fi
   if [ "$OWNED" != yes ]; then
     AUTHOR=$(git show -s --format='%an <%ae>' "$REMOTE")
     printf 'foreign remote commit %s by %s; no Hades push record or attempt trailer\n' \
@@ -1302,6 +1327,9 @@ MERGE_MAIN_MARKER = "# crucible: merge the base into the remote work branch"
 # and git stopped on conflicts (6). Neither pushed anything.
 MERGE_MAIN_HEAD_MOVED = 4
 MERGE_MAIN_CONFLICT = 6
+# hades #443: the author login that the images-digest workflow uses for digest commits.
+DIGEST_AUTHOR_LOGIN = "github-actions[bot]"
+DIGEST_MESSAGE_PREFIX = "Record the CI-built digest"
 
 
 def merge_main_script(
@@ -1382,8 +1410,28 @@ fi
 REMOTE=$(git rev-parse "refs/remotes/origin/$WORK_BRANCH")
 printf '%s\\n' "$REMOTE" > "$OUT/remote-head-before.txt"
 if [ "$REMOTE" != "$EXPECTED" ]; then
-  echo "the remote work branch is at $REMOTE, not the known tip $EXPECTED" > "$OUT/error.txt"
-  echo head-moved > "$OUT/step.txt"; drop_token; exit {MERGE_MAIN_HEAD_MOVED}
+  # hades #443: if the remote is ahead only by digest commits, accept it.
+  # Check all commits between EXPECTED and REMOTE are digest commits.
+  DIGEST_OK=yes
+  SPOOLS=$(git log --oneline --no-merges "$EXPECTED".."$REMOTE" 2>/dev/null || echo "")
+  if [ -n "$SPOOLS" ]; then
+    for COMMIT in $SPOOLS; do
+      COMMIT_SHA=${{COMMIT%% *}}
+      AUTHOR=$(git show -s --format='%an' "$COMMIT_SHA" 2>/dev/null || echo "")
+      MSG=$(git show -s --format='%s' "$COMMIT_SHA" 2>/dev/null || echo "")
+      if [ "$AUTHOR" != "$DIGEST_AUTHOR" ] || \
+         ! printf '%s' "$MSG" | grep -q "^${{DIGEST_MSG_PREFIX}}"; then
+        DIGEST_OK=no
+        break
+      fi
+    done
+  fi
+  if [ "$DIGEST_OK" = no ]; then
+    echo "the remote work branch is at $REMOTE, not the known tip $EXPECTED" > "$OUT/error.txt"
+    echo head-moved > "$OUT/step.txt"; drop_token; exit {MERGE_MAIN_HEAD_MOVED}
+  fi
+  # Accept: the remote tip now becomes the new expected head.
+  EXPECTED="$REMOTE"
 fi
 git checkout --quiet -B crucible-merge-main "$REMOTE" >> "$OUT/publisher.log" 2>&1
 if git merge-base --is-ancestor "refs/remotes/origin/$BASE_REF" HEAD; then
