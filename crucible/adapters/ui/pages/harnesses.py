@@ -121,9 +121,23 @@ def _last_gateway_or_routing_change_ts(uow: UoW) -> str | None:
 RUNNING_REFRESH_SECONDS = 5
 
 
-def _test_cell(last: dict[str, Any] | None, uow: UoW | None = None) -> dict[str, Any]:
+def _test_cell(
+    last: dict[str, Any] | None, uow: UoW | None = None, *, stale: bool = False
+) -> dict[str, Any]:
     if not last:
         return {"kind": "note", "value": "not tested yet"}
+    if stale:
+        # issue 147: a run that died with its process, or whose result could not be
+        # stored, never lands; the row says so and offers Test again.
+        return {
+            "kind": "status",
+            "value": "no result",
+            "tone": "bad",
+            "hint": (
+                f"started {last.get('started_at')} and no result landed; the run was "
+                "lost, run Test again"
+            ),
+        }
     if harness_test.is_running(last):
         return {
             "kind": "status",
@@ -175,14 +189,18 @@ async def harness_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     admin = principal.role is Role.ADMIN
     rows: list[list[Any]] = []
     running = False
+    now = ctx.admin.clock.now()
     for item in items:
         name = item["name"]
         image = item.get("default_image")
         last = item.get("last_test")
+        stale = harness_test.is_stale(last, now)
         actions: list[dict[str, Any]] = []
-        if harness_test.is_running(last):
+        if harness_test.is_running(last) and not stale:
             # issue 147: the row reads running and offers no second Test until the
-            # result lands; the service would refuse a duplicate anyway.
+            # result lands; the service would refuse a duplicate anyway. A marker past
+            # STALE_AFTER_SECONDS is a lost run: Test is offered again, and a start
+            # replaces the marker.
             running = True
         elif admin and item["enabled"]:
             actions.append(
@@ -223,7 +241,7 @@ async def harness_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                     else {"kind": "link", "href": "/ui/images", "label": "Choose on Images"}
                 ),
                 item["credential"]["state"].replace("_", " "),
-                _test_cell(last, uow),
+                _test_cell(last, uow, stale=stale),
                 {"kind": "actions", "items": actions} if actions else "",
             ]
         )

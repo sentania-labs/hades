@@ -39,9 +39,14 @@ of the same UI.
   stores the result (`status: finished`), a second Test while the marker says running
   starts no duplicate, the row reads running and the page reloads every few seconds
   until the result lands, and `crucible admin harnesses test NAME` polls
-  `GET /v1/admin/harnesses/{name}/test` and prints the result. A running marker older
-  than fifteen minutes with no run in the process is treated as a run that died with its
-  process and is replaced. Local mode runs the test in the foreground as before.
+  `GET /v1/admin/harnesses/{name}/test` and prints the result. The start claims the run
+  in one short transaction that locks the harness row (`SELECT ... FOR UPDATE`) and
+  commits the marker before the thread starts, so two starts on different api replicas
+  launch one run and the POST waits for nothing else. A run whose result cannot be
+  stored replaces its marker with a failed result naming the cause. A running marker
+  older than fifteen minutes with no run in the process is treated as a run that died
+  with its process: the row reads "no result", offers Test again and stops reloading,
+  and a start replaces the marker. Local mode runs the test in the foreground as before.
 - **Test fixtures** (#124): `test_fixtures` (`CRUCIBLE_TEST_FIXTURES`), false by default,
   wires the fake provider and registers the script harness. The compose smoke (CI and
   release) and the kind overlay turn it on. It is a restart-bound setting like its peers,

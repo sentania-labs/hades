@@ -12,17 +12,17 @@ run is the bounded probe (25) with every harness in a worker, Hermes included, s
 recorded as the probe is: a `credential_probed` event and the last launch outcome.
 
 The run takes up to a couple of minutes, so the API and the Harnesses page start it as a
-background job (issue 147): `start_test` stores a running marker as the harness's
-`last_test`, returns it at once, and a thread of this process runs the six steps and
-replaces the marker with the result. A second start while the marker says running returns
-that marker and starts nothing. `test_harness` is the run itself, in the foreground, which
+background job (issue 147): `start_test` claims the run by writing a running marker as the
+harness's `last_test` under a row lock, commits it, returns it at once, and a thread of
+this process runs the six steps and replaces the marker with the result. A second start
+while the marker says running, on this replica or another, returns that marker and starts
+nothing. `test_harness` is the run itself, in the foreground, which
 is what the thread and the CLI's local mode call."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
@@ -45,11 +45,9 @@ RUNNING = "running"
 FINISHED = "finished"
 NOT_TESTED = "not tested"
 # A running marker older than this, with no run in this process, was left by a process
-# that died mid-test (an api restart); a start replaces it rather than waiting on it.
+# that died mid-test (an api restart) or a run whose result could not be stored; a start
+# replaces it rather than waiting on it, and the Harnesses page offers Test again.
 STALE_AFTER_SECONDS = 900
-# How long a start waits for its thread to store the running marker, so the Harnesses
-# page loaded right after the redirect already reads running.
-MARKER_WAIT_SECONDS = 5.0
 
 ENABLED = "Harness enabled"
 IMAGE = "Worker image"
@@ -156,9 +154,11 @@ def is_result_of(latest: Any, started: Any) -> bool:
     return isinstance(since, str) and isinstance(landed, str) and landed >= since
 
 
-def _stale(marker: dict[str, Any], now: datetime) -> bool:
-    """A running marker nothing in this process is running, old enough to be a run that
-    died with its process. An unreadable start time is stale too."""
+def is_stale(marker: Any, now: datetime) -> bool:
+    """A running marker old enough to be a run that died with its process or whose result
+    could not be stored. An unreadable start time is stale too."""
+    if not is_running(marker):
+        return False
     raw = marker.get("started_at")
     try:
         started = datetime.fromisoformat(str(raw))
@@ -203,9 +203,12 @@ def start_test(
     the running marker and starts nothing. A marker older than `STALE_AFTER_SECONDS` with
     no run in this process is a run that died with its process, and a start replaces it.
 
-    `uow` is read, never written: the thread stores the marker and the result through
-    units of work of its own, so a result that lands quickly is never overwritten by the
-    caller's later commit of the marker."""
+    The claim is one short transaction of its own: the harness row is locked, a fresh
+    running marker on it is handed back, and otherwise the new marker is written and
+    committed before the thread starts. Two starts on different replicas serialise on
+    the row lock, so only one of them launches a run. `uow` is read, never written, so
+    the caller's later commit never overwrites the marker or a result that lands
+    quickly."""
     reason = guard_mutation(
         ctx, uow, reason, principal=principal, operation=f"harnesses test {harness}"
     )
@@ -216,20 +219,9 @@ def start_test(
         marker = runs.running(harness)
         if marker is not None:
             return dict(marker)
-        state = uow.harnesses.get(harness)
-        stored = state.last_test if state is not None else None
-        if is_running(stored) and not _stale(stored, ctx.clock.now()):
-            return dict(stored)
-        marker = {
-            "harness": harness,
-            "status": RUNNING,
-            "ok": None,
-            "failed_step": None,
-            "steps": [],
-            "started_at": ctx.clock.now().isoformat(),
-            "started_by": principal,
-        }
-        landed = threading.Event()
+        marker, claimed = _claim(ctx, principal=principal, harness=harness)
+        if not claimed:
+            return marker
         runs.start(
             harness,
             marker,
@@ -237,52 +229,82 @@ def start_test(
                 _in_background,
                 ctx,
                 marker,
-                landed,
                 principal=principal,
                 harness=harness,
                 reason=reason,
             ),
         )
-    landed.wait(MARKER_WAIT_SECONDS)
     return dict(marker)
+
+
+def _ensure_row(ctx: AdminContext, harness: str) -> None:
+    """The harness's row exists, so the claim has a row to lock. Two first starts may
+    both insert it; the one that loses finds the winner's row and goes on."""
+    try:
+        with ctx.uow_factory() as uow:
+            if uow.harnesses.get(harness) is None:
+                uow.harnesses.put(harness_state(uow, ctx.clock, harness))
+                uow.commit()
+    except Exception:
+        with ctx.uow_factory() as uow:
+            if uow.harnesses.get(harness) is None:
+                raise
+
+
+def _claim(ctx: AdminContext, *, principal: str, harness: str) -> tuple[dict[str, Any], bool]:
+    """Under the harness row's lock: the fresh running marker already there and False, or
+    a new running marker, committed, and True."""
+    _ensure_row(ctx, harness)
+    with ctx.uow_factory() as uow:
+        state = uow.harnesses.get(harness, for_update=True)
+        if state is None:  # pragma: no cover - _ensure_row has just made it
+            state = harness_state(uow, ctx.clock, harness)
+        now = ctx.clock.now()
+        stored = state.last_test
+        if is_running(stored) and not is_stale(stored, now):
+            return dict(stored), False
+        marker: dict[str, Any] = {
+            "harness": harness,
+            "status": RUNNING,
+            "ok": None,
+            "failed_step": None,
+            "steps": [],
+            "started_at": now.isoformat(),
+            "started_by": principal,
+        }
+        state.last_test = dict(marker)
+        state.updated_at = now
+        uow.harnesses.put(state)
+        uow.commit()
+    return marker, True
 
 
 def _in_background(
     ctx: AdminContext,
     marker: dict[str, Any],
-    landed: threading.Event,
     *,
     principal: str,
     harness: str,
     reason: str,
 ) -> None:
-    """The thread's whole life: the loop is its own, as the request handlers' are."""
+    """The thread's whole life: the loop is its own, as the request handlers' are. A run
+    whose result cannot be stored leaves a failed result in its place, never a marker
+    that stays running."""
     try:
-        asyncio.run(
-            _background(ctx, marker, landed, principal=principal, harness=harness, reason=reason)
-        )
-    except Exception:  # the thread has nowhere to raise
+        asyncio.run(_background(ctx, marker, principal=principal, harness=harness, reason=reason))
+    except Exception as exc:  # the thread has nowhere to raise
         log.exception("the %s test could not run in the background", harness)
-    finally:
-        landed.set()
+        _store_failure(ctx, marker, principal=principal, harness=harness, exc=exc)
 
 
 async def _background(
     ctx: AdminContext,
     marker: dict[str, Any],
-    landed: threading.Event,
     *,
     principal: str,
     harness: str,
     reason: str,
 ) -> None:
-    with ctx.uow_factory() as uow:
-        state = harness_state(uow, ctx.clock, harness)
-        state.last_test = dict(marker)
-        state.updated_at = ctx.clock.now()
-        uow.harnesses.put(state)
-        uow.commit()
-    landed.set()
     with ctx.uow_factory() as uow:
         await test_harness(
             ctx,
@@ -293,6 +315,43 @@ async def _background(
             started_at=str(marker["started_at"]),
         )
         uow.commit()
+
+
+def _store_failure(
+    ctx: AdminContext,
+    marker: dict[str, Any],
+    *,
+    principal: str,
+    harness: str,
+    exc: BaseException,
+) -> None:
+    """Replace this run's marker, if it is still the stored one, with a failed result
+    that names the cause. If even that cannot be stored, the marker goes stale and a
+    later start replaces it."""
+    steps = _Steps([])
+    steps.fail_in_progress(harness, exc)
+    try:
+        with ctx.uow_factory() as uow:
+            state = uow.harnesses.get(harness, for_update=True)
+            if state is None or not isinstance(state.last_test, dict):
+                return
+            if state.last_test.get("started_at") != marker["started_at"]:
+                return
+            state.last_test = {
+                "harness": harness,
+                "status": FINISHED,
+                "ok": False,
+                "failed_step": STEPS[0],
+                "steps": steps.items,
+                "started_at": marker["started_at"],
+                "tested_at": ctx.clock.now().isoformat(),
+                "tested_by": principal,
+            }
+            state.updated_at = ctx.clock.now()
+            uow.harnesses.put(state)
+            uow.commit()
+    except Exception:
+        log.exception("the failed %s test could not be stored", harness)
 
 
 async def test_harness(
