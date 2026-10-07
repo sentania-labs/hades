@@ -259,7 +259,6 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                         "kind": "form",
                         "action": "/ui/actions/routing-clear",
                         "label": "Clear",
-                        "reason": "optional",
                         "hidden": {"pool": item["pool"]},
                     }
                     if admin

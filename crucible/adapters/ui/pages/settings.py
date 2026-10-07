@@ -215,7 +215,6 @@ def settings_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         "kind": "form",
         "action": "/ui/actions/auto-merge",
         "label": "Disable auto-merge" if enabled else "Enable auto-merge",
-        "reason": "optional",
         "hidden": {"enabled": "false" if enabled else "true"},
     }
     rows = _settings_rows(ctx.settings)

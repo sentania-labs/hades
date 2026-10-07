@@ -183,7 +183,6 @@ async def harness_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                     "kind": "form",
                     "action": "/ui/actions/harness",
                     "label": "Disable" if item["enabled"] else "Enable",
-                    "reason": "optional",
                     "hidden": {
                         "harness": name,
                         "enabled": "false" if item["enabled"] else "true",
