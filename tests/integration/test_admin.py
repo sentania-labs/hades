@@ -2779,11 +2779,26 @@ def test_a_harness_test_reports_each_step_and_stops_at_the_first_failure(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """crucible#118: one Test per harness runs the path a task takes and says, per step,
-    pass or fail in plain words. It asks for no reason (crucible#117)."""
+    pass or fail in plain words. It asks for no reason (crucible#117). The POST starts the
+    run in the background and answers its running marker at once; the result lands on
+    the harness row, where `GET /admin/harnesses/{name}/test` reads it (issue 147)."""
+
+    def tested(harness: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        started = admin_client.post(f"/v1/admin/harnesses/{harness}/test", json=body)
+        assert started.status_code == 202, started.text
+        marker = started.json()
+        assert marker["status"] == "running" and marker["ok"] is None, marker
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            latest: dict[str, Any] = admin_client.get(f"/v1/admin/harnesses/{harness}/test").json()
+            if latest["status"] == "finished" and latest["started_at"] >= marker["started_at"]:
+                return latest
+            time.sleep(0.05)
+        raise AssertionError(f"the {harness} test did not land within 30 s")
+
     asyncio.run(live_supervisor.tick())
-    untested = admin_client.post("/v1/admin/harnesses/hermes/test")
-    assert untested.status_code == 200, untested.text
-    result = untested.json()
+    assert admin_client.get("/v1/admin/harnesses/hermes/test").json()["status"] == "not tested"
+    result = tested("hermes")
     assert result["ok"] is False and result["failed_step"] == "Worker image"
     assert [s["result"] for s in result["steps"]] == [
         "pass",
@@ -2806,7 +2821,7 @@ def test_a_harness_test_reports_each_step_and_stops_at_the_first_failure(
         uow.commit()
     # Hermes has no key in this tier: the test stops at the credential, before a worker.
     probes_before = len(provider.probes)
-    missing = admin_client.post("/v1/admin/harnesses/hermes/test", json={}).json()
+    missing = tested("hermes", {})
     assert missing["failed_step"] == "Credential"
     assert "no API key is stored" in missing["steps"][2]["detail"]
     assert "Local gateway" in missing["steps"][2]["detail"]
@@ -2824,13 +2839,13 @@ def test_a_harness_test_reports_each_step_and_stops_at_the_first_failure(
         "Model call",
     ]
     assert passed["steps"][2]["detail"] == "this harness needs none"
-    through_api = admin_client.post("/v1/admin/harnesses/script-harness/test").json()
+    through_api = tested("script-harness")
     assert through_api["ok"] is True
     assert provider.probe_requests[-1].harness == "script-harness"
 
     # A model provider that refuses the credential fails the model call, named as such.
     provider.probe_outcome = "auth_failure"
-    refused = admin_client.post("/v1/admin/harnesses/codex/test").json()
+    refused = tested("codex")
     assert refused["failed_step"] == "Model call", refused
     assert "refused the credential" in refused["steps"][-1]["detail"]
 
