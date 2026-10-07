@@ -200,6 +200,8 @@ def test_local_codex_uses_pool_limit_subscription_still_serial(
             state=AttemptState.RUNNING,
             execution_id="local",
             selected_pool="lab-local",
+            selected_model=None,
+            selected_harness=None,
         )
     ]
     uow = _uow(attempts=live)
@@ -212,6 +214,8 @@ def test_local_codex_uses_pool_limit_subscription_still_serial(
             state=AttemptState.RUNNING,
             execution_id="local",
             selected_pool="lab-local",
+            selected_model=None,
+            selected_harness=None,
         )
     )
     assert "2 of 2 lab-local" in str(supervisor._harness_busy_in_uow(uow, local))
@@ -221,6 +225,8 @@ def test_local_codex_uses_pool_limit_subscription_still_serial(
             routing_version=None,
             execution_id="subscription",
             selected_pool="pool-subscription",
+            selected_model=None,
+            selected_harness=None,
         )
     ]
     assert supervisor._harness_busy_in_uow(uow, local) is None

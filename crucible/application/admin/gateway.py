@@ -222,7 +222,10 @@ async def models_view(ctx: AdminContext, uow: UnitOfWork, *, fetch: bool = True)
                     "vanished_at": entry.get("vanished_at"),
                 }
             )
+        in_policy = bool(controls)
         is_offered = None if offered is None else model_name in offered
+        if not controls and is_offered:
+            controls.append({"harness": "hermes", "enabled": False, "enable_thinking": False})
         rows.append(
             {
                 "model": model_name,
@@ -231,7 +234,7 @@ async def models_view(ctx: AdminContext, uow: UnitOfWork, *, fetch: bool = True)
                 "id": model_name,
                 "model_name": model_name,
                 "offered": is_offered,
-                "in_policy": bool(controls),
+                "in_policy": in_policy,
                 "harnesses": controls,
                 "enabled": bool(controls and controls[0]["enabled"]),
                 "codex_enabled": any(
@@ -451,7 +454,9 @@ async def save_models(
             )
         pick = {
             "enabled": _flag(item, "enabled", index) if "enabled" in item else None,
-            "enable_thinking": _flag(item, "enable_thinking", index),
+            "enable_thinking": _flag(item, "enable_thinking", index)
+            if "enable_thinking" in item
+            else None,
             "capability": capability,
             "codex_enabled": _flag(item, "codex_enabled", index)
             if "codex_enabled" in item
@@ -538,7 +543,7 @@ async def save_models(
                 "weight": 1,
                 "enabled": True,
                 "disabled_reason": None,
-                "chat_template_kwargs": {"enable_thinking": pick["enable_thinking"]},
+                "chat_template_kwargs": {"enable_thinking": pick["enable_thinking"] or False},
             }
             entries.append(entry)
             local.append(entry)
@@ -548,7 +553,10 @@ async def save_models(
         entry["disabled_reason"] = None if pick["enabled"] else "operator did not pick it"
         if pick["enabled"]:
             entry["vanished_at"] = None
-        entry["chat_template_kwargs"] = {"enable_thinking": pick["enable_thinking"]}
+        if pick["enable_thinking"] is not None:
+            entry.setdefault("chat_template_kwargs", {})["enable_thinking"] = pick[
+                "enable_thinking"
+            ]
         if pick["capability"]:
             entry["capability"] = pick["capability"]
     disabled_not_offered: list[str] = []

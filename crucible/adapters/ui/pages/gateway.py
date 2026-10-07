@@ -389,7 +389,6 @@ async def _action_gateway_models(
                 "model": form[f"route.{route_index}.model"],
                 "harness": form[f"route.{route_index}.harness"],
                 "enabled": form.get(f"route.{route_index}.enabled") == "true",
-                "enable_thinking": False,
             }
         )
         route_index += 1

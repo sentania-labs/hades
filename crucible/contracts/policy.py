@@ -570,13 +570,9 @@ class RoutingPolicyV1(StrictModel):
                 raise ValueError(f"tier {tier} lists a preferred pool twice")
         return self
 
-    def model(self, model: str, harness: str | None = None) -> RoutingModel | None:
+    def model(self, model: str, harness: str) -> RoutingModel | None:
         return next(
-            (
-                entry
-                for entry in self.models
-                if entry.model == model and (harness is None or entry.harness == harness)
-            ),
+            (entry for entry in self.models if entry.model == model and entry.harness == harness),
             None,
         )
 

@@ -216,9 +216,9 @@ def usage_report(uow: UnitOfWork, routing: RoutingPolicyV1, now: datetime) -> li
 
 
 def check_quota(
-    uow: UnitOfWork, routing: RoutingPolicyV1, *, model_id: str, now: datetime
+    uow: UnitOfWork, routing: RoutingPolicyV1, *, model_id: str, harness: str, now: datetime
 ) -> Problem | None:
-    entry = routing.model(model_id)
+    entry = routing.model(model_id, harness)
     if entry is None:
         return None
     usage = pool_usage(uow, routing, entry.pool, now)
@@ -301,7 +301,7 @@ def select_model(
     harnesses: HarnessRegistry | None = None,
     image_allowlist: list[str] | None = None,
     excluded_pools: set[str] | None = None,
-    excluded_models: set[str] | None = None,
+    excluded_routes: set[tuple[str, str]] | None = None,
     pinned_model: str | None = None,
     pinned_harness: str | None = None,
 ) -> Selection:
@@ -344,7 +344,7 @@ def select_model(
             reasons.append("pool is at its soft limit")
         if usage.exhausted_until is not None:
             reasons.append(f"pool exhausted until {usage.exhausted_until.isoformat()}")
-        if excluded_models and entry.id in excluded_models:
+        if excluded_routes and (entry.harness, entry.model) in excluded_routes:
             reasons.append("model refused capacity for this retry")
         if excluded_pools and entry.pool in excluded_pools:
             reasons.append("pool excluded for the current quota reroute")
@@ -412,7 +412,9 @@ def select_model(
             "image": image or None,
             "eligible": not reasons,
             "excluded": reasons,
-            "capacity_refused": bool(excluded_models and entry.id in excluded_models),
+            "capacity_refused": bool(
+                excluded_routes and (entry.harness, entry.model) in excluded_routes
+            ),
             "preferred_pool": entry.pool in preferred,
             "quality": quality.as_dict(),
         }
@@ -504,7 +506,7 @@ def reserve(
     transaction that moves the attempt to `launching`, against the routing version the
     attempt was routed with (hades #254)."""
     routing = load_attempt_routing(uow, policy_document, routing_version)
-    entry: RoutingModel | None = routing.model(model_id) if routing else None
+    entry: RoutingModel | None = routing.model(model_id, harness) if routing else None
     if routing is None or entry is None:
         return Reservation(
             model=model_id,
@@ -514,7 +516,7 @@ def reserve(
             ok=True,
             detail="no routing policy entry; nothing to reserve",
         )
-    problem = check_quota(uow, routing, model_id=model_id, now=now)
+    problem = check_quota(uow, routing, model_id=model_id, harness=harness, now=now)
     if problem is not None:
         return Reservation(
             model=model_id,

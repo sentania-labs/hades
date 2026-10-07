@@ -208,7 +208,7 @@ def test_a_routed_attempt_keeps_the_version_it_was_routed_with() -> None:
 
     routing = load_attempt_routing(store.uow(), policy, 3)
     assert routing is not None and routing.version == 3
-    assert routing.model("gpt-test") is not None
+    assert routing.model("gpt-test", "codex") is not None
     current = load_attempt_routing(store.uow(), policy)
     assert current is not None and current.version == 4
 

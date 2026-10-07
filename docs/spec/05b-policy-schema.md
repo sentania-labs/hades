@@ -496,9 +496,16 @@ Local model entries may name `harness: codex`, `endpoint: local`, and `pool: lab
 For trivial and standard tiers, within the same pool Codex ranks before Hermes.
 Demotion and probe eligibility still rank first; pool preference still precedes
 harness preference, followed by capability and weighted least-recent rotation.
-An excluded Codex entry leaves Hermes eligible as the next local choice.
+A capacity refusal records both `excluded_harness` and `excluded_model` on the retry
+scheduled event. Selection excludes only that pair: a refused Codex route leaves
+Hermes and Qwen Code eligible even when they reference the same model. Route resolution
+requires the harness for both the submit quota check and the launch reservation, so
+each route uses its own pool and endpoint kind.
 
 The Local gateway page has one row per gateway model and places every harness using it
-under that row. It never presents an internal routing key as a model. A scheduled
+under that row. A newly offered model has an unchecked Hermes control for adding its
+first route. Saving these controls preserves each existing route's thinking preference;
+the form does not edit that preference. It never presents an internal routing key as
+a model. A scheduled
 gateway listing disables every `(harness, model)` entry for a vanished model, records
 when it vanished, and wakes the orchestrator with the model and stranded harnesses.

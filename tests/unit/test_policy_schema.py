@@ -148,8 +148,8 @@ def test_required_programs_default_to_none_and_take_bare_names() -> None:
 
 def test_the_seeded_routing_policy_validates() -> None:
     routing = parse_routing_policy(m4.DEFAULT_ROUTING)
-    assert routing.model("gpt-5-codex-mini") is not None
-    assert routing.model("nope") is None
+    assert routing.model("gpt-5-codex-mini", "codex") is not None
+    assert routing.model("nope", "codex") is None
 
 
 def _errors(document: dict[str, Any]) -> list[str]:

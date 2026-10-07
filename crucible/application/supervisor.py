@@ -2028,13 +2028,7 @@ class Supervisor:
             routing = load_attempt_routing(
                 route_uow, execution.policy_snapshot or {}, attempt.routing_version
             )
-            if routing is None:
-                route = None
-            else:
-                try:
-                    route = routing.model(selected_model, selected_harness)
-                except TypeError:  # lightweight test doubles and pre-0051 readers
-                    route = routing.model(selected_model)
+            route = None if routing is None else routing.model(selected_model, selected_harness)
             if route is not None:
                 endpoint = route.endpoint
                 endpoint_url = route.endpoint_url
@@ -2419,7 +2413,14 @@ class Supervisor:
                 other_routing = load_attempt_routing(
                     uow, other_execution.policy_snapshot or {}, other.routing_version
                 )
-                other_model = other_routing.model(other_execution.model) if other_routing else None
+                other_model = (
+                    other_routing.model(
+                        other.selected_model or other_execution.model,
+                        other.selected_harness or other_execution.harness,
+                    )
+                    if other_routing
+                    else None
+                )
                 if execution.harness == "codex" and other_model and other_model.endpoint == "local":
                     continue
                 running += 1
@@ -2524,6 +2525,24 @@ class Supervisor:
                 eligible.add(name)
         return eligible
 
+    def _capacity_exclusions(self, uow: UnitOfWork, item: _Pending) -> set[tuple[str, str]]:
+        excluded = set()
+        for event in self._all_task_events(uow, item.task.id):
+            model = event.payload.get("excluded_model")
+            if event.payload.get("next_attempt_id") != item.attempt.id or not model:
+                continue
+            harness = event.payload.get("excluded_harness")
+            if not harness and event.attempt_id:
+                # Retry events saved before pair identity can be resolved from the
+                # refusing attempt; never turn them into a model-wide exclusion.
+                previous = uow.attempts.get(event.attempt_id)
+                if previous is not None:
+                    harness = previous.selected_harness
+                    model = previous.selected_model or model
+            if harness:
+                excluded.add((str(harness), str(model)))
+        return excluded
+
     def _selection_for(
         self,
         uow: UnitOfWork,
@@ -2566,12 +2585,7 @@ class Supervisor:
                 .get("allowlist", [])
             ],
             excluded_pools={pool for pool in (excluded_pools or set()) if pool is not None},
-            excluded_models={
-                str(event.payload["excluded_model"])
-                for event in self._all_task_events(uow, item.task.id)
-                if event.payload.get("next_attempt_id") == item.attempt.id
-                and event.payload.get("excluded_model")
-            },
+            excluded_routes=self._capacity_exclusions(uow, item),
             pinned_model=request.pinned_model,
             pinned_harness=request.pinned_harness.value if request.pinned_harness else None,
         )
@@ -3115,8 +3129,10 @@ class Supervisor:
             routing = load_attempt_routing(
                 uow, execution.policy_snapshot or {}, attempt.routing_version
             )
-            # Resolve by model first so the refusal can name a mismatched harness.
-            entry = routing.model(execution.model) if routing is not None else None
+            # Resolve the exact route; models can be shared by several harnesses.
+            entry = (
+                routing.model(execution.model, execution.harness) if routing is not None else None
+            )
             refusal = self._review_route_refusal(routing, entry, execution)
             if refusal is None:
                 busy = self._harness_busy_in_uow(uow, execution, attempt.routing_version)
@@ -3150,9 +3166,13 @@ class Supervisor:
         routing: RoutingPolicyV1 | None, entry: Any, execution: Execution
     ) -> str | None:
         """Why a review may not launch with its model and harness, if it may not."""
-        if routing is None or entry is None:
+        if routing is None:
             return None
         where = f"routing policy {routing.name}/{routing.version}"
+        if entry is None:
+            return (
+                f"model {execution.model} is not paired with harness {execution.harness} in {where}"
+            )
         if not entry.enabled:
             reason = f": {entry.disabled_reason}" if entry.disabled_reason else ""
             return f"model {entry.id} is disabled in {where}{reason}"
@@ -5006,13 +5026,11 @@ class Supervisor:
                     uow, execution.policy_snapshot or {}, attempt.routing_version
                 )
                 model = attempt.selected_model or execution.model
-                if routing is None:
-                    route = None
-                else:
-                    try:
-                        route = routing.model(model, harness)
-                    except TypeError:  # lightweight test doubles and pre-0051 readers
-                        route = routing.model(model)
+                route = (
+                    None
+                    if routing is None
+                    else routing.model(model, attempt.selected_harness or execution.harness)
+                )
                 watch.local = route is not None and route.endpoint == "local"
             except Exception:
                 # Issue 278 must not cost the attempt its command tracking (issue 152):
@@ -6761,6 +6779,9 @@ class Supervisor:
                 "cause": message,
                 "next_attempt_id": nxt.id,
                 "resume_at": task.resume_at.isoformat(),
+                "excluded_harness": (attempt.selected_harness or execution.harness)
+                if detail.get("capacity_refused")
+                else None,
                 "excluded_model": (attempt.selected_model or execution.model)
                 if detail.get("capacity_refused")
                 else None,

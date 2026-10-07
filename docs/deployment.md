@@ -321,16 +321,17 @@ that older image is no longer offered for it; roll the Crucible release back wit
 
 For Hermes, use **Local gateway** to set the HTTPS `/v1` gateway URL and the LiteLLM
 virtual key together (also `crucible admin gateway set --endpoint-url URL --key` or
-`POST /v1/admin/gateway`), then tick the gateway's models to use, their thinking
-preference and capability, and the pool concurrency; saving the models writes a new
-routing policy version. Crucible writes the key into the `crucible-harness-hermes`
+`POST /v1/admin/gateway`), then tick the harness routes to use under each gateway model
+and set the pool concurrency; saving the models writes a new routing policy version. Crucible writes the key into the `crucible-harness-hermes`
 Secret, creating it if it is absent, and tests both: unauthenticated
 `/health/readiness` must return 200, then authenticated `/v1/models` decides. The key is
 never shown again; the page and `GET /v1/admin/credentials/hermes` report only
 `key_set`. The committed lab CA is already installed in the worker image trust store.
 The model list is one row per name returned by that authenticated request, with the
-harnesses using the model as controls beneath it. Routing publishes may reference only
-names in that listing. The same `model` value is used by task launches, credential
+harnesses using the model as controls beneath it. A newly offered model has an unchecked
+Hermes control; selecting it creates its first route. Saving model choices preserves
+existing thinking preferences, which remain editable in the routing policy.
+Routing publishes may reference only names in that listing. The same `model` value is used by task launches, credential
 probes, and the Harnesses page Test. If the gateway later drops a name, the supervisor's
 scheduled listing disables every harness route under it, records the disappearance time,
 and raises an orchestrator wake.
