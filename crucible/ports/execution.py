@@ -652,9 +652,12 @@ class ExecutionProvider(Protocol):
 
     async def reconcile(self) -> list[Handle]: ...
 
-    async def retention(self, keep: Sequence[str]) -> int:
+    async def retention(self, keep: Sequence[str], orphan: Sequence[str] | None = None) -> int:
         """Remove provider-side leavings for attempts that are gone (16). Returns the
-        count removed. A provider with nothing to remove returns 0."""
+        count removed. A provider with nothing to remove returns 0.  ``orphan`` is a
+        list of attempt IDs whose claims are terminal and never-launched (hades #394);
+        the sweep removes those claims regardless of the ``keep`` set.
+        """
         ...
 
     async def list_images(self) -> list[ImageInfo]:
@@ -665,6 +668,11 @@ class ExecutionProvider(Protocol):
         """Remove anything secret the provider placed for an attempt that will never be
         collected: a launch that failed after the credential was seeded, or a worker
         that was lost (12). Cleanup is separate and may never run for such an attempt."""
+        ...
+
+    async def delete_workspace_claim(self, attempt_id: str) -> None:
+        """hades #394: remove the workspace claim (PVC) for an attempt that never
+        launched.  Idempotent."""
         ...
 
     async def probe_credential(self, request: ProbeRequest) -> ProbeResult:

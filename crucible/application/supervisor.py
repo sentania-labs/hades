@@ -995,6 +995,11 @@ class Supervisor:
             if not await self._renew_lease_async():
                 result.held = False
                 await self._abandon_launches()
+                raise LeaseLostError("mid-tick renewal lost lease before pre-launch cleanup")
+            await self._pre_launch_cleanup_step()
+            if not await self._renew_lease_async():
+                result.held = False
+                await self._abandon_launches()
                 raise LeaseLostError("mid-tick renewal lost lease before retention")
             await self._retention_step()
             await self._db(self._refresh_attempt_metrics)
@@ -3965,6 +3970,43 @@ class Supervisor:
                 out.append((attempt, execution.provider, choice))
         return out
 
+    def _list_pre_launch_cleanup_due(self) -> list[tuple[Attempt, str]]:
+        """hades #394: attempts that never launched and need their claim deleted.
+
+        Returns (attempt, provider_name) pairs for attempts whose ``started_at`` is
+        ``None`` but that have a workspace claim still present in the database
+        (``workspace_path`` is set).  These cover environment failures at prepare,
+        start failures, and return-to-pending on a quota exhaust where the claim was
+        created but never consumed by a gate.  The retention sweep also picks up
+        these claims via :meth:`~KubernetesProvider.retention` so that any that
+        leaked before this code lands are drained on their own.
+
+        Excludes attempts already cleaned up.
+        """
+        out: list[tuple[Attempt, str]] = []
+        with self._uow_factory() as uow:
+            for attempt in uow.attempts.list_in_states(
+                [
+                    AttemptState.COLLECTED,
+                    AttemptState.SUCCEEDED,
+                    AttemptState.BLOCKED,
+                    AttemptState.FAILED,
+                    AttemptState.PENDING,
+                ]
+            ):
+                if attempt.started_at is not None:
+                    continue
+                if attempt.cleaned_up_at is not None:
+                    continue
+                if attempt.workspace_path is None:
+                    # _discard already cleared it; nothing to do.
+                    continue
+                execution = uow.executions.get(attempt.execution_id)
+                if execution is None:
+                    continue
+                out.append((attempt, execution.provider))
+        return out
+
     async def _cleanup_step(self) -> int:
         """08: remove the container, keep or delete the workspace per policy, release
         the checkout lease, and record it. Only ever after `logs_drained`."""
@@ -4002,6 +4044,37 @@ class Supervisor:
             cleaned += 1
         return cleaned
 
+    async def _pre_launch_cleanup_step(self) -> int:
+        """hades #394: remove workspace claims for attempts that never launched.
+
+        An attempt whose ``started_at`` is still ``None`` after it ended (environment
+        failure at prepare, start failure, or return-to-pending on a quota exhaust)
+        has a claim created by :meth:`.prepare` that was never consumed by a gate.
+        Without cleanup it sits in the namespace forever, filling the claim quota.
+
+        This runs after the normal :meth:`_cleanup_step` so that the claim is visible
+        in the database as cleaned, and before the retention sweep so that the sweep
+        also prunes any claim that leaked before this code landed.  It is idempotent.
+        """
+        cleaned = 0
+        for attempt, provider_name in await self._db(self._list_pre_launch_cleanup_due):
+            try:
+                provider = self._provider(provider_name)
+            except ProviderError:
+                continue
+            try:
+                await provider.delete_workspace_claim(attempt.id)
+            except ProviderError:
+                log.exception("pre-launch cleanup failed; the next tick tries again")
+                continue
+            await self._db(partial(self._mark_cleaned, attempt.id, "pre_launch_delete"))
+            self._workspaces.pop(attempt.id, None)
+            self._workspace_fingerprints.pop(attempt.id, None)
+            self._handles.pop(attempt.id, None)
+            self._command_watches.pop(attempt.id, None)
+            cleaned += 1
+        return cleaned
+
     def _mark_cleaned(self, attempt_id: str, choice: str) -> None:
         with self._fenced() as uow:
             attempt = uow.attempts.get(attempt_id, for_update=True)
@@ -4027,9 +4100,12 @@ class Supervisor:
         applied = await self._db(self._retention_sweep)
         applied += await self._release_workspaces()
         keep = await self._db(self._live_attempt_ids)
+        # hades #394: pass orphan attempt IDs so the retention sweep can also remove
+        # pre-launch terminal claims that may have leaked before this code lands.
+        orphan = await self._db(self._list_orphan_attempt_ids)
         for provider in self._providers.values():
             try:
-                applied += await provider.retention(keep)
+                applied += await provider.retention(keep, orphan=orphan)
             except ProviderError:
                 log.warning("provider retention failed; the next tick tries again")
         return applied
@@ -4062,6 +4138,26 @@ class Supervisor:
                 if attempt.cleaned_up_at is None
             )
             return live
+
+    def _list_orphan_attempt_ids(self) -> list[str]:
+        """hades #394: attempt IDs whose claims should be swept by the retention
+        pass even when they are still in ``keep``.
+
+        These are terminal attempts that never launched (``started_at`` is
+        ``None``), have a workspace claim (``workspace_path`` is set), and have
+        not yet been cleaned up.  The ``_pre_launch_cleanup_step`` deletes these
+        on the normal tick, but the retention sweep also prunes them so that
+        claims leaked before this code lands drain on their own.  Claims
+        carrying the retention label are never touched by the sweep.
+        """
+        with self._uow_factory() as uow:
+            return [
+                attempt.id
+                for attempt in uow.attempts.list_in_states(sorted(ATTEMPT_TERMINAL))
+                if attempt.started_at is None
+                and attempt.workspace_path is not None
+                and attempt.cleaned_up_at is None
+            ]
 
     async def _release_workspaces(self) -> int:
         """16 and the lab findings of 2026-09-29: a workspace a cleanup policy kept is

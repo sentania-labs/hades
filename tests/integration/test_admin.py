@@ -2504,6 +2504,9 @@ class _EgressProbe(FakeProvider):
     def reload_settings(self) -> None:
         self.reloads += 1
 
+    async def delete_workspace_claim(self, attempt_id: str) -> None:
+        """Protocol requirement from ExecutionProvider."""
+
 
 def test_kubernetes_egress_through_api_cli_and_ui(
     ctx: AppContext,
