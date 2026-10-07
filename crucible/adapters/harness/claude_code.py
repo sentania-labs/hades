@@ -79,6 +79,8 @@ QUOTA_PATTERNS = base.patterns(
     "out of extra usage",
     "rate_limit_error",
     "Credit balance is too low",
+    # FDY-0514: a model-only refusal whose body tells the user to switch models.
+    "model_requires_usage_credits",
 )
 # What the CLI actually emits when the subscription window is used up (first live
 # sample, C5b, 08:58 CDT on 2026-09-17): a `rate_limit_event` whose status is
@@ -94,6 +96,15 @@ QUOTA_PATTERNS += base.correlated(
 )
 
 
+# FDY-0514: text that tells the user to switch models (a model-only refusal).
+_MODEL_REFUSAL_PATTERNS = base.patterns(
+    "switch to a different model",
+    "try a different model",
+    "switch model",
+    "try switching models",
+)
+
+
 def _provider_quota_refusal(document: Mapping[str, Any]) -> bool:
     if document.get("type") != "rate_limit_event":
         return False
@@ -104,6 +115,31 @@ def _provider_quota_refusal(document: Mapping[str, Any]) -> bool:
         info.get(key) in {"rejected", "out_of_credits"}
         for key in ("status", "overageStatus", "overageDisabledReason")
     )
+
+
+def _is_account_level_refusal(document: Mapping[str, Any]) -> bool:
+    """Return True when the refusal is account-level (should mark the pool), not
+    model-only (which should exclude only the model and reroute within the pool).
+
+    Account-level signals are:
+    - rate_limit_event with status 'rejected' and overage 'out_of_credits'
+    - out_of_credits with no model qualifier in the refusal text
+    - rate-limit headers (handled elsewhere in the supervisor)
+    """
+    if document.get("type") != "rate_limit_event":
+        return False
+    info = document.get("rate_limit_info")
+    if not isinstance(info, dict):
+        return False
+    status = info.get("status")
+    return status == "rejected" and "out_of_credits" in str(
+        info.get("overageReason", info.get("overageReasonCode", ""))
+    )
+
+
+def _is_model_refusal(text: str) -> bool:
+    """Return True when *text* tells the user to switch models (a model-only signal)."""
+    return base.first_match((text,), _MODEL_REFUSAL_PATTERNS) is not None
 
 
 class ClaudeCodeAdapter:
@@ -119,11 +155,20 @@ class ClaudeCodeAdapter:
         self, stdout_tail: str, stderr_tail: str, now: datetime | None = None
     ) -> ProviderQuotaEvent | None:
         return base.provider_quota_event(
-            stdout_tail, stderr_tail, predicate=_provider_quota_refusal, now=now
+            stdout_tail,
+            stderr_tail,
+            predicate=_provider_quota_refusal,
+            now=now,
+            is_account_level=lambda doc, _line: _is_account_level_refusal(doc),
         )
 
     def provider_quota_exhausted(self, stdout_tail: str, stderr_tail: str) -> bool:
         return self.provider_quota_event(stdout_tail, stderr_tail) is not None
+
+    def is_model_refusal(self, stdout_tail: str, stderr_tail: str) -> bool:
+        """FDY-0514: True when the exit was quota-exhausted but only the model is at
+        fault (model_requires_usage_credits or model-switch text)."""
+        return _is_model_refusal(stdout_tail) or _is_model_refusal(stderr_tail)
 
     def capabilities(self) -> HarnessCapabilities:
         return HarnessCapabilities(
