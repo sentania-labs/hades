@@ -117,9 +117,23 @@ def _last_gateway_or_routing_change_ts(uow: UoW) -> str | None:
     return latest
 
 
+# How often the Harnesses page reloads while a test runs (issue 147).
+RUNNING_REFRESH_SECONDS = 5
+
+
 def _test_cell(last: dict[str, Any] | None, uow: UoW | None = None) -> dict[str, Any]:
     if not last:
         return {"kind": "note", "value": "not tested yet"}
+    if harness_test.is_running(last):
+        return {
+            "kind": "status",
+            "value": "running",
+            "tone": "accent",
+            "hint": (
+                f"started {last.get('started_at')}; this page refreshes until the result "
+                "lands, up to a couple of minutes"
+            ),
+        }
     tones = {"pass": "ok", "fail": "bad", "not run": "accent"}
     steps_out: list[dict[str, Any]] = [
         {**step, "tone": tones.get(str(step.get("result")), "accent")}
@@ -160,12 +174,17 @@ async def harness_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     }
     admin = principal.role is Role.ADMIN
     rows: list[list[Any]] = []
+    running = False
     for item in items:
         name = item["name"]
         image = item.get("default_image")
         last = item.get("last_test")
         actions: list[dict[str, Any]] = []
-        if admin and item["enabled"]:
+        if harness_test.is_running(last):
+            # issue 147: the row reads running and offers no second Test until the
+            # result lands; the service would refuse a duplicate anyway.
+            running = True
+        elif admin and item["enabled"]:
             actions.append(
                 {
                     "kind": "form",
@@ -213,8 +232,9 @@ async def harness_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             "title": "Harnesses",
             "note": (
                 "Test runs what a task runs: the harness's image, its credential, a worker "
-                "under the worker's egress, and one small model call. It takes up to a "
-                "couple of minutes. Qwen Code uses the Local gateway key shared with Hermes. "
+                "under the worker's egress, and one small model call. It runs in the "
+                "background for up to a couple of minutes; the row reads running until the "
+                "result lands. Qwen Code uses the Local gateway key shared with Hermes. "
                 "Its per-turn tool-call cap is disabled; its context window comes from "
                 "the routing model (131072 tokens by default)."
             ),
@@ -266,6 +286,7 @@ async def harness_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         heading="Harnesses",
         intro="Whether each harness can run a task, and a test that proves it.",
         sections=sections,
+        refresh_seconds=RUNNING_REFRESH_SECONDS if running else None,
     )
 
 
@@ -305,18 +326,16 @@ async def _action_harness_test(
     reason: str | None,
 ) -> Response | None:
     assert ctx.admin is not None
-    result = await harness_test.test_harness(
+    # issue 147: the test runs in the background; the row reads running until the
+    # result lands, and the page refreshes itself until then.
+    started = harness_test.start_test(
         ctx.admin, uow, principal=principal.name, harness=form.get("harness", "")
     )
-    uow.commit()
-    failed = result["failed_step"]
     message = (
-        f"{result['harness']} passed every step."
-        if result["ok"]
-        else f"{result['harness']} failed at {failed}: "
-        + next(s["detail"] for s in result["steps"] if s["name"] == failed)
+        f"{started['harness']}: the test is running. The row reads running until the "
+        "result lands, up to a couple of minutes."
     )
-    return _redirect(form, message, kind="ok" if result["ok"] else "bad")
+    return _redirect(form, message, kind="info")
 
 
 register("harness-test", _action_harness_test)

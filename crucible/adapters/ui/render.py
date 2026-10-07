@@ -563,7 +563,10 @@ def _page(
     sections: list[dict[str, Any]],
     badge: str | None = None,
     badge_kind: str = "accent",
+    refresh_seconds: int | None = None,
 ) -> HTMLResponse:
+    """`refresh_seconds` makes the browser reload the page (at its own path, without the
+    flash message) every so many seconds while something on it is in progress."""
     timezone = "America/Chicago"
     settings = getattr(request.app.state.ctx, "settings", None)
     if settings is not None:
@@ -579,6 +582,7 @@ def _page(
         sections=sections,
         badge=badge,
         badge_kind=badge_kind,
+        refresh_seconds=refresh_seconds,
     )
     return templates.TemplateResponse(request=request, name="page.html", context=context)
 

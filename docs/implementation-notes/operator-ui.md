@@ -33,7 +33,15 @@ of the same UI.
   enabled, worker image, credential, model, worker starts, model call. The worker run is
   the bounded probe with every harness in a worker (Hermes included) and the model's
   local endpoint passed through, so its egress is the task's. The last result is kept on
-  the harness row (`harnesses.last_test`, migration 0024).
+  the harness row (`harnesses.last_test`, migration 0024). The run is a background job
+  (issue 147): the POST and the button answer at once with a running marker stored as
+  `last_test` (`status: running`), a thread of the api process runs the six steps and
+  stores the result (`status: finished`), a second Test while the marker says running
+  starts no duplicate, the row reads running and the page reloads every few seconds
+  until the result lands, and `crucible admin harnesses test NAME` polls
+  `GET /v1/admin/harnesses/{name}/test` and prints the result. A running marker older
+  than fifteen minutes with no run in the process is treated as a run that died with its
+  process and is replaced. Local mode runs the test in the foreground as before.
 - **Test fixtures** (#124): `test_fixtures` (`CRUCIBLE_TEST_FIXTURES`), false by default,
   wires the fake provider and registers the script harness. The compose smoke (CI and
   release) and the kind overlay turn it on. It is a restart-bound setting like its peers,
