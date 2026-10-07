@@ -371,9 +371,12 @@ async def test_images_workflow_offers_qwen_its_own_promotion(
         }
     ]
     rendered = _image_rows([qwen], admin=True)
-    action = rendered[0][-1]["items"][0]
-    assert action["action"] == "/ui/actions/image-promote"
+    items = rendered[0][-1]["items"]
+    assert len(items) == 1
+    action = items[0]
+    assert action["action"] == "/ui/actions/image-change"
     assert action["hidden"] == {"harness": "qwen_code"}
+    assert action["select"]["options"] == [(image.digest, image.reference)]
 
 
 def test_worker_node_and_qwen_pins_are_checksum_verified() -> None:
