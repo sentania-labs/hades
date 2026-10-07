@@ -29,14 +29,15 @@ MERGED = {"0044_attempt_stall_shape", "0044_editor_leftovers_policy", "0044_merg
 # 0047 above that; hades #389's migration was renumbered to 0047 on top and chains from
 # 0047_attempt_egress_probe so the graph stays linear. hades #176 adds 0048 on top,
 # hades #265 adds 0049 for persisted batch outcomes, then #485 adds 0050 for the cache TTL,
-# and #489 adds 0051 for operator notes on a task.
+# and #489 adds 0052 for operator notes on a task.
 ABOVE = "0046_blocked_reason"
 PROBE = "0047_attempt_egress_probe"
 LAUNCH = "0047_successful_launch_time"
 REBOUND = "0048_repository_rebound"
 BATCH = "0049_repository_batch"
 CACHE = "0050_status_cache"
-HEAD = "0051_task_notes"
+ROUTE = "0051_routing_model_references"
+HEAD = "0052_task_notes"
 
 
 def _script() -> ScriptDirectory:
@@ -70,7 +71,9 @@ def test_the_0045_merge_joins_the_three_0044_heads() -> None:
     assert batch is not None and batch.down_revision == REBOUND
     cache = script.get_revision(CACHE)
     assert cache is not None and cache.down_revision == BATCH
-    assert head is not None and head.down_revision == CACHE
+    route = script.get_revision(ROUTE)
+    assert route is not None and route.down_revision == CACHE
+    assert head is not None and head.down_revision == ROUTE
 
 
 def test_the_cli_config_sees_the_same_single_head() -> None:
@@ -98,7 +101,7 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
         plan = [step.revision.revision for step in script._upgrade_revs("head", head)]
         assert plan.index("0043_credential_mount_mode") < plan.index("0044_merge_423_424")
         assert plan.index("0044_merge_423_424") < plan.index(MERGE)
-        assert plan[-8:] == [MERGE, ABOVE, PROBE, LAUNCH, REBOUND, BATCH, CACHE, HEAD]
+        assert plan[-9:] == [MERGE, ABOVE, PROBE, LAUNCH, REBOUND, BATCH, CACHE, ROUTE, HEAD]
 
 
 def test_0043_credential_mount_mode_keeps_the_kinds_the_live_check_permits() -> None:

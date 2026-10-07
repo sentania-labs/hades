@@ -32,7 +32,7 @@ from crucible.application.admin.routing import (
     publish_routing,
 )
 from crucible.application.errors import ConflictError, ContractValidationError, NotFoundError
-from crucible.contracts.policy import parse_routing_policy
+from crucible.contracts.policy import parse_routing_policy, routing_model_name
 from crucible.domain.endpoints import validate_endpoint
 from crucible.domain.entities import Principal, ProviderSetting
 from crucible.domain.events import EventKind
@@ -152,9 +152,8 @@ def gateway_view(
         "last_outcome": outcome,
         "models": [
             {
-                "id": entry.get("id"),
+                "model": routing_model_name(entry),
                 "harness": entry.get("harness"),
-                "model_name": entry.get("model_name") or entry.get("id"),
                 "enabled": entry.get("enabled") is True,
                 "enable_thinking": (entry.get("chat_template_kwargs") or {}).get(
                     "enable_thinking", False
@@ -170,8 +169,8 @@ def gateway_view(
 
 
 async def models_view(ctx: AdminContext, uow: UnitOfWork, *, fetch: bool = True) -> dict[str, Any]:
-    """What the gateway offers this key, beside the local entries in force: one row per
-    offered model. An inconclusive listing retains the configured rows.
+    """One row per endpoint model, with every harness route as a control beneath it.
+    An inconclusive listing retains configured rows.
 
     When *fetch* is False the gateway is not contacted and a not-asked note is returned
     instead.  This keeps the gateway page fast until the operator clicks the link.
@@ -194,31 +193,54 @@ async def models_view(ctx: AdminContext, uow: UnitOfWork, *, fetch: bool = True)
                     error = exc.detail
     else:
         error = "The gateway's models were not asked for; use the link to list them."
-    codex = {
-        str(entry.get("model_name") or entry["id"]): entry
-        for entry in entries
-        if entry.get("harness") == "codex"
-    }
-    by_id = {str(entry.get("id")): entry for entry in entries if entry.get("harness") != "codex"}
-    for model_id in codex:
-        by_id.setdefault(model_id, {})
+    by_model: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:
+        by_model.setdefault(routing_model_name(entry), []).append(entry)
+    configured_names = [
+        name
+        for name, routes in by_model.items()
+        if offered is None
+        or name in offered
+        or any(route.get("enabled") or route.get("vanished_at") for route in routes)
+    ]
+    names = list(dict.fromkeys([*(offered or []), *configured_names]))
     rows: list[dict[str, Any]] = []
-    for model_id in offered if offered is not None else by_id:
-        entry = by_id.get(model_id)
-        display_entry = entry or codex.get(model_id)
-        is_offered = None if offered is None else model_id in offered
+    for model_name in names:
+        controls = []
+        for entry in sorted(
+            by_model.get(model_name, []), key=lambda item: str(item.get("harness") or "")
+        ):
+            controls.append(
+                {
+                    "harness": entry.get("harness") or "hermes",
+                    "enabled": entry.get("enabled") is True,
+                    "enable_thinking": bool(
+                        (entry.get("chat_template_kwargs") or {}).get("enable_thinking")
+                    ),
+                    "capability": entry.get("capability") or "mid",
+                    "disabled_reason": entry.get("disabled_reason"),
+                    "vanished_at": entry.get("vanished_at"),
+                }
+            )
+        in_policy = bool(controls)
+        is_offered = None if offered is None else model_name in offered
+        if not controls and is_offered:
+            controls.append({"harness": "hermes", "enabled": False, "enable_thinking": False})
         rows.append(
             {
-                "id": model_id,
+                "model": model_name,
+                # Compatibility for API clients predating #513. This is the endpoint
+                # model, never the removed internal routing id.
+                "id": model_name,
+                "model_name": model_name,
                 "offered": is_offered,
-                "in_policy": entry is not None,
-                "enabled": bool(entry and entry.get("enabled") is True),
-                "codex_enabled": bool(codex.get(model_id, {}).get("enabled")),
-                "enable_thinking": bool(
-                    entry and (entry.get("chat_template_kwargs") or {}).get("enable_thinking")
+                "in_policy": in_policy,
+                "harnesses": controls,
+                "enabled": bool(controls and controls[0]["enabled"]),
+                "codex_enabled": any(
+                    control["harness"] == "codex" and control["enabled"] for control in controls
                 ),
-                "capability": (display_entry or {}).get("capability") or "mid",
-                "note": _row_note(display_entry, is_offered),
+                "note": "not offered by the gateway" if is_offered is False else "",
             }
         )
     return {
@@ -233,17 +255,19 @@ async def models_view(ctx: AdminContext, uow: UnitOfWork, *, fetch: bool = True)
 
 
 def _row_note(entry: dict[str, Any] | None, offered: bool | None) -> str:
+    harness = f"{entry.get('harness')}: " if entry and entry.get("harness") else ""
     if offered is False:
-        return (
+        note = (
             "not offered by the gateway; saving disables it"
             if entry and entry.get("enabled")
             else "not offered by the gateway"
         )
+        return harness + note
     if entry is None:
         return "offered; tick it to add it" if offered else ""
     if entry.get("enabled"):
-        return "in use"
-    return f"disabled: {entry.get('disabled_reason') or 'no reason recorded'}"
+        return harness + "in use"
+    return harness + f"disabled: {entry.get('disabled_reason') or 'no reason recorded'}"
 
 
 async def save_gateway(
@@ -414,8 +438,9 @@ async def save_models(
             errors=[{"path": "max_concurrency", "message": "must be at least 1"}],
         )
     picks: dict[str, dict[str, Any]] = {}
+    route_picks: list[tuple[str, str, dict[str, Any]]] = []
     for index, item in enumerate(models):
-        model_id = str(item.get("id") or "").strip()
+        model_id = str(item.get("model") or item.get("id") or "").strip()
         if not model_id:
             raise ContractValidationError(
                 f"models[{index}].id is required",
@@ -427,18 +452,25 @@ async def save_models(
                 f"models[{index}].capability must be one of {list(CAPABILITIES)}",
                 errors=[{"path": f"models.{index}.capability", "message": "unknown capability"}],
             )
-        picks[model_id] = {
+        pick = {
             "enabled": _flag(item, "enabled", index) if "enabled" in item else None,
-            "enable_thinking": _flag(item, "enable_thinking", index),
+            "enable_thinking": _flag(item, "enable_thinking", index)
+            if "enable_thinking" in item
+            else None,
             "capability": capability,
             "codex_enabled": _flag(item, "codex_enabled", index)
             if "codex_enabled" in item
             else None,
         }
+        harness = str(item.get("harness") or "").strip()
+        if harness:
+            route_picks.append((model_id, harness, pick))
+        else:
+            picks[model_id] = pick
     policy, routing = active_documents(uow)
     document = copy.deepcopy(routing.document)
     entries = document.setdefault("models", [])
-    by_id = {str(m.get("id")): m for m in entries}
+    by_id = {routing_model_name(m): m for m in entries if m.get("harness") == HERMES}
     subscription = sorted(i for i in picks if i in by_id and by_id[i].get("endpoint") != "local")
     if subscription:
         raise GatewayError(
@@ -448,9 +480,7 @@ async def save_models(
     # A new model the gateway does not list is a typo or a stale page: refused by name.
     # An entry already in force that the gateway stopped listing is disabled below with
     # that reason, whatever the pick said, so a page saved as it was shown still saves.
-    known_aliases = {
-        str(m.get("model_name") or m["id"]) for m in entries if m.get("endpoint") == "local"
-    }
+    known_aliases = {routing_model_name(m) for m in entries if m.get("endpoint") == "local"}
     unoffered = sorted(
         i
         for i, pick in picks.items()
@@ -458,12 +488,19 @@ async def save_models(
         and i not in offered
         and i not in known_aliases
     )
+    unoffered.extend(
+        model
+        for model, _harness, pick in route_picks
+        if pick["enabled"] and model not in offered and model not in known_aliases
+    )
     if unoffered:
         raise GatewayError(
             f"gateway {endpoint} does not offer {unoffered}; only a model it lists can be enabled"
         )
     local = [m for m in entries if m.get("endpoint") == "local"]
-    before_enabled = sorted(str(m["id"]) for m in local if m.get("enabled"))
+    before_enabled = sorted(
+        f"{m['harness']}:{routing_model_name(m)}" for m in local if m.get("enabled")
+    )
     pool_name = str(local[0]["pool"]) if local else DEFAULT_POOL
     pools = document.setdefault("pools", {})
     if pool_name not in pools:
@@ -472,33 +509,31 @@ async def save_models(
         pools[pool_name]["max_concurrency"] = max_concurrency
     added: list[str] = []
     expanded: list[tuple[str, str, str, dict[str, Any]]] = []
+    expanded.extend((model, model, harness, pick) for model, harness, pick in route_picks)
     for model_id, pick in picks.items():
         if pick["enabled"] is not None:
             expanded.append((model_id, model_id, HERMES, pick))
         if pick["codex_enabled"] is not None:
-            existing = next(
-                (
-                    m
-                    for m in local
-                    if m.get("harness") == "codex" and (m.get("model_name") or m["id"]) == model_id
-                ),
-                None,
-            )
-            route_id = str(existing["id"]) if existing else f"codex-local:{model_id}"
-            if route_id in by_id and existing is None:
-                raise GatewayError(f"routing id {route_id!r} is already in use")
+            model_name = model_id
             expanded.append(
-                (route_id, model_id, "codex", {**pick, "enabled": pick["codex_enabled"]})
+                (model_name, model_name, "codex", {**pick, "enabled": pick["codex_enabled"]})
             )
     for model_id, gateway_model, harness, pick in expanded:
-        entry = by_id.get(model_id)
+        entry = next(
+            (
+                candidate
+                for candidate in local
+                if candidate.get("harness") == harness
+                and routing_model_name(candidate) == gateway_model
+            ),
+            None,
+        )
         if entry is None:
             if not pick["enabled"]:
                 continue  # nothing to keep for a model that was neither in use nor picked
             entry = {
-                "id": model_id,
+                "model": gateway_model,
                 "harness": harness,
-                "model_name": gateway_model,
                 "endpoint": "local",
                 "endpoint_url": endpoint,
                 "capability": pick["capability"] or "mid",
@@ -508,7 +543,7 @@ async def save_models(
                 "weight": 1,
                 "enabled": True,
                 "disabled_reason": None,
-                "chat_template_kwargs": {"enable_thinking": pick["enable_thinking"]},
+                "chat_template_kwargs": {"enable_thinking": pick["enable_thinking"] or False},
             }
             entries.append(entry)
             local.append(entry)
@@ -516,16 +551,22 @@ async def save_models(
             continue
         entry["enabled"] = pick["enabled"]
         entry["disabled_reason"] = None if pick["enabled"] else "operator did not pick it"
-        entry["chat_template_kwargs"] = {"enable_thinking": pick["enable_thinking"]}
+        if pick["enabled"]:
+            entry["vanished_at"] = None
+        if pick["enable_thinking"] is not None:
+            entry.setdefault("chat_template_kwargs", {})["enable_thinking"] = pick[
+                "enable_thinking"
+            ]
         if pick["capability"]:
             entry["capability"] = pick["capability"]
     disabled_not_offered: list[str] = []
     for entry in local:
         entry["endpoint_url"] = endpoint
-        if str(entry.get("model_name") or entry["id"]) not in offered and entry.get("enabled"):
+        if routing_model_name(entry) not in offered and entry.get("enabled"):
             entry["enabled"] = False
             entry["disabled_reason"] = NOT_OFFERED
-            disabled_not_offered.append(str(entry["id"]))
+            entry["vanished_at"] = ctx.clock.now().isoformat()
+            disabled_not_offered.append(f"{entry['harness']}:{routing_model_name(entry)}")
     try:
         parse_routing_policy({**document, "version": routing.version})
     except ValueError as exc:
@@ -549,7 +590,9 @@ async def save_models(
         reason=reason,
         note="Local gateway models update",
     )
-    after_enabled = sorted(str(m["id"]) for m in local if m.get("enabled"))
+    after_enabled = sorted(
+        f"{m['harness']}:{routing_model_name(m)}" for m in local if m.get("enabled")
+    )
     admin_event(
         uow,
         ctx,

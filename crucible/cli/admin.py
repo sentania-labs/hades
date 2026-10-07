@@ -338,6 +338,7 @@ def build_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     local_set = route_sub.add_parser("set-local-endpoint")
     local_set.add_argument("--endpoint-url", required=True)
     local_set.add_argument("--model", default="coder")
+    local_set.add_argument("--harness", default=None)
     state = local_set.add_mutually_exclusive_group(required=True)
     state.add_argument("--enable", action="store_true")
     state.add_argument("--disable", action="store_true")
@@ -665,7 +666,7 @@ def _remote(args: argparse.Namespace, remote: Api) -> Any:
         if args.harness_command == "list":
             return remote.call("GET", "/v1/admin/harnesses")
         if args.harness_command == "test":
-            return remote.call("POST", f"/v1/admin/harnesses/{args.name}/test", reason)
+            return _remote_harness_test(args, remote, reason)
         return remote.call(
             "POST", f"/v1/admin/harnesses/{args.name}/{args.harness_command}", reason
         )
@@ -775,7 +776,11 @@ def _remote(args: argparse.Namespace, remote: Api) -> Any:
                 "endpoint_url": args.endpoint_url,
                 "models": [
                     {
-                        "id": args.model,
+                        **(
+                            {"model": args.model, "harness": args.harness}
+                            if args.harness
+                            else {"id": args.model}
+                        ),
                         "enabled": args.enable,
                         "enable_thinking": args.enable_thinking,
                     }
@@ -881,6 +886,32 @@ def _remote_login(args: argparse.Namespace, remote: Api, reason: dict[str, str])
             break
         time.sleep(1)
     return remote.call("POST", f"/v1/admin/credentials/{args.harness}/login/finish", reason)
+
+
+# issue 147: the service runs a harness test in the background; the CLI waits for the
+# result, polling the stored test every so often for at most so long.
+HARNESS_TEST_POLL_SECONDS = 2.0
+HARNESS_TEST_WAIT_SECONDS = 900.0
+
+
+def _remote_harness_test(args: argparse.Namespace, remote: Api, reason: dict[str, str]) -> Any:
+    """Start the test and wait for its result, which is what the operator asked for. A
+    service that answers the POST with the result itself is printed as it is."""
+    started = remote.call("POST", f"/v1/admin/harnesses/{args.name}/test", reason)
+    if not harness_test.is_running(started):
+        return started
+    print(f"{args.name}: the test is running; waiting for the result", file=sys.stderr)
+    deadline = time.monotonic() + HARNESS_TEST_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        time.sleep(HARNESS_TEST_POLL_SECONDS)
+        latest = remote.call("GET", f"/v1/admin/harnesses/{args.name}/test")
+        if harness_test.is_result_of(latest, started):
+            return latest
+    raise ClientError(
+        "timeout",
+        f"the {args.name} test did not finish within {HARNESS_TEST_WAIT_SECONDS:g} s",
+        hint="`crucible admin harnesses list` shows the result once it lands",
+    )
 
 
 # ----- local mode --------------------------------------------------------------
@@ -1079,7 +1110,11 @@ def _local(args: argparse.Namespace, wiring: Wiring) -> Any:
                 endpoint_url=args.endpoint_url,
                 models=[
                     {
-                        "id": args.model,
+                        **(
+                            {"model": args.model, "harness": args.harness}
+                            if args.harness
+                            else {"id": args.model}
+                        ),
                         "enabled": args.enable,
                         "enable_thinking": args.enable_thinking,
                     }

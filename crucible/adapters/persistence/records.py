@@ -934,8 +934,11 @@ class HarnessStates:
             last_test=dict(row.last_test) if row.last_test is not None else None,
         )
 
-    def get(self, name: str) -> HarnessState | None:
-        row = self._s.get(HarnessStateRow, name)
+    def get(self, name: str, *, for_update: bool = False) -> HarnessState | None:
+        if for_update:
+            row = self._s.get(HarnessStateRow, name, with_for_update=True, populate_existing=True)
+        else:
+            row = self._s.get(HarnessStateRow, name)
         return self._to_entity(row) if row else None
 
     def list_all(self) -> Sequence[HarnessState]:

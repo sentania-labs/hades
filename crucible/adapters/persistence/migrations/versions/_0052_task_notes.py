@@ -20,13 +20,13 @@ from crucible.adapters.persistence.migrations.versions._0050_status_cache import
     _event_kinds as _previous_event_kinds,
 )
 
-revision = "0051_task_notes"
-down_revision = "0050_status_cache"
+revision = "0052_task_notes"
+down_revision = "0051_routing_model_references"
 branch_labels = None
 depends_on = None
 
 EVENT_KINDS = ("task_note_recorded", "task_phase_action_applied")
-EVENT_ARCHIVE = "events_0051_archive"
+EVENT_ARCHIVE = "events_0052_archive"
 
 
 def _event_kinds() -> list[str]:
