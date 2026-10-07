@@ -4476,6 +4476,11 @@ class KubernetesProvider:
             return CredentialFileSync(
                 auth.name, True, True, True, False, "changed; not newer than the source"
             )
+        # hades #315: the patch carries the Secret's resourceVersion from the read
+        # above, so the API server itself does the compare-and-swap (339) and answers
+        # 409 when another attempt already wrote the Secret since this read. No shared
+        # pathname is ever involved; this is the whole replace, atomically.
+        resource_version = (source.get("metadata") or {}).get("resourceVersion")
         try:
             await self._call(
                 self.client.patch,
@@ -4485,8 +4490,18 @@ class KubernetesProvider:
                     "metadata": {"labels": _owned_labels(copy.spec.harness)},
                     "data": {_secret_key(auth.name): base64.b64encode(data).decode("ascii")},
                 },
+                resource_version=resource_version,
             )
         except KubernetesApiError as exc:
+            if exc.status == 409:
+                return CredentialFileSync(
+                    auth.name,
+                    True,
+                    True,
+                    True,
+                    False,
+                    "changed; source moved past the candidate, skipped",
+                )
             return CredentialFileSync(
                 auth.name, True, True, True, False, f"changed; write back failed: {exc.status}"
             )

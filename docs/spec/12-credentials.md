@@ -194,6 +194,31 @@ as it stands, is recorded and not written. A file the adapter marks as state
 rather than a credential is seeded and never written back. Then the copy is
 removed at once.
 
+Two attempts of the same writable harness can finish and sync back together,
+each holding its own refreshed file (hades #315). The Docker provider writes
+each file back through a temporary pathname that carries the attempt's own id
+(`<name>.crucible-sync.<attempt id>`), so two attempts never write through the
+same name, and the replace itself is a compare-and-swap: immediately before
+the `os.replace`, under a lock every attempt syncing that source shares
+(`<name>.crucible-sync.lock`), the source is read again and the newer-than
+check is redone against what is actually on disk now, not the copy read at
+the start of the sync. A source that already carries a token as new or newer
+than this attempt's candidate is left alone, and the file's `CredentialFileSync`
+records the skip rather than a clean "not newer" miss. The Kubernetes provider
+has no temporary pathname at all, shared or otherwise: it patches the harness's
+Secret directly, and the same compare-and-swap is the patch's own
+`metadata.resourceVersion`, read along with the Secret immediately before the
+patch, so the API server itself refuses the write with 409 when another
+attempt's write already moved the Secret past it; a refused patch is recorded
+the same way, never retried blind. Either way, whichever attempt's write lands
+last against a source that has not moved since its own read is the one that
+is kept, regardless of which attempt's harness process exited, or synced,
+first. Today only one Codex attempt runs at a time (`per_harness.codex: 1`,
+PR 307), so the race does not yet happen; this is the safety net for the
+moment any writable, rotating harness runs in
+parallel, and for whatever still syncs back once the brokered renewer ("Many
+Workers, One Login") removes the need for Codex to.
+
 The exit code is deliberately not a condition. A harness that refreshed its
 token before the task failed has rotated its refresh token, so the one in the
 source may already be revoked, and dropping the newer file would lock every
