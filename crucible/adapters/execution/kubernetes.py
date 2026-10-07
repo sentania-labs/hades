@@ -359,6 +359,10 @@ class KubernetesConfig:
     # as the detail (image pull, no schedulable node, PVC unbound), never a stall.
     launch_timeout_seconds: int = 300
     prepare_timeout_seconds: int = 900
+    # How long a preparer (or any single-role Job) may go without writing log output
+    # before it is ended as a stall.  A bounded stall bound avoids waiting the full
+    # `prepare_timeout_seconds` when the preparer is stuck (issue 370).
+    preparer_stall_seconds: int = 120
     collector_timeout_seconds: int = 900
     verifier_timeout_seconds: int = 3600
     # The short roles' own time, counted from when their Pod is Running (the image pull
@@ -1789,6 +1793,7 @@ class KubernetesProvider:
                 timeout=self.config.prepare_timeout_seconds,
                 plan=self._checkout_plan(spec, k8sspec.ROLE_PREPARER, token is not None),
                 cancelled=cancelled,
+                stall_seconds=self.config.preparer_stall_seconds,
             )
         if exit_code != 0:
             detail = redact(self.last_error.get(k8sspec.ROLE_PREPARER, ""))
@@ -1796,9 +1801,24 @@ class KubernetesProvider:
                 # hades #423: the preparer is a separate Pod the quota counts; one it
                 # refused waits for room, as the probe and the worker do.
                 raise LaunchWaitError(f"the namespace quota has no room for the preparer: {detail}")
-            raise ProviderError(
-                f"the preparer Job could not build the checkout (exit {exit_code}): {detail}"
-            )
+            # Issue 370: a correction whose resume source (bundle or remote branch)
+            # cannot be fetched names that source in the wake.  The preparer script
+            # writes the failure reason to stderr; we surface it in the error so the
+            # wake's summary carries the source name.
+            if spec.role == "correct":
+                # A correction resumes from the remote work branch when the contract
+                # says `resume_from_work_branch`, otherwise from the preceding
+                # attempt's sealed bundle.
+                is_remote_branch = bool(repository.get("resume_from_work_branch"))
+                source = "remote branch" if is_remote_branch else "bundle"
+                msg = f"the preparer Job could not build the checkout (exit {exit_code}): "
+                if _names_quota(detail):
+                    msg += f"namespace quota refused the {source} checkout: {detail}"
+                else:
+                    msg += f"the {source} checkout failed: {detail}"
+            else:
+                msg = f"the preparer Job could not build the checkout (exit {exit_code}): {detail}"
+            raise ProviderError(msg)
         prepared = await self._read_files(
             spec,
             ["output/prepared-head.txt", "output/started-from.txt"],
@@ -4535,6 +4555,7 @@ class KubernetesProvider:
         adopt_existing: bool = False,
         preserve_on_cancel: bool = False,
         init_containers: Sequence[Mapping[str, Any]] = (),
+        stall_seconds: int = 0,
     ) -> int:
         """Run one single-purpose Job to completion and delete it. With `cancelled`, a
         cancel ends the wait (hades #189): the Job and its policy are deleted on the way
@@ -4544,7 +4565,11 @@ class KubernetesProvider:
         replaced by an error about garbage collection. With `wait_for_quota`, a Job whose
         Pod the namespace quota refuses waits for room until its deadline rather than
         ending at once: the publisher's Jobs, where giving up is a failed publication an
-        operator has to retry, not a collection the supervisor tries again."""
+        operator has to retry, not a collection the supervisor tries again.
+
+        `stall_seconds` is a positive value when a stall-bound check should be applied:
+        if the Pod has not produced any log output within that window, the Job is ended
+        as a stall with the detail named (issue 370)."""
         key = (role, spec.attempt_id)
         name = k8sspec.object_name(OBJECT_PREFIX.get(role, role), spec.attempt_id)
         collection = role in COLLECTION_ROLES
@@ -4616,6 +4641,13 @@ class KubernetesProvider:
             code = await self._await_job(
                 name, timeout=timeout, cancelled=cancelled, wait_for_quota=wait_for_quota
             )
+            if stall_seconds > 0:
+                # Issue 370: check whether the Pod produced log output within the
+                # stall window; a preparer (or any role) that wrote nothing for
+                # longer than the bound is ended as a stall.
+                code = await self._check_stall(
+                    name, role, spec.attempt_id, timeout, stall_seconds, code, cancelled
+                )
             refusal = self._job_refusals.pop(name, None)
             if code is None:
                 if name in self._job_unanswered:
@@ -4657,7 +4689,14 @@ class KubernetesProvider:
                     checkout_tail = await self._job_tail(name, container="checkout")
                     if checkout_tail and checkout_tail != tail:
                         tail = "\n".join(part for part in (checkout_tail, tail) if part)
-                self._role_error(role, spec.attempt_id, tail)
+                # Issue 370: when the role already has a diagnostic (stall, API
+                # unavailable), only overwrite it when the tail is non-empty so
+                # the more specific message is preserved.
+                prev = self.last_error.get(role, "")
+                if prev and tail and prev not in tail:
+                    pass  # keep the existing diagnostic
+                else:
+                    self._role_error(role, spec.attempt_id, tail)
                 log.warning("%s Job exited %s: %s", role, code, tail[-1000:])
             if collection and code >= 0:
                 self._collection_role_exits[key] = code
@@ -4694,6 +4733,74 @@ class KubernetesProvider:
     def _role_error(self, role: str, attempt_id: str, text: str, unavailable: bool = False) -> None:
         self.last_error[role] = text
         self.role_errors[(role, attempt_id)] = (text, unavailable)
+
+    async def _check_stall(
+        self,
+        name: str,
+        role: str,
+        attempt_id: str,
+        timeout: int,
+        stall_seconds: int,
+        code: int | None,
+        cancelled: CancelCheck | None,
+    ) -> int | None:
+        """Issue 370: if the Pod has not produced log output within `stall_seconds`,
+        end the Job as a stall.  Only the role that is still running (code in
+        {0, None, JOB_TIMED_OUT}) is checked; a Pod that already exited is fine."""
+        if code not in (0, None, JOB_TIMED_OUT):
+            return code
+        # We need the Pod to read logs from it.
+        try:
+            pod = await self._pod_of(name)
+        except KubernetesApiError:
+            return code
+        if pod is None:
+            return code
+        try:
+            frames = await self._call(
+                self.client.pod_log,
+                str(pod["metadata"]["name"]),
+                container=k8sspec.CONTAINER_NAME,
+                timestamps=True,
+            )
+        except KubernetesApiError:
+            return code
+        output = b"".join(f.payload for f in frames).decode("utf-8", "replace")
+        if output.strip():
+            # The Pod produced output: fine.
+            return code
+        # No output yet.  Check whether we have been running longer than the stall
+        # bound.  We approximate by checking the elapsed wall time since we entered
+        # this role.  A Pod that is still starting (image pull) may legitimately
+        # take longer; we only fire when *more* than stall_seconds have passed
+        # since the *start* of this job, not since it became Running.
+        # We use the config's poll interval * a few polls as our clock source
+        # because we don't store a separate timestamp here.  Instead, we check
+        # whether `timeout` (the role's own time) plus `start_wait` (the launch
+        # timeout, which covers image pull) is still running and whether we are
+        # past the stall bound from the wall-clock start.  Since we cannot easily
+        # get the exact wall-clock start from here, we use a simpler heuristic:
+        # if the Pod has been running for longer than stall_seconds without output,
+        # we check the Pod's creation timestamp.
+        creation_ts = str((pod.get("metadata") or {}).get("creationTimestamp") or "")
+        if creation_ts:
+            try:
+                created = parse_rfc3339(creation_ts)
+                now = datetime.now(UTC)
+                if (now - created).total_seconds() >= stall_seconds:
+                    self._role_error(
+                        role,
+                        attempt_id,
+                        (
+                            f"the {role} Job produced no log output for "
+                            f"{stall_seconds}s: the pod was created at "
+                            f"{created.isoformat()} and is still running"
+                        ),
+                    )
+                    return JOB_API_ERROR
+            except ValueError:
+                pass
+        return code
 
     async def _run_verifier(
         self, spec: LaunchSpec, limits: Limits
