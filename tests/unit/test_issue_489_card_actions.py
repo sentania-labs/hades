@@ -750,9 +750,7 @@ def test_next_phase_applies_the_default_move_for_the_lane() -> None:
     proposed = store_for(_S.PROPOSED)
     card = board_card_view(proposed.uow(), TASK_ID, NOW)
     assert card["lane"]["key"] == "inbox" and card["default_move"] == "approve"
-    result = next_phase(
-        proposed.uow(), clock, principal=OPERATOR, task_id=TASK_ID, note_text=NOTE
-    )
+    result = next_phase(proposed.uow(), clock, principal=OPERATOR, task_id=TASK_ID, note_text=NOTE)
     assert result.lane == "inbox" and result.move.key == "approve"
     assert result.task.state is _S.SCHEDULED
 
