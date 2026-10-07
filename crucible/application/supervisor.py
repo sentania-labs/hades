@@ -69,6 +69,7 @@ from crucible.application.review import (
 from crucible.application.routing import (
     count_blocking_failures,
     current_routing_version,
+    launch_model_name,
     load_attempt_routing,
     reserve,
     select_model,
@@ -2178,10 +2179,22 @@ class Supervisor:
         # that record rather than a value saved since.
         effective: dict[str, Any] | None = None
         if settings_harness == "hermes":
-            effective = attempt.effective_settings or effective_settings(
-                harness_settings,
-                thinking=route.chat_template_kwargs.enable_thinking if route else False,
-            )
+            if attempt.effective_settings is not None:
+                effective = attempt.effective_settings
+            else:
+                effective = effective_settings(
+                    harness_settings,
+                    thinking=route.chat_template_kwargs.enable_thinking if route else False,
+                )
+                # Hades #354: Codex's own provider config takes model_context_window and
+                # the max output tokens from the routing entry, not the Hermes default,
+                # when the entry carries its own. Resolved once per attempt, like the
+                # rest of `effective`.
+                if selected_harness == "codex" and route is not None:
+                    if route.context_length:
+                        effective["context_length"] = route.context_length
+                    if route.max_output_tokens:
+                        effective["max_output_tokens"] = route.max_output_tokens
         if selected_harness == "qwen_code":
             effective = attempt.effective_settings or {
                 "context_length": route.context_length
@@ -2256,7 +2269,7 @@ class Supervisor:
         launch = adapter.build_launch(
             LaunchContext(
                 attempt_id=attempt.id,
-                model=(route.model_name or route.id) if route else selected_model,
+                model=launch_model_name(route, selected_model),
                 effort=execution.effort,
                 timeout_seconds=execution.timeout_seconds,
                 identity_mount=IDENTITY_MOUNT,
@@ -3310,6 +3323,19 @@ class Supervisor:
             )
             attempt.workspace_path = ws.checkout_path.removesuffix("/repo")
             attempt.identity_sha256 = ws.identity_sha256 or attempt.identity_sha256
+            # Hades #354: the evidence records the lane (`model`, above) and the name the
+            # launch actually sends the harness, when a routing entry overrides it.
+            routing = load_attempt_routing(
+                uow, execution.policy_snapshot or {}, attempt.routing_version
+            )
+            route = (
+                routing.model(
+                    attempt.selected_model or execution.model,
+                    attempt.selected_harness or execution.harness,
+                )
+                if routing is not None
+                else None
+            )
             move_attempt(
                 uow,
                 self._clock,
@@ -3319,6 +3345,9 @@ class Supervisor:
                 payload={
                     "workspace": attempt.workspace_path,
                     "model": attempt.selected_model,
+                    "sent_model_name": launch_model_name(
+                        route, attempt.selected_model or execution.model
+                    ),
                     "harness": attempt.selected_harness,
                     "image": attempt.selected_image,
                     "pool": attempt.selected_pool,

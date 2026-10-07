@@ -429,12 +429,13 @@ other effective settings. Runtime edits create later immutable versions through
 the admin surface. The database value is authoritative over the environment after the
 migration.
 
-The `model` field is exactly what the harness sends to the endpoint. A routing entry is
-unique on `(harness, model)`, so Hermes, Qwen Code and Codex may all use `coder`.
-Local models are references to the gateway's authenticated `/models` listing at publish
-time; an unknown reference is refused with 422 and the checked listing. Subscription
-models are references known by their adapter. Which routing version a deployment
-uses is the policy's own choice. `default-software` version 2, seeded by
+The `model` field is what routing, pools and evidence call the entry; by default it is
+also exactly what the harness is sent. A routing entry is unique on `(harness, model)`,
+so Hermes, Qwen Code and Codex may all use `coder`. Local models are references to the
+gateway's authenticated `/models` listing at publish time; an unknown reference is
+refused with 422 and the checked listing. Subscription models are references known by
+their adapter. Which routing version a deployment uses is the policy's own choice.
+`default-software` version 2, seeded by
 migration 0009 (C5b), is version 1's document naming `default-routing`
 version 2, and it is the version the shipped example policy, the example
 contract, the compose smoke, the fixtures, and the tiers all reference, so
@@ -509,3 +510,24 @@ the form does not edit that preference. It never presents an internal routing ke
 a model. A scheduled
 gateway listing disables every `(harness, model)` entry for a vanished model, records
 when it vanished, and wakes the orchestrator with the model and stranded harnesses.
+
+### Codex on a local lane is sent a model name it knows (hades #354)
+
+Codex logged `Model metadata for 'fast' not found` on a local lane: Hades sent the lane
+name, which Codex's own model catalog does not recognise, so it fell back to generic
+tool, prompt, output-token and compaction defaults. A routing entry may now carry
+`harness_model_name`, the name its harness is actually launched with, for example
+`gpt-5.4`, the gateway alias Codex's catalog does recognise for the same backing
+model, while `model` keeps the lane name (`fast`) that routing, pools and evidence
+always read. Absent, the harness is sent `model` unchanged (every entry before #354,
+and every entry that sets no override, behaves exactly as before). The launch event
+(`attempt_launching`) records both: `model`, the lane, and `sent_model_name`, the name
+actually passed to the harness.
+
+A local Codex entry's own `context_length` and `max_output_tokens` (the same fields
+#448 added for Qwen Code) feed Codex's per-attempt provider config,
+`model_context_window` and `model_max_output_tokens`, ahead of the Hermes-administered
+defaults on the Local gateway page; an entry that sets neither is unaffected, and Codex
+keeps reading the Hermes defaults it reads today. Changing a gateway alias or a
+routing entry's thinking setting is lab-admin's call, not this mechanism's; #354 does
+not touch either.

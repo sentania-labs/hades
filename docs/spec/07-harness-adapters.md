@@ -413,6 +413,26 @@ loaded into `OPENAI_API_KEY` at container start. It never mounts subscription
 `model_context_window` uses the Local gateway page's context length. A saved zero,
 which asks Hermes to discover its window, uses 131072 for Codex because Codex cannot
 use Hermes's discovery. Set a positive context length for the actual gateway model.
+The top-level `model_max_output_tokens` uses the Local gateway page's response
+allowance the same way.
+
+Hades #354: the routing entry Codex launches with is read first. Its own
+`context_length` and `max_output_tokens`, when either is set, replace the Local
+gateway page's figures above, resolved once per attempt like the rest of
+`effective_settings` (hades #388) and reused on every later spec of that attempt. An
+entry that sets neither keeps reading the Local gateway page's defaults, unchanged.
+
+`--model` is the routing entry's `model` (the lane, for example `fast`) unless the
+entry carries `harness_model_name`, in which case that name is sent instead, for
+example `gpt-5.4`, a gateway alias Codex's own model catalog recognises for the same
+backing model. Without a recognised name Codex logs `Model metadata for '<name>' not
+found` and falls back to generic tool, prompt, output-token and compaction defaults,
+regardless of `model_context_window` and `model_max_output_tokens` above. Routing,
+pools and `GET /routing/history` always read `model`; the launch event
+(`attempt_launching`) records `sent_model_name` beside it, so the lane and the name
+actually sent are both evidence. An entry with no `harness_model_name` sends `model`
+unchanged, exactly as before #354. Setting `harness_model_name` never changes the
+gateway alias itself or a routing entry's thinking setting; those stay lab-admin's.
 
 The launch retains `--dangerously-bypass-approvals-and-sandbox`, never adds
 `--ignore-user-config`, and sends identity plus the pointer prompt through a finite

@@ -47,6 +47,13 @@ class PoolUsage:
         }
 
 
+def launch_model_name(route: RoutingModel | None, model_id: str) -> str:
+    """Hades #354: the name a launch passes to the harness - a routing entry's own
+    `harness_model_name` when it carries one, else the lane name routing, pools and
+    evidence always use. With no entry (an unrouted execution) the lane name itself."""
+    return route.sent_model_name if route is not None else model_id
+
+
 def routing_ref(policy_document: dict[str, Any]) -> tuple[str, int] | None:
     ref = (policy_document or {}).get("routing", {}).get("policy", {})
     if not ref:
