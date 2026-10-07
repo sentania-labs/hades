@@ -126,6 +126,7 @@ from crucible.ports.execution import (
     ProbeRequest,
     ProbeResult,
     ProviderCapabilities,
+    PrepareJobPodsTimeoutError,
     ProviderError,
     ProviderHealth,
     ProviderUnavailableError,
@@ -359,6 +360,11 @@ class KubernetesConfig:
     # as the detail (image pull, no schedulable node, PVC unbound), never a stall.
     launch_timeout_seconds: int = 300
     prepare_timeout_seconds: int = 900
+    # hades #503: how many seconds the provider waits for a preparer Job's Pods to
+    # disappear after deletion before classifying the prepare as an environment failure.
+    # The total wait (including backoff retries) is bounded below
+    # prepare_timeout_seconds.
+    prepare_pod_deletion_wait_seconds: float = 15.0
     collector_timeout_seconds: int = 900
     verifier_timeout_seconds: int = 3600
     # The short roles' own time, counted from when their Pod is Running (the image pull
@@ -4639,6 +4645,7 @@ class KubernetesProvider:
                 # A full namespace is a wait, not a verdict on the attempt.
                 self._role_error(role, spec.attempt_id, refusal, True)
                 return JOB_API_ERROR
+            job_completed = code is not None and code >= 0
             if log_output is not None:
                 pod = await self._pod_of(name)
                 if pod is not None:
@@ -4678,9 +4685,19 @@ class KubernetesProvider:
                         grace_period_seconds=0 if role == k8sspec.ROLE_VERIFIER else None,
                     )
                 try:
-                    await self._await_job_pods_gone(
-                        name, force=role == k8sspec.ROLE_VERIFIER, collection=collection
-                    )
+                    # hades #503: the preparer gets a bounded retry with backoff.
+                    if role == k8sspec.ROLE_PREPARER:
+                        await self._await_preparer_job_pods_gone(
+                            name,
+                            job_completed=job_completed,
+                            job_completed_reason=job_completed_reason,
+                        )
+                    else:
+                        await self._await_job_pods_gone(
+                            name, force=role == k8sspec.ROLE_VERIFIER, collection=collection
+                        )
+                except PrepareJobPodsTimeoutError:
+                    raise
                 except (ProviderError, KubernetesApiError) as exc:
                     # An error already in flight is the one to report, not the Pod.
                     if not (tolerate_lingering_pod or failed):
@@ -5183,6 +5200,86 @@ class KubernetesProvider:
             float(grace if grace is not None else DEFAULT_POD_GRACE_SECONDS)
             + POD_DELETION_MARGIN_SECONDS
         )
+
+    async def _await_preparer_job_pods_gone(
+        self,
+        job_name: str,
+        *,
+        timeout: float | None = None,
+        job_completed: bool = True,
+        job_completed_reason: str | None = None,
+    ) -> None:
+        """hades #503: wait for a preparer Job's Pods to disappear, with retries.
+
+        The preparer's pods may linger after the Job is deleted.  Instead of failing
+        on the first timeout, retry with exponential backoff (starting at 2 s,
+        doubling each time) until the cumulative wait exceeds timeout or the pods
+        are gone.  job_completed indicates whether the Job itself had finished
+        (succeeded or failed) or was still running when the wait began; this is
+        included in the error message so the operator knows what state the Job was in.
+        """
+        if timeout is None:
+            timeout = self.config.prepare_pod_deletion_wait_seconds
+        # Bounded below prepare_timeout_seconds so the total never exceeds it.
+        max_timeout = min(timeout, float(self.config.prepare_timeout_seconds))
+
+        completed_label = (
+            "the Job had completed"
+            if job_completed
+            else f"the Job was still running (reason: {job_completed_reason})"
+        )
+
+        attempt = 0
+        backoff = 2.0  # seconds, starts at 2 s, doubles each retry
+        start = time.monotonic()
+
+        while True:
+            rows: list[dict[str, Any]] | None = None
+            try:
+                rows = await self._call(
+                    self.client.list_objects,
+                    "pods",
+                    label_selector=f"job-name={job_name}",
+                )
+            except KubernetesUnavailableError:
+                # Transient API failure: sleep and retry the list call so the
+                # caller can confirm the pods are gone later.
+                elapsed = time.monotonic() - start
+                if elapsed >= max_timeout:
+                    raise PrepareJobPodsTimeoutError(
+                        f"Pods for Job {job_name!r} were still present after "
+                        f"{elapsed:.1f} seconds: {completed_label}"
+                    )
+                attempt += 1
+                log.info(
+                    "preparer Job %s pods query unavailable (attempt %d); retrying in %.1f s",
+                    job_name,
+                    attempt,
+                    backoff,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_timeout - elapsed)
+                continue
+
+            if not rows:
+                return  # pods are gone
+
+            elapsed = time.monotonic() - start
+            if elapsed >= max_timeout:
+                raise PrepareJobPodsTimeoutError(
+                    f"Pods for Job {job_name!r} were still present after "
+                    f"{elapsed:.1f} seconds: {completed_label}"
+                )
+
+            attempt += 1
+            log.info(
+                "preparer Job %s pods still present (attempt %d); retrying in %.1f s",
+                job_name,
+                attempt,
+                backoff,
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, max_timeout - elapsed)
 
     async def _await_pod_gone(
         self, name: str, *, timeout: float = 15, collection: bool = False

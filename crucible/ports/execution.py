@@ -539,6 +539,13 @@ class ProviderUnavailableError(ProviderError):
     than failing the attempt."""
 
 
+class PrepareJobPodsTimeoutError(ProviderError):
+    """hades #503: a preparer Job's Pods linger after deletion despite backoff
+    retries.  The provider records whether the Job had completed or was still
+    running when the wait gave up.  Retrying the attempt does not consume the
+    budget; the attempt goes back to pending."""
+
+
 class CollectionPendingError(ProviderUnavailableError):
     """Collection is waiting for backend cleanup. Retry on the next supervisor tick,
     up to the configured collection retry limit, while keeping the workspace intact."""

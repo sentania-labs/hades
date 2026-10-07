@@ -95,6 +95,21 @@ def _unpublished_bundle_problem(
     if work is None:
         return {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
     attempt, execution = work
+    # hades #503: a prepare failure leaves workspace_path as None; skip it and use the
+    # preceding attempt's bundle (same pattern as the never_started check below).
+    if attempt.workspace_path is None:
+        prev_attempts = [
+            a for a in uow.attempts.list_for_execution(execution.id) if a.workspace_path is not None
+        ]
+        if prev_attempts:
+            attempt = max(prev_attempts, key=lambda a: a.id)
+            source_execution = uow.executions.get(attempt.execution_id)
+            if source_execution is not None:
+                execution = source_execution
+            else:
+                return {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
+        else:
+            return {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
     exited = uow.events.latest_for_task_kind(task.id, EventKind.ATTEMPT_EXITED.value)
     if (
         exited is not None
@@ -138,12 +153,14 @@ def _unpublished_bundle_problem(
         ),
         None,
     )
+    # hades #503: a prepare failure leaves workspace_path as None; the preceding
+    # attempt's bundle must not be discarded by this check.
     released = any(
         action.kind == "workspace" and action.subject == attempt.id
         for action in uow.retention.list_recent(10_000)
     )
-    path = f"{attempt.workspace_path}/output/work_branch.bundle"
-    local_missing = "://" not in path and not Path(path).is_file()
+    path = f"{attempt.workspace_path}/output/work_branch.bundle" if attempt.workspace_path else ""
+    local_missing = bool(path) and "://" not in path and not Path(path).is_file()
     if evidence is None or released or local_missing:
         return {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
     return None

@@ -176,6 +176,7 @@ from crucible.ports.execution import (
     Observation,
     ObservationState,
     ProviderError,
+    PrepareJobPodsTimeoutError,
     ProviderUnavailableError,
     VerificationRun,
     WorkerStartError,
@@ -1930,6 +1931,24 @@ class Supervisor:
                 # to pending; a later tick launches it.
                 await self._db(partial(self._return_to_pending, attempt.id, "prepare", str(exc)))
                 return False
+            except PrepareJobPodsTimeoutError as exc:
+                # hades #503: a preparer Job's pods that linger after deletion are retried
+                # with backoff; the attempt is not counted against the budget.
+                log.warning(
+                    "preparer pods still present for %s: %s; retrying with backoff",
+                    item.execution.id,
+                    exc,
+                    extra={"error": str(exc)},
+                )
+                await self._db(
+                    partial(
+                        self._retry_with_backoff,
+                        attempt.id,
+                        "prepare",
+                        str(exc),
+                    )
+                )
+                return False
             except ProviderError as exc:
                 detail = str(exc)
                 await self._db(partial(self._environment_failure, attempt.id, "prepare", detail))
@@ -3485,6 +3504,70 @@ class Supervisor:
                 )
             log.info(
                 "launch waits for room; the attempt is pending again",
+                extra={"stage": stage, "detail": reason},
+            )
+            uow.commit()
+
+    def _retry_with_backoff(self, attempt_id: str, stage: str, detail: str) -> None:
+        """hades #503: a preparer Job's pods linger and all backoff retries are
+        exhausted.  The attempt is not counted against the budget; it goes back to
+        pending with the reason so a later tick can retry.  No workspace cleanup
+        runs because the prepare never succeeded (workspace_path is already None)."""
+        with self._fenced() as uow:
+            attempt = uow.attempts.get(attempt_id, for_update=True)
+            assert attempt is not None
+            task = uow.tasks.get(attempt.task_id, for_update=True)
+            assert task is not None
+            if attempt.state not in (AttemptState.PREPARING, AttemptState.LAUNCHING):
+                # Another supervisor already settled it.
+                return
+            if task.state in ENDS_ATTEMPTS:
+                self._end_cancelled_launch(uow, attempt, task, stage)
+                uow.commit()
+                return
+            reason = redact(detail)[:1000]
+            # The prepare never created a workspace, so nothing to clean up.
+            attempt.workspace_path = None
+            attempt.identity_sha256 = None
+            attempt.handle = None
+            move_attempt(
+                uow,
+                self._clock,
+                attempt,
+                AttemptState.PENDING,
+                EventKind.HARNESS_LAUNCH_DEFERRED,
+                payload={
+                    "attempt_id": attempt.id,
+                    "stage": stage,
+                    "detail": reason,
+                    "quota_wait": True,
+                },
+            )
+            self._release_checkout_leases(uow, attempt)
+            execution = uow.executions.get(attempt.execution_id)
+            if (
+                task.state is TaskState.RUNNING
+                and execution is not None
+                and execution.role is not ExecutionRole.REVIEW
+            ):
+                scheduled = uow.events.latest_for_task_kind(task.id, EventKind.TASK_SCHEDULED.value)
+                move_task(
+                    uow,
+                    self._clock,
+                    task,
+                    TaskState.SCHEDULED,
+                    EventKind.TASK_SCHEDULED,
+                    execution_id=attempt.execution_id,
+                    attempt_id=attempt.id,
+                    payload={
+                        "reason": "prepare_pod_wait",
+                        "stage": stage,
+                        "detail": reason,
+                        **({} if scheduled is None else scheduled.payload),
+                    },
+                )
+            log.info(
+                "preparer pod wait exhausted; attempt back to pending for retry",
                 extra={"stage": stage, "detail": reason},
             )
             uow.commit()
