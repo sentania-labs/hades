@@ -171,7 +171,8 @@ def gateway_view(
 
 async def models_view(ctx: AdminContext, uow: UnitOfWork, *, fetch: bool = True) -> dict[str, Any]:
     """What the gateway offers this key, beside the local entries in force: one row per
-    offered model. An inconclusive listing retains the configured rows.
+    non-Codex route and one Codex control per model name. Offered models without
+    a non-Codex route get a placeholder. An inconclusive listing retains configured rows.
 
     When *fetch* is False the gateway is not contacted and a not-asked note is returned
     instead.  This keeps the gateway page fast until the operator clicks the link.
@@ -199,21 +200,55 @@ async def models_view(ctx: AdminContext, uow: UnitOfWork, *, fetch: bool = True)
         for entry in entries
         if entry.get("harness") == "codex"
     }
-    by_id = {str(entry.get("id")): entry for entry in entries if entry.get("harness") != "codex"}
-    for model_id in codex:
-        by_id.setdefault(model_id, {})
+    primary = [
+        entry
+        for entry in entries
+        if entry.get("harness") != "codex"
+        and (
+            offered is None
+            or str(entry.get("model_name") or entry["id"]) in offered
+            or entry.get("enabled") is True
+        )
+    ]
+    policy_model_names = {str(entry.get("model_name") or entry["id"]) for entry in entries}
+    primary_names = {str(entry.get("model_name") or entry["id"]) for entry in primary}
+    placeholder_names = [name for name in (offered or []) if name not in primary_names]
+    placeholder_names.extend(
+        name
+        for name, entry in codex.items()
+        if name not in primary_names
+        and name not in placeholder_names
+        and (offered is None or entry.get("enabled") is True)
+    )
+    row_entries: list[dict[str, Any] | None] = [
+        *primary,
+        *(None for _ in placeholder_names),
+    ]
     rows: list[dict[str, Any]] = []
-    for model_id in offered if offered is not None else by_id:
-        entry = by_id.get(model_id)
-        display_entry = entry or codex.get(model_id)
-        is_offered = None if offered is None else model_id in offered
+    offered_only = iter(placeholder_names)
+    codex_controls: set[str] = set()
+    for entry in row_entries:
+        model_name = (
+            str(entry.get("model_name") or entry["id"]) if entry is not None else next(offered_only)
+        )
+        model_id = str(entry["id"]) if entry is not None else model_name
+        codex_editable = model_name not in codex_controls
+        codex_controls.add(model_name)
+        codex_entry = codex.get(model_name)
+        display_entry = entry or codex_entry
+        is_offered = None if offered is None else model_name in offered
         rows.append(
             {
                 "id": model_id,
+                "model_name": model_name,
+                "harness": (entry or {}).get("harness"),
                 "offered": is_offered,
-                "in_policy": entry is not None,
+                "in_policy": model_name in policy_model_names,
                 "enabled": bool(entry and entry.get("enabled") is True),
-                "codex_enabled": bool(codex.get(model_id, {}).get("enabled")),
+                "codex_editable": codex_editable,
+                "codex_enabled": bool(
+                    codex_editable and codex_entry and codex_entry.get("enabled")
+                ),
                 "enable_thinking": bool(
                     entry and (entry.get("chat_template_kwargs") or {}).get("enable_thinking")
                 ),
@@ -233,17 +268,19 @@ async def models_view(ctx: AdminContext, uow: UnitOfWork, *, fetch: bool = True)
 
 
 def _row_note(entry: dict[str, Any] | None, offered: bool | None) -> str:
+    harness = f"{entry.get('harness')}: " if entry and entry.get("harness") else ""
     if offered is False:
-        return (
+        note = (
             "not offered by the gateway; saving disables it"
             if entry and entry.get("enabled")
             else "not offered by the gateway"
         )
+        return harness + note
     if entry is None:
         return "offered; tick it to add it" if offered else ""
     if entry.get("enabled"):
-        return "in use"
-    return f"disabled: {entry.get('disabled_reason') or 'no reason recorded'}"
+        return harness + "in use"
+    return harness + f"disabled: {entry.get('disabled_reason') or 'no reason recorded'}"
 
 
 async def save_gateway(
@@ -455,7 +492,7 @@ async def save_models(
         i
         for i, pick in picks.items()
         if (pick["enabled"] or pick["codex_enabled"])
-        and i not in offered
+        and str(by_id.get(i, {}).get("model_name") or i) not in offered
         and i not in known_aliases
     )
     if unoffered:
@@ -476,19 +513,21 @@ async def save_models(
         if pick["enabled"] is not None:
             expanded.append((model_id, model_id, HERMES, pick))
         if pick["codex_enabled"] is not None:
+            model_name = str(by_id.get(model_id, {}).get("model_name") or model_id)
             existing = next(
                 (
                     m
                     for m in local
-                    if m.get("harness") == "codex" and (m.get("model_name") or m["id"]) == model_id
+                    if m.get("harness") == "codex"
+                    and (m.get("model_name") or m["id"]) == model_name
                 ),
                 None,
             )
-            route_id = str(existing["id"]) if existing else f"codex-local:{model_id}"
+            route_id = str(existing["id"]) if existing else f"codex-local:{model_name}"
             if route_id in by_id and existing is None:
                 raise GatewayError(f"routing id {route_id!r} is already in use")
             expanded.append(
-                (route_id, model_id, "codex", {**pick, "enabled": pick["codex_enabled"]})
+                (route_id, model_name, "codex", {**pick, "enabled": pick["codex_enabled"]})
             )
     for model_id, gateway_model, harness, pick in expanded:
         entry = by_id.get(model_id)

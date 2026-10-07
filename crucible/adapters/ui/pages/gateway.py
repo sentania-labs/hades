@@ -86,7 +86,7 @@ async def gateway_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         # Build rows and model-choice form only when the operator asked for models.
         if principal.role is not Role.ADMIN:
             listing.update(
-                columns=["Model", "Offered", "Hermes", "Codex", "Thinking", "Capability", "Note"],
+                columns=["Model", "Offered", "Use", "Codex", "Thinking", "Capability", "Note"],
                 rows=[
                     [
                         row["id"],
@@ -110,13 +110,20 @@ async def gateway_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                             "kind": "checkbox",
                             "name": f"model.{index}.enabled",
                             "value": row["enabled"],
-                            "label": f"use {row['id']}",
+                            "label": f"use {row['id']} with {row['harness'] or 'hermes'}",
                         },
                         {
                             "kind": "checkbox",
                             "name": f"model.{index}.codex",
                             "value": row["codex_enabled"],
-                            "label": f"use Codex for {row['id']}",
+                            "label": f"use Codex for {row['model_name']}",
+                        }
+                        if row["codex_editable"]
+                        else {
+                            "kind": "hidden",
+                            "name": f"model.{index}.codex_shared",
+                            "value": "true",
+                            "label": f"Codex control shared for {row['model_name']}",
                         },
                         {
                             "kind": "checkbox",
@@ -141,7 +148,7 @@ async def gateway_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                     {
                         "kind": "grid",
                         "label": "",
-                        "columns": ["Model", "Hermes", "Codex", "Thinking", "Capability", "Note"],
+                        "columns": ["Model", "Use", "Codex", "Thinking", "Capability", "Note"],
                         "rows": rows,
                     },
                     {
@@ -389,7 +396,11 @@ async def _action_gateway_models(
             {
                 "id": form[f"model.{index}.id"],
                 "enabled": form.get(f"model.{index}.enabled") == "true",
-                "codex_enabled": form.get(f"model.{index}.codex") == "true",
+                **(
+                    {"codex_enabled": form.get(f"model.{index}.codex") == "true"}
+                    if form.get(f"model.{index}.codex_shared") != "true"
+                    else {}
+                ),
                 "enable_thinking": form.get(f"model.{index}.thinking") == "true",
                 "capability": form.get(f"model.{index}.capability") or None,
             }
