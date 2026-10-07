@@ -201,19 +201,24 @@ def test_a_policy_cannot_list_the_enforced_gate() -> None:
 # ----- the collector records authors for the reviewer ------------------------------
 
 
-def _collect(tmp_path: Path, repo: Path) -> Path:
+def _collect(tmp_path: Path, repo: Path, *, policy_from: str | None = None) -> Path:
     output = tmp_path / "output"
     report = tmp_path / "report"
     output.mkdir()
     report.mkdir()
     # Stand in for the trusted record left by preparation in these collector fixtures.
-    (output / "prepared-base.txt").write_text(
-        subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "main"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout
+    base = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "main"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    (output / "prepared-base.txt").write_text(base)
+    # Stand in for the preparer's trusted commit_policy start (hades #230): no prior
+    # work_branch to resume from in these fixtures, so it is the same commit as the base,
+    # unless a test hands its own (an unreadable range, for instance).
+    (output / "prepared-policy-from.txt").write_text(
+        base if policy_from is None else policy_from + "\n"
     )
     generated = scripts.collector_script(
         base_ref="main",
@@ -328,16 +333,13 @@ def test_the_hook_puts_the_trailer_last_even_after_a_dashed_line(tmp_path: Path)
 
 
 def test_the_check_reports_a_range_it_cannot_read_as_not_checked(tmp_path: Path) -> None:
-    """A check that did not run is never read as one that found nothing."""
+    """A check that did not run is never read as one that found nothing. hades #230:
+    the range's start is the preparer's recorded commit id, never a ref read fresh from
+    the checkout, so this is triggered by a prepared-policy-from.txt that does not name
+    an object the checkout has, not by a live ref the worker could move."""
     repo = _worker_branch(tmp_path)
     _commit(repo, "a.txt", "Add a")
-    # A remote-tracking ref that names an object the checkout does not have.
-    (repo / ".git" / "refs" / "remotes" / "origin").mkdir(parents=True)
-    (repo / ".git" / "refs" / "remotes" / "origin" / "crucible" / "test").parent.mkdir()
-    (repo / ".git" / "refs" / "remotes" / "origin" / "crucible" / "test").write_text(
-        "f" * 40 + "\n", encoding="utf-8"
-    )
-    output = _collect(tmp_path, repo)
+    output = _collect(tmp_path, repo, policy_from="f" * 40)
     assert read_commit_policy(output / "commit-policy") is None
 
 
