@@ -61,7 +61,7 @@ also carries a signed-session CSRF value. Sign-out clears the cookie.
 | POST | `/tasks/{id}/dispositions` | Record `ReviewDisposition` rows for received external review comments. Orchestrator role. |
 | POST | `/tasks/{id}/head-decision` | In `head_diverged`: `recollect` (the task re-enters `scheduled` with a `correct` execution against the remote work branch, so the new head gets a claim of its own before any gate reads it), `reject`, or `cancel`, with reasoning. |
 | POST | `/tasks/{id}/ci-decision` | In `ci_certification_failed`: record the cause Foundry determined (enum in 23) and the action: `rerun` (recorded; the operator re-runs on GitHub, 23), `correct` (followed by a correction), `reject`, or `cancel`. |
-| POST | `/tasks/{id}/decisions` | Record a `Decision` (verbatim text, who, what it resolves). |
+| POST | `/tasks/{id}/decisions` | Record a `Decision` (verbatim text, who, what it resolves). The `kind` field is validated against a closed list (FDY-0509): `accept`, `accept_no_ci`, `escalation_answer`, `recollect`, `release_authorization`, `waive_external_review`. An unknown kind returns 422 with the accepted list in the problem detail body. An empty or one-character `verbatim` or `resolves` also returns 422. `escalation_answer` is the kind Foundry's client sends to answer an escalation. |
 | POST | `/tasks/{id}/close` | Orchestrator closes an `accepted`, `merged`, or `released` task. |
 | GET | `/tasks/{id}/events` | Ordered events for the task and its children. |
 | GET | `/tasks/{id}/pull-request` | The PR record with head history, the external review cycles and their completed components, external reviews, comments, dispositions, the observed reactions, whether reactions are observable at all, and CI certifications. |
@@ -158,7 +158,9 @@ the reference; what binds the API is this:
   API's response, never reworded), `next`, `warnings`, and on failure `error`
   carrying the problem document above whole. Exit 0, 1 on a refusal or failure,
   2 on usage. `crucible schema` prints the envelope's schema and each `kind`'s,
-  the orchestrator ones generated from the response models here.
+  the orchestrator ones generated from the response models here. It also
+  carries `decision_kinds`, the sorted list of accepted decision kinds that
+  the same constant the validator uses (FDY-0509).
 - `next` is the actions valid from the record's state for the principal in use,
   each as an argv with what it needs. It follows the lifecycle table (09) and
   each endpoint's state guard; a verb this section marks orchestrator-only is

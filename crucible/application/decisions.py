@@ -15,6 +15,7 @@ from crucible.application.transitions import move_task, record_event, require_co
 from crucible.application.wakes import create_wake
 from crucible.contracts.api import DecisionRequest, DispositionRequest
 from crucible.contracts.wake import WakeReason
+from crucible.domain.decisions import OPERATOR_ONLY_DECISION_KINDS
 from crucible.domain.entities import (
     Decision,
     Escalation,
@@ -32,9 +33,6 @@ from crucible.ports.clock import Clock
 from crucible.ports.repository import UnitOfWork
 
 DEFAULT_ESCALATION_STALE_HOURS = 24
-# ADR 0025: waiving the remaining external review rounds, or accepting that a repository
-# has no CI, is the operator's call on one task, like authorizing a release.
-OPERATOR_ONLY_DECISION_KINDS = frozenset({"release_authorization", *WAIVER_KINDS})
 
 
 def open_escalation(
