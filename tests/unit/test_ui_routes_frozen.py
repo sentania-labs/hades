@@ -10,6 +10,8 @@ FROZEN_ROUTES = [
     ("GET", "/ui/artifacts/{artifact_id}/content"),
     ("GET", "/ui/audit"),
     ("GET", "/ui/board"),
+    # hades #489: the opened card.
+    ("GET", "/ui/board/{task_id}"),
     ("GET", "/ui/bootstrap"),
     ("GET", "/ui/bootstrap/{import_id}"),
     ("GET", "/ui/credentials"),
@@ -35,6 +37,9 @@ FROZEN_ROUTES = [
     ("GET", "/ui/workers"),
     ("GET", "/ui/workers/{attempt_id}/logs"),
     ("POST", "/ui/actions/{action}"),
+    # hades #489: the card's note and phase actions.
+    ("POST", "/ui/board/{task_id}/actions"),
+    ("POST", "/ui/board/{task_id}/notes"),
     ("POST", "/ui/sign-in"),
     ("POST", "/ui/sign-out"),
     # hades #424: the operator's answers to proposed tasks, one at a time and as a batch.

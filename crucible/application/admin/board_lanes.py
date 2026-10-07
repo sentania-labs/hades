@@ -125,20 +125,20 @@ def lane_for_state(state: TaskState, *, waiting_on_scott: bool = False) -> str:
     return LANE_BY_STATE[state]
 
 
-def _first_sentence(value: str) -> str:
+def first_sentence(value: str) -> str:
     text = " ".join(value.split())
     match = re.search(r"(?<=[.!?])\s", text)
     return text[: match.start() + 1].rstrip() if match else text
 
 
-def _is_scott_question(escalation: Any) -> bool:
+def is_scott_question(escalation: Any) -> bool:
     kind = str(
         getattr(escalation, "kind", None) or getattr(escalation, "reason", None) or ""
     ).lower()
     return kind in DECISION_KINDS
 
 
-def _issue(issue: str, repository_url: str | None) -> dict[str, str]:
+def issue_link(issue: str, repository_url: str | None) -> dict[str, str]:
     url = issue if issue.startswith("https://") else ""
     if not url and repository_url and issue.startswith("#"):
         url = f"{repository_url.removesuffix('.git').rstrip('/')}/issues/{issue[1:]}"
@@ -154,7 +154,7 @@ def _contract_fields(document: dict[str, Any]) -> dict[str, Any]:
     repository_url = (document.get("repository") or {}).get("url")
     execution = document.get("execution") or document.get("execution_request") or {}
     return {
-        "issues": [_issue(issue, repository_url) for issue in issues],
+        "issues": [issue_link(issue, repository_url) for issue in issues],
         "tier": str(execution.get("tier") or document.get("tier") or "not recorded"),
     }
 
@@ -201,7 +201,7 @@ def _waiting_words(
     events: dict[tuple[str, str], Any],
 ) -> str:
     if lane == "waiting_on_scott" and escalation is not None:
-        return _first_sentence(str(escalation.question))
+        return first_sentence(str(escalation.question))
     if task.state is _S.PRE_PR_GATES_FAILED:
         event = events.get((task.id, EventKind.GATES_EVALUATED.value))
         failing = (event.payload if event else {}).get("failing") or []
@@ -264,7 +264,7 @@ def board_lanes_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
         escalation = escalation_by_task.get(task.id)
         lane_key = lane_for_state(
             task.state,
-            waiting_on_scott=bool(escalation and _is_scott_question(escalation)),
+            waiting_on_scott=bool(escalation and is_scott_question(escalation)),
         )
         attempt = current_attempt.get(task.id)
         pr = pull_requests.get(task.id)
@@ -331,4 +331,13 @@ def board_lanes_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
     return {"generated_at": now, "lanes": lanes}
 
 
-__all__ = ["COLLAPSED_LANES", "LANES", "LANE_BY_STATE", "board_lanes_view", "lane_for_state"]
+__all__ = [
+    "COLLAPSED_LANES",
+    "LANES",
+    "LANE_BY_STATE",
+    "board_lanes_view",
+    "first_sentence",
+    "is_scott_question",
+    "issue_link",
+    "lane_for_state",
+]

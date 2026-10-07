@@ -74,6 +74,7 @@ from crucible.application.routing import (
     select_model,
 )
 from crucible.application.runtime_settings import resolve as resolve_runtime_setting
+from crucible.application.task_notes import operator_notes_for
 from crucible.application.transitions import (
     move_attempt,
     move_execution,
@@ -2222,6 +2223,8 @@ class Supervisor:
             resume_bundle_ancestor=(
                 str(published.payload["head_sha"]) if published and resume_bundle else None
             ),
+            # hades #489: the operator's notes open the worker's IDENTITY.md.
+            operator_notes=operator_notes_for(route_uow, task.id),
         )
         adapter = self._harnesses.get(selected_harness) if self._harnesses else None
         if adapter is None:

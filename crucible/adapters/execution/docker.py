@@ -834,6 +834,7 @@ class DockerProvider:
             work_branch=work_branch,
             network_mode=spec.network,
             report_schema=CompletionClaimV1.model_json_schema(),
+            operator_notes=spec.operator_notes,
         )
         # The preparer's own output files are not evidence; the collector rewrites the
         # directory after the run and a stale head would only confuse a reader.

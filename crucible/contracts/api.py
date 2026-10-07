@@ -117,6 +117,8 @@ class TaskView(Response):
     resume_at: Rfc3339 | None = None
     reroute_chain: list[dict[str, Any]] = Field(default_factory=list)
     gate_probes: list[dict[str, Any]] = Field(default_factory=list)
+    # hades #489: the operator's notes, newest first: id, author, text, verbatim, created_at.
+    notes: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class TaskListItem(Response):
@@ -427,6 +429,15 @@ class DispositionRequest(StrictModel):
 
 class CloseRequest(StrictModel):
     note: str = Field(min_length=1)
+
+
+class NoteRequest(StrictModel):
+    """hades #489: an operator's note on a task, stored as typed."""
+
+    text: str = Field(min_length=1, description="The operator's words, as typed.")
+    verbatim: bool = Field(
+        default=True, description="True when the text is the operator's own words."
+    )
 
 
 # ----- C4: GitHub delivery (04, 23) --------------------------------------
