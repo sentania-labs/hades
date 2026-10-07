@@ -158,11 +158,11 @@ def check_selection(
 def pool_usage(uow: UnitOfWork, routing: RoutingPolicyV1, pool: str, now: datetime) -> PoolUsage:
     spec = routing.pools[pool]
     since = now - timedelta(seconds=window_seconds(spec.window))
-    models = {m.id for m in routing.models if m.pool == pool}
+    routes = {(m.harness, m.model) for m in routing.models if m.pool == pool}
     rows = [
         m
         for m in uow.attempt_metrics.list_since(since=since, model=None, task_ids=None)
-        if m.model in models
+        if (m.harness, m.model) in routes
     ]
     attempts = len(rows)
     mark = uow.pool_exhaustions.get(pool)

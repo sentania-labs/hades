@@ -13,10 +13,13 @@ from unittest.mock import AsyncMock
 import pytest
 import sqlalchemy as sa
 from alembic import op
+from fastapi import FastAPI, Request
 from starlette.responses import HTMLResponse
+from starlette.testclient import TestClient
 
 from crucible.adapters.persistence.migrations.versions import _0051_routing_model_references as m51
 from crucible.adapters.ui.pages import gateway as page
+from crucible.adapters.ui.render import _page, _routing_policy_details, templates
 from crucible.application import routing as routes
 from crucible.application.admin import credentials, gateway
 from crucible.application.admin import routing as admin_routing
@@ -91,6 +94,75 @@ def test_pair_uniqueness_allows_three_harnesses_to_share_coder() -> None:
         ("qwen_code", "coder"),
         ("codex", "coder"),
     ]
+
+
+def test_shipped_migrated_policy_renders_routing_gateway_and_board_pages() -> None:
+    """Keep the worker-local tier sensitive to the three compose-smoke page failures."""
+    document = m51._current(m51._legacy(_document()))
+    principal = _principal()
+    app = FastAPI()
+    app.state.ctx = SimpleNamespace(settings=None)
+
+    @app.get("/ui/routing")
+    def routing_page(request: Request) -> HTMLResponse:
+        return _page(
+            request,
+            principal,
+            "csrf",
+            active="/ui/routing",
+            heading="Routing",
+            intro="Routes in force.",
+            sections=[_routing_policy_details(document)],
+        )
+
+    @app.get("/ui/gateway")
+    def gateway_page(request: Request) -> HTMLResponse:
+        rows = [
+            [entry["model"], entry["harness"], "enabled" if entry["enabled"] else "disabled"]
+            for entry in document["models"]
+        ]
+        return _page(
+            request,
+            principal,
+            "csrf",
+            active="/ui/gateway",
+            heading="Local gateway",
+            intro="Gateway models.",
+            sections=[
+                {
+                    "title": "Models the key can see",
+                    "columns": ["Model", "Harness", "State"],
+                    "rows": rows,
+                }
+            ],
+        )
+
+    @app.get("/ui/board")
+    def board_page(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request=request,
+            name="board.html",
+            context={
+                "request": request,
+                "title": "Board",
+                "active": "/ui/board",
+                "nav": (),
+                "principal": principal,
+                "csrf": "csrf",
+                "message": None,
+                "lanes": [],
+            },
+        )
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        responses = {path: client.get(path) for path in ("/ui/routing", "/ui/gateway", "/ui/board")}
+    assert {path: response.status_code for path, response in responses.items()} == {
+        "/ui/routing": 200,
+        "/ui/gateway": 200,
+        "/ui/board": 200,
+    }
+    assert "qwen-coder" not in responses["/ui/routing"].text
+    assert "coder" in responses["/ui/routing"].text
 
 
 def test_duplicate_pair_is_refused() -> None:
