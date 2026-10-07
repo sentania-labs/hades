@@ -275,6 +275,7 @@ def branch_facts(bundle: BranchBundle | None) -> BranchFacts | None:
         work_branch=bundle.work_branch,
         commit_messages=tuple(bundle.commit_messages),
         commit_paths=tuple(bundle.commit_paths),
+        attempt_commit_paths=tuple(bundle.attempt_commit_paths),
     )
 
 

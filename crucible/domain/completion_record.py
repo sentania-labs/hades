@@ -75,6 +75,7 @@ class BranchFacts:
     work_branch: str = ""
     commit_messages: tuple[str, ...] = ()
     commit_paths: tuple[str, ...] = ()
+    attempt_commit_paths: tuple[str, ...] = ()
 
 
 def how_it_ended(
@@ -152,7 +153,7 @@ def finding_coverage(
     """One entry per review finding the correction addresses (hades #498).
 
     The default disposition is `addressed`, with the collected head as the commit, when
-    the diff touches the finding's path, and `not addressed` when no commit touches it.
+    this attempt's commits touch the finding's path, and `not addressed` otherwise.
     A disposition the worker wrote for the same finding is kept beside it, as the
     worker's; it never replaces Hades's reading of the diff."""
     by_worker: dict[str, Mapping[str, Any]] = {}
@@ -224,7 +225,9 @@ def compose_completion_record(
         ]
     coverage = finding_coverage(
         findings,
-        changed_paths=changed,
+        # Never fall back to branch-wide paths: a resumed correction inherits the
+        # original reviewed changes even when it does no work on the finding.
+        changed_paths=branch.attempt_commit_paths if branch is not None else (),
         head_sha=branch.head_sha if branch is not None else None,
         worker_dispositions=dispositions,
     )

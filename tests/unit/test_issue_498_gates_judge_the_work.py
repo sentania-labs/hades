@@ -23,11 +23,12 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from crucible.adapters.execution.scripts import collector_script
 from crucible.adapters.harness import base
 from crucible.adapters.harness.qwen_code import QwenCodeAdapter
 from crucible.application.gates import evidence_items
 from crucible.application.queries import attempt_report
-from crucible.application.supervisor import TERMINATION_TIMEOUT, local_cap_kind
+from crucible.application.supervisor import TERMINATION_TIMEOUT, branch_facts, local_cap_kind
 from crucible.contracts.completion_claim import (
     JUDGEMENT_FIELDS,
     CompletionClaimV1,
@@ -73,9 +74,12 @@ from crucible.domain.lifecycle import AttemptState, TaskState
 from crucible.domain.publication import BodyInput, render_body
 from crucible.ports.execution import BranchBundle, CollectedOutputs, VerificationRun
 from crucible.ports.harness import LaunchContext
+from tests.collector_tools import collector_env
 from tests.fixtures import contract_document
 from tests.unit.test_advisory_gates import _without_review
+from tests.unit.test_correction_resume import _prepare, _repository
 from tests.unit.test_gates import HEAD, _claim_payload, _ev, _gi, _passing_evidence
+from tests.unit.test_issue_344_attempt_diff import _read
 from tests.unit.test_issue_353_infrastructure_interruptions import _running
 from tests.unit.test_issue_401_codex_findings_correction import _report
 from tests.unit.test_policy_schema import seeded_policy_v3
@@ -209,6 +213,7 @@ def _bundle(*paths: str, commits: int = 1) -> BranchBundle:
         verified=True,
         sha256="f" * 64,
         commit_paths=paths,
+        attempt_commit_paths=paths,
         commit_messages=("Return 409 on duplicate import",) if commits else (),
     )
 
@@ -470,6 +475,7 @@ def _composed(worker: dict[str, Any] | None = None, **overrides: Any) -> dict[st
             work_branch="crucible/EX-0001",
             commit_messages=("fix the import\n\nlong body", "add the test"),
             commit_paths=("src/ledger/a.py", "tests/ledger/test_a.py"),
+            attempt_commit_paths=("src/ledger/a.py", "tests/ledger/test_a.py"),
         ),
         "diff_paths": ("src/ledger/a.py", "tests/ledger/test_a.py"),
         "checks": (
@@ -489,6 +495,75 @@ def _composed(worker: dict[str, Any] | None = None, **overrides: Any) -> dict[st
     }
     arguments.update(overrides)
     return compose_completion_record(**arguments)
+
+
+@pytest.mark.parametrize("resume", ["bundle", "remote_branch"])
+@pytest.mark.parametrize("change", ["none", "other", "reviewed"])
+def test_finding_coverage_uses_only_the_corrections_commits(
+    tmp_path: Path, resume: str, change: str
+) -> None:
+    """The real preparer and collector must not credit inherited changes (#507)."""
+    origin, seed, previous_head, bundle = _repository(tmp_path)
+    if resume == "remote_branch":
+        _git(seed, "push", "origin", "crucible/FDY-0150")
+    assert (
+        _prepare(
+            tmp_path,
+            origin,
+            bundle=bundle if resume == "bundle" else None,
+            head=previous_head if resume == "bundle" else None,
+        )
+        == previous_head
+    )
+    work = tmp_path / "work"
+    repo = work / "repo"
+    if change != "none":
+        path = "file.txt" if change == "reviewed" else "other.txt"
+        (repo / path).write_text("correction\n")
+        _git(repo, "add", path)
+        _git(repo, "commit", "-qm", "correct the finding")
+    report = tmp_path / "report"
+    report.mkdir()
+    output = work / "output"
+    script = collector_script(
+        base_ref="main", work_branch="crucible/FDY-0150", size_cap_bytes=1024 * 1024
+    )
+    script = (
+        script.replace("/crucible/report", str(report))
+        .replace("/crucible/repo", str(repo))
+        .replace("/crucible/out", str(output))
+    )
+    done = subprocess.run(
+        ["sh", "-c", script],
+        capture_output=True,
+        text=True,
+        env=collector_env(tmp_path),
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    outputs = _read(work, output)
+    assert "file.txt" in outputs.diff_paths
+    assert "file.txt" in outputs.bundle.commit_paths
+    assert ("file.txt" in outputs.bundle.attempt_commit_paths) == (change == "reviewed")
+    record = _composed(
+        branch=branch_facts(outputs.bundle),
+        diff_paths=outputs.diff_paths,
+        findings=(ReviewFinding("review-1", "file.txt"),),
+    )
+    finding = record["composed"]["findings"][0]
+    assert finding["disposition"] == (
+        DISPOSITION_ADDRESSED if change == "reviewed" else DISPOSITION_NOT_ADDRESSED
+    )
+    assert finding["commit"] == (_git(repo, "rev-parse", "HEAD") if change == "reviewed" else None)
+
+
+def test_missing_attempt_coverage_never_uses_the_branch_diff() -> None:
+    record = _composed(
+        branch=BranchFacts(head_sha=HEAD, commits=1, commit_paths=("src/ledger/a.py",)),
+    )
+    finding = record["composed"]["findings"][0]
+    assert finding["disposition"] == DISPOSITION_NOT_ADDRESSED
+    assert finding["commit"] is None
 
 
 def test_hades_composes_the_record_from_its_own_evidence() -> None:

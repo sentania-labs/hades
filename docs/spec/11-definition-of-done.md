@@ -118,7 +118,11 @@ the completion record itself, from evidence it already holds: the commits on the
 collected branch, the `required_verification` commands it re-ran in the verifier
 container with their exit codes, and the diff against each review comment's path the
 correction addresses, as the default disposition `addressed` with the collected head
-or `not addressed` when no commit touches it. The worker's report, when there is one,
+or `not addressed` when no commit in this attempt touches it. Coverage uses only
+commits after the trusted `prepared-head.txt`, recorded after the preparer resumes
+the prior bundle or remote branch. Earlier attempts' changes remain in the branch
+summary but cannot mark a correction finding addressed. Missing attempt coverage
+never falls back to the branch-wide diff. The worker's report, when there is one,
 adds its judgement fields (summary, self-review, acceptance mapping, proposed pull
 request, limitations, risks, blockers, follow-ups, dispositions) beside Hades's own
 `composed` section and never gates the record. The record is the attempt's stored
