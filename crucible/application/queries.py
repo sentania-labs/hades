@@ -9,8 +9,8 @@ from types import SimpleNamespace
 from typing import Any
 
 from crucible.application.errors import NotFoundError
-from crucible.application.task_notes import list_notes, note_view
 from crucible.application.publish import publishing_waits
+from crucible.application.task_notes import list_notes, note_view
 from crucible.contracts.api import (
     AcceptanceView,
     ArtifactList,

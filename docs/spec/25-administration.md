@@ -63,6 +63,54 @@ The quality log covers tasks whose pull request opened in the last 14 days. It
 shows pre-PR gate failures, Codex finding severities and dispositions,
 corrections, outcome, and submit-to-merge time, with totals by harness and model.
 
+### The card (hades #489)
+
+Each board card opens at `/ui/board/{task_id}`. The card shows, in words: where the
+task is and what it is stuck on (its lane and state, the latest attempt and how it
+ended, the failing gates with their detail, the CI failure, a failed publication, and
+the open escalation as the first sentence of its question); the head and CI state
+(the collected head, the pushed head and branch, the latest CI certification, the gate
+results on the head); the cost so far (attempts, worker minutes, Codex rounds); the
+contract as text (objective, scope, acceptance criteria, required checks, dispatch
+tier and rationale, expected deliverable); the attempt timeline (each attempt's role
+and number, start and end, harness and model, exit class, and one line on how it
+ended); the correction history (each correction version, what it corrects, its
+reason, where it resumed from, and its instructions); the operator notes, newest
+first; and the phase actions. It links to the issue, the pull request, the full task
+page and the board. The panels flow into one column at phone width.
+
+**Operator notes.** A note is the operator's words on one task: author, time, text
+as typed, and a verbatim flag. Operators and admins post one from the card or with
+`POST /v1/tasks/{id}/notes`; the task read lists them newest first. Every note is an
+audit event (`task_note_recorded`) whose reason is the text. The next attempt's or
+correction's `IDENTITY.md` opens with the notes under "Operator notes", before the
+contract (06), so the worker reads them first.
+
+**Phase actions.** A pull-down offers only the moves the task's state allows, each
+mapped to an existing operation:
+
+| Move | Operation | Offered when |
+|---|---|---|
+| Approve and queue | `approve` | `proposed` |
+| Start now | `start` | `submitted` |
+| Correction, resume from the PR branch | `corrections` with `resume_from: remote_branch` | a correctable state with a pull request |
+| Correction, resume from the last attempt | `corrections` with `resume_from: last_attempt` | a correctable state |
+| Accept the collected head | `accept` with verdict `accepted` | `awaiting_acceptance` |
+| Answer the open escalation | `decisions` on the escalation (rescheduling a blocked task) | an open escalation |
+| Cancel with reason | `cancel` | any state the lifecycle lets cancel |
+
+The operator's words are required. **Go** stores them as a note and applies the
+chosen move with them: the cancel reason and verbatim, the correction instructions,
+the acceptance reasoning, the decision verbatim, the approval reason. **Next phase**
+applies the lane's default move, published on the card: Inbox to Holding pen
+(approve), Holding pen to In progress (start now), Stuck to In progress (correction,
+resume from the PR branch), Waiting on Scott to In progress (answer the escalation),
+In progress to Graveyard (cancel). Wins and Graveyard have no next phase. Every action
+records a `task_phase_action_applied` event with the move, the operation, the lane,
+and the note's text as `verbatim`, beside the operation's own event; both show on
+the Audit page with the words as the reason. The actions are open to operator and
+admin principals; an observer reads the card without the forms.
+
 ## Shape
 
 - **Versioned admin API** under `/v1/admin`, admin role only, generated

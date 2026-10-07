@@ -58,8 +58,8 @@ from crucible.adapters.persistence.records import (
     Policies,
     ProviderSettings,
     ReviewReports,
-    TaskNotes,
     RoutingPolicies,
+    TaskNotes,
     Wakes,
 )
 from crucible.domain.entities import (
@@ -128,6 +128,7 @@ from crucible.ports.repository import (
     ReviewReportRepository,
     RoutingPolicyRepository,
     SupervisorStatusRepository,
+    TaskNoteRepository,
     TaskRepository,
     UiSessionRepository,
     UnitOfWork,
