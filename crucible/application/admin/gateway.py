@@ -199,21 +199,43 @@ async def models_view(ctx: AdminContext, uow: UnitOfWork, *, fetch: bool = True)
         for entry in entries
         if entry.get("harness") == "codex"
     }
-    by_id = {str(entry.get("id")): entry for entry in entries if entry.get("harness") != "codex"}
-    for model_id in codex:
-        by_id.setdefault(model_id, {})
+    primary = [
+        entry
+        for entry in entries
+        if entry.get("harness") != "codex"
+        and (
+            offered is None
+            or str(entry.get("model_name") or entry["id"]) in offered
+            or entry.get("enabled") is True
+        )
+    ]
+    policy_model_names = {str(entry.get("model_name") or entry["id"]) for entry in entries}
+    row_entries: list[dict[str, Any] | None] = list(primary)
+    if offered is not None:
+        row_entries.extend(None for model_id in offered if model_id not in policy_model_names)
+    elif not primary:
+        row_entries.extend(codex.values())
     rows: list[dict[str, Any]] = []
-    for model_id in offered if offered is not None else by_id:
-        entry = by_id.get(model_id)
-        display_entry = entry or codex.get(model_id)
-        is_offered = None if offered is None else model_id in offered
+    offered_only = iter(
+        model_id for model_id in (offered or []) if model_id not in policy_model_names
+    )
+    for entry in row_entries:
+        model_name = (
+            str(entry.get("model_name") or entry["id"]) if entry is not None else next(offered_only)
+        )
+        model_id = str(entry["id"]) if entry is not None else model_name
+        codex_entry = codex.get(model_name)
+        display_entry = entry or codex_entry
+        is_offered = None if offered is None else model_name in offered
         rows.append(
             {
                 "id": model_id,
+                "model_name": model_name,
+                "harness": (display_entry or {}).get("harness"),
                 "offered": is_offered,
-                "in_policy": entry is not None,
+                "in_policy": model_name in policy_model_names,
                 "enabled": bool(entry and entry.get("enabled") is True),
-                "codex_enabled": bool(codex.get(model_id, {}).get("enabled")),
+                "codex_enabled": bool(codex_entry and codex_entry.get("enabled")),
                 "enable_thinking": bool(
                     entry and (entry.get("chat_template_kwargs") or {}).get("enable_thinking")
                 ),
@@ -233,17 +255,19 @@ async def models_view(ctx: AdminContext, uow: UnitOfWork, *, fetch: bool = True)
 
 
 def _row_note(entry: dict[str, Any] | None, offered: bool | None) -> str:
+    harness = f"{entry.get('harness')}: " if entry and entry.get("harness") else ""
     if offered is False:
-        return (
+        note = (
             "not offered by the gateway; saving disables it"
             if entry and entry.get("enabled")
             else "not offered by the gateway"
         )
+        return harness + note
     if entry is None:
         return "offered; tick it to add it" if offered else ""
     if entry.get("enabled"):
-        return "in use"
-    return f"disabled: {entry.get('disabled_reason') or 'no reason recorded'}"
+        return harness + "in use"
+    return harness + f"disabled: {entry.get('disabled_reason') or 'no reason recorded'}"
 
 
 async def save_gateway(
@@ -455,7 +479,7 @@ async def save_models(
         i
         for i, pick in picks.items()
         if (pick["enabled"] or pick["codex_enabled"])
-        and i not in offered
+        and str(by_id.get(i, {}).get("model_name") or i) not in offered
         and i not in known_aliases
     )
     if unoffered:

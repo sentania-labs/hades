@@ -86,7 +86,7 @@ async def gateway_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         # Build rows and model-choice form only when the operator asked for models.
         if principal.role is not Role.ADMIN:
             listing.update(
-                columns=["Model", "Offered", "Hermes", "Codex", "Thinking", "Capability", "Note"],
+                columns=["Model", "Offered", "Use", "Codex", "Thinking", "Capability", "Note"],
                 rows=[
                     [
                         row["id"],
@@ -110,7 +110,7 @@ async def gateway_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                             "kind": "checkbox",
                             "name": f"model.{index}.enabled",
                             "value": row["enabled"],
-                            "label": f"use {row['id']}",
+                            "label": f"use {row['id']} with {row['harness'] or 'hermes'}",
                         },
                         {
                             "kind": "checkbox",
@@ -141,7 +141,7 @@ async def gateway_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                     {
                         "kind": "grid",
                         "label": "",
-                        "columns": ["Model", "Hermes", "Codex", "Thinking", "Capability", "Note"],
+                        "columns": ["Model", "Use", "Codex", "Thinking", "Capability", "Note"],
                         "rows": rows,
                     },
                     {
