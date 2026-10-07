@@ -585,6 +585,52 @@ class RestGitHubClient:
             body={"state": "closed"},
         )
 
+    def rerun_failed_jobs(
+        self, token: InstallationToken, *, repository: str, run_id: int
+    ) -> dict[str, Any]:
+        """POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs (Actions write,
+        issue 435).
+
+        Returns the raw GitHub response payload.
+        """
+        status, payload, _ = self._http.request(
+            "POST",
+            f"/repos/{repository}/actions/runs/{run_id}/rerun-failed-jobs",
+            bearer=token.reveal(),
+        )
+        if status >= 400 or not isinstance(payload, dict):
+            message = payload.get("message") if isinstance(payload, dict) else "rerun failed"
+            raise GitHubError(
+                status,
+                str(message),
+                path=f"/repos/{repository}/actions/runs/{run_id}/rerun-failed-jobs",
+            )
+        return payload
+
+    def get_installation_permissions(
+        self, token: InstallationToken, *, repository: str
+    ) -> dict[str, str]:
+        """Read the installation's granted permissions for the one repository (issue 435).
+
+        Mint a read-only installation token via the App JWT and read
+        ``permissions`` from the response; it carries what the installation
+        itself grants, independent of what we asked for.  This is the canonical
+        way to inspect the App's installed permission set without needing the
+        installation id upfront.  ``token`` and ``repository`` are kept in the
+        signature for the ``GitHubClient`` protocol but are not used here.
+        """
+        del token, repository
+        status, payload, _ = self._http.request(
+            "POST",
+            "/app/installations/self/access_tokens",
+            bearer=self._auth.app_jwt(),
+            body={"permissions": {"metadata": "read"}},
+        )
+        if status != 201 or not isinstance(payload, dict):
+            return {}
+        accepted = payload.get("permissions") or {}
+        return {str(k): str(v) for k, v in accepted.items()}
+
 
 def _message(payload: Any) -> str:
     if isinstance(payload, dict) and "message" in payload:

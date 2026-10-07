@@ -605,6 +605,7 @@ def wire(settings: Settings, *, role: ProcessRole) -> Wiring:
         lease_ttl_seconds=settings.supervisor.lease_ttl_seconds,
         github_webhook_enabled=settings.github.webhook_enabled,
         github_webhook_secret_path=settings.github.app.webhook_secret_path,
+        github_client=github,
         harnesses=registry,
         harness_gates=harness_gates(settings),
         credential_sources=credential_sources(settings),

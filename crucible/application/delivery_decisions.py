@@ -2,8 +2,9 @@
 
 `ci-decision` and `head-decision` are the two places where Crucible has recorded facts,
 stopped, and needs judgment. Crucible records the judgment and performs its mechanical
-consequence. It never re-runs a workflow (that needs Actions write, which the App does
-not hold) or closes a pull request. Hades merges a certified head when policy enables it.
+consequence. When the App holds Actions write it re-runs failed jobs through the
+GitHub API (issue 435); otherwise it records the intent and raises a wake for the
+operator. Hades merges a certified head when policy enables it.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from crucible.domain.events import EventKind
 from crucible.domain.ids import new_id
 from crucible.domain.lifecycle import TaskState
 from crucible.ports.clock import Clock
+from crucible.ports.github import GitHubClient
 from crucible.ports.repository import UnitOfWork
 
 
@@ -48,8 +50,15 @@ def record_ci_decision(
     principal: Principal,
     task_id: str,
     request: CIDecisionRequest,
+    github_client: GitHubClient | None = None,
 ) -> Task:
-    """23: the cause from the fixed enum and the action. No automatic retry ever."""
+    """23: the cause from the fixed enum and the action.
+
+    When the action is ``rerun`` and the installation grants Actions write,
+    Hades re-runs the failed jobs through the App API and records the new
+    attempt (issue 435).  When the installation lacks that permission the
+    intent is recorded and a wake is raised for the operator (the legacy
+    hand-off path)."""
     _orchestrator(principal, "a CI decision")
     task = uow.tasks.get(task_id, for_update=True)
     if task is None:
@@ -99,8 +108,61 @@ def record_ci_decision(
         },
     )
     if request.action is CIAction.RERUN:
-        # Re-running a workflow needs Actions write, which ADR 0007 does not grant. The
-        # intent is recorded and the operator performs it on GitHub (23, 22).
+        # Issue 435: when the installation grants Actions write, re-run the
+        # failed jobs through the API and record the new attempt; otherwise
+        # raise the CI_RERUN_NEEDED wake for the operator (legacy hand-off).
+        if github_client is not None and certification is not None:
+            repo = uow.repositories.get(task.repository_id, for_update=False)
+            if repo is not None and repo.installation_id is not None:
+                token = github_client.installation_token(
+                    installation_id=repo.installation_id,
+                    repository=repo.name,
+                    permissions={"actions": "write", "metadata": "read"},
+                )
+                try:
+                    actual = token.permissions or {}
+                    if actual.get("actions") == "write":
+                        # One rerun per decision (issue 435): do not auto-rerun again
+                        # when a rerun has already been attempted for this cert.
+                        new_attempt = 1
+                        if certification.failure.get("rerun_attempt") is None:
+                            run_id = certification.failure.get("run_id")
+                            new_attempt = 1
+                            if run_id is not None:
+                                response = github_client.rerun_failed_jobs(
+                                    token,
+                                    repository=repo.name,
+                                    run_id=int(run_id),
+                                )
+                                run_info = response.get("run")
+                                if isinstance(run_info, dict):
+                                    new_attempt = run_info.get("run_attempt_number", 1)
+                                # Record the new attempt number on the certification.
+                                certification.failure["rerun_attempt"] = new_attempt
+                                certification.failure["rerun_run_id"] = int(run_id)
+                                uow.ci_certifications.put(certification)
+                        move_task(
+                            uow,
+                            clock,
+                            task,
+                            TaskState.AWAITING_CI_CERTIFICATION,
+                            EventKind.TASK_AWAITING_CI_CERTIFICATION,
+                            principal=principal.name,
+                            payload={
+                                "ci_decision_id": decision.id,
+                                "head_sha": task.head_sha,
+                                "note": (
+                                    f"rerun requested, attempt {new_attempt} running; "
+                                    f"the App re-runs failed jobs (issue 435)"
+                                ),
+                            },
+                        )
+                        return task
+                finally:
+                    github_client.revoke_token(token)
+        # The installation lacks Actions write, the repo has no installation, or
+        # the client is unavailable.  Record the intent and raise the wake for
+        # the operator (23, 22).
         move_task(
             uow,
             clock,

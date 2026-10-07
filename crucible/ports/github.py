@@ -347,6 +347,25 @@ class GitHubClient(Protocol):
         self, token: InstallationToken, *, repository: str, head_sha: str
     ) -> Sequence[CheckRecord]: ...
 
+    def rerun_failed_jobs(
+        self, token: InstallationToken, *, repository: str, run_id: int
+    ) -> dict[str, Any]:
+        """Re-run all failed jobs of a workflow run (Actions write, issue 435).
+
+        Returns the raw GitHub response, which carries the new attempt number
+        under the ``run`` key as ``run.run_attempt_number``.
+        """
+
+    def get_installation_permissions(
+        self, token: InstallationToken, *, repository: str
+    ) -> dict[str, str]:
+        """Read the installation's granted permissions for the one repository.
+
+        GitHub embeds the permissions on the token mint; this method re-reads them
+        from the installation to decide whether Hades can act.  Returns
+        ``{"actions": "write"}`` when the installation grants Actions write.
+        """
+
 
 # ----- the App credential the service owns (ADR 0017) ----------------------------------
 
