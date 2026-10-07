@@ -150,8 +150,8 @@ from crucible.domain.exit_class import (
 )
 from crucible.domain.gates import GateName, GateResult, evaluate_gate
 from crucible.domain.harness_settings import (
-    DEFAULT_QWEN_CONTEXT_LENGTH,
     effective_settings,
+    qwen_effective_settings,
     setting_name,
 )
 from crucible.domain.ids import new_id
@@ -2214,11 +2214,12 @@ class Supervisor:
                 thinking=route.chat_template_kwargs.enable_thinking if route else False,
             )
         if selected_harness == "qwen_code":
-            effective = attempt.effective_settings or {
-                "context_length": route.context_length
-                if route and route.context_length
-                else DEFAULT_QWEN_CONTEXT_LENGTH
-            }
+            # hades #498: recorded as the Hermes values are; an attempt launched before
+            # the cap and thinking were recorded keeps its record and takes the defaults.
+            effective = attempt.effective_settings or qwen_effective_settings(
+                harness_settings,
+                context_length=route.context_length if route else None,
+            )
         if effective is not None:
             harness_settings.update(effective)
         # Issue 128: the policy default, narrowed by the contract, capped at the attempt.
