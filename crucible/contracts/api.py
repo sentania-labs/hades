@@ -420,13 +420,19 @@ class DecisionRequest(StrictModel):
 
     @model_validator(mode="after")
     def _validate_kind(self) -> DecisionRequest:
-        """FDY-0509: kind must be in the closed list accepted by the server."""
-        from crucible.domain.decisions import ACCEPTED_DECISION_KINDS  # noqa: PLC0415
+        """FDY-0509: kind must be in the public closed list accepted by the server.
 
-        if self.kind not in ACCEPTED_DECISION_KINDS:
+        Internal closure kinds (task_cancelled, task_closed) are excluded so
+        a task owner cannot fabricate lifecycle events.  Internal callers
+        (cancel_task, close_task) bypass the model and write to UoW directly.
+        (Finding 01M4CFEK8J8BXDEB0NETRX267E)
+        """
+        from crucible.domain.decisions import PUBLIC_DECISION_KINDS  # noqa: PLC0415
+
+        if self.kind not in PUBLIC_DECISION_KINDS:
             raise ValueError(
                 f"decision kind {self.kind!r} is not accepted. "
-                f"Accepted kinds: {sorted(ACCEPTED_DECISION_KINDS)}"
+                f"Accepted kinds: {sorted(PUBLIC_DECISION_KINDS)}"
             )
         return self
 
