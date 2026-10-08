@@ -245,6 +245,19 @@ def test_ac3_commit_with_shim_content_fails() -> None:
     assert "notes/readme.txt" in detail
 
 
+def test_finding_fdy_0537_commit_m_status_with_shim() -> None:
+    """Finding FDY-0537: a file modified to shim, then modified back still has
+    the shim record with status M in commit history — this must fail."""
+    result, detail = _gate_result(
+        [],
+        [],
+        commit_paths=["notes/readme.txt"],
+        commit_changes=[_shim_change("notes/readme.txt", "M")],
+    )
+    assert result is GateResult.FAIL
+    assert "notes/readme.txt" in detail
+
+
 # ---------------------------------------------------------------------------
 # Integration: end-to-end gate evaluation with real shim blob
 # ---------------------------------------------------------------------------

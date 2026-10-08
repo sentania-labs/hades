@@ -493,7 +493,7 @@ def _injected_hits(
     for path, status, blob, classification in commit_changes or []:
         oldest_status[path] = status
         # Issue #377: check shim content on every committed path, not just injected names.
-        if blob in shim and status in ("A", "T"):
+        if blob in shim and status in ("A", "T", "M"):
             hits.add(path)
         if _injected(path) and (status == "T" or blob in shim or classification == "shim"):
             hits.add(path)
