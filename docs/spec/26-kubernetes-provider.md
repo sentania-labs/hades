@@ -505,6 +505,28 @@ the namespace. A deployment therefore names one exact, pullable reference in
   what 08's Docker `prepare` performs. `prepare` returns
   when the Job completes; a failed Job is a prepare failure with the Job's
   log excerpt as detail.
+
+  After the preparer Job ends (completed, failed, timed out or cancelled) the
+  provider deletes it in the background and waits for its Pod to disappear.
+  The wait is `prepare_pod_deletion_wait_seconds` in `[kubernetes]` (15 s by
+  default), clipped to `prepare_timeout_seconds`: the Pods are listed, and
+  while any remains the provider pauses 2 s, then 4 s, then 8 s and so on,
+  every pause clipped to what is left of the wait, so the whole wait never
+  exceeds the setting (the default is four tries: 2, 4, 8 and 1 s). An API
+  server that cannot answer a listing is asked again after the next pause.
+  Pods that clear during the wait let `prepare` go on and the attempt
+  launches. Pods still present when the wait runs out are
+  `PrepareJobPodsTimeoutError`, whose message says how long it waited and how
+  many times it tried again, what the Job had done when the wait gave up
+  (completed with its exit code, not finished within the prepare timeout, or
+  still running because a cancel or an API error ended the wait for it), and
+  the lingering Pod's name, phase and whether its deletion was under way
+  (hades #503; recording the preparer's own output as evidence is hades #370).
+  The supervisor prepares the same attempt again for that error up to three
+  times, after 30 s, 60 s and 120 s, charging the task no attempt, and
+  classes the fourth as `environment` (16). A cancel or an API error raised
+  while the Job ran is the error reported, and a Pod lingering behind it is
+  only logged, as for every other role.
 - `launch`: resolve the worker image to a digest through the image registry
   (11, 25) and record it; refuse an unsupported harness version; create the
   NetworkPolicy and the worker Job; return the Job name as the handle. The

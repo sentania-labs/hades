@@ -112,6 +112,9 @@ class KubernetesSettings(BaseModel):
     # as the detail, never a stall.
     launch_timeout_seconds: int = 300
     prepare_timeout_seconds: int = 900
+    # hades #503: the whole wait for a preparer Job's Pods to disappear after the Job is
+    # deleted, polled with backoff (26); the provider clips it to prepare_timeout_seconds.
+    prepare_pod_deletion_wait_seconds: float = 15.0
     collector_timeout_seconds: int = 900
     verifier_timeout_seconds: int = 3600
     # The short roles' time once their Pod is Running (the bundle verifier, the cleaner,
