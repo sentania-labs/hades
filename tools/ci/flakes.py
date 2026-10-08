@@ -142,13 +142,24 @@ def parse_junit_failures(xml_bytes: bytes) -> list[str]:
 def _node_id(classname: str, name: str) -> str:
     """`tests.unit.test_foo`, `test_bar` -> `tests/unit/test_foo.py::test_bar`.
 
+    `tests.unit.test_issue_389_credential_state_recovers.TestAC1RecoveryAfterAuthFailure`,
+    `test_auth_failure_cleared_by_successful_launch` ->
+    `tests/unit/test_issue_389_credential_state_recovers.py::TestAC1RecoveryAfterAuthFailure::test_auth_failure_cleared_by_successful_launch`.
+
     pytest's default (xunit2) JUnit report has no `file` attribute, only the dotted
-    `classname`; this assumes a plain module path with no test class, which is this
-    repository's convention (plain functions, no unittest-style classes under tests/).
+    `classname`, which for a class-based test is the module path followed by one or
+    more test classes with no marker between them. This repository's convention is
+    snake_case modules and CapWords classes, so the first dotted component that starts
+    with an uppercase letter is the first class component; everything before it is the
+    module path, everything from it on (plus `name`) is the `::`-joined node suffix.
     """
     if not classname:
         return name
-    return f"{classname.replace('.', '/')}.py::{name}"
+    parts = classname.split(".")
+    split_at = next((i for i, part in enumerate(parts) if part[:1].isupper()), len(parts))
+    module_path = "/".join(parts[:split_at]) + ".py"
+    suffix = "::".join([*parts[split_at:], name])
+    return f"{module_path}::{suffix}"
 
 
 @dataclass(frozen=True)
@@ -250,8 +261,15 @@ def fetch_attempt_jobs(repo: str, run_id: int, attempt: int) -> list[dict[str, A
     return jobs
 
 
-def fetch_attempt_artifacts(repo: str, run_id: int, attempt: int) -> list[dict[str, Any]]:
-    raw = _gh("api", f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/artifacts")
+def fetch_run_artifacts(repo: str, run_id: int) -> list[dict[str, Any]]:
+    """Every artifact uploaded under this run id, across every attempt.
+
+    GitHub documents only the run-scoped listing route (no `/attempts/{attempt}/
+    artifacts`); an artifact stays listed here however many attempts the run had, so
+    attempts are told apart by the attempt-specific artifact name (`artifact_name_for_job`),
+    not by the endpoint queried.
+    """
+    raw = _gh("api", f"repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100")
     artifacts: list[dict[str, Any]] = json.loads(raw)["artifacts"]
     return artifacts
 
@@ -269,20 +287,25 @@ def build_recorded_run(repo: str, run: dict[str, Any]) -> RecordedRun:
     return RecordedRun(run_id=run_id, jobs=tuple(jobs))
 
 
-def artifact_name_for_job(job_name: str) -> str | None:
-    """The attempt-1 JUnit artifact `ci.yml` uploads for a given job name."""
+def artifact_name_for_job(job_name: str, attempt: int) -> str | None:
+    """The JUnit artifact `ci.yml` uploads for a given job name and attempt.
+
+    Matches `ci.yml`'s `name:` for the `test`, `e2e` and `e2e-kind` jobs, which all
+    carry `github.run_attempt` so a later attempt's upload never collides with
+    attempt 1's (hades #196 P1: upload-artifact v4 rejects a repeated name).
+    """
     if job_name in {"test", "e2e"}:
-        return f"junit-{job_name}"
+        return f"junit-{job_name}-{attempt}"
     match = re.fullmatch(r"e2e-kind \((\d+)\)", job_name)
-    return f"junit-e2e-kind-{match.group(1)}" if match else None
+    return f"junit-e2e-kind-{match.group(1)}-{attempt}" if match else None
 
 
 def make_junit_lookup(repo: str) -> JunitLookup:
     def lookup(run_id: int, job_name: str) -> list[str]:
-        artifact_name = artifact_name_for_job(job_name)
+        artifact_name = artifact_name_for_job(job_name, 1)
         if artifact_name is None:
             return []
-        artifacts = fetch_attempt_artifacts(repo, run_id, 1)
+        artifacts = fetch_run_artifacts(repo, run_id)
         match = next(
             (a for a in artifacts if a["name"] == artifact_name and not a.get("expired")), None
         )

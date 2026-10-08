@@ -26,6 +26,28 @@ def test_parse_junit_failures_names_only_the_failing_and_erroring_cases() -> Non
     ]
 
 
+UNIT_XML_WITH_A_CLASS_BASED_FAILURE = b"""<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testsuite name="pytest" tests="1" failures="1" errors="0">
+    <testcase
+        classname="tests.unit.test_issue_389_credential_state_recovers.TestAC1RecoveryAfterAuthFailure"
+        name="test_auth_failure_cleared_by_successful_launch" time="0.01">
+      <failure message="AssertionError">assert False</failure>
+    </testcase>
+  </testsuite>
+</testsuites>
+"""
+
+
+def test_parse_junit_failures_keeps_the_test_class_in_the_node_id() -> None:
+    # hades #196 P2: a class-based test's classname is module *and* class with no
+    # marker between them; the class must not be folded into a bogus path segment.
+    assert flakes.parse_junit_failures(UNIT_XML_WITH_A_CLASS_BASED_FAILURE) == [
+        "tests/unit/test_issue_389_credential_state_recovers.py"
+        "::TestAC1RecoveryAfterAuthFailure::test_auth_failure_cleared_by_successful_launch"
+    ]
+
+
 def test_detect_flaky_tests_names_the_failing_test_and_the_flake_rate() -> None:
     # Run 42: the "test" job failed on attempt 1 and passed on attempt 2, same commit
     # (the run id). Run 43 is a plain green run with no rerun.
