@@ -120,7 +120,7 @@ async def get_attempt_logs(
     if await request.is_disconnected():
         return Response(status_code=499, media_type="text/plain")
 
-    if not ctx.sse_tail_limiter.try_acquire():
+    if not await ctx.sse_tail_limiter.try_acquire():
         return problem_response(
             slug="sse-tail-limit-exceeded",
             title="Too many live log tails",
@@ -134,7 +134,7 @@ async def get_attempt_logs(
     # permit is still released explicitly because no StreamingResponse (and so no
     # BackgroundTask) has been created yet.
     if await request.is_disconnected():
-        ctx.sse_tail_limiter.release()
+        await ctx.sse_tail_limiter.release_acquired()
         return Response(status_code=499, media_type="text/plain")
 
     async def events() -> AsyncIterator[str]:

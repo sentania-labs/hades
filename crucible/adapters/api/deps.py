@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from threading import BoundedSemaphore
 from typing import Annotated
 
 from fastapi import Depends, Header, Request
@@ -28,19 +29,41 @@ from crucible.ports.repository import UnitOfWork, UnitOfWorkFactory
 
 @dataclass(slots=True)
 class SseTailLimiter:
-    """Process-local admission control for database-polling SSE log tails."""
+    """Process-local admission control for database-polling SSE log tails.
+
+    Uses a plain int counter protected by a threading.Lock so that the limit
+    works correctly regardless of which event loop calls it.  No asyncio
+    primitive (Semaphore, Lock, Event, Condition) is ever created at import
+    time or at constructor time, so a shared limiter instance can safely cross
+    event-loop boundaries without ``RuntimeError: ... is bound to a different
+    event loop``.
+    """
 
     limit: int = 20
-    _semaphore: BoundedSemaphore = field(init=False, repr=False)
+    _count: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    def __post_init__(self) -> None:
-        self._semaphore = BoundedSemaphore(self.limit)
+    async def try_acquire(self) -> bool:
+        """Acquire a permit.  Returns False when the limit is already reached."""
+        asyncio.get_running_loop()
+        with self._lock:
+            if self._count >= self.limit:
+                return False
+            self._count += 1
+            return True
 
-    def try_acquire(self) -> bool:
-        return self._semaphore.acquire(blocking=False)
+    async def release_acquired(self) -> None:
+        asyncio.get_running_loop()
+        self.release()
 
     def release(self) -> None:
-        self._semaphore.release()
+        """Release a permit (sync and async callers both work).
+
+        May be called from a thread pool (e.g. Starlette BackgroundTask) or
+        directly from async code; the shared ``_lock`` serialises both.
+        """
+        with self._lock:
+            self._count -= 1
 
 
 @dataclass(slots=True)

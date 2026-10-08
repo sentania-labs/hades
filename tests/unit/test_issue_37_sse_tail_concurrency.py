@@ -119,3 +119,61 @@ def test_tail_permit_releases_on_background_even_if_the_generator_never_ran(
     )
     assert freed.media_type == "text/event-stream"
     ctx.sse_tail_limiter.release()
+
+
+def test_two_separate_event_loops_each_open_a_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The limiter may live across event-loop boundaries (e.g. a shared test
+    fixture).  Each ``asyncio.run()`` creates a fresh loop; the limiter must
+    never raise ``RuntimeError: ... is bound to a different event loop``.
+
+    This proves the fix for the e2e failure:
+    ``tests/e2e/test_failures.py::test_live_log_tail_delivers_while_worker_is_running``
+    where a shared AppContext carrying the limiter is used from two different
+    TestClient event loops.
+    """
+    principal = SimpleNamespace(id="reader", name="reader", role=Role.OBSERVER)
+    attempt = SimpleNamespace(logs_drained_at=None)
+    uow = SimpleNamespace(
+        attempts=SimpleNamespace(get=lambda _attempt_id: attempt),
+        logs=SimpleNamespace(list_from_offset=lambda *_args, **_kwargs: []),
+    )
+    # A single limiter shared across both loops.
+    ctx = cast(
+        AppContext,
+        SimpleNamespace(
+            uow_factory=lambda: nullcontext(uow),
+            sse_tail_limiter=SseTailLimiter(20),
+        ),
+    )
+
+    async def _is_disconnected() -> bool:
+        return False
+
+    request = cast(
+        Request,
+        SimpleNamespace(
+            headers={"accept": "text/event-stream"},
+            state=SimpleNamespace(),
+            url=SimpleNamespace(path="/v1/attempts/attempt-1/logs"),
+            is_disconnected=_is_disconnected,
+        ),
+    )
+    monkeypatch.setattr(records, "authenticate", lambda _uow, _token: principal)
+
+    # Loop 1
+    loop1_tail = asyncio.run(
+        records.get_attempt_logs("attempt-1", request, ctx, authorization="Bearer token")
+    )
+    assert loop1_tail.media_type == "text/event-stream"
+
+    # Loop 2 (completely different event loop)
+    loop2_tail = asyncio.run(
+        records.get_attempt_logs("attempt-1", request, ctx, authorization="Bearer token")
+    )
+    assert loop2_tail.media_type == "text/event-stream"
+
+    # Release both permits so the limiter can be reused.
+    ctx.sse_tail_limiter.release()
+    ctx.sse_tail_limiter.release()
