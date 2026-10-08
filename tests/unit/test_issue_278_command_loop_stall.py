@@ -282,7 +282,7 @@ def run_for(
     monkeypatch.setattr(
         supervisor_module,
         "load_attempt_routing",
-        lambda _uow, _policy, _version: SimpleNamespace(model=lambda _model: route),
+        lambda _uow, _policy, _version: SimpleNamespace(model=lambda _model, _harness: route),
     )
     return Run(supervisor, store, clock, provider, timeline)
 

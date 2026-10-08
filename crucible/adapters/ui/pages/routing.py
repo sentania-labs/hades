@@ -25,6 +25,7 @@ from crucible.application.admin import routing, routing_preference
 from crucible.application.admin.context import guard_mutation
 from crucible.application.errors import ConflictError, ContractValidationError
 from crucible.application.policies import put_policy, put_routing_policy
+from crucible.contracts.policy import routing_model_name
 from crucible.domain.cluster_egress import format_labels, parse_labels
 from crucible.domain.entities import Principal, Role
 from crucible.domain.gates import ALWAYS_BLOCKING_GATES, PRE_PR_GATES
@@ -68,7 +69,9 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     bounds = command_timeout["command_timeout_ms"]
     dns = egress["document"].get("dns") or {}
     endpoint = egress["document"].get("local_endpoint") or {}
-    local_models = ", ".join(m["id"] for m in local["models"] if m.get("enabled")) or "none"
+    local_models = (
+        ", ".join(routing_model_name(m) for m in local["models"] if m.get("enabled")) or "none"
+    )
     per_harness = (
         (policy.document.get("concurrency", {}).get("per_harness") or {}) if policy else {}
     )
