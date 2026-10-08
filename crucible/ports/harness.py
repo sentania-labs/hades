@@ -315,6 +315,8 @@ class ExitInfo:
     timed_out: bool = False
     killed: bool = False
     lost: bool = False
+    duration_seconds: float | None = None
+    credential_mode: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

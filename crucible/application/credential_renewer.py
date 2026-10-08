@@ -273,6 +273,7 @@ def worker_credential_spec(spec: CredentialSpec) -> CredentialSpec:
         auth_files=(AuthFile("access-token.json", json=True, sync_back=False),),
         minimum_mode=MountMode.RENEWER,
         config_dir_env=spec.config_dir_env,
+        templates=spec.templates,
         login_hint=spec.login_hint,
     )
 

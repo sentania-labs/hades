@@ -138,6 +138,29 @@ Docker file atomically or patches each live Kubernetes attempt Secret. Kubernete
 Secret projection is eventually consistent, so the host waits and re-reads for up to
 90 seconds after a rejection. No shared read-write volume is used.
 
+The Codex directory `/home/worker/.codex` remains writable for sqlite state, logs and
+sessions in renewer mode. Kubernetes mounts the attempt claim's credential leaf there;
+an init container links `access-token.json` to a separate read-only Secret directory
+projection. The Secret mount has no `subPath`, so kubelet's atomic projection updates
+remain visible when the host reopens the link. Docker gives the Codex directory a
+worker-owned writable tmpfs and the same link to a read-only per-attempt directory,
+following atomic file replacement. That tmpfs shares the existing home memory
+allowance. `config.toml` remains a Hades-owned read-only template in both providers.
+The worker receives no login `auth.json` or refresh token. `ro` and `rw-narrow` retain
+their existing directory mounts.
+
+A Codex exit within the first minute with a filesystem error naming that directory
+is `environment`. Its attempt detail names the path and launch mount mode. It stops
+for repair without spending an attempt or automatically retrying the same bad mount.
+Container start/finish times determine this window when available, excluding collection
+and scheduling delays.
+
+Changing the credential mount mode runs the Harnesses Test with the requested mode
+before saving it. Both the CLI command and the provider's mounts use that mode. A
+failed step refuses the change with its detail, records the usual admin refusal,
+and leaves the saved setting unchanged; a passing test saves it for the next launch.
+
+
 Only a process serving the supervisor constructs a grant-capable renewer (including
 `serve --all`). API-only and local admin processes construct a read-only status store
 with `dead` and `last_refresh` reads, without renewal or Secret mutation methods.

@@ -30,9 +30,10 @@ from typing import Any, TypeGuard
 
 from crucible.application.admin import credentials
 from crucible.application.admin.context import AdminContext, guard_mutation
-from crucible.application.errors import ApplicationError, NotFoundError
+from crucible.application.errors import ApplicationError, ConflictError, NotFoundError
 from crucible.application.harnesses import HarnessUnavailableError, harness_state
 from crucible.domain.exit_class import ExitClass
+from crucible.ports.harness import MountMode
 from crucible.ports.repository import UnitOfWork
 
 log = logging.getLogger(__name__)
@@ -83,6 +84,15 @@ def _credential_title(harness: str, detail: str) -> str:
             return f"The credential of {harness} cannot be read. Check Local gateway."
         return f"The credential of {harness} cannot be read. Check Credentials."
     return detail
+
+
+def _worker_did_not_start(record: credentials.ProbeRecord) -> bool:
+    """Whether the probe ended before the harness could start.
+
+    Other environment classifications, including OOM kills, describe how a launched
+    worker ended and belong to the model-call step.
+    """
+    return record.cause in {"provider_unavailable", "credential_directory"}
 
 
 # What each way a run can end means to the operator, for the model call step.
@@ -237,6 +247,49 @@ def start_test(
     return dict(marker)
 
 
+async def test_harness_claimed(
+    ctx: AdminContext,
+    uow: UnitOfWork,
+    *,
+    principal: str,
+    harness: str,
+    reason: str | None = None,
+    credential_mode: MountMode | None = None,
+) -> dict[str, Any]:
+    """Run a foreground test after taking the same per-harness claim as ``start_test``.
+
+    Mount-mode validation needs the result before it can save the setting, so it cannot
+    use the background entry point. It must still claim the harness row, or it could
+    race a Harnesses Test and both probes would use and replace the same credential and
+    ``last_test`` value.
+    """
+    reason = guard_mutation(
+        ctx, uow, reason, principal=principal, operation=f"harnesses test {harness}"
+    )
+    if ctx.harnesses.get(harness) is None:
+        raise NotFoundError(f"no adapter declares harness {harness!r}")
+    runs = ctx.harness_tests
+    with runs.guard:
+        running = runs.running(harness)
+        if running is not None:
+            raise ConflictError(f"a Harnesses Test for {harness} is already running")
+        marker, claimed = _claim(ctx, principal=principal, harness=harness)
+        if not claimed:
+            raise ConflictError(f"a Harnesses Test for {harness} is already running")
+    with ctx.uow_factory() as test_uow:
+        result = await test_harness(
+            ctx,
+            test_uow,
+            principal=principal,
+            harness=harness,
+            reason=reason,
+            started_at=str(marker["started_at"]),
+            credential_mode=credential_mode,
+        )
+        test_uow.commit()
+        return result
+
+
 def _ensure_row(ctx: AdminContext, harness: str) -> None:
     """The harness's row exists, so the claim has a row to lock. Two first starts may
     both insert it; the one that loses finds the winner's row and goes on."""
@@ -362,6 +415,7 @@ async def test_harness(
     harness: str,
     reason: str | None = None,
     started_at: str | None = None,
+    credential_mode: MountMode | None = None,
 ) -> dict[str, Any]:
     """Run the steps in the foreground, store the result as the harness's `last_test`
     and return it: {harness, status, ok, failed_step, steps, started_at, tested_at,
@@ -375,7 +429,15 @@ async def test_harness(
     started = started_at or ctx.clock.now().isoformat()
     steps = _Steps([])
     try:
-        await _run(ctx, uow, steps, principal=principal, harness=harness, reason=reason)
+        await _run(
+            ctx,
+            uow,
+            steps,
+            principal=principal,
+            harness=harness,
+            reason=reason,
+            credential_mode=credential_mode,
+        )
     except Exception as exc:
         log.exception("the %s test raised at step %d", harness, len(steps.items) + 1)
         steps.fail_in_progress(harness, exc)
@@ -405,6 +467,7 @@ async def _run(
     principal: str,
     harness: str,
     reason: str,
+    credential_mode: MountMode | None = None,
 ) -> None:
     adapter = ctx.harnesses.require(harness)
     try:
@@ -479,7 +542,12 @@ async def _run(
 
     try:
         record = await credentials.worker_probe(
-            ctx, uow, harness=harness, principal=principal, reason=reason
+            ctx,
+            uow,
+            harness=harness,
+            principal=principal,
+            reason=reason,
+            credential_mode=credential_mode,
         )
     except ApplicationError as exc:
         detail = exc.detail or exc.title
@@ -491,9 +559,9 @@ async def _run(
         detail = f"the harness cannot be launched on this route: {exc}"
         steps.failed(WORKER, detail, title=f"Fix the route for {harness} on Routing.")
         return
-    if record.cause == "provider_unavailable":
+    if _worker_did_not_start(record):
         detail = f"the worker did not start: {record.detail}"
-        steps.failed(WORKER, detail, title=f"Check the worker's egress for {harness}.")
+        steps.failed(WORKER, detail, title=f"Check the worker's environment for {harness}.")
         return
     seconds = f"{record.duration_seconds:g} s"
     steps.passed(WORKER, f"ran {record.image_digest or record.image} under the worker's egress")

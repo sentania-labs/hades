@@ -345,7 +345,7 @@ async def _action_credential(
         )
         uow.commit()
     elif verb == "mount-mode":
-        credentials.set_mount_mode(
+        await credentials.set_mount_mode(
             ctx.admin,
             uow,
             principal=principal.name,

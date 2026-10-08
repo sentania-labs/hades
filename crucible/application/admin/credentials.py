@@ -112,7 +112,7 @@ def effective_source(ctx: AdminContext, uow: UnitOfWork, harness: str) -> Creden
     )
 
 
-def set_mount_mode(
+async def set_mount_mode(
     ctx: AdminContext,
     uow: UnitOfWork,
     *,
@@ -149,6 +149,27 @@ def set_mount_mode(
             f"harness {harness!r} declares {spec.minimum_mode.value}; "
             f"it does not support {selected.value}"
         )
+        record_refusal(ctx, principal=principal, operation="credential mount mode", detail=detail)
+        raise ContractValidationError(
+            f"credential mount mode refused: {detail}",
+            errors=[{"path": "mount_mode", "message": detail}],
+        )
+    from crucible.application.admin.harness_test import test_harness_claimed  # noqa: PLC0415
+
+    try:
+        result = await test_harness_claimed(
+            ctx, uow, principal=principal, harness=harness, reason=reason, credential_mode=selected
+        )
+    except ConflictError as exc:
+        detail = f"{selected.value}: {exc.detail}"
+        record_refusal(ctx, principal=principal, operation="credential mount mode", detail=detail)
+        raise ContractValidationError(
+            f"credential mount mode refused: {detail}",
+            errors=[{"path": "mount_mode", "message": detail}],
+        ) from exc
+    if not result["ok"]:
+        failed = next(step for step in result["steps"] if step["ok"] is False)
+        detail = f"{selected.value}: {failed['name']}: {failed['detail']}"
         record_refusal(ctx, principal=principal, operation="credential mount mode", detail=detail)
         raise ContractValidationError(
             f"credential mount mode refused: {detail}",
@@ -850,6 +871,7 @@ async def _probe_async(
     reason: str,
     audit_event: bool = True,
     in_worker: bool = False,
+    credential_mode: MountMode | None = None,
 ) -> ProbeRecord:
     """The bounded probe. `in_worker` runs every harness in a worker, Hermes too, the
     way a task runs it (the harness test, crucible#118); without it Hermes is checked
@@ -877,7 +899,9 @@ async def _probe_async(
         )
     provider = _probe_provider(ctx)
     image = await probe_image(ctx, uow, provider, harness)
-    mode = effective_mount_mode(spec, source) if spec is not None else MountMode.RO
+    mode = credential_mode or (
+        effective_mount_mode(spec, source) if spec is not None else MountMode.RO
+    )
     model, endpoint, endpoint_url = probe_route(uow, adapter, harness)
     launch = adapter.build_launch(
         LaunchContext(
@@ -912,6 +936,7 @@ async def _probe_async(
         },
         endpoint=endpoint,
         endpoint_url=endpoint_url,
+        credential_mode=mode.value,
     )
     started = time.monotonic()
     try:
@@ -931,16 +956,16 @@ async def _probe_async(
             detail=f"{type(exc).__name__}: {exc}",
             duration=time.monotonic() - started,
         )
-    exit_class = adapter.classify_exit(
-        ExitInfo(
-            exit_code=result.exit_code,
-            report_present=False,
-            timed_out=result.timed_out,
-            oom_killed=result.oom_killed,
-        ),
-        result.stdout_tail,
-        result.stderr_tail,
+    exit_info = ExitInfo(
+        exit_code=result.exit_code,
+        report_present=False,
+        timed_out=result.timed_out,
+        oom_killed=result.oom_killed,
+        duration_seconds=result.duration_seconds,
+        credential_mode=mode.value,
     )
+    exit_class = adapter.classify_exit(exit_info, result.stdout_tail, result.stderr_tail)
+    interruption = adapter.interruption(exit_info, result.stdout_tail, result.stderr_tail)
     # A probe asks for no report: exit 0 without one is the probe's success.
     if exit_class is ExitClass.COMPLETED_WITHOUT_REPORT:
         exit_class = ExitClass.COMPLETED
@@ -960,9 +985,17 @@ async def _probe_async(
         mount_mode=mode.value,
         duration_seconds=round(result.duration_seconds, 1),
         files=tuple(f.as_dict() for f in sync.files) if sync else (),
-        detail=result.detail,
+        detail=interruption.message
+        if interruption is not None and interruption.environment
+        else result.detail,
         conclusive=conclusive,
-        cause="" if conclusive else exit_class.value,
+        cause=(
+            ""
+            if conclusive
+            else "credential_directory"
+            if interruption is not None and interruption.environment
+            else exit_class.value
+        ),
     )
     now = ctx.clock.now()
     record_launch_outcome(
@@ -1258,12 +1291,24 @@ def probe_route(
 
 
 async def worker_probe(
-    ctx: AdminContext, uow: UnitOfWork, *, harness: str, principal: str, reason: str
+    ctx: AdminContext,
+    uow: UnitOfWork,
+    *,
+    harness: str,
+    principal: str,
+    reason: str,
+    credential_mode: MountMode | None = None,
 ) -> ProbeRecord:
     """The bounded probe in a worker for every harness, Hermes included: the harness
     test's run (crucible#118). The caller has applied the guard."""
     return await _probe_async(
-        ctx, uow, harness=harness, principal=principal, reason=reason, in_worker=True
+        ctx,
+        uow,
+        harness=harness,
+        principal=principal,
+        reason=reason,
+        in_worker=True,
+        credential_mode=credential_mode,
     )
 
 

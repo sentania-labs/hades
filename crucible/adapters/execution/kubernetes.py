@@ -93,7 +93,7 @@ from crucible.domain.cluster_egress import (
 from crucible.domain.command_timeout import effective_command_timeout_ms
 from crucible.domain.exit_class import ExitClass
 from crucible.domain.ids import new_id
-from crucible.domain.infrastructure import START_FAILURES
+from crucible.domain.infrastructure import START_FAILURES, runtime_seconds
 from crucible.domain.role_timeouts import (
     DEFAULT_API_RETRY_SECONDS,
     DEFAULT_ROLE_TIMEOUT_SECONDS,
@@ -2289,6 +2289,9 @@ class KubernetesProvider:
                 exit_code=code,
                 detail=f"{detail}:oom_killed" if oom else detail,
                 oom_killed=oom,
+                duration_seconds=runtime_seconds(
+                    terminated.get("startedAt"), terminated.get("finishedAt")
+                ),
             )
         if phase == "Failed":
             # The Pod failed without the worker's own container producing an exit. The
@@ -2931,7 +2934,7 @@ class KubernetesProvider:
         if spec is None:
             return
         copy = launched.credential if launched is not None else self._credential_copy(spec)
-        if copy is None or not copy.writable:
+        if copy is None or not (copy.writable or copy.mode is MountMode.RENEWER):
             return
         with contextlib.suppress(Exception):
             await self._remove_from_claim(spec, [k8sspec.CREDENTIAL_LEAF])
@@ -3301,6 +3304,7 @@ class KubernetesProvider:
             stdin_text=request.stdin_text,
             endpoint=request.endpoint,
             endpoint_url=request.endpoint_url,
+            credential_mode=request.credential_mode,
         )
         root = f"k8s://{self.config.namespace}/{k8sspec.object_name('ws', probe_id)}"
         ws = Workspace(
@@ -4118,7 +4122,9 @@ class KubernetesProvider:
         """The per-attempt credential, mounted per the adapter's declaration (12, 26).
 
         Read-only is the Secret itself, which is a tmpfs the worker cannot write and
-        nothing ever lands on a disk for.
+        nothing ever lands on a disk for. Renewer mode links the access token from
+        that projection into a writable claim leaf, preserving live Secret updates
+        while leaving room for Codex runtime state and read-only template mounts.
 
         `rw-narrow` cannot be the Secret: a Kubernetes Secret volume is read-only
         whatever the mount asks for, and the harnesses that declare `rw-narrow` refresh
@@ -4142,7 +4148,7 @@ class KubernetesProvider:
             if _secret_key(auth.name) in set(present)
         ]
         source_volume = {
-            "name": "cred-source" if copy.writable else "cred",
+            "name": "cred-source" if copy.writable or copy.mode is MountMode.RENEWER else "cred",
             "secret": {
                 "secretName": k8sspec.object_name("cred", spec.attempt_id),
                 "defaultMode": 0o400,
@@ -4155,13 +4161,21 @@ class KubernetesProvider:
         mounts: list[Mount] = []
         volumes: list[dict[str, Any]] = []
         init: list[dict[str, Any]] = []
-        if copy.writable:
+        if copy.writable or copy.mode is MountMode.RENEWER:
+            if copy.mode is MountMode.RENEWER:
+                # A whole Secret projection follows kubelet atomic updates; a file
+                # subPath mount would pin the old token inode forever.
+                mounts.append(Mount("cred-source", k8sspec.CREDENTIAL_SOURCE_MOUNT, read_only=True))
             mounts.append(Mount("ws", target, sub_path=k8sspec.CREDENTIAL_LEAF))
             init.append(
                 {
                     "name": k8sspec.CREDENTIAL_INIT_CONTAINER,
                     "image": image,
-                    "command": ["sh", "-c", _seed_script(copy.spec)],
+                    "command": [
+                        "sh",
+                        "-c",
+                        _seed_script(copy.spec, renewer=copy.mode is MountMode.RENEWER),
+                    ],
                     "securityContext": {
                         "allowPrivilegeEscalation": False,
                         "readOnlyRootFilesystem": True,
@@ -4906,7 +4920,7 @@ class KubernetesProvider:
 
     async def _remove_credential(self, spec: LaunchSpec, copy: _CredentialCopy) -> bool:
         removed = await self._delete_credential_secret(spec.attempt_id)
-        if copy.writable:
+        if copy.writable or copy.mode is MountMode.RENEWER:
             try:
                 await self._remove_from_claim(spec, [k8sspec.CREDENTIAL_LEAF])
             except Exception as exc:
@@ -6905,8 +6919,8 @@ _LOGIN_CODE_SCRIPT = (
 )
 
 
-def _seed_script(spec: CredentialSpec) -> str:
-    """The init container that makes a `rw-narrow` copy (12).
+def _seed_script(spec: CredentialSpec, *, renewer: bool = False) -> str:
+    """The init container that makes a `rw-narrow` copy or renewer link (12).
 
     It reads the per-attempt Secret's read-only projection and writes the same named
     files into the attempt's own claim, mode 0700 on the directory and 0600 on each
@@ -6916,6 +6930,11 @@ def _seed_script(spec: CredentialSpec) -> str:
     names = " ".join("'" + a.name.replace("'", "'\"'\"'") + "'" for a in spec.auth_files)
     # An optional file the Secret did not carry is simply not projected, and the `-f`
     # test below skips it; nothing but the adapter's declared files is ever copied.
+    write = (
+        'ln -sfn "$src/$rel" "$dst/$rel"'
+        if renewer
+        else 'cat < "$src/$rel" > "$dst/$rel"\n  chmod 0600 "$dst/$rel"'
+    )
     return f"""set -eu
 umask 077
 src={k8sspec.CREDENTIAL_SOURCE_MOUNT}
@@ -6925,8 +6944,7 @@ chmod 0700 "$dst"
 for rel in {names}; do
   [ -f "$src/$rel" ] || continue
   mkdir -p "$dst/$(dirname "$rel")"
-  cat < "$src/$rel" > "$dst/$rel"
-  chmod 0600 "$dst/$rel"
+  {write}
 done
 """
 

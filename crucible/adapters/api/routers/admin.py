@@ -518,7 +518,7 @@ def admin_credential(harness: str, ctx: Ctx, uow: UoW, _principal: Admin) -> dic
 
 
 @router.post("/admin/credentials/{harness}/mount-mode")
-def admin_credential_mount_mode(
+async def admin_credential_mount_mode(
     harness: str,
     ctx: Ctx,
     uow: UoW,
@@ -531,7 +531,7 @@ def admin_credential_mount_mode(
             "mount_mode is required",
             errors=[{"path": "mount_mode", "message": "must be a string"}],
         )
-    result = credentials.set_mount_mode(
+    result = await credentials.set_mount_mode(
         _admin(ctx),
         uow,
         principal=principal.name,

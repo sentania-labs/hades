@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -57,9 +58,15 @@ def _policy(cap: int) -> dict[str, Any]:
     return document
 
 
-def test_saved_mode_changes_policy_validation_and_is_audited() -> None:
+async def test_saved_mode_changes_policy_validation_and_is_audited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "crucible.application.admin.harness_test.test_harness_claimed",
+        AsyncMock(return_value={"ok": True}),
+    )
     ctx, uow = _context()
-    saved = set_mount_mode(
+    saved = await set_mount_mode(
         ctx, uow, principal="admin", harness="codex", mode="renewer", reason="parallel"
     )
     assert saved["mount_mode_source"] == "saved"
@@ -72,7 +79,7 @@ def test_saved_mode_changes_policy_validation_and_is_audited() -> None:
     )
     assert uow.events.items[-1].kind == EventKind.CREDENTIAL_MOUNT_MODE_SET.value
 
-    set_mount_mode(
+    await set_mount_mode(
         ctx, uow, principal="admin", harness="codex", mode="rw-narrow", reason="compatibility"
     )
     with pytest.raises(ContractValidationError):
@@ -94,11 +101,11 @@ def test_claude_code_defaults_to_read_only_without_a_saved_setting() -> None:
 
 
 @pytest.mark.parametrize("mode", ["rw-narrow", "renewer"])
-def test_harness_declaration_refuses_an_unsupported_mode(mode: str) -> None:
+async def test_harness_declaration_refuses_an_unsupported_mode(mode: str) -> None:
     """hades#308: Claude Code must not get writable credentials through admin settings."""
     ctx, uow = _context()
     with pytest.raises(ContractValidationError, match=f"does not support {mode}"):
-        set_mount_mode(
+        await set_mount_mode(
             ctx,
             uow,
             principal="admin",

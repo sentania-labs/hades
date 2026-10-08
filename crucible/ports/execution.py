@@ -205,6 +205,7 @@ class Observation:
     never_started: bool = False
     container_message: str | None = None
     pod_events: tuple[dict[str, Any], ...] = ()
+    duration_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -501,6 +502,7 @@ class ProbeRequest:
     # path a task's does (crucible#118).
     endpoint: Literal["subscription", "local"] = "subscription"
     endpoint_url: str | None = None
+    credential_mode: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
