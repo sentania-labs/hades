@@ -69,8 +69,9 @@ their own environment.
 
 ## Shell tests (CI and locally through `make test-shell`)
 
-`tools/*/*_test.sh` files run as part of `make test-shell` (and so `make test`).
-Each script exercises a piece of the toolchain that is hard to test from Python
+Every `*_test.sh` file found anywhere under `tools/` (recursively, at any depth)
+runs as part of `make test-shell` (and so `make test`). Each script exercises
+a piece of the toolchain that is hard to test from Python
 (stubbed external tools, shell-level integration):
 
 - `tools/kind/e2e-kind_cleanup_test.sh` -- proves the kind-cleanup path from

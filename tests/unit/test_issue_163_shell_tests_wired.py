@@ -49,9 +49,11 @@ class TestMakefileWiring:
         assert "test-shell" in phony_section
 
     def test_test_shell_finds_all_test_sh_files(self) -> None:
-        """AC1, AC3: ``make test-shell`` iterates ``tools/*/*_test.sh``.
+        """AC1, AC3: ``make test-shell`` discovers ``*_test.sh`` recursively.
 
-        Check the recipe line (tab-indented) for the glob pattern.
+        A one-level glob (``tools/*/*_test.sh``) silently skips a script
+        directly under ``tools/`` or nested deeper than one directory, so the
+        recipe must use a recursive discovery mechanism (``find``) instead.
         """
         content = _read_makefile()
         shell_found = False
@@ -60,7 +62,13 @@ class TestMakefileWiring:
                 shell_found = True
                 continue
             if shell_found and line.startswith("\t"):
-                assert "tools/*/*_test.sh" in line
+                assert "tools/*/*_test.sh" not in line, (
+                    "test-shell must not rely on a one-level glob; "
+                    "it must discover *_test.sh recursively"
+                )
+                assert "find" in line and "tools" in line and "*_test.sh" in line, (
+                    f"expected a recursive find over tools/ in: {line}"
+                )
                 return
         pytest.fail("no recipe line found after test-shell:")
 
@@ -72,22 +80,45 @@ class TestMakefileWiring:
         assert test_file.stat().st_mode & 0o111, "script is not executable"
 
     def test_new_test_sh_is_picked_up_without_makefile_change(self) -> None:
-        """AC3: adding a new *_test.sh under tools/ is picked up automatically.
+        """AC3: a new *_test.sh anywhere under tools/ is picked up automatically.
 
-        We simulate a new file in a subdirectory (matching the Makefile glob
-        ``tools/*/*_test.sh``), confirm it is found, then remove it.
+        Covers the two cases a one-level glob (``tools/*/*_test.sh``) misses:
+        a script directly under ``tools/`` and one nested two levels deep
+        (``tools/foo/bar/example_test.sh``). We actually run ``make test-shell``
+        and confirm both scripts executed (not merely that a glob matches),
+        then remove the fixtures.
         """
-        tmp = ROOT / "tools" / "kind" / "e2e-fake_test.sh"
+        top_level = ROOT / "tools" / "zz_top_level_test.sh"
+        nested_dir = ROOT / "tools" / "zz_foo" / "bar"
+        nested = nested_dir / "example_test.sh"
         try:
-            tmp.write_text("#!/bin/sh\nexit 0\n")
-            tmp.chmod(0o755)
-            # Verify the glob would pick it up
-            # (tools/*/*_test.sh matches tools/kind/e2e-fake_test.sh)
-            matches = sorted(ROOT.glob("tools/*/*_test.sh"))
-            names = [m.name for m in matches]
-            assert "e2e-fake_test.sh" in names
+            top_level.write_text("#!/bin/sh\necho MARKER_TOP_LEVEL\nexit 0\n")
+            top_level.chmod(0o755)
+            nested_dir.mkdir(parents=True)
+            nested.write_text("#!/bin/sh\necho MARKER_NESTED\nexit 0\n")
+            nested.chmod(0o755)
+
+            result = subprocess.run(
+                ["make", "-C", str(ROOT), "test-shell"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert "MARKER_TOP_LEVEL" in result.stdout, (
+                f"a *_test.sh placed directly under tools/ was not run: {result.stdout}"
+            )
+            assert "MARKER_NESTED" in result.stdout, (
+                f"a *_test.sh nested two levels under tools/ was not run: {result.stdout}"
+            )
         finally:
-            tmp.unlink(missing_ok=True)
+            top_level.unlink(missing_ok=True)
+            nested.unlink(missing_ok=True)
+            if nested_dir.exists():
+                nested_dir.rmdir()
+            if nested_dir.parent.exists():
+                nested_dir.parent.rmdir()
 
     def test_test_shell_exits_non_zero_on_failure(self) -> None:
         """AC1: ``make test-shell`` propagates a non-zero exit from a failing script.

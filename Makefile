@@ -250,8 +250,8 @@ test-integration: ## needs Docker for postgres:16 (testcontainers) or CRUCIBLE_T
 	$(UV) sync --frozen --quiet
 	$(UV) run pytest tests/integration -q -m integration -n $(PYTEST_WORKERS)
 
-test-shell: ## run every *_test.sh under tools/ (today only e2e-kind_cleanup_test.sh)
-	@failures=0; for f in tools/*/*_test.sh; do [ -f "$$f" ] || continue; echo "==> running $$f"; if ! bash "$$f"; then failures=1; fi; done; test "$$failures" -eq 0
+test-shell: ## run every *_test.sh anywhere under tools/ (today only e2e-kind_cleanup_test.sh)
+	@failures=0; for f in $$(find tools -name '*_test.sh' -type f | sort); do echo "==> running $$f"; if ! bash "$$f"; then failures=1; fi; done; test "$$failures" -eq 0
 
 e2e-image: ## build the e2e worker image (18) on whichever daemon DOCKER names
 	DOCKER_HOST=$${DOCKER_HOST:-} images/build.sh script-harness
