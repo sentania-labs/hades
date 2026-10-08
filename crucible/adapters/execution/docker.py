@@ -1722,14 +1722,11 @@ class DockerProvider:
         if (root / CREDENTIAL_LEAF).exists():
             await self._remove_through_daemon(ws, spec, [CREDENTIAL_LEAF])
 
-    async def delete_workspace_claim(self, attempt_id: str) -> None:
-        """The Docker provider manages workspace claims through volumes; the normal
-        cleanup and retention sweep handle PVC removal.  This is a no-op here."""
-
     async def cleanup(
         self, ws: Workspace, policy: CleanupPolicy, spec: LaunchSpec | None = None
     ) -> None:
-        """Only ever called for an attempt that recorded `logs_drained` (08)."""
+        """Only ever called for an attempt that recorded `logs_drained` (08), or for one
+        that ended before its worker launched (hades #394)."""
         for row in await self._containers_for(ws.attempt_id):
             await self._call(self.client.remove_container, str(row["Id"]), force=True)
         root = self._root(ws.attempt_id)
@@ -1833,7 +1830,7 @@ class DockerProvider:
             )
         return handles
 
-    async def retention(self, keep: Sequence[str], orphan: Sequence[str] | None = None) -> int:
+    async def retention(self, keep: Sequence[str]) -> int:
         """Remove containers and volumes labelled for attempts Crucible no longer
         tracks (16). Every removal the caller records as a RetentionAction."""
         live = set(keep)

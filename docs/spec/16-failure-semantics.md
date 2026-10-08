@@ -182,6 +182,22 @@ A cleanup pass runs each reconcile tick. Every deletion is an event and a
 `RetentionAction` row naming the policy version that authorized it.
 Nothing that a gate consumed is deleted before the task is terminal.
 
+An attempt that ended before its worker launched (`started_at` null: an
+`environment` exit at prepare or launch, a `killed` cancel during launch, a
+`quota_exhausted` refusal at reserve, an `infrastructure` start failure)
+never records `logs_drained`, which the cleanup pass waits for. Its
+workspace is cleaned up by a pass of its own, under `delete` whatever the
+policy says, because no gate consumed it and no worker wrote on it; the
+attempt is recorded cleaned with `attempt_cleaned_up` as any other, and an
+`infrastructure` exit waits the attempt lease first. A workspace that is a
+resume source for a correction or an interruption retry (an attempt with a
+verified bundle head, 08) is kept instead, with the retention label, and
+released by the step below; collection is the only thing that records a
+bundle head, so no attempt that never launched is one today. The provider
+retention sweep does not hold back such an attempt's objects either, so a
+claim leaked before this rule existed drains on its own; a claim with the
+retention label is honoured (hades #394).
+
 A workspace a cleanup policy kept (`keep`, `keep_diff_only`) is released by
 the retention step, one `RetentionAction` of kind `workspace` per attempt,
 once its task is terminal (closed, rejected, cancelled) or the task's work

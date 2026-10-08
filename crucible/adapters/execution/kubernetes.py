@@ -2592,28 +2592,11 @@ class KubernetesProvider:
         with contextlib.suppress(Exception):
             await self._remove_from_claim(spec, [k8sspec.CREDENTIAL_LEAF])
 
-    async def delete_workspace_claim(self, attempt_id: str) -> None:
-        """Delete the ws-<attempt> persistent volume claim for an attempt that never
-        launched.
-
-        Called when an attempt ends before it is ever started (hades #394): the claim
-        was created by prepare() but never consumed by a gate, so it must be removed
-        to free the claim quota.  This is idempotent—deleting a claim that is already
-        gone is a no-op.
-        """
-        claim_name = k8sspec.object_name("ws", attempt_id)
-        try:
-            await self._call(self.client.delete, "persistentvolumeclaims", claim_name)
-        except KubernetesApiError as exc:
-            if exc.status == 404:
-                # Already gone; idempotent.
-                return
-            raise ProviderError(f"delete_workspace_claim({attempt_id}) failed: {exc}") from exc
-
     async def cleanup(
         self, ws: Workspace, policy: CleanupPolicy, spec: LaunchSpec | None = None
     ) -> None:
-        """08, 26: only ever called for an attempt that recorded `logs_drained`.
+        """08, 26: only ever called for an attempt that recorded `logs_drained`, or
+        for one that ended before its worker launched (hades #394), under `delete`.
 
         Jobs and the NetworkPolicy go; the per-attempt Secret goes under every policy,
         `keep` included (12, 16); the claim is kept or deleted per policy, and a kept
@@ -2776,18 +2759,10 @@ class KubernetesProvider:
             )
         return handles
 
-    async def retention(self, keep: Sequence[str], orphan: Sequence[str] | None = None) -> int:
-        """Remove what is labelled for attempts Crucible no longer tracks (16).
-
-        `orphan` is a list of attempt IDs whose workspace claims are terminal and
-        never-launched (started_at null) but still labelled in the cluster.  The
-        supervisor passes these from the pre-launch cleanup so the sweep can delete
-        claims that leaked before this code lands (hades #394).  Claims carrying the
-        retention label are never touched.
-        """
+    async def retention(self, keep: Sequence[str]) -> int:
+        """Remove what is labelled for attempts Crucible no longer tracks (16)."""
         live = set(keep)
         removed = 0
-        orphan_set = set(orphan) if orphan else set()
         for kind in (
             "jobs",
             "pods",
@@ -2819,13 +2794,6 @@ class KubernetesProvider:
                     # label; the sweep honours it (26) and the workspace retention
                     # window of 16 is what removes it later.
                     continue
-                # hades #394: an orphan claim (pre-launch terminal attempt) is removed
-                # even if the attempt is still in ``live``.  The retention label
-                # check above protects kept claims.
-                if kind == "persistentvolumeclaims" and attempt_id and attempt_id in orphan_set:
-                    with contextlib.suppress(KubernetesApiError):
-                        await self._call(self.client.delete, kind, str(metadata.get("name", "")))
-                        removed += 1
                 if attempt_id and attempt_id not in live:
                     with contextlib.suppress(KubernetesApiError):
                         await self._call(self.client.delete, kind, str(metadata.get("name", "")))

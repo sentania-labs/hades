@@ -793,10 +793,7 @@ class FakeProvider:
         """Nothing secret was placed; the call is recorded so a test can assert it."""
         self.discarded.append(ws.attempt_id)
 
-    async def delete_workspace_claim(self, attempt_id: str) -> None:
-        """The Fake provider has no PVCs to remove."""
-
-    async def retention(self, keep: Sequence[str], orphan: Sequence[str] | None = None) -> int:
+    async def retention(self, keep: Sequence[str]) -> int:
         return 0
 
     async def reconcile(self) -> list[Handle]:

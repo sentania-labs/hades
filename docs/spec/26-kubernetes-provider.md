@@ -100,13 +100,13 @@ Per attempt the provider creates, in `crucible-workers`, all labelled
 
 | Object | Role | Lifetime |
 |---|---|---|
-| PersistentVolumeClaim `ws-<attempt>` | the workspace: `repo/`, `report/`, `output/`, and `publish/` (the publisher's outcome, made before a push) | attempt, then per cleanup policy; a kept claim is deleted by the retention step once nothing needs it (16) |
+| PersistentVolumeClaim `ws-<attempt>` | the workspace: `repo/`, `report/`, `output/`, and `publish/` (the publisher's outcome, made before a push) | attempt, then per cleanup policy; a kept claim is deleted by the retention step once nothing needs it (16); the claim of an attempt that never launched is deleted, unless it is a resume source (hades #394, below) |
 | ConfigMap `identity-<attempt>` (or a projected volume from an object store above the ConfigMap size cap, 08) | the identity bundle, read-only | attempt |
 | Secret `cred-<attempt>` | the per-attempt copy of one harness credential directory, seeded from the harness's dedicated Secret in `crucible-workers`, `rw-narrow` where the adapter declares it (12) | attempt, deleted under every cleanup policy |
 | Secret `checkout-<attempt>` | a private repository's read-only installation token (ADR 0019), key `token`, mounted mode 0400 at `/run/crucible-token` into the refresher and the preparer Jobs and nothing else | created just before the refresher, deleted once the preparer's Pod is gone, on every path; a deletion that fails fails the prepare, and `discard`, `cleanup` and the retention sweep retry it |
 | Job `refresh-cache-<attempt>` | the reference cache's only writer: fetches the repository's bare mirror on the cache PVC (or clones it when absent), with git egress only and no workspace or identity bundle; for a private repository it also mounts `checkout-<attempt>` and fetches with it. It gives the remote 20 seconds to answer a ref listing and otherwise leaves the mirror as it is, so a refresh that cannot connect costs seconds, not the kernel's two-minute connect timeout (hades #191) | until complete, then deleted, before the preparer starts |
 | Job `prepare-<attempt>` | the preparer: clone into the PVC from the reference cache, mounted read-only, then branch, shims, author identity, `origin` placeholder (08) | until complete, then deleted |
-| Job `worker-<attempt>` | the worker, one Pod, `backoffLimit: 0`, `restartPolicy: Never` | until terminal, then deleted after `logs_drained` |
+| Job `worker-<attempt>` | the worker, one Pod, `backoffLimit: 0`, `restartPolicy: Never` | until terminal, then deleted after `logs_drained` (or, for an attempt that never launched, by its pre-launch cleanup, hades #394) |
 | Job `collect-<attempt>` | the collector, no network, repo and report read-only, output read-write (08) | until complete |
 | Job `verify-bundle-<attempt>` | `git bundle verify`, no network | until complete |
 | Job `verifier-<attempt>` | re-runs `required_verification` on an independent clone from the bundle (10, 11) | until complete |
@@ -586,6 +586,23 @@ the namespace. A deployment therefore names one exact, pullable reference in
   anything else still labelled for its attempt once the retention step
   decided nothing needs it (16), and reports a claim still there so the step
   tries again.
+- An attempt that ended before its worker launched (`started_at` null: an
+  environment failure at prepare or launch, a cancel during launch, a
+  `quota_exhausted` refusal at reserve, a worker that never started) never
+  records `logs_drained`, so the cleanup above never visited it and its
+  `ws-<attempt>` claim stayed in the namespace, counted against the claim
+  quota, forever (hades #394). The supervisor now calls `cleanup` for it under
+  `delete`, since no gate consumed the claim and no worker wrote on it, and
+  records it cleaned; an `infrastructure` exit waits the attempt lease first,
+  as the cleanup above does. The one exception is a claim the correction
+  resume of 08 could pick, an attempt with a verified bundle head: it is
+  cleaned under `keep`, so it carries the retention label and is released by
+  the retention step of 16. No attempt that never launched has one today
+  (only collection records a bundle head), so in practice every such claim
+  is deleted. The retention sweep likewise no longer holds back the objects
+  of a finished attempt that never launched, so an unlabelled claim leaked
+  before this fix is removed on its own; a claim with the retention label is
+  still honoured, and a running attempt's claim is never touched.
 - `reconcile`: list Jobs by label; a Job with no live attempt row is
   orphaned and deleted; a live attempt with no Job is `lost`. A Job still
   waiting on its Pod is adopted like a running one (103), its launch time

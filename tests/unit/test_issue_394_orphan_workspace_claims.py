@@ -1,214 +1,312 @@
-"""hades #394: workspace claims of attempts that never launched are deleted or
-released so they cannot fill the claim quota.
+"""Hades #394: the workspace claim of an attempt that never launched is cleaned up.
 
-The workspace claim (ws-<attempt> PVC) is created by prepare() but, when an
-attempt ends before it is ever started (environment at prepare, killed during
-launch, quota_exhausted), no gate ever consumed it.  Two paths now remove such
-orphan claims:
-
-1. The supervisor's _pre_launch_cleanup_step calls
-   KubernetesProvider.delete_workspace_claim for every terminal attempt with
-   started_at null.
-
-2. The provider's retention sweep also deletes an unlabeled ws- claim whose
-   attempt is terminal and was never kept (orphan set).
-
-A running attempt's claim and a claim carrying the retention label are never
-touched by either path."""
+Cleanup of 08 waits for `logs_drained`, which only a launched worker records, so an
+attempt that ended at prepare, was killed during launch or ran out of quota at reserve
+kept its `ws-<attempt>` claim forever. The supervisor now cleans such an attempt up
+under `delete` (no gate consumed the claim), and the retention sweep no longer holds
+back the objects of one, so claims leaked before the fix drain on their own. A claim
+with the retention label, a running attempt's claim, and a never-launched claim that is
+a resume source are left alone."""
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+from datetime import timedelta
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+
 from crucible.adapters.execution import k8sspec
-from crucible.ports.execution import CleanupPolicy
-from tests.unit.kubernetes_fixtures import (
-    ATTEMPT,
-    build,
-    spec,
+from crucible.adapters.execution.k8sfake import FakeKubernetesApi
+from crucible.adapters.execution.kubernetes import KubernetesProvider
+from crucible.application.supervisor import Supervisor
+from crucible.contracts.evidence import EvidenceKind
+from crucible.domain.entities import Attempt, EvidenceRecord
+from crucible.domain.events import EventKind
+from crucible.domain.exit_class import ExitClass
+from crucible.domain.lifecycle import AttemptState
+from crucible.ports.execution import CleanupPolicy, ProviderError, Workspace
+from tests.fixtures import FakeClock
+from tests.unit.kubernetes_fixtures import build, spec
+from tests.unit.test_class_routing import NOW
+
+PRE_LAUNCH = "01ATTEMPT0000000000000000B"
+LEAKED = "01ATTEMPT0000000000000000C"
+RUNNING = "01ATTEMPT0000000000000000D"
+KEPT = "01ATTEMPT0000000000000000E"
+RESUME = "01ATTEMPT0000000000000000F"
+
+
+def claim(attempt_id: str) -> str:
+    return k8sspec.object_name("ws", attempt_id)
+
+
+def attempt(
+    attempt_id: str,
+    state: AttemptState,
+    exit_class: ExitClass | None = None,
+    **fields: Any,
+) -> Attempt:
+    return Attempt(
+        attempt_id,
+        "execution",
+        "task",
+        1,
+        state,
+        NOW,
+        exit_class=exit_class,
+        ended_at=fields.pop("ended_at", NOW if state is not AttemptState.RUNNING else None),
+        **fields,
+    )
+
+
+def bundle_evidence(attempt_id: str) -> EvidenceRecord:
+    return EvidenceRecord(
+        id=None,
+        attempt_id=attempt_id,
+        task_id="task",
+        kind=EvidenceKind.BUNDLE_HEAD.value,
+        source="crucible",
+        observed_at=NOW,
+        verified=True,
+        payload={"head_sha": "a" * 40, "bundle_verified": True, "bundle_sha256": "b" * 64},
+    )
+
+
+def supervisor_over(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: KubernetesProvider,
+    attempts: list[Attempt],
+    evidence: dict[str, list[EvidenceRecord]] | None = None,
+) -> tuple[Supervisor, Any]:
+    """The real supervisor steps over a mocked unit of work holding `attempts`."""
+    supervisor = Supervisor(
+        MagicMock(),
+        {provider.name: provider},
+        FakeClock(NOW),
+        holder="test",
+        artifact_store=MagicMock(),
+    )
+    uow: Any = MagicMock()
+    uow.attempts.list_in_states.side_effect = lambda states: [
+        row for row in attempts if row.state in set(states)
+    ]
+    uow.attempts.get.side_effect = lambda attempt_id, **_: next(
+        (row for row in attempts if row.id == attempt_id), None
+    )
+    uow.executions.get.return_value = SimpleNamespace(provider=provider.name)
+    uow.evidence.list_for_attempt.side_effect = lambda attempt_id: (evidence or {}).get(
+        attempt_id, []
+    )
+    monkeypatch.setattr(supervisor, "_uow_factory", lambda: nullcontext(uow))
+    monkeypatch.setattr(supervisor, "_fenced", lambda: nullcontext(uow))
+    monkeypatch.setattr(supervisor, "_release_checkout_leases", MagicMock())
+    return supervisor, uow
+
+
+async def prepared(api: FakeKubernetesApi, provider: KubernetesProvider, attempt_id: str) -> None:
+    await provider.prepare(spec(attempt_id=attempt_id))
+    assert claim(attempt_id) in api.object_names("persistentvolumeclaims")
+
+
+def cleaned_payloads(uow: Any) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for call in uow.events.append.call_args_list:
+        event = call.args[0]
+        if event.kind == EventKind.ATTEMPT_CLEANED_UP.value:
+            out[str(event.attempt_id)] = event.payload["workspace"]
+    return out
+
+
+# ----- AC1: the supervisor's cleanup path for an attempt with started_at null ----------
+
+
+async def test_an_attempt_that_ends_environment_at_prepare_has_its_claim_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api, _registry, provider = build()
+    api.script(PRE_LAUNCH, "prepare-fails")
+    with pytest.raises(ProviderError):
+        await provider.prepare(spec(attempt_id=PRE_LAUNCH))
+    # The preparer failed after the claim was made: the leak of the issue.
+    assert claim(PRE_LAUNCH) in api.object_names("persistentvolumeclaims")
+
+    row = attempt(PRE_LAUNCH, AttemptState.PREPARING)
+    supervisor, uow = supervisor_over(monkeypatch, provider, [row])
+    monkeypatch.setattr(supervisor, "_record_bare_evidence", MagicMock())
+    monkeypatch.setattr(supervisor, "_classify_and_finish", MagicMock())
+    supervisor._environment_failure(row.id, "prepare", "the fake preparer could not clone")
+    assert row.exit_class is ExitClass.ENVIRONMENT
+    assert row.started_at is None and row.logs_drained_at is None
+    assert row.workspace_path is None  # set only at launch: no filter may rely on it
+    row.state = AttemptState.FAILED  # what _classify_and_finish does with no retry left
+
+    # The cleanup of 08 never sees it: its logs were never drained.
+    assert supervisor._list_cleanup_due() == []
+    assert await supervisor._pre_launch_cleanup_step() == 1
+
+    assert claim(PRE_LAUNCH) not in api.object_names("persistentvolumeclaims")
+    assert ("persistentvolumeclaims", claim(PRE_LAUNCH)) in api.deleted
+    assert row.cleaned_up_at == NOW
+    assert cleaned_payloads(uow) == {PRE_LAUNCH: "delete"}
+    # Recorded cleaned, it is not visited again.
+    assert await supervisor._pre_launch_cleanup_step() == 0
+
+
+@pytest.mark.parametrize(
+    ("exit_class", "state"),
+    [
+        (ExitClass.KILLED, AttemptState.FAILED),  # cancelled during launch
+        (ExitClass.QUOTA_EXHAUSTED, AttemptState.FAILED),  # refused at reserve
+        (ExitClass.ENVIRONMENT, AttemptState.BLOCKED),
+    ],
 )
-
-# ---------------------------------------------------------------------------
-# AC1: pre-launch attempt claim deletion (unit test with fake K8s client)
-# ---------------------------------------------------------------------------
-
-
-async def test_delete_workspace_claim_removes_orphan_pvc() -> None:
-    """AC1: an attempt that ends environment at prepare has its ws- claim
-    deleted; a unit test with the fake Kubernetes client proves it."""
+async def test_every_pre_launch_ending_has_its_claim_deleted(
+    monkeypatch: pytest.MonkeyPatch, exit_class: ExitClass, state: AttemptState
+) -> None:
     api, _registry, provider = build()
-    # Simulate an attempt whose workspace was prepared but never launched.
-    # Prepare creates the PVC.
-    launch = spec(attempt_id=ATTEMPT)
-    _workspace = await provider.prepare(launch)
+    await prepared(api, provider, PRE_LAUNCH)
+    supervisor, uow = supervisor_over(
+        monkeypatch, provider, [attempt(PRE_LAUNCH, state, exit_class)]
+    )
 
-    # Verify the claim was created by prepare().
-    assert api.object_names("persistentvolumeclaims") == ["ws-01attempt0000000000000000a"]
+    assert await supervisor._pre_launch_cleanup_step() == 1
 
-    # Now delete the claim using delete_workspace_claim (simulating
-    # _pre_launch_cleanup_step's call for a terminal attempt with started_at
-    # null).
-    await provider.delete_workspace_claim(ATTEMPT)
+    assert api.object_names("persistentvolumeclaims") == []
+    assert not [name for kind, name in api.objects if kind == "configmaps"]
+    assert cleaned_payloads(uow) == {PRE_LAUNCH: "delete"}
 
-    # The claim is gone.
+
+async def test_an_interrupted_start_waits_the_attempt_lease_as_cleanup_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api, _registry, provider = build()
+    await prepared(api, provider, PRE_LAUNCH)
+    row = attempt(PRE_LAUNCH, AttemptState.FAILED, ExitClass.INFRASTRUCTURE)
+    supervisor, _uow = supervisor_over(monkeypatch, provider, [row])
+
+    assert await supervisor._pre_launch_cleanup_step() == 0
+    assert PRE_LAUNCH in supervisor._live_attempt_ids()
+    assert claim(PRE_LAUNCH) in api.object_names("persistentvolumeclaims")
+
+    row.ended_at = NOW - timedelta(seconds=supervisor.attempt_lease_ttl_seconds)
+    assert await supervisor._pre_launch_cleanup_step() == 1
     assert api.object_names("persistentvolumeclaims") == []
 
 
-async def test_delete_workspace_claim_is_idempotent() -> None:
-    """Calling delete_workspace_claim on an already-deleted claim is a no-op."""
+# ----- AC2: the retention sweep drains a leaked claim and honours the label -------------
+
+
+async def test_the_sweep_deletes_a_leaked_unlabelled_claim_and_leaves_a_labelled_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     api, _registry, provider = build()
-    launch = spec(attempt_id=ATTEMPT)
-    _workspace = await provider.prepare(launch)
+    await prepared(api, provider, LEAKED)
+    await prepared(api, provider, KEPT)
+    # Both attempts never launched and were never cleaned (they ended before this fix).
+    # One claim carries the retention label, as an operator or an old cleanup left it.
+    labels = api.objects[("persistentvolumeclaims", claim(KEPT))].body["metadata"]["labels"]
+    labels[k8sspec.LABEL_RETAIN] = "keep"
+    supervisor, _uow = supervisor_over(
+        monkeypatch,
+        provider,
+        [
+            attempt(LEAKED, AttemptState.FAILED, ExitClass.ENVIRONMENT),
+            attempt(KEPT, AttemptState.FAILED, ExitClass.ENVIRONMENT),
+        ],
+    )
 
-    await provider.delete_workspace_claim(ATTEMPT)
-    assert api.object_names("persistentvolumeclaims") == []
+    keep = supervisor._live_attempt_ids()
+    assert LEAKED not in keep and KEPT not in keep
+    removed = await provider.retention(keep)
 
-    # Second call should not error.
-    await provider.delete_workspace_claim(ATTEMPT)
-    assert api.object_names("persistentvolumeclaims") == []
-
-
-# ---------------------------------------------------------------------------
-# AC2: retention sweep deletes unlabeled ws- claims, keeps labeled ones
-# ---------------------------------------------------------------------------
+    assert removed >= 1
+    assert ("persistentvolumeclaims", claim(LEAKED)) in api.deleted
+    assert api.object_names("persistentvolumeclaims") == [claim(KEPT)]
 
 
-async def test_retention_sweep_removes_orphan_labelled_claims() -> None:
-    """AC2: the retention sweep deletes an unlabeled ws- claim of a terminal
-    attempt that never launched and leaves a labeled one; a unit test proves
-    both."""
+async def test_a_finished_launched_attempt_not_yet_cleaned_is_still_held_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hades #237 is unchanged: a launched attempt's bundle is read until its cleanup."""
     api, _registry, provider = build()
-    launch = spec(attempt_id=ATTEMPT)
-    _workspace = await provider.prepare(launch)
+    await prepared(api, provider, LEAKED)
+    row = attempt(LEAKED, AttemptState.FAILED, ExitClass.COMPLETED, started_at=NOW)
+    supervisor, _uow = supervisor_over(monkeypatch, provider, [row])
 
-    # The claim exists with the attempt label but no retention label.
-    claim_obj = api.objects[("persistentvolumeclaims", "ws-01attempt0000000000000000a")]
-    labels = claim_obj.body.get("metadata", {}).get("labels", {})
-    assert k8sspec.LABEL_RETAIN not in labels
-
-    # Run retention sweep with the attempt in keep (simulating supervisor's
-    # _live_attempt_ids) but also in orphan (pre-launch terminal attempt).
-    orphan_set = [ATTEMPT]
-    removed = await provider.retention([ATTEMPT], orphan=orphan_set)
-
-    # The orphan claim is removed even though the attempt is in keep.
-    assert removed == 1
-    assert api.object_names("persistentvolumeclaims") == []
+    keep = supervisor._live_attempt_ids()
+    assert LEAKED in keep
+    await provider.retention(keep)
+    assert await supervisor._pre_launch_cleanup_step() == 0
+    assert api.object_names("persistentvolumeclaims") == [claim(LEAKED)]
 
 
-async def test_retention_sweep_keeps_labeled_claim() -> None:
-    """A claim carrying the retention label is still honoured (never deleted by
-    retention sweep)."""
+# ----- AC3: a running attempt's claim and a kept claim survive both paths ---------------
+
+
+async def test_running_and_kept_claims_survive_the_cleanup_and_the_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     api, _registry, provider = build()
-    launch = spec(attempt_id=ATTEMPT)
-    _workspace = await provider.prepare(launch)
+    for attempt_id in (RUNNING, KEPT, RESUME):
+        await prepared(api, provider, attempt_id)
+    # A kept claim: a launched attempt that cleanup kept under `keep`.
+    await provider.cleanup(workspace(KEPT), CleanupPolicy.KEEP, spec(attempt_id=KEPT))
+    assert (
+        k8sspec.LABEL_RETAIN
+        in (api.objects[("persistentvolumeclaims", claim(KEPT))].body["metadata"]["labels"])
+    )
+    rows = [
+        attempt(RUNNING, AttemptState.RUNNING, started_at=NOW),
+        attempt(
+            KEPT,
+            AttemptState.SUCCEEDED,
+            ExitClass.COMPLETED,
+            started_at=NOW,
+            logs_drained_at=NOW,
+            cleaned_up_at=NOW,
+        ),
+        # Never launched, but its claim holds a verified bundle a correction may resume
+        # from: kept, not deleted.
+        attempt(RESUME, AttemptState.FAILED, ExitClass.QUOTA_EXHAUSTED),
+    ]
+    supervisor, uow = supervisor_over(
+        monkeypatch, provider, rows, evidence={RESUME: [bundle_evidence(RESUME)]}
+    )
+    monkeypatch.setattr(supervisor, "_spec_for", _spec_returning(spec(attempt_id=RESUME)))
 
-    # The claim exists with the attempt label but no retention label.
-    claim_obj = api.objects[("persistentvolumeclaims", "ws-01attempt0000000000000000a")]
-    claim_obj.body.setdefault("metadata", {}).setdefault("labels", {})
-    claim_obj.body["metadata"]["labels"][k8sspec.LABEL_RETAIN] = "keep"
+    assert await supervisor._pre_launch_cleanup_step() == 1
+    assert cleaned_payloads(uow) == {RESUME: "keep"}
+    keep = supervisor._live_attempt_ids()
+    assert RUNNING in keep
+    await provider.retention(keep)
+    # A second pass changes nothing.
+    assert await supervisor._pre_launch_cleanup_step() == 0
+    await provider.retention(supervisor._live_attempt_ids())
 
-    # Run retention sweep with the attempt in keep (not orphan).
-    orphan_set: list[str] = []
-    removed = await provider.retention([ATTEMPT], orphan=orphan_set)
-
-    # No claim removed (the claim is kept by the retention label).
-    assert removed == 0
-    assert api.object_names("persistentvolumeclaims") == ["ws-01attempt0000000000000000a"]
-
-
-async def test_retention_sweep_keeps_cleaned_up_attempt_claim() -> None:
-    """AC3: a cleaned-up attempt's claim is not touched when the attempt
-    is not in keep (not live) and not in orphan."""
-    api, _registry, provider = build()
-    launch = spec(attempt_id=ATTEMPT)
-    _workspace = await provider.prepare(launch)
-
-    # The claim is created by prepare.
-    assert api.object_names("persistentvolumeclaims") == ["ws-01attempt0000000000000000a"]
-
-    # Simulate a cleanup that kept the claim (KEEP policy).  The claim has
-    # the retention label so it's protected.  We preserve the original labels
-    # (including LABEL_ATTEMPT) and just add LABEL_RETAIN.
-    claim_obj = api.objects[("persistentvolumeclaims", "ws-01attempt0000000000000000a")]
-    existing_labels = claim_obj.body.setdefault("metadata", {}).setdefault("labels", {})
-    existing_labels[k8sspec.LABEL_RETAIN] = "keep"
-
-    # The claim stays because it has the retention label (sweep skips it).
-    # We also pass the attempt in `keep` so non-PVC objects stay.
-    removed = await provider.retention([ATTEMPT], orphan=[])
-    assert removed == 0
-    assert api.object_names("persistentvolumeclaims") == ["ws-01attempt0000000000000000a"]
-
-
-# ---------------------------------------------------------------------------
-# AC3: running attempts and kept claims are never deleted
-# ---------------------------------------------------------------------------
-
-
-async def test_delete_workspace_claim_deletes_claim_regardless() -> None:
-    """AC3: delete_workspace_claim unconditionally deletes the claim.
-    The supervisor's pre-launch cleanup path guards the call with a
-    started_at check; this test verifies the provider method itself
-    just deletes."""
-    api, _registry, provider = build()
-    launch = spec(attempt_id=ATTEMPT)
-    _workspace = await provider.prepare(launch)
-    _handle = await provider.launch(_workspace, launch)
-
-    # The claim exists.
-    assert api.object_names("persistentvolumeclaims") == ["ws-01attempt0000000000000000a"]
-
-    # In normal operation delete_workspace_claim is only called by the
-    # pre-launch cleanup path, but the method itself is unconditional.
-    # We verify it deletes the claim (the supervisor guards the call with
-    # a started_at check).
-    await provider.delete_workspace_claim(ATTEMPT)
-    assert api.object_names("persistentvolumeclaims") == []
-
-    # The claim is gone but the provider still tracks the launched attempt.
-    assert ATTEMPT in provider._launched
+    assert sorted(api.object_names("persistentvolumeclaims")) == sorted(
+        claim(attempt_id) for attempt_id in (RUNNING, KEPT, RESUME)
+    )
+    resume_labels = api.objects[("persistentvolumeclaims", claim(RESUME))].body["metadata"][
+        "labels"
+    ]
+    assert resume_labels[k8sspec.LABEL_RETAIN] == CleanupPolicy.KEEP.value
+    assert not [name for kind, name in api.deleted if kind == "persistentvolumeclaims"]
 
 
-async def test_retention_sweep_deletes_orphan_pods_and_jobs() -> None:
-    """The retention sweep also removes pods and jobs for orphan attempts."""
-    api, _registry, provider = build()
-    launch = spec(attempt_id=ATTEMPT)
-    _workspace = await provider.prepare(launch)
-
-    # The prepare creates the PVC and a credential configmap.  The retention
-    # sweep (labelled for LABEL_ATTEMPT) also removes those non-PVC objects
-    # when the attempt is orphan (kept empty).
-    assert api.object_names("persistentvolumeclaims")  # PVC exists
-
-    # Run retention with an empty keep list but the attempt in the orphan set:
-    # the PVC is removed; non-PVC objects (configmaps/secrets) also vanish
-    # because they share LABEL_ATTEMPT and are not in ``keep``.
-    _removed = await provider.retention([], orphan=[ATTEMPT])
-    assert api.object_names("persistentvolumeclaims") == []
+def workspace(attempt_id: str) -> Workspace:
+    return Workspace(
+        attempt_id=attempt_id,
+        checkout_path="k8s://ws/repo",
+        identity_path="k8s://ws/identity",
+        report_path="k8s://ws/report",
+    )
 
 
-# ---------------------------------------------------------------------------
-# Policy preservation: keep_diff_only still produces a retention label
-# ---------------------------------------------------------------------------
+def _spec_returning(value: Any) -> Any:
+    async def _spec_for(_attempt: Attempt) -> Any:
+        return value
 
-
-async def test_cleanup_policy_keep_diff_only_produces_retention_label() -> None:
-    """A cleanup with KEEP diff only still produces the retention label so
-    the claim survives the retention sweep."""
-    api, _registry, provider = build()
-    launch = spec(attempt_id=ATTEMPT)
-    _workspace = await provider.prepare(launch)
-
-    # Run a keep_diff_only cleanup (this produces the retention label).
-    await provider.cleanup(_workspace, CleanupPolicy.KEEP_DIFF_ONLY, launch)
-
-    claim_obj = api.objects[("persistentvolumeclaims", "ws-01attempt0000000000000000a")]
-    labels = claim_obj.body.get("metadata", {}).get("labels", {})
-    assert k8sspec.LABEL_RETAIN in labels
-
-    # Retention sweep: the PVC has LABEL_RETAIN so it's spared.  Non-PVC
-    # objects (configmaps, secrets) that share LABEL_ATTEMPT are still
-    # removed because the attempt is not in ``keep``.  We expect the count
-    # to match those non-PVC deletions, not the PVC.
-    _removed = await provider.retention([], orphan=[])
-    # PVC stays because it has the retention label.
-    assert api.object_names("persistentvolumeclaims") == ["ws-01attempt0000000000000000a"]
+    return _spec_for
