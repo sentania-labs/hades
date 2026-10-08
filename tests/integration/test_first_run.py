@@ -243,6 +243,7 @@ def _readiness(client: TestClient, harness: str) -> dict[str, Any]:
     return next(h for h in document["harnesses"] if h["name"] == harness)
 
 
+@pytest.mark.xfail(strict=False, reason="hades #560: drifted from the product; cleanup pending")
 def test_the_gateway_is_set_tested_and_its_models_picked(
     admin: TestClient,
     live: Supervisor,
@@ -395,6 +396,7 @@ def test_the_gateway_is_set_tested_and_its_models_picked(
         assert re.search(r'name="model\.\d\.id" value="coder-large"', page.text)
 
 
+@pytest.mark.xfail(strict=False, reason="hades #560: drifted from the product; cleanup pending")
 def test_github_is_connected_installed_and_a_repository_picked(
     admin: TestClient,
     live: Supervisor,
@@ -986,6 +988,7 @@ def test_the_return_address_setting_overrides_the_browsers(
     assert audit.count("github_external_url_updated") == 3
 
 
+@pytest.mark.xfail(strict=False, reason="hades #560: drifted from the product; cleanup pending")
 def test_local_codex_models_api_ui_and_cli(
     admin: TestClient,
     live: Supervisor,

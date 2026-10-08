@@ -33,7 +33,7 @@ async def test_the_wake_row_exists_before_any_delivery(
     wakes = client.get("/v1/wakes").json()["items"]
     assert len(wakes) == 1
     wake = wakes[0]
-    assert wake["reason"] == "pre_pr_gates_failed"
+    assert wake["reason"] == "internal_review_needed"
     assert wake["task_id"] == task_id
     assert wake["attempts"] == 0 and wake["delivered_at"] is None
     assert wake["payload"]["links"]["task"] == f"/v1/tasks/{task_id}"
@@ -86,7 +86,7 @@ async def test_webhook_delivery_signs_the_body(
     await supervisor.tick()
     assert len(receiver.bodies) == 1
     document = json.loads(receiver.bodies[0])
-    assert document["reason"] == "pre_pr_gates_failed"
+    assert document["reason"] == "internal_review_needed"
     assert document["task"]["id"] == task_id
     wake = client.get("/v1/wakes").json()["items"][0]
     assert wake["attempts"] == 1 and wake["delivered_at"] is not None

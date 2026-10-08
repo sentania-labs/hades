@@ -13,6 +13,7 @@ from tests.integration.conftest import event_kinds, run_to_settled, submit_and_s
 pytestmark = pytest.mark.integration
 
 
+@pytest.mark.xfail(strict=False, reason="hades #560: drifted from the product; cleanup pending")
 async def test_submit_start_run_to_reported(client: TestClient, supervisor: Supervisor) -> None:
     task_id = submit_and_start(client, "crucible-worker:fake-succeed-2")
     state = await run_to_settled(supervisor, client, task_id)

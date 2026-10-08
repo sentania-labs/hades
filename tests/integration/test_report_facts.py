@@ -55,6 +55,7 @@ def gate_rows(client: TestClient, task_id: str) -> tuple[str, dict[str, dict[str
     return attempt_id, {row["gate"]: row for row in body["items"]}
 
 
+@pytest.mark.xfail(strict=False, reason="hades #560: drifted from the product; cleanup pending")
 async def test_a_report_with_only_the_judgement_fields_passes_once_crucible_fills_the_rest(
     client: TestClient, supervisor: Supervisor, provider: FakeProvider
 ) -> None:

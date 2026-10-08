@@ -395,9 +395,11 @@ def test_downgrade_generates_unique_ids_and_keeps_endpoint_aliases() -> None:
     legacy = m51._legacy(document)
     ids = [entry["id"] for entry in legacy["models"]]
     assert len(ids) == len(set(ids))
-    assert [entry["model_name"] for entry in legacy["models"]] == [
+    assert [entry.get("model_name", entry["id"]) for entry in legacy["models"]] == [
         entry["model"] for entry in entries
     ]
+    # model_name is written only where it differs from the id, as the legacy shape had it.
+    assert all(entry.get("model_name") != entry["id"] for entry in legacy["models"])
     assert all("model" not in entry and "vanished_at" not in entry for entry in legacy["models"])
     restored = m51._current(legacy)
     assert [(e["harness"], e["model"]) for e in restored["models"]] == [

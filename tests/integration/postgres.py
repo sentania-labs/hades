@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import os
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -62,12 +63,17 @@ def pytest_configure(config: pytest.Config) -> None:
     import docker as _docker  # type: ignore[import-untyped]  # noqa: PLC0415
     from testcontainers.postgres import PostgresContainer  # noqa: PLC0415
 
+    client = None
     try:
-        with _docker.from_env() as client:
-            client.ping()
+        client = _docker.from_env()
+        client.ping()
     except Exception:
         # Preserve the tier's skip when Docker is unavailable.
         return
+    finally:
+        if client is not None:
+            with suppress(Exception):
+                client.close()
 
     pg = PostgresContainer(POSTGRES_IMAGE, driver="psycopg")
     # Register before startup so partial startup failures also get cleaned up.

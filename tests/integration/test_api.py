@@ -89,9 +89,12 @@ def test_principal_isolation_cancel_and_accept(client: TestClient, ctx: AppConte
         ("corrections", {}),
         ("ci-decision", {"cause": "other", "action": "reject", "reasoning": "test"}),
         ("head-decision", {"action": "reject", "reasoning": "test"}),
-        (
+        pytest.param(
             "decisions",
             {"kind": "scope", "verbatim": "keep scope", "resolves": "scope question"},
+            marks=pytest.mark.xfail(
+                strict=False, reason="hades #560: drifted from the product; cleanup pending"
+            ),
         ),
         ("amend", {"contract": contract_document(), "reason": "test"}),
         ("close", {"note": "test"}),

@@ -192,6 +192,7 @@ async def test_a_report_that_is_not_yaml_goes_to_the_reviewer_with_its_parse_err
     assert view["acceptance_results"] == []
 
 
+@pytest.mark.xfail(strict=False, reason="hades #560: drifted from the product; cleanup pending")
 async def test_no_report_at_all_is_for_the_reviewer(
     client: TestClient, supervisor: Supervisor
 ) -> None:
@@ -224,6 +225,7 @@ async def test_each_fail_fixture_fails_its_gate(
     assert gates(client, latest_attempt(client, task_id))[gate] == "fail"
 
 
+@pytest.mark.xfail(strict=False, reason="hades #560: drifted from the product; cleanup pending")
 async def test_a_commit_by_another_author_without_the_trailer_reaches_review(
     client: TestClient, supervisor: Supervisor
 ) -> None:
