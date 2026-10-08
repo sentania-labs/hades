@@ -123,14 +123,16 @@ def test_the_self_hosting_policy_is_default_software_with_the_worker_checks() ->
     document = yaml.safe_load(SELF_HOSTING.read_text())
     policy = parse_policy(document)
     document = _without_advisory(document)
-    assert (policy.name, policy.version) == ("hades-self-hosting", 1)
+    # Version 2 since hades #475: a referenced version is immutable, and the gate is new.
+    assert (policy.name, policy.version) == ("hades-self-hosting", 2)
     assert policy.repository.required_checks == ["make lint", "make test-unit", "make scan"]
     assert {"uv", "python3.12", "gitleaks"} <= set(policy.repository.required_programs)
     assert {"pypi.org", "files.pythonhosted.org"} <= set(policy.network.egress_allowlist)
     assert "branch CI" in policy.description and "2026-09-28" in policy.description
     assert policy.ci_certification.require_green_on_final_sha
+    assert "image_checks_required" in document["gates"]["pre_pr"]
     seed = seeded_policy_v3()
-    ignored = {"name", "version", "description", "repository", "network", "routing"}
+    ignored = {"name", "version", "description", "repository", "network", "routing", "gates"}
     assert {k: v for k, v in document.items() if k not in ignored} == {
         k: v for k, v in seed.items() if k not in ignored
     }

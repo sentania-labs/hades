@@ -11,6 +11,7 @@ from crucible.domain.gates import (
     COLLECTOR_MARKER,
     DEFERRED_TO_C3,
     ENFORCED_PRE_PR_GATES,
+    OPTIONAL_PRE_PR_GATES,
     PRE_PR_EVALUATORS,
     PRE_PR_GATES,
     EvidenceItem,
@@ -125,7 +126,9 @@ def _gi(evidence: list[EvidenceItem], **kw: Any) -> GateInput:
 
 
 def test_every_pre_pr_gate_has_an_evaluator() -> None:
-    assert set(PRE_PR_EVALUATORS) == set(PRE_PR_GATES) | set(ENFORCED_PRE_PR_GATES)
+    assert set(PRE_PR_EVALUATORS) == (
+        set(PRE_PR_GATES) | set(ENFORCED_PRE_PR_GATES) | set(OPTIONAL_PRE_PR_GATES)
+    )
 
 
 def test_all_pass_on_a_clean_run() -> None:

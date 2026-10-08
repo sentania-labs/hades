@@ -115,12 +115,13 @@ def _pod_specs(objects: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]
 def test_every_object_is_namespaced_to_crucible_or_is_a_namespace(
     rendered: dict[str, list[dict[str, Any]]], target: str
 ) -> None:
-    """Nothing lands outside the two namespaces C9 owns.
+    """Nothing lands outside the namespaces C9 owns: the two of 26 and, since hades
+    #475, `crucible-buildkit` for Hades's own rootless BuildKit.
 
     The Argo Application is the exception and lives in `argocd`, because an Application
     object belongs to the GitOps controller's namespace by definition.
     """
-    allowed = {"crucible", "crucible-workers"}
+    allowed = {"crucible", "crucible-workers", "crucible-buildkit"}
     for obj in rendered[target]:
         kind = obj["kind"]
         if kind in {"Namespace", "Application"}:
@@ -363,6 +364,13 @@ def _containers(spec: dict[str, Any]) -> list[dict[str, Any]]:
     return list(spec.get("initContainers") or []) + list(spec.get("containers") or [])
 
 
+# The one Pod outside the `restricted` profile: Hades's rootless BuildKit (hades #475).
+# Its documented shape (seccomp and AppArmor unconfined, setuid newuidmap for the subuid
+# range) is what its own namespace admits at `privileged`; the test below asserts that
+# shape and that nothing else in the base shares it.
+ROOTLESS_BUILDKIT = "Deployment/crucible-buildkit"
+
+
 def test_no_pod_is_privileged_or_shares_a_host_namespace(
     rendered: dict[str, list[dict[str, Any]]],
 ) -> None:
@@ -374,10 +382,86 @@ def test_no_pod_is_privileged_or_shares_a_host_namespace(
             for container in _containers(spec):
                 security = container.get("securityContext") or {}
                 assert security.get("privileged") in (None, False), where
+                assert not security.get("capabilities", {}).get("add"), where
+                if where == ROOTLESS_BUILDKIT:
+                    continue
                 assert security.get("allowPrivilegeEscalation") is False, where
                 assert security.get("readOnlyRootFilesystem") is True, where
                 assert security.get("capabilities", {}).get("drop") == ["ALL"], where
-                assert not security.get("capabilities", {}).get("add"), where
+
+
+def test_the_buildkit_namespace_admits_only_the_documented_rootless_shape(
+    rendered: dict[str, list[dict[str, Any]]],
+) -> None:
+    """hades #475: rootless BuildKit's documented Pod (seccomp and AppArmor unconfined)
+    is outside Baseline, so it lives alone in `crucible-buildkit` at `privileged`, with
+    `crucible` still `restricted`; its NetworkPolicy admits the workers namespace on
+    1234 and nothing else; and no other Pod anywhere is unconfined."""
+    pins = dict(
+        line.split("=", 1)
+        for line in (ROOT / "images" / "pins.env").read_text().splitlines()
+        if line and not line.startswith("#")
+    )
+    for target in ("base", "overlays/lab", "overlays/kind"):
+        objects = rendered[target]
+        labels = _named(objects, "Namespace", "crucible-buildkit")["metadata"]["labels"]
+        assert labels.get("pod-security.kubernetes.io/enforce") == "privileged", target
+        assert labels.get("pod-security.kubernetes.io/warn") == "baseline", target
+        assert labels.get("pod-security.kubernetes.io/audit") == "baseline", target
+        control = _named(objects, "Namespace", "crucible")["metadata"]["labels"]
+        for label, value in PSA_LABELS.items():
+            assert control.get(label) == value, f"{target}: crucible {label}"
+
+        deployment = _named(objects, "Deployment", "crucible-buildkit")
+        assert deployment["metadata"]["namespace"] == "crucible-buildkit", target
+        spec = deployment["spec"]["template"]["spec"]
+        assert spec["securityContext"]["seccompProfile"] == {"type": "Unconfined"}, target
+        assert spec["securityContext"]["runAsUser"] == 1000, target
+        (container,) = _containers(spec)
+        assert container["image"] == pins["BUILDKIT_ROOTLESS_IMAGE"], target
+        assert "-rootless" in container["image"], target
+        security = container["securityContext"]
+        assert security["privileged"] is False, target
+        assert security["appArmorProfile"] == {"type": "Unconfined"}, target
+        assert "--oci-worker-no-process-sandbox" in container["args"], target
+        assert "privileged" not in deployment["spec"]["template"]["spec"], target
+        for where, other in _pod_specs(objects):
+            if where == ROOTLESS_BUILDKIT:
+                continue
+            assert (other.get("securityContext") or {}).get("seccompProfile", {}).get(
+                "type"
+            ) != "Unconfined", f"{target}: {where}"
+            for c in _containers(other):
+                profile = (c.get("securityContext") or {}).get("appArmorProfile") or {}
+                assert profile.get("type") != "Unconfined", f"{target}: {where}"
+
+        policies = [
+            p
+            for p in _of_kind(objects, "NetworkPolicy")
+            if p["metadata"]["namespace"] == "crucible-buildkit"
+        ]
+        assert len(policies) == 1, f"{target}: {len(policies)} NetworkPolicy objects"
+        policy = policies[0]["spec"]
+        assert policy["podSelector"] == {
+            "matchLabels": {"app.kubernetes.io/name": "crucible-buildkit"}
+        }, target
+        assert policy["policyTypes"] == ["Ingress"], target
+        (rule,) = policy["ingress"]
+        assert rule["from"] == [
+            {
+                "namespaceSelector": {
+                    "matchLabels": {"kubernetes.io/metadata.name": "crucible-workers"}
+                }
+            }
+        ], target
+        assert rule["ports"] == [{"protocol": "TCP", "port": 1234}], target
+
+        service = _named(objects, "Service", "crucible-buildkit")
+        assert service["metadata"]["namespace"] == "crucible-buildkit", target
+        assert service["spec"]["selector"] == {"app.kubernetes.io/name": "crucible-buildkit"}
+        assert [p["port"] for p in service["spec"]["ports"]] == [1234], target
+        claim = _named(objects, "PersistentVolumeClaim", "crucible-buildkit-cache")
+        assert claim["metadata"]["namespace"] == "crucible-buildkit", target
 
 
 def test_api_and_supervisor_pods_set_fsgroup_change_policy_on_root_mismatch(

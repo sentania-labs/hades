@@ -43,7 +43,18 @@ def test_shipped_policies_include_the_seed_and_every_example() -> None:
         assert str(path.relative_to(REPOSITORY)) in labels
 
 
-SELF_HOSTING_PROGRAMS = {"git", "uv", "python3.12", "gitleaks", "bash", "jq", "tar", "sha256sum"}
+SELF_HOSTING_PROGRAMS = {
+    "git",
+    "uv",
+    "python3.12",
+    "gitleaks",
+    "bash",
+    "jq",
+    "tar",
+    "sha256sum",
+    "buildctl",
+    "crane",
+}
 
 
 def test_the_shipped_policies_require_make() -> None:

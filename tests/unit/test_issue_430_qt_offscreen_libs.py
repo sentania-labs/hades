@@ -90,7 +90,9 @@ def test_build_sh_requires_and_passes_each_pin() -> None:
     build = BUILD_SH.read_text(encoding="utf-8")
     for key in PACKAGES:
         assert f'"${{{key}:?}}"' in build, f"build.sh does not require {key} from pins.env"
-        assert f'--build-arg "{key}=${key}"' in build, f"build.sh does not pass {key}"
+        # hades #475: one `arg_names` list feeds both builders' --build-arg flags.
+        passed = build.split("arg_names=(", 1)[1].split(")", 1)[0].split()
+        assert key in passed, f"build.sh does not pass {key}"
 
 
 def test_spec_13_lists_every_package_and_the_check() -> None:

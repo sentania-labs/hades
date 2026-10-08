@@ -7,7 +7,7 @@
 # overlay's own kustomization resolves `../../base` and `../../secret-shapes/sealed` as
 # relative paths.
 #
-# Automated sync is off on purpose. The first sync creates two namespaces, a database,
+# Automated sync is off on purpose. The first sync creates three namespaces, a database,
 # RBAC and the Secret objects, and the SealedSecret placeholders in the overlay are not
 # real ciphertext until lab-admin seals them. A person looking at the diff before the
 # first apply is the control that catches a placeholder that was missed; turning
@@ -37,7 +37,7 @@ spec:
   syncPolicy:
     # No `automated:` block: sync is manual until lab-admin decides otherwise.
     syncOptions:
-      # The two namespaces are resources of the base, with their Pod Security admission
+      # The namespaces are resources of the base, with their Pod Security admission
       # labels and their default deny. Argo must not create a bare one ahead of them.
       - CreateNamespace=false
       - PrunePropagationPolicy=foreground

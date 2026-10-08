@@ -5,10 +5,14 @@ examples/policies/hades-self-hosting.yaml, on the Kubernetes provider with the c
 worker image images/manifest.env pins and the real per-worker NetworkPolicy (Calico,
 no broad egress). The model is a stub Pod in its own namespace, reached the way the
 lab's gateway is (an in-cluster endpoint selector); it has Hermes run one scripted
-command that appends a line to docs/roadmap.md, commits it and writes the report. The
-verifier then runs `make lint`, `make test-unit` and `make scan` from the collected
-tree, fetching the locked dependencies from PyPI through the policy's allowlist, and
-the task has to get past `verification_ran` with all three passing.
+command that first runs `make images-check` and `make registry-check` (hades #475: the
+worker builds both images through Hades's own rootless BuildKit, which
+deploy/kind/workers.yaml starts in `crucible-buildkit`, and resolves the published
+worker image on GHCR through its per-attempt policy), then appends a line to
+docs/roadmap.md, commits it and writes the report. The verifier then runs `make lint`,
+`make test-unit`, `make scan` and the two image checks again from the collected tree,
+fetching the locked dependencies from PyPI through the policy's allowlist, and the
+task has to get past `verification_ran` with all five passing.
 
 `make e2e-kind-self-hosting` runs it (tools/kind/e2e-kind.sh with
 CRUCIBLE_E2E_KIND_WORKER_IMAGE). Local only: it needs the network and a committed HEAD.
@@ -63,7 +67,13 @@ MODEL_NAMESPACE = "crucible-kind-model"
 MODEL_PORT = 8765
 MODEL_LABELS = {"app": "stub-model"}
 ENDPOINT = f"http://stub-model.{MODEL_NAMESPACE}.svc.cluster.local:{MODEL_PORT}/v1"
-CHECKS = ("make lint", "make test-unit", "make scan")
+CHECKS = (
+    "make lint",
+    "make test-unit",
+    "make scan",
+    "make images-check",
+    "make registry-check",
+)
 SETTLED = {
     "accepted",
     "pre_pr_gates_failed",
@@ -78,6 +88,10 @@ SETTLED = {
 # fills the facts, section 7 of the identity bundle).
 CHANGE = r"""set -eu
 cd /crucible/repo
+# Issue 475: the worker itself reaches Hades's rootless BuildKit and GHCR through its
+# per-attempt policy. The verifier repeats these required checks from the collected tree.
+make images-check
+make registry-check
 printf '\n%s\n' 'A worker in the combined image wrote this for the hades 184 kind proof.' \
   >> docs/roadmap.md
 git add docs/roadmap.md
@@ -132,6 +146,32 @@ def database() -> Iterator[str]:
         url = pg.get_connection_url()
         migrate.upgrade(url)
         yield url
+
+
+BUILDKIT_NAMESPACE = "crucible-buildkit"
+
+
+@pytest.fixture(scope="module")
+def buildkit() -> None:
+    """Hades's own BuildKit, which deploy/kind/workers.yaml starts (hades #475): ready
+    before the task is submitted, so the worker's `make images-check` finds a daemon
+    and not a Pod still pulling its image."""
+    _kubectl(
+        "-n",
+        BUILDKIT_NAMESPACE,
+        "rollout",
+        "status",
+        "deployment/crucible-buildkit",
+        "--timeout=600s",
+    )
+    pods = json.loads(_kubectl("-n", BUILDKIT_NAMESPACE, "get", "pods", "-o", "json"))["items"]
+    ready = [
+        pod["metadata"]["name"]
+        for pod in pods
+        if all(c.get("ready") for c in pod["status"].get("containerStatuses", []))
+    ]
+    print(f"hades-475: BuildKit ready in {BUILDKIT_NAMESPACE}: {ready}")
+    assert ready
 
 
 @pytest.fixture(scope="module")
@@ -303,12 +343,12 @@ def _upload(admin: TestClient, ctx: AppContext) -> None:
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
     document["routing"] = {"policy": usage["routing_policy"]}
     document["images"]["allowlist"] = [*document["images"]["allowlist"], "localhost:*/*"]
-    response = admin.put("/v1/policies/hades-self-hosting/1", json=document)
+    response = admin.put("/v1/policies/hades-self-hosting/2", json=document)
     assert response.status_code == 200, response.text
 
 
 async def test_hades_184_a_hermes_task_passes_the_repositorys_own_checks_in_the_verifier(
-    database: str, stub_model: None
+    database: str, stub_model: None, buildkit: None
 ) -> None:
     image = os.environ["CRUCIBLE_E2E_KIND_WORKER_REGISTRY"]
     client = _recording_client()
@@ -377,7 +417,7 @@ async def test_hades_184_a_hermes_task_passes_the_repositorys_own_checks_in_the_
     document["required_verification"] = [
         {"id": f"V{i}", "command": check, "expect_exit": 0} for i, check in enumerate(CHECKS, 1)
     ]
-    document["policy"] = {"name": "hades-self-hosting", "version": 1}
+    document["policy"] = {"name": "hades-self-hosting", "version": 2}
     document["execution_request"].update({"provider": "kubernetes", "timeout_seconds": 900})
 
     supervisor = Supervisor(
@@ -396,7 +436,7 @@ async def test_hades_184_a_hermes_task_passes_the_repositorys_own_checks_in_the_
         task_id = str(response.json()["id"])
         response = operator.post(
             f"/v1/tasks/{task_id}/start",
-            json={"provider": "kubernetes", "policy_version": 1},
+            json={"provider": "kubernetes", "policy_version": 2},
         )
         assert response.status_code == 200, response.text
 
@@ -459,7 +499,24 @@ async def test_hades_184_a_hermes_task_passes_the_repositorys_own_checks_in_the_
     assert all(run["ran"] and run["exit_code"] == 0 for run in runs), runs
     assert all(isinstance(run["seconds"], int) for run in runs), runs
     assert {"pypi.org", "files.pythonhosted.org"} <= set(pinned)
+    # hades #475: the registry `make registry-check` resolves, with GHCR's redirect host.
+    assert {"ghcr.io", "pkg-containers.githubusercontent.com"} <= set(pinned)
     assert "github.com" not in pinned
+    buildkit_rules = [
+        rule
+        for policy in policies
+        for rule in policy["spec"]["egress"]
+        if any(
+            peer.get("namespaceSelector", {})
+            .get("matchLabels", {})
+            .get("kubernetes.io/metadata.name")
+            == BUILDKIT_NAMESPACE
+            for peer in rule.get("to", [])
+        )
+    ]
+    assert buildkit_rules and all(
+        rule["ports"] == [{"protocol": "TCP", "port": 1234}] for rule in buildkit_rules
+    )
     assert policies and all(
         rule.get("to")
         and all(

@@ -23,6 +23,7 @@ from crucible.domain.gates import (
     ALWAYS_BLOCKING_GATES,
     DEFAULT_ADVISORY_GATES,
     ENFORCED_PRE_PR_GATES,
+    OPTIONAL_PRE_PR_GATES,
     POST_PR_GATES,
     PRE_PR_GATES,
     PUBLICATION_GATES,
@@ -228,16 +229,19 @@ class Gates(StrictModel):
         enforced = sorted(set(listed) & (ENFORCED_PRE_PR_GATES - PRE_PR_GATES))
         if enforced:
             raise ValueError(f"{enforced} always run before review and are not listed in a policy")
-        unknown = sorted(set(listed) - ALL_GATES)
+        unknown = sorted(set(listed) - ALL_GATES - OPTIONAL_PRE_PR_GATES)
         if unknown:
             raise ValueError(f"unknown gates: {unknown}")
         if len(listed) != len(set(listed)):
             raise ValueError("a gate appears in more than one group")
+        # Issue 475 introduced this gate after immutable policy versions existed.
+        # An older version omitting it keeps its historical behavior; newly shipped
+        # policies list it explicitly.
         missing = sorted(ALL_GATES - set(listed))
         if missing:
             raise ValueError(f"gates in no group: {missing}")
         for group_name, group, expected in (
-            ("pre_pr", self.pre_pr, PRE_PR_GATES),
+            ("pre_pr", self.pre_pr, PRE_PR_GATES | OPTIONAL_PRE_PR_GATES),
             ("publication", self.publication, PUBLICATION_GATES),
             ("post_pr", self.post_pr, POST_PR_GATES),
         ):

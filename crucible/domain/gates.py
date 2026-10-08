@@ -46,6 +46,7 @@ class GateName(StrEnum):
     DEPENDENCIES_UNCHANGED = "dependencies_unchanged"
     CI_UNCHANGED = "ci_unchanged"
     WORKSPACE_CLEAN = "workspace_clean"
+    IMAGE_CHECKS_REQUIRED = "image_checks_required"
     INTERNAL_REVIEW_RECORDED = "internal_review_recorded"
     # pre-PR, evaluated whatever the policy lists (hades FDY-0135)
     COMMIT_POLICY = "commit_policy"
@@ -150,6 +151,9 @@ POST_PR_GATES: frozenset[str] = frozenset(
     }
 )
 ALL_GATES: frozenset[str] = PRE_PR_GATES | PUBLICATION_GATES | POST_PR_GATES
+# Added after immutable policy versions existed. New policies may opt into it; old
+# policies and contracts are not changed retroactively.
+OPTIONAL_PRE_PR_GATES: frozenset[str] = frozenset({GateName.IMAGE_CHECKS_REQUIRED})
 
 # C3 shipped the verifier container, so no pre-PR gate is deferred any more. The marker
 # stays so a reader of an older attempt's rows knows what `deferred` meant (11).
@@ -472,6 +476,30 @@ def scope_contained(gi: GateInput) -> GateOutcome:
         f"all {len(paths)} worker commit path(s) inside allowed_paths",
         (item.id, bundle.id),
     )
+
+
+_IMAGE_INPUTS = ("images/", "tools/images/", "tools/harness/")
+
+
+def image_checks_required(gi: GateInput) -> GateOutcome:
+    """Image build inputs require both reproducibility and registry checks."""
+    item = gi.one("diff_paths")
+    if item is None:
+        return _missing("diff_paths")
+    paths = [str(path) for path in item.payload.get("paths", [])]
+    touched = [path for path in paths if path.startswith(_IMAGE_INPUTS)]
+    if not touched:
+        return GateOutcome(GateResult.PASS, "no image build input changed", (item.id,))
+    commands = {str(check.get("command")) for check in gi.contract.get("required_verification", [])}
+    required = {"make images-check", "make registry-check"}
+    missing = sorted(required - commands)
+    if missing:
+        return GateOutcome(
+            GateResult.FAIL,
+            f"image changes require make images-check and make registry-check; missing: {missing}",
+            (item.id,),
+        )
+    return GateOutcome(GateResult.PASS, "image checks are required by the contract", (item.id,))
 
 
 def injected_name(path: str) -> bool:
@@ -1119,6 +1147,7 @@ PRE_PR_EVALUATORS: dict[str, Callable[[GateInput], GateOutcome]] = {
     GateName.EXIT_CLEAN: exit_clean,
     GateName.COMMITS_PRESENT: commits_present,
     GateName.SCOPE_CONTAINED: scope_contained,
+    GateName.IMAGE_CHECKS_REQUIRED: image_checks_required,
     GateName.NO_INJECTED_FILES: no_injected_files,
     GateName.NO_SECRETS: no_secrets,
     GateName.EDITOR_LEFTOVERS: editor_leftovers,

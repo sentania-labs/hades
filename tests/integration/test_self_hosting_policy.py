@@ -98,9 +98,9 @@ async def test_the_self_hosting_policy_routes_to_the_picked_hermes_model(
     assert usage["routing_policy"] == {"name": routing["name"], "version": routing["version"]}
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
     document["routing"] = {"policy": usage["routing_policy"]}
-    put = client.put("/v1/policies/hades-self-hosting/1", json=document, headers=_admin(tokens))
+    put = client.put("/v1/policies/hades-self-hosting/2", json=document, headers=_admin(tokens))
     assert put.status_code == 200, put.text
-    stored = client.get("/v1/policies/hades-self-hosting/1").json()["document"]
+    stored = client.get("/v1/policies/hades-self-hosting/2").json()["document"]
     assert stored["repository"]["required_checks"] == ["make lint", "make test-unit", "make scan"]
     assert "gitleaks" in stored["repository"]["required_programs"]
 
@@ -120,7 +120,7 @@ async def test_the_self_hosting_policy_routes_to_the_picked_hermes_model(
 
     contract = contract_document(external_id="HADES-184")
     contract["repository"]["work_branch"] = "crucible/HADES-184"
-    contract["policy"] = {"name": "hades-self-hosting", "version": 1}
+    contract["policy"] = {"name": "hades-self-hosting", "version": 2}
     contract["required_verification"] = [
         {"id": "V1", "command": "make lint", "expect_exit": 0},
         {"id": "V2", "command": "make test-unit", "expect_exit": 0},
@@ -141,7 +141,7 @@ async def test_the_self_hosting_policy_routes_to_the_picked_hermes_model(
     assert submitted.status_code == 201, submitted.text
     task_id = str(submitted.json()["id"])
     started = client.post(
-        f"/v1/tasks/{task_id}/start", json={"provider": "fake", "policy_version": 1}
+        f"/v1/tasks/{task_id}/start", json={"provider": "fake", "policy_version": 2}
     )
     assert started.status_code == 200, started.text
 

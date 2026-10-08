@@ -682,6 +682,8 @@ class EgressPlan:
     # a name resolves to is exactly what a translating CNI never matches.
     endpoint_selector: PeerSelector | None = None
     endpoint_ports: tuple[int, ...] = ()
+    buildkit_selector: PeerSelector | None = None
+    buildkit_port: int = 1234
     # Each allowlisted name with the addresses it resolved to when the policy was
     # written. The Pod is told these same addresses (`host_aliases`), so what it
     # connects to is what the policy permits even when the name's answer has since
@@ -690,7 +692,12 @@ class EgressPlan:
 
     @property
     def empty(self) -> bool:
-        return not self.hosts and not self.endpoints and self.endpoint_selector is None
+        return (
+            not self.hosts
+            and not self.endpoints
+            and self.endpoint_selector is None
+            and self.buildkit_selector is None
+        )
 
 
 _DNS_1123_SUBDOMAIN = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*")
@@ -839,6 +846,13 @@ def egress_policy(
             {
                 "to": [check_selector(plan.endpoint_selector, what="local endpoint").peer()],
                 "ports": [{"protocol": "TCP", "port": p} for p in plan.endpoint_ports],
+            }
+        )
+    if plan.buildkit_selector is not None:
+        rules.append(
+            {
+                "to": [check_selector(plan.buildkit_selector, what="BuildKit").peer()],
+                "ports": [{"protocol": "TCP", "port": plan.buildkit_port}],
             }
         )
     return {

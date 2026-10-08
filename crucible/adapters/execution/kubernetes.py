@@ -167,6 +167,31 @@ def _inside_declared_network(
 
 
 PROVIDER_NAME = "kubernetes"
+# Hades's own rootless BuildKit (hades #475): the namespace, pod labels and port that
+# deploy/kubernetes/base/buildkit creates, and the Service address a worker or a
+# verifier is told when its contract requires both image checks. The egress rule for
+# that attempt selects the Service's pods, and HTTPS to the hosts `make registry-check`
+# resolves: GHCR, which redirects config and blob reads to a second host (as
+# docs/deployment.md records for the control plane's own crane).
+BUILDKIT_NAMESPACE = "crucible-buildkit"
+BUILDKIT_POD_LABELS: Mapping[str, str] = {"app.kubernetes.io/name": "crucible-buildkit"}
+BUILDKIT_PORT = 1234
+BUILDKIT_HOST = f"tcp://crucible-buildkit.{BUILDKIT_NAMESPACE}.svc:{BUILDKIT_PORT}"
+IMAGE_CHECK_COMMANDS = frozenset({"make images-check", "make registry-check"})
+IMAGE_CHECK_HOSTS = ("ghcr.io", "pkg-containers.githubusercontent.com")
+
+
+def requires_image_checks(contract: Mapping[str, Any]) -> bool:
+    """Whether the contract names both image checks in `required_verification` (hades
+    #475). One without the other gets nothing: the gate that requires image changes to
+    list both is what decides, and the builder is never opened for a partial list."""
+    commands = {
+        str(check.get("command"))
+        for check in contract.get("required_verification", [])
+        if str(check.get("kind", "command")) == "command"
+    }
+    return commands >= IMAGE_CHECK_COMMANDS
+
 
 # A name to the addresses a NetworkPolicy may name.
 Resolver = Callable[[str], list[str]]
@@ -3818,6 +3843,8 @@ class KubernetesProvider:
             **spec.env,
             **launch_env,
         }
+        if requires_image_checks(spec.contract):
+            env["BUILDKIT_HOST"] = BUILDKIT_HOST
         mounts = [
             *k8sspec.base_mounts(),
             # 26's mount layout, with the paths the identity bundle names (06): the
@@ -4120,6 +4147,17 @@ class KubernetesProvider:
         hosts = tuple(h for h in wanted if ":" not in h)
         endpoints = tuple(h for h in wanted if ":" in h)
         plan = EgressPlan(hosts=hosts, endpoints=endpoints)
+        if role in (k8sspec.ROLE_WORKER, k8sspec.ROLE_VERIFIER) and requires_image_checks(
+            spec.contract
+        ):
+            # hades #475: the builder's pods and the registry (with its redirect host),
+            # for the two roles that run the repository's image checks and no other.
+            plan = replace(
+                plan,
+                hosts=tuple(dict.fromkeys((*plan.hosts, *IMAGE_CHECK_HOSTS))),
+                buildkit_selector=PeerSelector.of(BUILDKIT_NAMESPACE, BUILDKIT_POD_LABELS),
+                buildkit_port=BUILDKIT_PORT,
+            )
         if role == k8sspec.ROLE_WORKER:
             plan = self._local_endpoint_plan(plan, spec.endpoint_url)
         return plan
@@ -4925,7 +4963,12 @@ class KubernetesProvider:
             ],
             volumes=[self._claim_volume(spec.attempt_id)],
             limits=limits,
-            env=PACKAGE_CACHE_ENV,
+            env={
+                **PACKAGE_CACHE_ENV,
+                **(
+                    {"BUILDKIT_HOST": BUILDKIT_HOST} if requires_image_checks(spec.contract) else {}
+                ),
+            },
             timeout=self.config.verifier_timeout_seconds,
             plan=self._egress_plan(spec, k8sspec.ROLE_VERIFIER),
         )
