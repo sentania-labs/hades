@@ -65,20 +65,27 @@ jobs:
           fi
           echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
 
-      # hades #476 (the operator's design, 2026-10-06): find the release before this
-      # one, so the worker image build below can be skipped when nothing in
-      # images/manifest.env's WORKER tag has changed since then. Local git only: every
-      # vMAJOR.MINOR.PATCH tag is a release tag by this repository's own convention
-      # (CONTRIBUTING.md), fetched in full by the checkout above (`fetch-depth: 0`
-      # fetches every tag), so this needs no registry read and no new credential.
+      # hades #573 / #476: find the previous release, defined as the highest version
+      # below this one whose worker and script-harness images are both published.
+      # The previous tag's release may have failed (hades #570): that tag is a git
+      # release but has no published worker image, so re-pushing from it would fail.
+      # `tools/release/published_versions.py` queries the GHCR registry API for the
+      # worker package tags (anonymous, no credential, same pattern as the "move
+      # latest" step) and prints versions with both image tags; those feed into
+      # version.py --previous which picks the highest version below the candidate.
+      # The later `git show v<previous>:images/manifest.env` still works because every
+      # published version is also a git tag.  If the package has no published versions,
+      # the script prints nothing and the existing "no previous release" path runs.
       # `tools/release/version.py --previous` never answers with this release's own
       # version, even if this run is a re-run of a tag that is somehow already in the
       # list.
       - name: find the previous release
         id: previous
+        env:
+          WORKER_REGISTRY: "ghcr.io/sentania-labs/crucible-worker"
         run: |
           set -euo pipefail
-          PREV=$(git tag --list 'v*.*.*' | sed 's/^v//' \
+          PREV=$(python3 tools/release/published_versions.py --registry "$WORKER_REGISTRY" \
             | python3 tools/release/version.py --previous "$VERSION")
           echo "version=$PREV" >> "$GITHUB_OUTPUT"
           if [ -n "$PREV" ]; then
@@ -298,6 +305,8 @@ jobs:
       # already-published worker images are copied to this version's tags on the
       # registry, by digest, the same `docker buildx imagetools create` the "move
       # latest" step below uses to move `latest` without pushing from a local build.
+      # hades #573: the source has both published image tags, so a failed release's
+      # git tag or half-published worker cannot select a missing image for either copy.
       # The release notes name the reused image and digest (`make release-notes
       # WORKER_REUSED_FROM=`).
       - name: re-publish the previous release's worker images by digest
