@@ -204,7 +204,7 @@ async def test_an_amendment_to_a_disabled_model_is_refused(
     admin = {"Authorization": f"Bearer {tokens['admin']}"}
     routing = client.get("/v1/routing/default-routing/2").json()["document"]
     routing["version"] = 50
-    disabled = next(m for m in routing["models"] if m["id"] == "gemini-3.8-flash-low")
+    disabled = next(m for m in routing["models"] if m["model"] == "gemini-3.8-flash-low")
     disabled["enabled"] = False
     assert (
         client.put("/v1/routing/default-routing/50", json=routing, headers=admin).status_code == 200
