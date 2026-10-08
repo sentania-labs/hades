@@ -10,6 +10,9 @@ from sqlalchemy import Connection, inspect, text
 
 from crucible.adapters.harness.registry import default_registry
 from crucible.adapters.persistence import migrate
+from crucible.adapters.persistence.migrations.versions import (
+    _0051_routing_model_references as m51,
+)
 from crucible.adapters.persistence.unit_of_work import SqlUnitOfWorkFactory, make_engine
 from crucible.application.routing import load_routing
 from crucible.contracts.policy import RoutingPolicyV1
@@ -426,14 +429,15 @@ def test_0017_seeds_from_the_routing_in_force_not_an_unreferenced_draft(
     # 0017 mints one new version on top of the draft, then C11's 0019 mints another
     # beside it, so the in-force chain now runs two steps past the draft, not one.
     assert seeded_version == draft_version + 2
-    ids = [model["id"] for model in seeded["models"]]
+    # At head, 0051 has made each entry a (harness, model) reference.
+    ids = [model["model"] for model in seeded["models"]]
     assert "draft-only-experiment" not in ids
     assert [
         model
         for model in seeded["models"]
-        if model.get("harness") != "hermes" and model["id"] != "claude-opus-5-5"
-    ] == [model for model in routing["models"] if model.get("harness") != "hermes"]
-    assert kept_draft == draft
+        if model.get("harness") != "hermes" and model["model"] != "claude-opus-5-5"
+    ] == [model for model in m51._current(routing)["models"] if model.get("harness") != "hermes"]
+    assert kept_draft == m51._current(draft)
 
     migrate.downgrade(database_url, "0016_disposition_versions")
     # The draft this test inserted by hand is unreferenced, so no downgrade removes
@@ -515,7 +519,9 @@ def test_0017_extends_a_routing_policy_the_operator_named_differently(
     # 0017 extends lab-routing to version 2; C11's 0019 then extends it again to 3,
     # and that is what the in-force policy now names.
     assert seeded_policy["routing"] == {"policy": {"name": "lab-routing", "version": 3}}
-    assert [model["id"] for model in seeded["models"] if model["harness"] == "hermes"] == ["coder"]
+    assert [model["model"] for model in seeded["models"] if model["harness"] == "hermes"] == [
+        "coder"
+    ]
 
     migrate.downgrade(database_url, "0016_disposition_versions")
     engine = make_engine(database_url)
@@ -588,7 +594,10 @@ def test_0019_adds_opus_5_5_disabled_beside_the_frontier_entry(database_url: str
     ids = [model.id for model in routing.models]
     assert ids.index("claude-opus-5-5") == ids.index("claude-fable-5-1") + 1
     # Everything else is the routing version it was copied from, unchanged.
-    assert [m for m in document["models"] if m["id"] != "claude-opus-5-5"] == source["models"]
+    # At head, 0051 has made each entry a (harness, model) reference.
+    assert [m for m in document["models"] if m["model"] != "claude-opus-5-5"] == m51._current(
+        source
+    )["models"]
     migrate.downgrade(database_url, "0018_combined_worker_image")
     with engine.connect() as conn:
         assert _active(conn)[0] == before_policy and _active(conn)[2] == before_routing
@@ -678,7 +687,7 @@ def test_0019_downgrade_leaves_an_operator_copy_that_enabled_opus_alone(
         name = policy["routing"]["policy"]["name"]
         enabled = json.loads(json.dumps(routing))
         for model in enabled["models"]:
-            if model["id"] == "claude-opus-5-5":
+            if model["model"] == "claude-opus-5-5":
                 model["enabled"] = True
                 model.pop("disabled_reason", None)
         operator_routing = routing_version + 1
@@ -1617,9 +1626,9 @@ def test_each_0044_head_upgrades_through_the_0045_merge(
                 {"kind": kind},
             )
         migrate.upgrade(database_url)
-        # hades #393 put 0046_blocked_reason above the merge and hades #425 put
-        # 0047_attempt_egress_probe above that; the path still runs both.
-        assert migrate.current_revision(engine) == "0047_attempt_egress_probe"
+        # Later revisions (0046_blocked_reason, 0047_attempt_egress_probe, ...) sit above
+        # the merge; the path still runs them all, up to the one head.
+        assert migrate.current_revision(engine) == migrate.head_revision(database_url)
         ok, detail = migrate.is_current(engine, database_url)
         assert ok, detail
         with engine.begin() as conn:

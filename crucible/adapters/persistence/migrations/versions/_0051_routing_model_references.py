@@ -63,7 +63,10 @@ def _legacy(
     for entry in migrated.get("models", []):
         model = entry.pop("model")
         entry["id"] = ids[(entry["harness"], model)]
-        entry["model_name"] = model
+        # Legacy entries named model_name only when it differed from the id; writing it
+        # always would leave rows an earlier revision's downgrade no longer recognizes.
+        if entry["id"] != model:
+            entry["model_name"] = model
         entry.pop("vanished_at", None)
     return migrated
 
