@@ -2595,7 +2595,8 @@ class KubernetesProvider:
     async def cleanup(
         self, ws: Workspace, policy: CleanupPolicy, spec: LaunchSpec | None = None
     ) -> None:
-        """08, 26: only ever called for an attempt that recorded `logs_drained`.
+        """08, 26: only ever called for an attempt that recorded `logs_drained`, or
+        for one that ended before its worker launched (hades #394), under `delete`.
 
         Jobs and the NetworkPolicy go; the per-attempt Secret goes under every policy,
         `keep` included (12, 16); the claim is kept or deleted per policy, and a kept
