@@ -37,6 +37,7 @@ from crucible.application.admin.login import FLOWS, LoginSession, render_line
 from crucible.ports.execution import ProbeRequest, ProviderError
 from tests.login_captures import capture
 from tests.unit.kubernetes_fixtures import build, created, spec
+from tests.wait import async_wait_until, wait_until
 
 WORKER = "crucible-worker:20260916-login"
 ALL_HARNESSES = {
@@ -269,11 +270,11 @@ async def test_each_captured_login_reaches_its_state_through_the_pod_log() -> No
 
 
 async def wait_for_state(session: LoginSession, state: str) -> None:
-    for _ in range(400):
-        if session.state == state:
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"the session never reached {state}: {session.as_dict()}")
+    await async_wait_until(
+        lambda: session.state == state and session.as_dict(),
+        timeout=4,
+        describe=f"login session to reach {state}",
+    )
 
 
 async def test_a_pasted_code_goes_in_over_exec_stdin_and_never_in_an_argv() -> None:
@@ -361,7 +362,6 @@ async def test_cancel_deletes_the_job_and_leaves_the_secret_alone() -> None:
 
     async def cancel() -> None:
         await wait_for_state(session, "waiting_for_operator")
-        await asyncio.sleep(0.05)
         session.cancel_requested = True
 
     await run_login(provider, "codex", session, during=cancel)
@@ -426,12 +426,12 @@ async def test_a_probe_in_flight_is_seen_as_holding_the_credential() -> None:
     held: list[list[str]] = []
 
     async def watch() -> None:
-        for _ in range(400):
-            found = provider.probes_holding("codex")
-            if found:
-                held.append(found)
-                return
-            await asyncio.sleep(0.01)
+        found = await async_wait_until(
+            lambda: provider.probes_holding("codex"),
+            timeout=4,
+            describe="credential probe to hold the login lock",
+        )
+        held.append(found)
 
     request = dataclasses.replace(probe_request(), timeout_seconds=1)
     watcher = asyncio.create_task(watch())
@@ -604,10 +604,11 @@ async def test_the_supervisor_neither_sweeps_nor_adopts_a_probe_in_flight() -> N
             result["error"] = exc
 
     task = asyncio.create_task(probe())
-    for _ in range(400):
-        if [n for n in api.object_names("jobs") if n.startswith("worker-probe")]:
-            break
-        await asyncio.sleep(0.01)
+    await async_wait_until(
+        lambda: [n for n in api.object_names("jobs") if n.startswith("worker-probe")],
+        timeout=4,
+        describe="worker probe Job to be created",
+    )
     assert await other.retention([]) == 0
     assert await other.reconcile() == []
     assert [n for n in api.object_names("persistentvolumeclaims") if "probe" in n]
@@ -748,9 +749,10 @@ def test_the_driver_masks_the_token_and_the_pasted_code_and_reports_the_exit(
     reader = threading.Thread(target=pump, daemon=True)
     reader.start()
     try:
-        deadline = time.monotonic() + 20
         pasted = False
-        while time.monotonic() < deadline:
+
+        def login_finished() -> bool:
+            nonlocal pasted
             with lock:
                 seen = bytes(output)
             if not pasted and b"Paste code here" in seen:
@@ -761,9 +763,9 @@ def test_the_driver_masks_the_token_and_the_pasted_code_and_reports_the_exit(
                     check=True,
                 )
                 pasted = True
-            if b"crucible-login.exit=" in seen:
-                break
-            time.sleep(0.1)
+            return b"crucible-login.exit=" in seen
+
+        wait_until(login_finished, timeout=20, describe="Kubernetes login driver to exit")
     finally:
         process.kill()
         process.wait()

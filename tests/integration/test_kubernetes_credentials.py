@@ -48,6 +48,7 @@ from tests.fixtures import promote_for_test
 from tests.integration.conftest import put_seeded_policy_in_force
 from tests.integration.test_admin import ui_sign_in
 from tests.integration.test_harness_registry import _submit_pinned
+from tests.wait import wait_until
 
 pytestmark = pytest.mark.integration
 
@@ -149,12 +150,17 @@ def admin(
 
 
 def poll(client: TestClient, harness: str, *states: str) -> dict[str, Any]:
-    for _ in range(400):
+    def wanted_state() -> dict[str, Any]:
         state: dict[str, Any] = client.get(f"/v1/admin/credentials/{harness}/login").json()
         if state["state"] in states:
             return state
-        time.sleep(0.02)
-    raise AssertionError(f"the {harness} login never reached {states}: {state}")
+        return {}
+
+    return wait_until(
+        wanted_state,
+        timeout=8,
+        describe=f"{harness} login to reach one of {states}",
+    )
 
 
 def test_a_codex_login_fills_an_empty_namespace_and_the_probe_validates_it(
@@ -433,11 +439,18 @@ def test_a_second_replica_is_refused_while_the_lock_is_held_and_starts_after(
             admin_ctx, uow, other, principal="second-principal", harness="codex", reason="now"
         )
         uow.commit()
-    for _ in range(400):
+
+    def finished_session() -> Any:
         session = other.get("codex")
         if session is not None and session.state in ("finished", "failed"):
-            break
-        time.sleep(0.02)
+            return session
+        return None
+
+    session = wait_until(
+        finished_session,
+        timeout=8,
+        describe="the second process's codex login to finish",
+    )
     assert session is not None and session.state == "finished", session
     assert k8s_api.harness_secret("crucible-harness-codex") == {"auth.json": CODEX_AUTH}
     assert lock_names(k8s_api) == []
@@ -530,7 +543,7 @@ def test_a_cancelled_login_reads_failed_only_once_its_lock_is_gone(
     release = k8s_provider.release_login_lock
 
     def slow_release(lock: Any) -> None:
-        time.sleep(0.5)
+        threading.Event().wait(0.5)
         release(lock)
 
     monkeypatch.setattr(k8s_provider, "release_login_lock", slow_release)
@@ -700,7 +713,7 @@ def test_a_slow_secret_read_does_not_hold_the_status_handler(
         async def other_requests() -> None:
             nonlocal ticks
             while True:
-                await asyncio.sleep(0.02)
+                await asyncio.to_thread(threading.Event().wait, 0.02)
                 ticks += 1
 
         running = asyncio.create_task(other_requests())

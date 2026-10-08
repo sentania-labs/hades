@@ -253,7 +253,6 @@ async def test_the_tick_is_not_waiting_on_a_held_collection(
         await supervisor.tick()
         assert time.monotonic() - started < 3
     hold.set()
-    await asyncio.sleep(0)
     await supervisor.stop()
 
 

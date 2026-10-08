@@ -33,6 +33,7 @@ from crucible.application.admin.context import AdminContext, BackgroundRuns
 from crucible.cli import admin as cli_admin
 from crucible.client.envelope import ClientError
 from crucible.domain.entities import HarnessState, Principal, Role
+from tests.wait import wait_until
 
 NOW = datetime(2026, 10, 7, 14, 0, tzinfo=UTC)
 HARNESS = "codex"
@@ -97,8 +98,7 @@ def _gated_run(gate: threading.Event, calls: list[str]) -> Any:
         ctx: Any, uow: Any, steps: Any, *, principal: str, harness: str, reason: str
     ) -> None:
         calls.append(harness)
-        while not gate.is_set():
-            await asyncio.sleep(0.005)
+        wait_until(gate.is_set, timeout=2.0, describe="gate to open")
         for step in harness_test.STEPS:
             steps.passed(step, "stood in for")
 
@@ -108,9 +108,7 @@ def _gated_run(gate: threading.Event, calls: list[str]) -> Any:
 def _ran(calls: list[str], timeout: float = 2.0) -> list[str]:
     """The runs started so far, once the thread has had time to enter the first one: the
     start no longer waits for its thread, which may not have reached the steps yet."""
-    deadline = time.monotonic() + timeout
-    while not calls and time.monotonic() < deadline:
-        time.sleep(0.005)
+    wait_until(lambda: bool(calls), timeout=timeout, describe="harness run to start")
     return calls
 
 
@@ -599,8 +597,7 @@ def test_the_start_never_waits_for_its_thread(monkeypatch: pytest.MonkeyPatch) -
     ctx = _context(store)
 
     async def slow(ctx: Any, marker: Any, **_kwargs: Any) -> None:
-        while not gate.is_set():
-            await asyncio.sleep(0.005)
+        wait_until(gate.is_set, timeout=5.0, describe="gate to open")
 
     monkeypatch.setattr(harness_test, "_background", slow)
     before = time.monotonic()
