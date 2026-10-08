@@ -65,6 +65,7 @@ Immutable once submitted. A change is a new contract.
 | `changelog_satisfied` | when `changelog_required`: the changelog at `target_sha` has an entry for `version` |
 | `tag_absent` | the tag does not exist on the remote |
 | `evidence_present` | every included PR has its internal review, external review dispositions, and CI certification records |
+| `worker_image_policy` | the release workflow's policy check passes: the worker image carries every program a shipped policy's required check starts with or declares (`make images-policy-check`), verified between the build and the first push |
 
 Any failure moves the release to `gates_failed` and wakes Foundry. Nothing
 is pushed.
