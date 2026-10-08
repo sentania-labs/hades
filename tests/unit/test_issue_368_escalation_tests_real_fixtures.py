@@ -148,6 +148,14 @@ class _Wakes:
     def add(self, wake: Wake) -> None:
         self.rows.append(wake)
 
+    def list_for_task(self, task_id: str, *, reason: str, include_acked: bool = True) -> list[Wake]:
+        # hades #502: the repeat reads the task's earlier wakes for its cause.
+        return [
+            w
+            for w in self.rows
+            if w.task_id == task_id and w.reason == reason and (include_acked or w.acked_at is None)
+        ]
+
 
 class _Store:
     """One unit of work over rows kept in memory, in the #360 tests' style. Commit and

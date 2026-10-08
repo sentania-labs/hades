@@ -137,3 +137,30 @@ a copy for a fresh build; that note, like the reuse decision itself, only fires
 when both tags are unchanged. This does not change what a job tests, and it is
 not the per-harness promotion flow on Images; both are explicitly out of scope
 for #476. Proven directly at `tests/unit/test_issue_476_scoped_ci_classes.py`.
+
+## Retention of `ci-*` proof tags on GHCR
+
+Image listing stopped resolving `ci-*` proof tags (111), but nothing pruned the
+versions behind them, and they accumulate in the `crucible-worker` package's
+storage forever. A daily scheduled workflow
+(`.github/workflows/ghcr-ci-tag-retention.yml`) deletes them: `tools/registry/
+ci_tag_retention.py` lists the package's versions through the GitHub Packages
+API, selects the ones whose tags are all `ci-*` and whose `created_at` is older
+than N days, and deletes exactly those.
+
+Never selected, whatever its age: a version carrying any tag that is not `ci-*`
+(a release version or `latest`), an untagged version, or a version whose digest
+is named by a `*_DIGEST` line of `images/manifest.env` on `main` or appears in a
+GitHub release body for this repository (a release pins and republishes images
+by digest, above).
+
+`--dry-run` is the script's default: it prints every version it would delete
+and deletes nothing, until the caller passes `--execute`. The workflow calls it
+with `--execute` and the run's own token, scoped to `packages: write`, which is
+the narrowest permission the delete needs (`contents: read` to check out the
+script and `images/manifest.env`); the delete call itself logs the version it
+is about to remove before removing it, so the run's own log is the record of
+what it deleted.
+
+N=14 days. Decision: Foundry, on Scott's delegation of 2026-10-07 5:22 PM
+("You know the vision- choose answers that align to the vision") (140).

@@ -92,7 +92,7 @@ gates:
     - feedback_dispositions_complete
     - ci_green_for_head
   skipped: []                          # release gates live on the release contract (24)
-                                       # commit_policy is never listed: it always runs, always advisory (11)
+                                       # commit_policy and report_present are never listed: they always run, always advisory (11, hades #498)
   advisory:                            # ADR 0024: a failure of these goes to the internal reviewer instead of stopping the task
     - criteria_mapped                  # absent (every version written before 2026-09-29): this default set
     - report_present
