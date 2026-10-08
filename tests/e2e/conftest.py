@@ -122,6 +122,35 @@ def _squid_conf(directory: Path, subnet: str) -> Path:
     return path
 
 
+class NetworkDaemon(Protocol):
+    """The network operations the stack needs before it starts containers."""
+
+    def ensure_network(
+        self,
+        name: str,
+        *,
+        internal: bool,
+        subnet: str | None = None,
+        seed: str | None = None,
+        max_attempts: int = 5,
+    ) -> str: ...
+
+    def remove_network(self, name: str) -> None: ...
+
+
+def _create_stack_networks(network_daemon: NetworkDaemon) -> str:
+    """Create the stack networks, removing successful creates if a later one fails."""
+    created: list[str] = []
+    try:
+        network_daemon.ensure_network(NET_CONTROL, internal=False)
+        created.append(NET_CONTROL)
+        return network_daemon.ensure_network(NET_WORKERS, internal=True, seed=RUN_ID)
+    except Exception:
+        for name in reversed(created):
+            network_daemon.remove_network(name)
+        raise
+
+
 @pytest.fixture(scope="session")
 def artifact_root() -> Iterator[Path]:
     """The artifact root, shared between this process and the containers it creates.
@@ -169,10 +198,9 @@ def stack(artifact_root: Path) -> Iterator[dict[str, Any]]:
         "sockproxy": f"crucible-e2e-sockproxy-{RUN_ID}",
         "egress": f"crucible-e2e-egress-{RUN_ID}",
     }
-    daemon.ensure_network(NET_CONTROL, internal=False)
     # Issue 135: retry on subnet overlap; seed=RUN_ID, max 5 attempts.
     # Returns the actual subnet used (may differ from WORKERS_SUBNET if retry).
-    actual_workers_subnet = daemon.ensure_network(NET_WORKERS, internal=True, seed=RUN_ID)
+    actual_workers_subnet = _create_stack_networks(daemon)
     pg_port, proxy_port = daemon.free_port(), daemon.free_port()
     conf = _squid_conf(artifact_root, actual_workers_subnet)
     socket_path = os.environ.get("CRUCIBLE_E2E_DOCKER_SOCKET", "/var/run/docker.sock")

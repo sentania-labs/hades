@@ -20,6 +20,7 @@ from crucible.domain.refs import check_ref
 from crucible.ports.github import (
     CheckRecord,
     CommentRecord,
+    CommitDiffRecord,
     GitHubError,
     InstallationToken,
     MergeResult,
@@ -341,6 +342,30 @@ class RestGitHubClient:
         required = tuple(
             self.list_required_checks(token, repository=repository, branch=base_ref or pr.base_ref)
         )
+        # hades #443: fetch the observed head's commit metadata for digest-move detection.
+        head_commit_author = ""
+        head_commit_message = ""
+        head_commit_diff: tuple[CommitDiffRecord, ...] = ()
+        try:
+            _status, commit_payload, _ = self._http.request(
+                "GET",
+                f"/repos/{repository}/commits/{pr.head_sha}",
+                bearer=token.reveal(),
+            )
+            if isinstance(commit_payload, dict):
+                author = commit_payload.get("author", {})
+                if isinstance(author, dict):
+                    head_commit_author = str(author.get("login", ""))
+                if not head_commit_author:
+                    author_data = commit_payload.get("commit", {})
+                    if isinstance(author_data, dict):
+                        author_data = author_data.get("author", {})
+                        if isinstance(author_data, dict):
+                            head_commit_author = str(author_data.get("name", ""))
+                head_commit_message = str(commit_payload.get("commit", {}).get("message", ""))
+        except GitHubError:
+            # If we can't read the commit metadata, proceed without it.
+            pass
         return Observation(
             pull_request=pr,
             reviews=reviews,
@@ -354,6 +379,10 @@ class RestGitHubClient:
             observed_at=datetime.now(UTC),
             rate_limit_remaining=self._http.rate_limit_remaining,
             notes=tuple(notes),
+            # hades #443: populate commit metadata for digest-move detection.
+            head_commit_author=head_commit_author,
+            head_commit_message=head_commit_message,
+            head_commit_diff=head_commit_diff,
         )
 
     def issue_comments(
@@ -464,6 +493,40 @@ class RestGitHubClient:
         if status >= 400 or not isinstance(payload, bytes):
             return b""
         return payload[-max(1, limit_bytes) :]
+
+    def diff_commits(
+        self,
+        token: InstallationToken,
+        *,
+        repository: str,
+        base_sha: str,
+        head_sha: str,
+    ) -> tuple[CommitDiffRecord, ...]:
+        """The diff between two commits (hades #443).
+
+        Uses ``git log`` for a lightweight summary (author, message, files changed)
+        rather than ``git diff`` to avoid large bodies.
+        """
+        if base_sha == head_sha:
+            return ()
+        payload: dict[str, Any]
+        status, payload, _ = self._http.request(
+            "GET",
+            f"/repos/{repository}/compare/{base_sha}...{head_sha}",
+            bearer=token.reveal(),
+        )
+        if status != 200 or not isinstance(payload, dict):
+            return ()
+        files = payload.get("files", [])
+        return tuple(
+            CommitDiffRecord(
+                path=f["filename"] if isinstance(f, dict) and "filename" in f else "",
+                additions=f.get("additions", 0) if isinstance(f, dict) else 0,
+                deletions=f.get("deletions", 0) if isinstance(f, dict) else 0,
+            )
+            for f in files
+            if isinstance(f, dict)
+        )
 
     # ----- mutations ----------------------------------------------------
 
@@ -677,6 +740,7 @@ def _message(payload: Any) -> str:
 __all__ = [
     "CheckRecord",
     "CommentRecord",
+    "CommitDiffRecord",
     "RestGitHubClient",
     "ReviewRecord",
 ]

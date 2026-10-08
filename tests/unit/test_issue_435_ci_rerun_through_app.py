@@ -46,6 +46,7 @@ from crucible.domain.lifecycle import TaskState
 from crucible.ports.github import (
     CheckRecord,
     CommentRecord,
+    CommitDiffRecord,
     GitHubClient,
     GitHubError,
     InstallationToken,
@@ -146,6 +147,16 @@ class FakeGitHubClient(GitHubClient):
 
     def remote_head(self, token: InstallationToken, *, repository: str, ref: str) -> str | None:
         return None
+
+    def diff_commits(
+        self,
+        token: InstallationToken,
+        *,
+        repository: str,
+        base_sha: str,
+        head_sha: str,
+    ) -> tuple[CommitDiffRecord, ...]:
+        return ()
 
     def find_pull_request(
         self, token: InstallationToken, *, repository: str, head_branch: str

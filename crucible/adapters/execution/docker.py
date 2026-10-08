@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
 import hashlib
 import io
 import json
@@ -374,12 +375,16 @@ HarnessRefusedError = LaunchRefusedError
 @dataclass(frozen=True, slots=True)
 class _CredentialCopy:
     """What was seeded for one attempt: the spec, the source, the effective mode, and
-    the sha256 of each file as seeded (in memory only, never stored)."""
+    the sha256 of each file as seeded (in memory only, never stored).
+
+    `attempt_id` names the attempt the sync-back's temporary pathname is unique to
+    (hades #315): two attempts never write through the same name."""
 
     spec: CredentialSpec
     source: CredentialSource
     mode: MountMode
     seeded: dict[str, str | None]
+    attempt_id: str = ""
 
 
 class CollectionFailedError(ProviderError):
@@ -1163,6 +1168,7 @@ class DockerProvider:
             source=source,
             mode=mode,
             seeded={},
+            attempt_id=spec.attempt_id,
         )
 
     def _credential_mounts(self, spec: LaunchSpec) -> list[dict[str, Any]]:
@@ -1725,7 +1731,8 @@ class DockerProvider:
     async def cleanup(
         self, ws: Workspace, policy: CleanupPolicy, spec: LaunchSpec | None = None
     ) -> None:
-        """Only ever called for an attempt that recorded `logs_drained` (08)."""
+        """Only ever called for an attempt that recorded `logs_drained` (08), or for one
+        that ended before its worker launched (hades #394)."""
         for row in await self._containers_for(ws.attempt_id):
             await self._call(self.client.remove_container, str(row["Id"]), force=True)
         root = self._root(ws.attempt_id)
@@ -2351,9 +2358,26 @@ def _issued_at(document: Any, path: tuple[str, ...] | None) -> datetime | None:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
+def _issued_at_of(raw: bytes | None, path: tuple[str, ...] | None) -> datetime | None:
+    """`_issued_at` against a source file's raw bytes, or absent (hades #315)."""
+    if raw is None:
+        return None
+    document: Any = None
+    with contextlib.suppress(UnicodeDecodeError, ValueError):
+        document = json.loads(raw.decode("utf-8"))
+    return _issued_at(document, path)
+
+
 def _sync_one(copy: _CredentialCopy, auth: AuthFile, data: bytes) -> CredentialFileSync:
     """Decide one file's sync-back (12): changed against the source, valid JSON shape,
-    newer issued-at than the source, then an atomic replace, mode 600."""
+    newer issued-at than the source, then a compare-and-swap replace, mode 600.
+
+    Two attempts never share a temporary pathname (hades #315): this attempt's own id
+    is in the suffix. Immediately before the replace, under a lock shared by every
+    attempt syncing this source, the source is re-read and the newer-than check is
+    redone against it; a source that moved past the candidate this attempt started
+    from (another attempt already won the race, with a token as new or newer) is left
+    alone and the skip is recorded, never clobbered by an unconditional last write."""
     target = copy.spec.source_path(copy.source.path, auth.name)
     try:
         current = target.read_bytes()
@@ -2388,33 +2412,59 @@ def _sync_one(copy: _CredentialCopy, auth: AuthFile, data: bytes) -> CredentialF
         return CredentialFileSync(
             auth.name, True, True, True, False, "changed; the copy carries no issued-at"
         )
-    old_document: Any = None
-    if current is not None:
-        with contextlib.suppress(UnicodeDecodeError, ValueError):
-            old_document = json.loads(current.decode("utf-8"))
-    older = _issued_at(old_document, auth.issued_at)
+    older = _issued_at_of(current, auth.issued_at)
     if older is not None and newer <= older:
         return CredentialFileSync(
             auth.name, True, True, True, False, "changed; not newer than the source"
         )
-    temporary = target.with_name(target.name + ".crucible-sync")
+    lock_path = target.with_name(target.name + ".crucible-sync.lock")
     try:
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, target)
+        lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
     except OSError as exc:
-        with contextlib.suppress(OSError):
-            temporary.unlink()
         return CredentialFileSync(
-            auth.name, True, True, True, False, f"changed; write back failed: {type(exc).__name__}"
+            auth.name, True, True, True, False, f"changed; lock failed: {type(exc).__name__}"
         )
-    return CredentialFileSync(
-        auth.name, True, True, True, True, "changed; newer issued-at, written back"
-    )
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            live = target.read_bytes()
+        except OSError:
+            live = None
+        live_older = _issued_at_of(live, auth.issued_at)
+        if live_older is not None and newer <= live_older:
+            return CredentialFileSync(
+                auth.name,
+                True,
+                True,
+                True,
+                False,
+                "changed; source moved past the candidate, skipped",
+            )
+        temporary = target.with_name(f"{target.name}.crucible-sync.{copy.attempt_id}")
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, target)
+        except OSError as exc:
+            with contextlib.suppress(OSError):
+                temporary.unlink()
+            return CredentialFileSync(
+                auth.name,
+                True,
+                True,
+                True,
+                False,
+                f"changed; write back failed: {type(exc).__name__}",
+            )
+        return CredentialFileSync(
+            auth.name, True, True, True, True, "changed; newer issued-at, written back"
+        )
+    finally:
+        os.close(lock_fd)
 
 
 def _tails(frames: Sequence[LogFrame], limit: int) -> tuple[str, str]:

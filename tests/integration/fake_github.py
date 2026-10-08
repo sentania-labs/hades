@@ -72,6 +72,8 @@ class RepositoryState:
     check_runs: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     workflow_runs: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     required_checks: list[str] = field(default_factory=list)
+    # hades #443: commits on the work branch, keyed by SHA.
+    commits: dict[str, dict[str, Any]] = field(default_factory=dict)
     next_number: int = 1
     # Object ids never repeat, even after a delete: GitHub's do not either, and a reused
     # id would make a new reaction look like one Crucible had already recorded.
@@ -334,6 +336,41 @@ class FakeGitHub:
             pull.events.append(
                 {"event": "closed", "actor": {"login": by}, "created_at": pull.closed_at}
             )
+
+    # ----- hades #443: commit helpers for the fake -----------------------
+
+    def record_commit(
+        self,
+        full_name: str,
+        sha: str,
+        *,
+        author_login: str = "crucible",
+        message: str = "",
+        files: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Record a commit so the compare endpoint can answer diff requests."""
+        repo = self.repositories[full_name]
+        repo.commits[sha] = {
+            "sha": sha,
+            "author": {"login": author_login},
+            "commit": {"message": message},
+            "files": files or [],
+            "parents": [{"sha": repo.branches.get("main", "0" * 40)}],
+        }
+        # Make the commit on the default branch so remote_head returns it.
+        repo.branches["main"] = sha
+
+    def diff_commits(self, full_name: str, base_sha: str, head_sha: str) -> list[dict[str, Any]]:
+        """Return the compare diff between two commits (hades #443)."""
+        repo = self.repositories[full_name]
+        if base_sha == head_sha:
+            return []
+        head_commit = repo.commits.get(head_sha)
+        if head_commit is None:
+            return []
+        return head_commit.get("files", [])  # type: ignore[no-any-return]
+
+    # ----- hades #443: compare endpoint for the test server ---------------
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -680,6 +717,38 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if rest[:2] == ["rules", "branches"]:
             self._send(200, [])
+            return
+        # hades #443: /repos/{owner}/{repo}/compare/{base}...{head}
+        if rest[:1] == ["compare"] and len(rest) >= 3:
+            # Handle ... separator: rest[1] might be "base...head" or "base" with rest[2] as "head"
+            compare_ref = parts[-1]  # Everything after /repos/owner/repo/
+            if "..." in compare_ref:
+                base_sha, head_sha = compare_ref.split("...", 1)
+            else:
+                base_sha = rest[1] if len(rest) >= 2 else ""
+                head_sha = rest[2] if len(rest) >= 3 else ""
+            diff = self.state.diff_commits(full_name, base_sha, head_sha)
+            head_commit = repo.commits.get(head_sha, {})
+            base_commit_sha = ""
+            if head_commit.get("parents"):
+                base_commit_sha = head_commit["parents"][0].get("sha", "")
+            self._send(
+                200,
+                {
+                    "base_commit": {
+                        "sha": base_commit_sha,
+                        "author": {"login": "crucible-spike[bot]"},
+                        "commit": {"message": ""},
+                    },
+                    "head_commit": {
+                        "sha": head_sha,
+                        "author": head_commit.get("author", {"login": "crucible"}),
+                        "commit": {"message": head_commit.get("commit", {}).get("message", "")},
+                    },
+                    "files": diff,
+                    "total_commits": 1,
+                },
+            )
             return
         self._send(404, {"message": "Not Found"})
 

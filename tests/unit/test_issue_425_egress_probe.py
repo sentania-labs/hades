@@ -21,7 +21,6 @@ import signal
 import stat
 import subprocess
 import sys
-import time
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -67,6 +66,7 @@ from crucible.ports.harness import ExitInfo, LaunchContext
 from tests.unit.kubernetes_fixtures import build, pod_of, spec
 from tests.unit.test_credential_copy import StubClient, config
 from tests.unit.test_kubernetes_network_policy import allows, policies
+from tests.wait import wait_until
 
 GITHUB = "140.82.121.4"
 PYPI = "151.101.0.223"
@@ -315,11 +315,11 @@ def test_wrapped_harness_receives_term_and_finishes_cleanup(
     )
 
     def await_file(name: str) -> None:
-        deadline = time.monotonic() + 5
-        while not (tmp_path / name).exists():
+        def file_exists() -> bool:
             assert process.poll() is None, "wrapper exited before harness cleanup"
-            assert time.monotonic() < deadline, f"harness never wrote {name}"
-            time.sleep(0.01)
+            return (tmp_path / name).exists()
+
+        wait_until(file_exists, timeout=5, describe=f"harness to write {name}")
 
     try:
         await_file("ready")

@@ -34,6 +34,7 @@ from crucible.ports.execution import (
     Workspace,
 )
 from tests.fixtures import contract_document
+from tests.wait import async_wait_until
 
 IMAGE = "crucible-worker:script-harness-1.0.0-abc"
 LABELS = {"crucible.harness": "script-harness", "crucible.harness_version": "1.0.0"}
@@ -356,7 +357,11 @@ async def test_a_cancel_during_the_preparer_removes_it_within_one_poll(tmp_path:
 
     async def cancel_mid_clone() -> float:
         await asyncio.to_thread(client.started.wait, 5)
-        await asyncio.sleep(0.5)  # the clone is well under way
+        await async_wait_until(
+            lambda: len(asked) >= 3,
+            timeout=5,
+            describe="preparer to poll cancellation three times",
+        )
         flag.set()
         return time.monotonic()
 

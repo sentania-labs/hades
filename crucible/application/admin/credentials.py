@@ -46,6 +46,7 @@ from crucible.application.harnesses import (
     set_harness_enabled,
 )
 from crucible.application.runtime_settings import RuntimeValue, resolve, save_scalar
+from crucible.contracts.policy import routing_model_name
 from crucible.domain.events import EventKind
 from crucible.domain.exit_class import ExitClass
 from crucible.ports.execution import (
@@ -1248,11 +1249,12 @@ def probe_route(
             "model the operator disabled or removed"
         )
     model = best[1]
+    endpoint_model = routing_model_name(model)
     if model.get("endpoint") == "local" and model.get("endpoint_url"):
-        return str(model["id"]), "local", str(model["endpoint_url"])
+        return endpoint_model, "local", str(model["endpoint_url"])
     if not needs_model:
         return "none", "subscription", None
-    return str(model["id"]), "subscription", None
+    return endpoint_model, "subscription", None
 
 
 async def worker_probe(

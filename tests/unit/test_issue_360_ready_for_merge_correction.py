@@ -197,6 +197,10 @@ class _Repositories:
     def get_by_name(self, name: str) -> Repository | None:
         return self.repository if name == self.repository.name else None
 
+    def upsert(self, repository: Repository) -> Repository:
+        self.repository = repository
+        return self.repository
+
 
 class _Policies:
     def __init__(self, policy: Policy) -> None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+import threading
 import time
 from collections.abc import Mapping
 from dataclasses import replace
@@ -226,7 +227,7 @@ async def test_concurrent_readiness_checks_share_one_canary() -> None:
     async def delayed_probe() -> NamespaceProbe:
         nonlocal calls
         calls += 1
-        await asyncio.sleep(0.01)
+        await asyncio.to_thread(threading.Event().wait, 0.01)
         return await real()
 
     provider._run_probe = delayed_probe  # type: ignore[method-assign]
@@ -1952,6 +1953,8 @@ async def test_a_refresh_waits_for_readers_and_holds_new_ones_back() -> None:
     order: list[str] = []
     first_in = asyncio.Event()
     release_first = asyncio.Event()
+    writer_started = asyncio.Event()
+    late_reader_started = asyncio.Event()
 
     async def first_reader() -> None:
         async with gate.reading():
@@ -1961,23 +1964,23 @@ async def test_a_refresh_waits_for_readers_and_holds_new_ones_back() -> None:
             order.append("first out")
 
     async def writer() -> None:
+        writer_started.set()
         async with gate.writing():
             order.append("write")
 
     async def late_reader() -> None:
+        late_reader_started.set()
         async with gate.reading():
             order.append("late in")
 
     first = asyncio.create_task(first_reader())
     await first_in.wait()
     write = asyncio.create_task(writer())
-    for _ in range(5):
-        await asyncio.sleep(0)
+    await writer_started.wait()
     # The refresh is waiting on the first reader; a reader that arrives now waits
     # behind the refresh rather than starving it.
     late = asyncio.create_task(late_reader())
-    for _ in range(5):
-        await asyncio.sleep(0)
+    await late_reader_started.wait()
     assert order == ["first in"]
     release_first.set()
     await asyncio.gather(first, write, late)

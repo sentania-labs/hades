@@ -26,6 +26,9 @@ from typing import Any
 # window needs its real figure saved, or 0 to let Hermes probe for it.
 # Qwen's full engine window when the routing entry does not override it (#448).
 DEFAULT_QWEN_CONTEXT_LENGTH = 131_072
+# hades #498: Qwen's response cap when the saved limits name none, the same allowance
+# Hermes runs with; Qwen clamps it to the room left in the window.
+DEFAULT_QWEN_MAX_OUTPUT_TOKENS = 32_000
 DEFAULT_HERMES_MAX_TURNS = 300
 DEFAULT_HERMES_CONTEXT_LENGTH = 131_072
 # Hades #388: the response allowance the lab's gateway applies when a request names none.
@@ -72,6 +75,23 @@ def hermes_run_limits(document: Mapping[str, Any] | None) -> HermesRunLimits:
         max_output_tokens=whole("max_output_tokens", DEFAULT_HERMES_MAX_OUTPUT_TOKENS),
         thinking=values.get("thinking") is True,
     )
+
+
+def qwen_effective_settings(
+    document: Mapping[str, Any] | None, *, context_length: int | None
+) -> dict[str, int | bool]:
+    """hades #498: what one Qwen attempt runs with, recorded on the attempt at launch as
+    the Hermes values are: the window (the routing entry's, else the default), the
+    response cap from the saved limits, and thinking, which is always off for Qwen."""
+    limits = hermes_run_limits(document)
+    saved = (document or {}).get("max_output_tokens")
+    return {
+        "context_length": context_length or DEFAULT_QWEN_CONTEXT_LENGTH,
+        "max_output_tokens": limits.max_output_tokens
+        if isinstance(saved, int) and not isinstance(saved, bool)
+        else DEFAULT_QWEN_MAX_OUTPUT_TOKENS,
+        "thinking": False,
+    }
 
 
 def effective_settings(

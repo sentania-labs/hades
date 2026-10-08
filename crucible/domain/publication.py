@@ -113,6 +113,10 @@ class BodyInput:
     limitations: tuple[str, ...] = ()
     risks: tuple[str, ...] = ()
     artifact_verifications: tuple[str, ...] = ()
+    # hades #498: the `composed` section of the completion record Hades wrote from its
+    # own evidence: how the run ended, the branch, each review finding against the diff,
+    # and what the worker's report was. Rendered as its own section.
+    record: dict[str, Any] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -240,6 +244,8 @@ def render_body(body: BodyInput) -> str:
         lines += ["The contract required no verification commands.", ""]
     if body.artifact_verifications:
         lines += _bullets("Required artifacts", body.artifact_verifications)
+    if body.record:
+        lines += _record_section(body.record)
     if body.review_reference:
         lines += ["## Internal review", ""]
         for key in sorted(body.review_reference):
@@ -297,6 +303,48 @@ def render_body(body: BodyInput) -> str:
             f"the rendered body matches the {hit} secret pattern; nothing is sent"
         )
     return text
+
+
+def _record_section(record: dict[str, Any]) -> list[str]:
+    """The completion record Hades composed (hades #498), as the body shows it. Every
+    value is Hades's own observation except the worker's disposition column and the
+    report status, which say what the worker wrote without repeating its text."""
+    ended = record.get("ended") or {}
+    branch = record.get("branch") or {}
+    lines = ["## Completion record", ""]
+    lines.append("Composed by Hades from the collected branch, its own re-run of the required")
+    lines.append("checks and the diff; the worker's report, when there was one, adds to it.")
+    lines.append("")
+    lines.append(f"- ended: {_cell(str(ended.get('how') or ''))}")
+    if branch:
+        lines.append(
+            f"- branch: {_cell(str(branch.get('commits') or 0))} commit(s) at "
+            f"`{_cell(str(branch.get('head_sha') or ''))}`"
+        )
+    lines.append(f"- required checks passed: {_cell(str(record.get('checks_passed') or ''))}")
+    worker = record.get("worker_report") or {}
+    lines.append(f"- worker report: {_cell(str(worker.get('status') or 'absent'))}")
+    for problem in list(worker.get("problems") or [])[:5]:
+        lines.append(f"  - {_cell(str(problem))}")
+    lines.append("")
+    findings = [f for f in record.get("findings") or [] if isinstance(f, dict)]
+    if findings:
+        lines += [
+            "| Review finding | Path | Diff | Commit | Worker's disposition |",
+            "|---|---|---|---|---|",
+        ]
+        for finding in findings:
+            worker_entry = finding.get("worker") or {}
+            said = str(worker_entry.get("disposition") or "none")
+            lines.append(
+                f"| `{_cell(str(finding.get('review_comment_id') or ''))}` "
+                f"| `{_cell(str(finding.get('path') or 'no path'))}` "
+                f"| {_cell(str(finding.get('disposition') or ''))} "
+                f"| `{_cell(str(finding.get('commit') or 'none'))}` "
+                f"| {_cell(said)} |"
+            )
+        lines.append("")
+    return lines
 
 
 def _cell(text: str) -> str:

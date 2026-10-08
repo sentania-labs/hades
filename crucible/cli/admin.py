@@ -338,6 +338,7 @@ def build_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     local_set = route_sub.add_parser("set-local-endpoint")
     local_set.add_argument("--endpoint-url", required=True)
     local_set.add_argument("--model", default="coder")
+    local_set.add_argument("--harness", default=None)
     state = local_set.add_mutually_exclusive_group(required=True)
     state.add_argument("--enable", action="store_true")
     state.add_argument("--disable", action="store_true")
@@ -775,7 +776,11 @@ def _remote(args: argparse.Namespace, remote: Api) -> Any:
                 "endpoint_url": args.endpoint_url,
                 "models": [
                     {
-                        "id": args.model,
+                        **(
+                            {"model": args.model, "harness": args.harness}
+                            if args.harness
+                            else {"id": args.model}
+                        ),
                         "enabled": args.enable,
                         "enable_thinking": args.enable_thinking,
                     }
@@ -1105,7 +1110,11 @@ def _local(args: argparse.Namespace, wiring: Wiring) -> Any:
                 endpoint_url=args.endpoint_url,
                 models=[
                     {
-                        "id": args.model,
+                        **(
+                            {"model": args.model, "harness": args.harness}
+                            if args.harness
+                            else {"id": args.model}
+                        ),
                         "enabled": args.enable,
                         "enable_thinking": args.enable_thinking,
                     }

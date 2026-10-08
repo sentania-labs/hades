@@ -244,6 +244,17 @@ Rules:
   refuses unless the result differs in digest values alone. The branch
   checkout is data, never imported or run. The push is not forced and is
   skipped when the branch has moved past the commit CI built.
+- **Digest commits are Hades's own head moves (FDY-0310 / #443)**: when the
+  remote branch tip moves to a SHA reachable by a commit from the known
+  expected tip and that commit is by `github-actions[bot]` with the message
+  prefix `Record the CI-built digest` touching only `*_DIGEST` lines of
+  `images/manifest.env`, Hades records a `digest_commit_observed` event,
+  carries the previous acceptance and dispositions forward, and does not
+  enter `head_diverged`. The task stays in its current delivery state
+  (e.g. `ready_for_merge`) with the new head SHA. If CI is green on the new
+  head, the task proceeds to merge without a head decision. The publisher
+  (12) treats a remote branch ahead only by digest commits as owned, pushing
+  the worker's commits on top using the existing lease.
 - The release publishes both to `ghcr.io/sentania-labs/crucible-worker`
   with `docker push`, the way the service image and every ScarGuard service
   are pushed (the operator's decision, 2026-09-23; 24): it builds from
@@ -380,6 +391,20 @@ exact port ACL. The port is added to `Safe_ports`; an HTTPS port is also added t
 After an operator uploads or selects a different routing policy, the proxy configuration
 is atomically regenerated from that policy and the proxy is reloaded before an attempt
 can use the route.
+
+Each local routing entry is the pair `(harness, model)`. `model` is the exact name the
+gateway returned for the stored key and the exact value the launch and credential probe
+send. The supervisor repeats that authenticated listing on its normal schedule. A name
+that disappears is pruned by this same reference for every harness, with its first
+missing time retained for the Local gateway page and an orchestrator wake. Newly offered
+models have an unchecked Hermes control on that page so the operator can add them.
+Changing route selections preserves the thinking preference of each existing route.
+
+Migration 0051 keeps policy versions while replacing legacy route IDs with endpoint
+model references. Its downgrade retains `model_name` as the endpoint alias and assigns
+unique legacy IDs across harnesses, consistently across stored versions. Stored execution
+and attempt model references follow that mapping without changing their policy or
+routing versions.
 
 From S6, as each list stood after an authenticated task completed through
 the filter (so none of them is provisional any more): Claude Code

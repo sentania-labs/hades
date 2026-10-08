@@ -116,7 +116,11 @@ is `0` to prevent the per-turn loop cap from stopping productive runs, and
 `model.generationConfig.contextWindowSize` is the routing model's `context_length`
 (or **131072** tokens when absent). This is the full engine window: Qwen budgets
 its output request inside it rather than adding 32000 output tokens beyond it.
-Set the routing value to the engine's actual capacity. The worker also includes
+Set the routing value to the engine's actual capacity. Mirroring Hermes (hades
+#498), the wrapper also allows only the file and shell tools (no sub-agent, skill,
+memory, web or MCP tool), loads no `QWEN.md` or `AGENTS.md` as rules, sets thinking
+off and the response cap, and writes a minimal `report.yaml` from the run log when
+the model left neither a report nor `blocked.md`. The worker also includes
 Node 22 and npm for repository checks (#288). Promote its image separately with
 `crucible admin images promote <digest> --harness qwen_code`.
 

@@ -29,6 +29,7 @@ from crucible.adapters.execution.docker import (
 from crucible.ports.execution import WORK_MOUNT, LaunchCancelledError, ProviderError
 from crucible.ports.github import InstallationToken
 from tests.unit.test_docker_provider import StubClient, config, spec
+from tests.wait import async_wait_until
 
 URL = "https://github.com/octo-lab/widgets"
 
@@ -277,7 +278,11 @@ async def test_a_cancel_during_the_refresh_removes_it_and_creates_no_preparer(
 
     async def cancel_mid_fetch() -> float:
         await asyncio.to_thread(client.fetching.wait, 5)
-        await asyncio.sleep(0.5)
+        await async_wait_until(
+            lambda: len(asked) >= 3,
+            timeout=5,
+            describe="cache refresher to poll cancellation three times",
+        )
         flag.set()
         return time.monotonic()
 

@@ -23,9 +23,12 @@ values, only names that the provider resolves from mounts), mounts, working
 dir, user, resource limits, network mode, expected exit semantics.
 
 `ExitClass` is the one enum used by contracts, policies, and 16:
-`completed`, `completed_without_report`, `blocked`, `environment`,
+`completed`, `completed_without_report`, `ended_by_budget`, `blocked`, `environment`,
 `auth_failure`, `infrastructure`, `provider_error`, `quota_exhausted`, `timeout`, `stalled`,
-`killed`, `crashed`, `lost`, `incomplete`, `unknown`. `infrastructure` (hades #353, #346) is
+`killed`, `crashed`, `lost`, `incomplete`, `unknown`. `ended_by_budget` (hades #498) is
+a stop on the attempt's time limit or the harness's turn limit with commits on the
+branch: a normal end, collected and gated like a completed run; the class only says
+how the run ended. `infrastructure` (hades #353, #346) is
 a model call the gateway or provider failed (502, 503, 504, refused, reset, at capacity)
 as each adapter reads it from its own CLI's error events, or a worker whose container
 never started; it is retried under its own budget, never consumes an attempt, and is
@@ -133,6 +136,29 @@ bumping a pin without renaming the fixtures fails the test with a clear
   remain project files and no generated shim is written.
 - Stream-json lines are parsed into progress events (tool use, text) at low
   fidelity; the full stream is stored as the transcript artifact.
+- Quota (hades #373): two refusals, read apart. The account's own refusal is
+  the CLI's `rate_limit_event` whose window `status` is `rejected` (the C5b
+  live sample: status rejected, overage reason `out_of_credits`, then a
+  synthetic result with `terminal_reason` `api_error`); it is the one signal
+  that marks the pool (05b, 16), until the reset the event states, else the
+  pool's `default_cooldown_seconds`. The event's overage fields are not the
+  signal: with extra usage switched off for the account, every ordinary run
+  carries `overageStatus: rejected` and `overageDisabledReason: out_of_credits`
+  beside `status: allowed` (observed on 2.1.280, 2026-10-08), so those words
+  alone classify nothing and mark nothing. A model-only refusal is an error
+  event (a synthetic assistant message, an `api_retry` line, an error result)
+  whose words name the model's own credit requirement
+  (`model_requires_usage_credits`, "out of usage credits") or tell the user to
+  switch models ("Switch to another model to continue"); it classifies
+  `quota_exhausted` like any refusal, but `provider_quota_event` reports it
+  `model_only`, and the supervisor excludes that model id until the refusal's
+  reset, or the pool's `default_cooldown_seconds` when it states none, and
+  reroutes the task to the next candidate in the same pool. The pool is not
+  marked and no pool wake is raised. The same words reaching the tail as plain
+  text exclude the model too: an exclusion is that model's own, so it needs no
+  structured proof the way a shared pool mark does. (2026-10-02, FDY-0256: the
+  429 `model_requires_usage_credits` on claude-fable-5-1 marked anthropic-sub
+  for two days while Opus and Sonnet, which the plan covers, were eligible.)
 - Known: nested invocation from inside another Claude session works, but
   workers never run inside a session anyway.
 
@@ -294,8 +320,9 @@ bumping a pin without renaming the fixtures fails the test with a clear
 
 `/crucible/report/report.yaml` is parsed against `CompletionClaimV1` from
 the collector's copy (08), after Crucible has filled the fact fields from its
-own evidence (11, hades #215). A missing file with exit 0 is
-`completed_without_report`. A file that is present but does not parse is
+own evidence (11, hades #215). A missing file with exit 0 and no commit is
+`completed_without_report`; with commits on the branch the exit is `completed` and
+the missing report is advisory (hades #498). A file that is present but does not parse is
 recorded as `report_parse_failed` with the parser's errors and
 `report_present` true; it is never recorded as "no report". Either way the
 report gate fails hard and neither is a success; what differs is that the
@@ -413,6 +440,32 @@ loaded into `OPENAI_API_KEY` at container start. It never mounts subscription
 `model_context_window` uses the Local gateway page's context length. A saved zero,
 which asks Hermes to discover its window, uses 131072 for Codex because Codex cannot
 use Hermes's discovery. Set a positive context length for the actual gateway model.
+The top-level `model_max_output_tokens` uses the Local gateway page's response
+allowance the same way.
+
+Hades #354: the routing entry Codex launches with is read first. Its own
+`context_length` and `max_output_tokens`, when either is set, replace the Local
+gateway page's figures above, resolved once per attempt like the rest of
+`effective_settings` (hades #388) and reused on every later spec of that attempt. An
+entry that sets neither keeps reading the Local gateway page's defaults, unchanged.
+`context_length` and `max_output_tokens` are set independently, so the two can combine
+(one entry's own pair, or one figure against the other inherited from the Local
+gateway page) into a response reservation that consumes the whole window; that final
+pair is validated before the launch config is emitted, and the launch is refused,
+the same way an unknown harness or a missing credential is, rather than sent to fail
+at request time with no input budget.
+
+`--model` is the routing entry's `model` (the lane, for example `fast`) unless the
+entry carries `harness_model_name`, in which case that name is sent instead, for
+example `gpt-5.4`, a gateway alias Codex's own model catalog recognises for the same
+backing model. Without a recognised name Codex logs `Model metadata for '<name>' not
+found` and falls back to generic tool, prompt, output-token and compaction defaults,
+regardless of `model_context_window` and `model_max_output_tokens` above. Routing,
+pools and `GET /routing/history` always read `model`; the launch event
+(`attempt_launching`) records `sent_model_name` beside it, so the lane and the name
+actually sent are both evidence. An entry with no `harness_model_name` sends `model`
+unchanged, exactly as before #354. Setting `harness_model_name` never changes the
+gateway alias itself or a routing entry's thinking setting; those stay lab-admin's.
 
 The launch retains `--dangerously-bypass-approvals-and-sandbox`, never adds
 `--ignore-user-config`, and sends identity plus the pointer prompt through a finite
@@ -425,7 +478,7 @@ launch, credential synchronization, and its concurrency cap of one are unchanged
 ### Qwen Code (`qwen_code`, 0.25.0)
 
 The local-only adapter launches `crucible-qwen-code`, which writes settings and
-execs `qwen --yolo --auth-type openai --advisor off --output-format stream-json
+runs `qwen --yolo --auth-type openai --advisor off --output-format stream-json
 --max-session-turns 300 "<IDENTITY>"`. The full IDENTITY.md precedes the pointer
 prompt, including the requirement to write `report.yaml` as CompletionClaimV1.
 CLI success prose is never substituted for that report. `OPENAI_BASE_URL` names
@@ -433,7 +486,21 @@ the gateway and `OPENAI_MODEL` the routed lane (`model_name` when configured).
 The adapter mounts Hermes's existing `api-key` read-only and resolves it as
 `OPENAI_API_KEY` at container start, with no credential sync-back.
 
-The fresh home gets `~/.qwen/settings.json` with two model settings:
+The wrapper passes Qwen's stream-json stdout through line by line (the provider's
+launch wrapper is still the transcript writer), forwards SIGTERM and SIGINT, and
+keeps Qwen's exit status. After the run (hades #498) it looks in
+`CRUCIBLE_QWEN_REPORT_DIR` (the report mount) for `report.yaml` or `blocked.md`
+and, finding neither, writes a minimal `report.yaml` from the run log: how the run
+ended (the result event's subtype and the exit code), the shell commands the model
+ran, and the commits made during the run (`git log` from the head at start). It
+carries `schema_version`, `summary` and one `limitations` line and nothing judged,
+so Hades lists it for the reviewer under `report_present` and composes the
+completion record from its own evidence. The wrapper never writes over a report or
+a `blocked.md` the model left.
+
+The fresh home gets `~/.qwen/settings.json`, mirroring the Hermes launch
+(`--ignore-rules --safe-mode --toolsets terminal,file`, thinking and
+`model.max_tokens`):
 
 - `model.maxToolCallsPerTurn: 0` disables the per-turn tool-call cap that stopped
   10 of the 44 replay runs in #448.
@@ -441,7 +508,22 @@ The fresh home gets `~/.qwen/settings.json` with two model settings:
   routing entry's positive integer `context_length`, or **131072** by default.
   Qwen 0.25.0 clamps output to the room left in this window, including its safety
   margin, preventing a 32000-token output reservation beyond the engine limit.
-  The effective value is recorded on the attempt and reused on reconstruction.
+- `model.generationConfig.enable_thinking: false` (`CRUCIBLE_QWEN_THINKING`, always
+  `false` for Qwen) and `model.generationConfig.samplingParams.max_tokens`
+  (`CRUCIBLE_QWEN_MAX_OUTPUT_TOKENS`, the saved Local gateway `max_output_tokens`,
+  default **32000**): thinking off and the response cap (hades #498).
+- `tools.core` allows the file and shell tools only (`list_directory`, `read_file`,
+  `read_many_files`, `glob`, `search_file_content`, `write_file`, `edit`/`replace`,
+  `run_shell_command`) and `tools.exclude` names `task` (sub-agents), `skill`,
+  `save_memory`, `web_fetch`, `web_search` and `todo_write`; no MCP server is
+  configured in the fresh home.
+- `context.fileName` names a file no checkout carries, so `QWEN.md` and `AGENTS.md`
+  are not loaded as rules, and `context.loadMemoryFromIncludeDirectories` is false:
+  the identity is the only instruction source, as under Hermes's `--ignore-rules`.
+
+The window, the response cap and the thinking setting are resolved once per attempt
+and recorded as the attempt's `effective_settings`, the same three keys the Hermes
+record carries; a later spec of the same attempt reuses the record.
 
 Shell execution uses child_process rather than optional native PTY addons; search
 uses the image's pinned ripgrep. The npm bundle is extracted without resolving
