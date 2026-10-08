@@ -14,18 +14,27 @@ depends_on = None
 
 
 def upgrade() -> None:
-    from alembic import op
     import sqlalchemy as sa
+    from alembic import op
     from sqlalchemy.dialects import postgresql
-    
-    op.add_column('pull_requests', sa.Column('schema_tables', postgresql.JSONB(astext_type=sa.Text()), nullable=True))
-    op.add_column('pull_requests', sa.Column('schema_columns', postgresql.JSONB(astext_type=sa.Text()), nullable=True))
-    op.add_column('pull_requests', sa.Column('schema_models', postgresql.JSONB(astext_type=sa.Text()), nullable=True))
+
+    op.add_column(
+        "pull_requests",
+        sa.Column("schema_tables", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+    )
+    op.add_column(
+        "pull_requests",
+        sa.Column("schema_columns", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+    )
+    op.add_column(
+        "pull_requests",
+        sa.Column("schema_models", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+    )
 
 
 def downgrade() -> None:
     from alembic import op
-    
-    op.drop_column('pull_requests', 'schema_tables')
-    op.drop_column('pull_requests', 'schema_columns')
-    op.drop_column('pull_requests', 'schema_models')
+
+    op.drop_column("pull_requests", "schema_tables")
+    op.drop_column("pull_requests", "schema_columns")
+    op.drop_column("pull_requests", "schema_models")
