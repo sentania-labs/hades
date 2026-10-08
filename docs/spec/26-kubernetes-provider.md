@@ -575,7 +575,10 @@ the namespace. A deployment therefore names one exact, pullable reference in
   claim, which still holds the work, rather than failing the attempt (10); a
   credential copy already synced is not synced twice. A failed status look
   while a Pod starts is asked again until the deadline, never taken as the
-  answer.
+  answer. The bounded retry counts and unavailable-provider retry window are
+  supervisor memory, not attempt state: after a supervisor restart collection
+  begins a fresh window and receives its full retry count. The workspace stays
+  in place, so this can extend, but cannot discard, a pending collection.
 - `terminate`: `drain` deletes the Pod with the policy grace period, read
   off the Pod itself (SIGTERM, then SIGKILL by the kubelet); `kill` deletes
   with grace zero.
@@ -634,6 +637,10 @@ back from there through the reader Pod and writes it into the harness Secret
 whenever the attempt reaches collection, whether the worker exited successfully
 or not. This matches the Docker provider: a valid newer refresh is durable state
 even when the task itself fails.
+That credential read-back deliberately uses the collection reader wait, rather
+than the preparer's short wait: a reader Pod that is still terminating can hold
+the only newly rotated credential, and the supervisor must retry collection
+instead of treating that state as a launch failure.
 (Made concrete 2026-09-21 during C8a.)
 The per-attempt Secret is deleted under every cleanup policy. The admin
 login flow (25) runs the harness's login in a login Job and captures the device
