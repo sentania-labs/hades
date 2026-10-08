@@ -154,11 +154,19 @@ async def set_mount_mode(
             f"credential mount mode refused: {detail}",
             errors=[{"path": "mount_mode", "message": detail}],
         )
-    from crucible.application.admin.harness_test import test_harness  # noqa: PLC0415
+    from crucible.application.admin.harness_test import test_harness_claimed  # noqa: PLC0415
 
-    result = await test_harness(
-        ctx, uow, principal=principal, harness=harness, reason=reason, credential_mode=selected
-    )
+    try:
+        result = await test_harness_claimed(
+            ctx, uow, principal=principal, harness=harness, reason=reason, credential_mode=selected
+        )
+    except ConflictError as exc:
+        detail = f"{selected.value}: {exc.detail}"
+        record_refusal(ctx, principal=principal, operation="credential mount mode", detail=detail)
+        raise ContractValidationError(
+            f"credential mount mode refused: {detail}",
+            errors=[{"path": "mount_mode", "message": detail}],
+        ) from exc
     if not result["ok"]:
         failed = next(step for step in result["steps"] if step["ok"] is False)
         detail = f"{selected.value}: {failed['name']}: {failed['detail']}"
@@ -981,7 +989,13 @@ async def _probe_async(
         if interruption is not None and interruption.environment
         else result.detail,
         conclusive=conclusive,
-        cause="" if conclusive else exit_class.value,
+        cause=(
+            ""
+            if conclusive
+            else "credential_directory"
+            if interruption is not None and interruption.environment
+            else exit_class.value
+        ),
     )
     now = ctx.clock.now()
     record_launch_outcome(

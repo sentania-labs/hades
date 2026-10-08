@@ -17,8 +17,9 @@ import pytest
 from crucible.adapters.execution import k8sspec
 from crucible.adapters.execution.kubernetes import KubernetesConfig
 from crucible.adapters.harness.codex import CONFIG_DIR, CodexAdapter
-from crucible.application.admin import credentials
+from crucible.application.admin import credentials, harness_test
 from crucible.application.errors import ContractValidationError
+from crucible.application.harnesses import harness_state
 from crucible.domain.events import EventKind
 from crucible.domain.exit_class import ExitClass
 from crucible.ports.execution import ProbeResult, Workspace
@@ -217,6 +218,66 @@ async def test_mount_mode_is_tested_before_save(
         assert "Worker starts" in refusal.payload["detail"]
     provider.probe_credential.assert_awaited_once()
     assert uow.harnesses.get("codex").last_test["ok"] is passes
+
+
+async def test_mount_mode_validation_refuses_to_overlap_a_harness_test(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, uow = _context()
+    uow.harnesses = Harnesses()
+    uow.commit = MagicMock()
+    ctx.uow_factory = lambda: nullcontext(uow)  # type: ignore[assignment]
+    ctx.credential_sources = {"codex": CredentialSource("", MountMode.RW_NARROW)}
+    provider = MagicMock()
+    ctx.providers = {"kubernetes": provider}
+    monkeypatch.setattr(credentials, "secret_store", lambda _: provider)
+    state = harness_state(uow, ctx.clock, "codex")
+    state.last_test = {
+        "harness": "codex",
+        "status": harness_test.RUNNING,
+        "ok": None,
+        "failed_step": None,
+        "steps": [],
+        "started_at": ctx.clock.now().isoformat(),
+        "started_by": "other-admin",
+    }
+    uow.harnesses.put(state)
+
+    with pytest.raises(ContractValidationError, match="already running"):
+        await credentials.set_mount_mode(
+            ctx, uow, principal="admin", harness="codex", mode="renewer", reason="parallel"
+        )
+
+    assert credentials.mount_mode_value(ctx, uow, "codex").value == "rw-narrow"
+    assert not provider.probe_credential.called
+    assert uow.harnesses.locked == ["codex"]
+    refusal = next(e for e in uow.events.items if e.kind == EventKind.ADMIN_REFUSED.value)
+    assert "already running" in refusal.payload["detail"]
+
+
+def test_other_environment_exit_is_a_model_call_failure_not_a_startup_failure() -> None:
+    record = credentials.ProbeRecord(
+        harness="codex",
+        exit_class=ExitClass.ENVIRONMENT.value,
+        exit_code=137,
+        harness_version="0.156.0",
+        image="image",
+        image_digest="digest",
+        auth_files_changed=False,
+        mount_mode="renewer",
+        duration_seconds=12,
+        detail="OOMKilled",
+        conclusive=False,
+        cause=ExitClass.ENVIRONMENT.value,
+    )
+    steps = harness_test._Steps([])
+
+    assert not harness_test._worker_did_not_start(record)
+    steps.passed(harness_test.WORKER, "the worker started")
+    steps.failed(harness_test.MODEL, harness_test.EXIT_WORDS[record.exit_class])
+
+    assert steps.items[0]["name"] == harness_test.WORKER and steps.items[0]["ok"] is True
+    assert steps.items[1]["name"] == harness_test.MODEL and steps.items[1]["ok"] is False
 
 
 async def test_kubernetes_probe_mounts_requested_mode_instead_of_configured_mode() -> None:
