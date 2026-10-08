@@ -478,6 +478,9 @@ def _injected_hits(
     diff_status: dict[str, str] = {}
     for path, status, blob, classification in diff_changes or []:
         diff_status[path] = status
+        # Issue #377: check shim content on every added/modified path, not just injected names.
+        if blob in shim and status in ("A", "T", "M"):
+            hits.add(path)
         if _injected(path) and (
             status not in ("M", "D") or blob in shim or classification == "shim"
         ):
@@ -489,6 +492,9 @@ def _injected_hits(
     oldest_status: dict[str, str] = {}
     for path, status, blob, classification in commit_changes or []:
         oldest_status[path] = status
+        # Issue #377: check shim content on every committed path, not just injected names.
+        if blob in shim and status in ("A", "T"):
+            hits.add(path)
         if _injected(path) and (status == "T" or blob in shim or classification == "shim"):
             hits.add(path)
     for path, status in oldest_status.items():
