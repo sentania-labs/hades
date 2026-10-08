@@ -384,4 +384,34 @@ if [ -n "${CRUCIBLE_E2E_KIND_SHARD:-}" ]; then
 else
   selection=("${CRUCIBLE_E2E_KIND_TESTS:-tests/e2e/test_kind.py}")
 fi
+
+# hades #508: watchdog before the GitHub Actions `timeout-minutes: 20` ceiling.
+# Kills pytest with SIGABRT (faulthainer dump of all Python stacks) at 18 minutes,
+# two minutes before the CI cancellation.  The marker file lets the EXIT trap know
+# it must call dump.sh; the dump script already prints cluster state on non-zero exit.
+WATCHDOG_TIMEOUT=${CRUCIBLE_KIND_WATCHDOG_SECONDS:-1080}
+WATCHDOG_MARKER="$scratch/watchdog.marker"
+export CRUCIBLE_KIND_WATCHDOG_MARKER="$WATCHDOG_MARKER"
+shard_label=${CRUCIBLE_E2E_KIND_SHARD:-whole}
+watchdog_pid=
+if [ -f "$root/tools/kind/watchdog.sh" ]; then
+    watchdog_pid=$(bash "$root/tools/kind/watchdog.sh" "$WATCHDOG_TIMEOUT" "$WATCHDOG_MARKER" $$) || true
+fi
+
 uv run pytest "${selection[@]}" -q -m e2e --durations=0 "${extra_args[@]}"
+pytest_exit=$?
+
+# If pytest exited because of a watchdog SIGABRT, the process is gone and pytest_exit
+# is the signal; if it exited clean but the watchdog marker appeared, the watchdog fired
+# and pytest was killed by our parent (the shell), so the marker is what we honour.
+if [ -n "$watchdog_pid" ] && [ -f "$WATCHDOG_MARKER" ]; then
+    echo "e2e-kind: shard timed out after ${WATCHDOG_TIMEOUT}s (watchdog fired)" >&2
+    pytest_exit=1
+fi
+
+# Kill the watchdog child so it does not keep sleeping if pytest finished early.
+if [ -n "$watchdog_pid" ]; then
+    kill "$watchdog_pid" 2>/dev/null || true
+fi
+
+exit "$pytest_exit"
