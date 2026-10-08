@@ -73,6 +73,9 @@ class PullRequests:
             last_polled_at=_dt(row.last_polled_at),
             last_reactions_polled_at=_dt(row.last_reactions_polled_at),
             reactions_observable=row.reactions_observable,
+            schema_tables=row.schema_tables,
+            schema_columns=row.schema_columns,
+            schema_models=row.schema_models,
             cancelled_at=_dt(row.cancelled_at),
             observed_head_sha=row.observed_head_sha,
             observed_base_ref=row.observed_base_ref,
@@ -109,6 +112,9 @@ class PullRequests:
                 last_polled_at=pull_request.last_polled_at,
                 last_reactions_polled_at=pull_request.last_reactions_polled_at,
                 reactions_observable=pull_request.reactions_observable,
+                schema_tables=pull_request.schema_tables,
+                schema_columns=pull_request.schema_columns,
+                schema_models=pull_request.schema_models,
                 cancelled_at=pull_request.cancelled_at,
                 observed_head_sha=pull_request.observed_head_sha,
                 observed_base_ref=pull_request.observed_base_ref,
@@ -157,6 +163,9 @@ class PullRequests:
         row.last_polled_at = pull_request.last_polled_at
         row.last_reactions_polled_at = pull_request.last_reactions_polled_at
         row.reactions_observable = pull_request.reactions_observable
+        row.schema_tables = pull_request.schema_tables
+        row.schema_columns = pull_request.schema_columns
+        row.schema_models = pull_request.schema_models
         row.cancelled_at = pull_request.cancelled_at
         row.observed_head_sha = pull_request.observed_head_sha
         row.observed_base_ref = pull_request.observed_base_ref

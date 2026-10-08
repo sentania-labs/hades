@@ -8,15 +8,13 @@ run back into a parsed report. Adapters contain no lifecycle logic.
 
 ```python
 class HarnessAdapter(Protocol):
-    name: HarnessName  # "claude_code" | "codex" | "agy" | "hermes" | "qwen_code" | "script-harness" (e2e only, 18)
-    supported_versions: VersionRange  # tested range; launch refused outside it
-
+    name: HarnessName                     # "claude_code" | "codex" | "agy" | "hermes" | "qwen_code" | "script-harness" (e2e only, 18)
+    supported_versions: VersionRange      # tested range; launch refused outside it
     def capabilities(self) -> HarnessCapabilities: ...
     def credential_spec(self) -> CredentialSpec: ...
     def build_launch(self, ctx: LaunchContext) -> LaunchSpec: ...
     def parse_report(self, report_dir: Path, exit: ExitInfo) -> ParsedReport: ...
     def classify_exit(self, exit: ExitInfo, stdout_tail: str, stderr_tail: str) -> ExitClass: ...
-
     # both tails: Claude Code and AGY report a missing or expired login on stdout (S5)
 ```
 

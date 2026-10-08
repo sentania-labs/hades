@@ -235,6 +235,9 @@ class _PullRequests:
     def save(self, pull_request: PullRequest) -> None:
         self.rows[pull_request.id] = pull_request
 
+    def list_in_states(self, states: Sequence[PullRequestState]) -> list[PullRequest]:
+        return [p for p in self.rows.values() if p.state in states]
+
 
 class _ReviewCycles:
     def __init__(self) -> None:

@@ -759,9 +759,12 @@ def upsert_pull_request(
     plan: PublishPlan,
     ref: PullRequestRef,
     body_hash: str,
-    schema_changes: dict | None = None,
+    schema_changes: dict[str, Any] | None = None,
 ) -> tuple[PullRequest, bool]:
-    """Write or refresh the PR row and record the head as one Crucible pushed."""
+    """Write or refresh the PR row and record the head as one Crucible pushed.
+
+    hades #447: `schema_changes` is the publisher's reading of the branch's new
+    migrations (tables, columns, model files); it refreshes the row when given."""
     now = clock.now()
     existing = uow.pull_requests.get_for_task(task.id, for_update=True)
     opened = existing is None
@@ -796,6 +799,10 @@ def upsert_pull_request(
         pull_request.title = ref.title or plan.title
         pull_request.body_sha256 = body_hash
         pull_request.state = PullRequestState.OPEN
+        if schema_changes is not None:
+            pull_request.schema_tables = list(schema_changes.get("tables") or [])
+            pull_request.schema_columns = list(schema_changes.get("columns") or [])
+            pull_request.schema_models = list(schema_changes.get("models") or [])
         uow.pull_requests.save(pull_request)
     uow.pull_request_heads.add(
         PullRequestHead(
