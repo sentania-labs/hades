@@ -105,7 +105,12 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
         plan = [step.revision.revision for step in script._upgrade_revs("head", head)]
         assert plan.index("0043_credential_mount_mode") < plan.index("0044_merge_423_424")
         assert plan.index("0044_merge_423_424") < plan.index(MERGE)
-        assert plan[-9:] == [
+        assert plan[-14:] == [
+            "0043_credential_mount_mode",
+            "0044_merge_423_424",
+            ("0044_editor_leftovers_policy", "0044_attempt_stall_shape")[
+                head == "0044_editor_leftovers_policy"
+            ],
             MERGE,
             ABOVE,
             PROBE,
@@ -114,8 +119,8 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
             BATCH,
             CACHE,
             ROUTE,
-            "0052_cert_change_class",
             "0052_task_notes",
+            "0052_cert_change_class",
             MERGE_HEAD,
         ]
 
