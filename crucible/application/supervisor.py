@@ -325,6 +325,12 @@ LOOP_COMMAND_QUOTE = 200
 # Hades #353: infrastructure interruptions retried per contract version before the task
 # blocks for the endpoint.
 INFRASTRUCTURE_RETRY_BUDGET = 3
+# hades #503: how many times one attempt's prepare runs again after the preparer Job's
+# Pods outlived the provider's deletion wait (26), before the attempt ends as the
+# environment. None of them costs the task an attempt, and each waits longer than the
+# last before the next prepare: the delay below, doubled on every retry.
+PREPARE_POD_WAIT_RETRY_BUDGET = 3
+PREPARE_POD_WAIT_RETRY_DELAY_SECONDS = 30
 
 
 def worker_stall_action(
@@ -615,21 +621,21 @@ def workspace_release_reason(
     # Once a correction is materialized it becomes `latest_work_attempt`, but its
     # preparer still needs the immediately preceding unpublished attempt's bundle.
     # Keep that source across a supervisor restart until preparation has produced the
-    # correction's own workspace.
+    # correction's own workspace. hades #503: the same holds for any implementing or
+    # correcting attempt whose prepare has produced no workspace, whether it is still
+    # pending, was sent back to pending because the preparer's Pods outlived the
+    # deletion wait, or failed there: a prepare failure never discards the bundle the
+    # next correction resumes from, which is the newest earlier attempt that has one.
     if work is not None:
-        latest_attempt, latest_execution = work
-        if (
-            latest_execution.role is ExecutionRole.CORRECT
-            and not latest_attempt.resume_from_remote
-            and not latest_attempt.workspace_path
-        ):
+        latest_attempt, _latest_execution = work
+        if not latest_attempt.resume_from_remote and not latest_attempt.workspace_path:
             preceding = max(
                 (
                     candidate
                     for candidate_execution in uow.executions.list_for_task(task.id)
-                    if candidate_execution.id != latest_execution.id
-                    and candidate_execution.role is not ExecutionRole.REVIEW
+                    if candidate_execution.role is not ExecutionRole.REVIEW
                     for candidate in uow.attempts.list_for_execution(candidate_execution.id)
+                    if candidate.id < latest_attempt.id and candidate.workspace_path
                 ),
                 key=lambda candidate: candidate.id,
                 default=None,
@@ -1932,20 +1938,23 @@ class Supervisor:
                 await self._db(partial(self._return_to_pending, attempt.id, "prepare", str(exc)))
                 return False
             except PrepareJobPodsTimeoutError as exc:
-                # hades #503: a preparer Job's pods that linger after deletion are retried
-                # with backoff; the attempt is not counted against the budget.
-                log.warning(
-                    "preparer pods still present for %s: %s; retrying with backoff",
-                    item.execution.id,
-                    exc,
-                    extra={"error": str(exc)},
-                )
+                # hades #503: the preparer Job's Pods outlived the provider's deletion
+                # wait. The prepare runs again a bounded number of times, each after a
+                # longer pause and none charged to the task; past that budget the attempt
+                # ends as the environment, with the provider's message saying what the
+                # Job had done when the wait gave up.
+                detail = str(exc)
+                if await self._db(
+                    partial(self._defer_prepare_pod_wait, attempt.id, "prepare", detail)
+                ):
+                    return False
                 await self._db(
                     partial(
-                        self._retry_with_backoff,
+                        self._environment_failure,
                         attempt.id,
                         "prepare",
-                        str(exc),
+                        f"{detail}; the prepare was tried {PREPARE_POD_WAIT_RETRY_BUDGET} "
+                        "more times and the Pods stayed",
                     )
                 )
                 return False
@@ -3455,122 +3464,138 @@ class Supervisor:
                 self._end_cancelled_launch(uow, attempt, task, stage)
                 uow.commit()
                 return
-            reason = redact(detail)[:1000]
-            attempt.workspace_path = None
-            attempt.identity_sha256 = None
-            attempt.handle = None
-            move_attempt(
-                uow,
-                self._clock,
-                attempt,
-                AttemptState.PENDING,
-                EventKind.HARNESS_LAUNCH_DEFERRED,
-                payload={
-                    "attempt_id": attempt.id,
-                    "stage": stage,
-                    "detail": reason,
-                    "quota_wait": True,
-                },
+            reason = self._pending_again(
+                uow, attempt, task, stage, detail, reason="quota_wait", mark={"quota_wait": True}
             )
-            self._release_checkout_leases(uow, attempt)
-            execution = uow.executions.get(attempt.execution_id)
-            if (
-                task.state is TaskState.RUNNING
-                and execution is not None
-                and execution.role is not ExecutionRole.REVIEW
-            ):
-                # The task returns to the queue where it stood: the queue reads the
-                # newest scheduling event, and a head adoption's resume flag rides along.
-                scheduled = uow.events.latest_for_task_kind(task.id, EventKind.TASK_SCHEDULED.value)
-                move_task(
-                    uow,
-                    self._clock,
-                    task,
-                    TaskState.SCHEDULED,
-                    EventKind.TASK_SCHEDULED,
-                    execution_id=attempt.execution_id,
-                    attempt_id=attempt.id,
-                    payload={
-                        "reason": "quota_wait",
-                        "stage": stage,
-                        "detail": reason,
-                        **(
-                            {"resume_from_work_branch": True}
-                            if scheduled is not None
-                            and scheduled.payload.get("resume_from_work_branch") is True
-                            else {}
-                        ),
-                    },
-                )
             log.info(
                 "launch waits for room; the attempt is pending again",
                 extra={"stage": stage, "detail": reason},
             )
             uow.commit()
 
-    def _retry_with_backoff(self, attempt_id: str, stage: str, detail: str) -> None:
-        """hades #503: a preparer Job's pods linger and all backoff retries are
-        exhausted.  The attempt is not counted against the budget; it goes back to
-        pending with the reason so a later tick can retry.  No workspace cleanup
-        runs because the prepare never succeeded (workspace_path is already None)."""
+    def _defer_prepare_pod_wait(self, attempt_id: str, stage: str, detail: str) -> bool:
+        """hades #503: the preparer Job's Pods outlived the provider's deletion wait.
+        Nothing of the attempt ran, so the prepare is tried again: the attempt goes back
+        to pending with the provider's message, the task back to scheduled with a resume
+        time that doubles on each retry, and no attempt is charged (the attempt is the
+        same row, never terminal, so the retry count in `_classify_and_finish` does not
+        see it). The retries are counted from the attempt's own deferral events, so a
+        supervisor restart does not reset them. True when the attempt was deferred (or a
+        cancel settled it); False once the budget is spent, and the caller then ends the
+        attempt as the environment."""
         with self._fenced() as uow:
             attempt = uow.attempts.get(attempt_id, for_update=True)
             assert attempt is not None
             task = uow.tasks.get(attempt.task_id, for_update=True)
             assert task is not None
             if attempt.state not in (AttemptState.PREPARING, AttemptState.LAUNCHING):
-                # Another supervisor already settled it.
-                return
+                # Another supervisor already settled it (a stranded launch, 10).
+                return True
             if task.state in ENDS_ATTEMPTS:
                 self._end_cancelled_launch(uow, attempt, task, stage)
                 uow.commit()
-                return
-            reason = redact(detail)[:1000]
-            # The prepare never created a workspace, so nothing to clean up.
-            attempt.workspace_path = None
-            attempt.identity_sha256 = None
-            attempt.handle = None
-            move_attempt(
+                return True
+            retries = self._prepare_pod_wait_retries(uow, attempt)
+            if retries >= PREPARE_POD_WAIT_RETRY_BUDGET:
+                return False
+            delay = PREPARE_POD_WAIT_RETRY_DELAY_SECONDS * 2**retries
+            task.resume_at = self._clock.now() + timedelta(seconds=delay)
+            reason = self._pending_again(
                 uow,
-                self._clock,
                 attempt,
-                AttemptState.PENDING,
-                EventKind.HARNESS_LAUNCH_DEFERRED,
-                payload={
-                    "attempt_id": attempt.id,
-                    "stage": stage,
-                    "detail": reason,
-                    "quota_wait": True,
+                task,
+                stage,
+                detail,
+                reason="prepare_pod_wait",
+                mark={
+                    "prepare_pod_wait": True,
+                    "retry": retries + 1,
+                    "retry_budget": PREPARE_POD_WAIT_RETRY_BUDGET,
+                    "retry_delay_seconds": delay,
                 },
             )
-            self._release_checkout_leases(uow, attempt)
-            execution = uow.executions.get(attempt.execution_id)
-            if (
-                task.state is TaskState.RUNNING
-                and execution is not None
-                and execution.role is not ExecutionRole.REVIEW
-            ):
-                scheduled = uow.events.latest_for_task_kind(task.id, EventKind.TASK_SCHEDULED.value)
-                move_task(
-                    uow,
-                    self._clock,
-                    task,
-                    TaskState.SCHEDULED,
-                    EventKind.TASK_SCHEDULED,
-                    execution_id=attempt.execution_id,
-                    attempt_id=attempt.id,
-                    payload={
-                        "reason": "prepare_pod_wait",
-                        "stage": stage,
-                        "detail": reason,
-                        **({} if scheduled is None else scheduled.payload),
-                    },
-                )
-            log.info(
-                "preparer pod wait exhausted; attempt back to pending for retry",
+            uow.tasks.save(task)
+            log.warning(
+                "the preparer's Pods outlived the deletion wait; the prepare runs again "
+                "in %ds (retry %d of %d) and no attempt is charged: %s",
+                delay,
+                retries + 1,
+                PREPARE_POD_WAIT_RETRY_BUDGET,
+                reason,
                 extra={"stage": stage, "detail": reason},
             )
             uow.commit()
+            return True
+
+    @staticmethod
+    def _prepare_pod_wait_retries(uow: UnitOfWork, attempt: Attempt) -> int:
+        """How many times this attempt's prepare was already sent back to pending because
+        the preparer's Pods outlived the deletion wait (hades #503)."""
+        return sum(
+            row.kind == EventKind.HARNESS_LAUNCH_DEFERRED.value
+            and row.attempt_id == attempt.id
+            and row.payload.get("prepare_pod_wait") is True
+            for row in Supervisor._all_task_events(uow, attempt.task_id)
+        )
+
+    def _pending_again(
+        self,
+        uow: UnitOfWork,
+        attempt: Attempt,
+        task: Task,
+        stage: str,
+        detail: str,
+        *,
+        reason: str,
+        mark: dict[str, Any],
+    ) -> str:
+        """Send a preparing or launching attempt back to pending with nothing recorded
+        against it, and its task back to the queue where it stood; `reason` names why on
+        the scheduling event and `mark` rides on the deferral event. Returns the redacted
+        detail."""
+        redacted = redact(detail)[:1000]
+        attempt.workspace_path = None
+        attempt.identity_sha256 = None
+        attempt.handle = None
+        move_attempt(
+            uow,
+            self._clock,
+            attempt,
+            AttemptState.PENDING,
+            EventKind.HARNESS_LAUNCH_DEFERRED,
+            payload={"attempt_id": attempt.id, "stage": stage, "detail": redacted, **mark},
+        )
+        self._release_checkout_leases(uow, attempt)
+        execution = uow.executions.get(attempt.execution_id)
+        if (
+            task.state is TaskState.RUNNING
+            and execution is not None
+            and execution.role is not ExecutionRole.REVIEW
+        ):
+            # The task returns to the queue where it stood: the queue reads the
+            # newest scheduling event, and a head adoption's resume flag rides along.
+            scheduled = uow.events.latest_for_task_kind(task.id, EventKind.TASK_SCHEDULED.value)
+            move_task(
+                uow,
+                self._clock,
+                task,
+                TaskState.SCHEDULED,
+                EventKind.TASK_SCHEDULED,
+                execution_id=attempt.execution_id,
+                attempt_id=attempt.id,
+                payload={
+                    "reason": reason,
+                    "stage": stage,
+                    "detail": redacted,
+                    **(
+                        {"resume_from_work_branch": True}
+                        if scheduled is not None
+                        and scheduled.payload.get("resume_from_work_branch") is True
+                        else {}
+                    ),
+                },
+            )
+        return redacted
 
     def _start_failure(self, attempt_id: str, observation: Observation) -> None:
         """The launch's runtime refused to start the worker (hades #346). The attempt is

@@ -280,6 +280,7 @@ def kubernetes_config(
         cache_claim=k.cache_claim,
         launch_timeout_seconds=k.launch_timeout_seconds,
         prepare_timeout_seconds=k.prepare_timeout_seconds,
+        prepare_pod_deletion_wait_seconds=k.prepare_pod_deletion_wait_seconds,
         collector_timeout_seconds=k.collector_timeout_seconds,
         verifier_timeout_seconds=k.verifier_timeout_seconds,
         role_timeout_seconds=k.role_timeout_seconds,

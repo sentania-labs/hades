@@ -211,6 +211,8 @@ LAUNCH_POD_POLLS = 5
 
 POD_DELETION_MARGIN_SECONDS = 5
 DEFAULT_POD_GRACE_SECONDS = 30
+# hades #503: the first pause of the preparer's pod-gone wait; each later pause doubles.
+PREPARE_POD_WAIT_BACKOFF_SECONDS = 2.0
 COLLECTION_ROLES = (k8sspec.ROLE_COLLECTOR, k8sspec.ROLE_BUNDLE, k8sspec.ROLE_VERIFIER)
 
 # Deleting a Pod is the only way to signal one. Kubernetes sends SIGTERM, waits the
@@ -360,10 +362,10 @@ class KubernetesConfig:
     # as the detail (image pull, no schedulable node, PVC unbound), never a stall.
     launch_timeout_seconds: int = 300
     prepare_timeout_seconds: int = 900
-    # hades #503: how many seconds the provider waits for a preparer Job's Pods to
-    # disappear after deletion before classifying the prepare as an environment failure.
-    # The total wait (including backoff retries) is bounded below
-    # prepare_timeout_seconds.
+    # hades #503: the whole wait, in seconds, for a preparer Job's Pods to disappear
+    # after the Job is deleted; the provider polls with backoff (2 s, 4 s, 8 s, ...),
+    # each pause clipped to what is left of it, and clips the setting itself to
+    # `prepare_timeout_seconds`. Seeded by `[kubernetes] prepare_pod_deletion_wait_seconds`.
     prepare_pod_deletion_wait_seconds: float = 15.0
     collector_timeout_seconds: int = 900
     verifier_timeout_seconds: int = 3600
@@ -634,6 +636,17 @@ class _CacheGate:
                 self._writing = False
                 self._refreshed_at = time.monotonic()
                 self._condition.notify_all()
+
+
+def _pod_words(pod: Mapping[str, Any]) -> str:
+    """hades #503: one lingering Pod as the pod-gone wait's message names it: its name,
+    its phase, and whether its deletion was already under way."""
+    metadata = pod.get("metadata") or {}
+    status = pod.get("status") or {}
+    name = str(metadata.get("name") or "?")
+    phase = str(status.get("phase") or "unknown phase")
+    terminating = ", deletion under way" if metadata.get("deletionTimestamp") else ""
+    return f"Pod {name} was {phase}{terminating}"
 
 
 class KubernetesProvider:
@@ -4618,13 +4631,22 @@ class KubernetesProvider:
                     await self._call(self.client.delete, "networkpolicies", policy_name)
             return JOB_API_ERROR
         self.role_errors.pop((role, spec.attempt_id), None)
+        # hades #503: what the Job had done by the time it is deleted, for the preparer's
+        # pod-gone wait to report. Set before the wait so that a cancel or an API error
+        # raised while the Job ran still reaches the `finally` with an answer: the Job
+        # was still running when the wait for it ended.
+        job_outcome = "the Job was still running when the wait for it ended"
         try:
             code = await self._await_job(
                 name, timeout=timeout, cancelled=cancelled, wait_for_quota=wait_for_quota
             )
             refusal = self._job_refusals.pop(name, None)
-            job_completed: bool = False
-            job_completed_reason: str | None = None
+            if code is None:
+                job_outcome = f"the Job had not finished within {timeout}s of running"
+            elif code >= 0:
+                job_outcome = f"the Job had completed with exit {code}"
+            else:
+                job_outcome = "the Job had ended without an exit code (its Pod failed)"
             if code is None:
                 if name in self._job_unanswered:
                     self._job_unanswered.discard(name)
@@ -4647,14 +4669,6 @@ class KubernetesProvider:
                 # A full namespace is a wait, not a verdict on the attempt.
                 self._role_error(role, spec.attempt_id, refusal, True)
                 return JOB_API_ERROR
-            if code is not None and code >= 0:
-                job_completed = True
-            elif code is not None and code < 0:
-                # Derive the reason from the Job's conditions so the error message
-                # at prepare can say whether the Job had completed or was still running.
-                reason = await self._job_termination_reason(name)
-                if reason is not None:
-                    job_completed_reason = reason
             if log_output is not None:
                 pod = await self._pod_of(name)
                 if pod is not None:
@@ -4694,19 +4708,15 @@ class KubernetesProvider:
                         grace_period_seconds=0 if role == k8sspec.ROLE_VERIFIER else None,
                     )
                 try:
-                    # hades #503: the preparer gets a bounded retry with backoff.
+                    # hades #503: the preparer's Pods get a bounded wait with backoff, and
+                    # running out of it is `PrepareJobPodsTimeoutError`, which the
+                    # supervisor retries without charging the attempt.
                     if role == k8sspec.ROLE_PREPARER:
-                        await self._await_preparer_job_pods_gone(
-                            name,
-                            job_completed=job_completed,
-                            job_completed_reason=job_completed_reason,
-                        )
+                        await self._await_preparer_job_pods_gone(name, job_outcome=job_outcome)
                     else:
                         await self._await_job_pods_gone(
                             name, force=role == k8sspec.ROLE_VERIFIER, collection=collection
                         )
-                except PrepareJobPodsTimeoutError:
-                    raise
                 except (ProviderError, KubernetesApiError) as exc:
                     # An error already in flight is the one to report, not the Pod.
                     if not (tolerate_lingering_pod or failed):
@@ -5052,24 +5062,6 @@ class KubernetesProvider:
                 return f"the namespace quota refused the Pod: {message}"
         return None
 
-    async def _job_termination_reason(self, name: str) -> str | None:
-        """Return a human-readable reason for the Job's failure, or None."""
-        try:
-            job = await self._call(self.client.get, "jobs", name)
-        except KubernetesApiError:
-            return None
-        for condition in (job.get("status") or {}).get("conditions") or []:
-            if not isinstance(condition, dict):
-                continue
-            if str(condition.get("status")) != "True":
-                continue
-            ctype = str(condition.get("type", ""))
-            reason = str(condition.get("reason", ""))
-            message = str(condition.get("message", ""))
-            if ctype in ("Failed", "FailureTarget"):
-                return f"{reason}: {message}".strip() if message else reason
-        return None
-
     async def _job_deadline_exceeded(self, name: str) -> bool:
         """Whether the Job controller ended this Job for running past its
         `activeDeadlineSeconds`. The controller records the condition before it removes
@@ -5228,85 +5220,62 @@ class KubernetesProvider:
             + POD_DELETION_MARGIN_SECONDS
         )
 
-    async def _await_preparer_job_pods_gone(
-        self,
-        job_name: str,
-        *,
-        timeout: float | None = None,
-        job_completed: bool = True,
-        job_completed_reason: str | None = None,
-    ) -> None:
-        """hades #503: wait for a preparer Job's Pods to disappear, with retries.
+    async def _await_preparer_job_pods_gone(self, job_name: str, *, job_outcome: str) -> None:
+        """hades #503: wait for a deleted preparer Job's Pods to go, with backoff.
 
-        The preparer's pods may linger after the Job is deleted.  Instead of failing
-        on the first timeout, retry with exponential backoff (starting at 2 s,
-        doubling each time) until the cumulative wait exceeds timeout or the pods
-        are gone.  job_completed indicates whether the Job itself had finished
-        (succeeded or failed) or was still running when the wait began; this is
-        included in the error message so the operator knows what state the Job was in.
-        """
-        if timeout is None:
-            timeout = self.config.prepare_pod_deletion_wait_seconds
-        # Bounded below prepare_timeout_seconds so the total never exceeds it.
-        max_timeout = min(timeout, float(self.config.prepare_timeout_seconds))
-
-        completed_label = (
-            "the Job had completed"
-            if job_completed
-            else f"the Job was still running (reason: {job_completed_reason})"
+        The whole wait is `prepare_pod_deletion_wait_seconds`, clipped to
+        `prepare_timeout_seconds`. The Pods are listed, and while any remains the wait
+        pauses 2 s, then 4 s, then 8 s and so on, every pause clipped to what is left of
+        the wait, so the total never exceeds the setting. Running out raises
+        `PrepareJobPodsTimeoutError`, whose message says how long the wait was, how many
+        times it tried again, what the Job had done when the wait gave up (`job_outcome`:
+        completed with an exit code, still running, or not finished in time) and what the
+        lingering Pod looked like. An API server that cannot answer a listing is tried
+        again on the next pause, not treated as an answer."""
+        total = min(
+            float(self.config.prepare_pod_deletion_wait_seconds),
+            float(self.config.prepare_timeout_seconds),
         )
-
-        attempt = 0
-        backoff = 2.0  # seconds, starts at 2 s, doubles each retry
-        start = time.monotonic()
-
+        started = time.monotonic()
+        deadline = started + total
+        backoff = PREPARE_POD_WAIT_BACKOFF_SECONDS
+        retries = 0
+        unavailable = False
+        rows: list[dict[str, Any]] = []
         while True:
-            rows: list[dict[str, Any]] | None = None
             try:
                 rows = await self._call(
-                    self.client.list_objects,
-                    "pods",
-                    label_selector=f"job-name={job_name}",
+                    self.client.list_objects, "pods", label_selector=f"job-name={job_name}"
                 )
+                unavailable = False
+                if not rows:
+                    return
             except KubernetesUnavailableError:
-                # Transient API failure: sleep and retry the list call so the
-                # caller can confirm the pods are gone later.
-                elapsed = time.monotonic() - start
-                if elapsed >= max_timeout:
-                    raise PrepareJobPodsTimeoutError(
-                        f"Pods for Job {job_name!r} were still present after "
-                        f"{elapsed:.1f} seconds: {completed_label}"
-                    ) from None
-                attempt += 1
-                log.info(
-                    "preparer Job %s pods query unavailable (attempt %d); retrying in %.1f s",
-                    job_name,
-                    attempt,
-                    backoff,
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, max_timeout - elapsed)
-                continue
-
-            if not rows:
-                return  # pods are gone
-
-            elapsed = time.monotonic() - start
-            if elapsed >= max_timeout:
-                raise PrepareJobPodsTimeoutError(
-                    f"Pods for Job {job_name!r} were still present after "
-                    f"{elapsed:.1f} seconds: {completed_label}"
-                )
-
-            attempt += 1
+                unavailable = True
+            # Measured again right before every pause: the listing took time too, and
+            # the pause is never longer than what is left of the wait.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            pause = min(backoff, remaining)
+            retries += 1
             log.info(
-                "preparer Job %s pods still present (attempt %d); retrying in %.1f s",
+                "preparer Job %s Pods still present (%s); trying again in %.1f s (retry %d)",
                 job_name,
-                attempt,
-                backoff,
+                "the API was unavailable" if unavailable else f"{len(rows)} Pod(s)",
+                pause,
+                retries,
             )
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, max_timeout - elapsed)
+            await asyncio.sleep(pause)
+            backoff *= 2
+        if unavailable:
+            seen = "the API was unavailable for the last look"
+        else:
+            seen = "; ".join(_pod_words(row) for row in rows) or "no Pod was listed"
+        raise PrepareJobPodsTimeoutError(
+            f"Pods for Job {job_name!r} were still present after {total:g} seconds "
+            f"({retries} retries with backoff): {job_outcome}; {seen}"
+        )
 
     async def _await_pod_gone(
         self, name: str, *, timeout: float = 15, collection: bool = False

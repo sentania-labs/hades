@@ -540,10 +540,11 @@ class ProviderUnavailableError(ProviderError):
 
 
 class PrepareJobPodsTimeoutError(ProviderError):
-    """hades #503: a preparer Job's Pods linger after deletion despite backoff
-    retries.  The provider records whether the Job had completed or was still
-    running when the wait gave up.  Retrying the attempt does not consume the
-    budget; the attempt goes back to pending."""
+    """hades #503: the preparer Job's Pods were still present when the provider's
+    bounded, backed-off deletion wait ran out. The message says what the Job had done
+    when the wait gave up (completed with an exit code, not finished in time, or still
+    running). The supervisor prepares the same attempt again a bounded number of times,
+    charging the task no attempt, before it classes the failure as the environment."""
 
 
 class CollectionPendingError(ProviderUnavailableError):

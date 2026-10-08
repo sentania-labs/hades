@@ -1,497 +1,622 @@
-"""hades #503: a preparer Job whose pods are slow to clear is retried with
-backoff, keeps the previous bundle, and costs no attempt."""
+"""hades #503: a preparer whose Job's Pods are slow to clear is retried with backoff,
+keeps the previous bundle, and costs no attempt.
+
+The provider half runs against the fake Kubernetes API (26): the preparer Job runs, the
+provider deletes it, and a stand-in for the Job controller's background propagation
+leaves the Pod behind for a while. A fake clock stands in for `time.monotonic` and
+`asyncio.sleep` in the provider module, so a 15 s wait takes no time here. The
+supervisor half runs `_finish_launch` as hades #423's tests do, and the corrections and
+retention halves run the pure functions against an in-memory unit of work."""
 
 from __future__ import annotations
 
 import asyncio
-import sys
-from collections.abc import Generator
-from contextlib import contextmanager
-from pathlib import Path
-from types import MethodType
+import time
+from datetime import datetime, timedelta
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# Ensure the repo's source package is importable.
-# ---------------------------------------------------------------------------
-_repo = Path(__file__).resolve().parents[3]
-if str(_repo) not in sys.path:
-    sys.path.insert(0, str(_repo))
-
-from crucible.adapters.execution.kubernetes import (  # noqa: E402  # isort: skip
-    KubernetesConfig,
-    KubernetesProvider,
-    PrepareJobPodsTimeoutError,
+from crucible.adapters.execution import k8sspec
+from crucible.adapters.execution import kubernetes as kubernetes_module
+from crucible.adapters.execution.k8sapi import KubernetesUnavailableError
+from crucible.adapters.execution.kubernetes import KubernetesConfig, PrepareJobPodsTimeoutError
+from crucible.application.corrections import (
+    PREVIOUS_BUNDLE_GONE,
+    PREVIOUS_BUNDLE_OTHER_PROVIDER,
+    _unpublished_bundle_problem,
 )
-from crucible.domain.entities import (  # noqa: E402  # isort: skip
+from crucible.application.supervisor import (
+    PREPARE_POD_WAIT_RETRY_BUDGET,
+    PREPARE_POD_WAIT_RETRY_DELAY_SECONDS,
+    workspace_release_reason,
+)
+from crucible.cli.wiring import kubernetes_config
+from crucible.domain.entities import (
     Attempt,
+    Event,
+    EvidenceRecord,
     Execution,
     ExecutionRole,
+    RetentionAction,
     Task,
 )
-from crucible.domain.lifecycle import (  # noqa: E402  # isort: skip
-    AttemptState,
-    ExecutionState,
-    TaskState,
-)
-from tests.fixtures import FakeClock  # noqa: E402  # isort: skip type: ignore[attr-defined]
-from tests.fixtures import UTC  # type: ignore[attr-defined]  # noqa: E402  # isort: skip
-
-
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
-
-from datetime import datetime  # noqa: E402  # isort: skip
-
-_TASK_ID = "task-1"
-_EXEC_ID = "exec-1"
-
-
-def _make_task(state: TaskState) -> Task:
-    return Task(
-        id=_TASK_ID,
-        external_id="EX-0001",
-        principal_id="p-01",
-        project="example",
-        title="Do a thing",
-        state=state,
-        contract_version=1,
-        policy_name="default-software",
-        policy_version=2,
-        repository_id="repo-1",
-        created_at=datetime(2026, 1, 1, tzinfo=UTC),
-        updated_at=datetime(2026, 1, 2, tzinfo=UTC),
-        head_sha="abcdef0123456789",
-    )
-
-
-def _make_execution(
-    task_id: str = _TASK_ID,
-    state: ExecutionState = ExecutionState.ACTIVE,
-) -> Execution:
-    return Execution(
-        id=_EXEC_ID,
-        task_id=task_id,
-        role=ExecutionRole.IMPLEMENT,
-        contract_version=1,
-        harness="script-harness",
-        model="gpt-5.6-sol",
-        effort="high",
-        provider="kubernetes",
-        image="ghcr.io/example/worker:latest",
-        policy_snapshot={"limits": {"publish_retry_max": 3}},
-        state=state,
-        max_attempts=5,
-        retry_on=["environment", "resource_exhausted"],
-        timeout_seconds=900,
-        created_at=datetime(2026, 1, 1, tzinfo=UTC),
-        ended_at=None,
-    )
-
-
-def _make_provider(
-    *,
-    wait_seconds: float = 15.0,
-    prepare_timeout: int = 900,
-) -> MagicMock:
-    """Return a provider stubbed so that list_objects returns *pods*
-    until a reset clears them (used for the backoff-retry tests)."""
-    config = KubernetesConfig(
-        poll_interval_seconds=0,
-        launch_timeout_seconds=5,
-        prepare_pod_deletion_wait_seconds=wait_seconds,
-        prepare_timeout_seconds=prepare_timeout,
-        storage_class="lab-ssd",
-        image_pull_secret="ghcr-pull",
-    )
-
-    prov = MagicMock()
-    prov.config = config
-    prov.client = MagicMock()
-    prov._call = MagicMock()
-
-    # Bind the real method to the stub instance so *self* is the mock.
-    prov._await_preparer_job_pods_gone = MethodType(
-        KubernetesProvider._await_preparer_job_pods_gone, prov
-    )
-    return prov
-
-
-# ---------------------------------------------------------------------------
-# AC1 - backoff retry succeeds, pods clear
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_ac1_pods_clear_after_two_retries() -> None:
-    """A preparer whose pods clear during a backoff retry finishes prepare
-    without raising PrepareJobPodsTimeoutError.  The attempt goes to pending
-    and eventually launches."""
-    pods = [{"metadata": {"name": "preparer-pod-1"}}]
-    prov = _make_provider(wait_seconds=8.0, prepare_timeout=900)
-
-    call_count = 0
-
-    async def fake_call(*args: Any, **kwargs: Any) -> list[dict[str, Any]] | None:
-        nonlocal call_count
-        call_count += 1
-        if "list_objects" in str(args):
-            if call_count <= 3:
-                return pods
-            return None
-        return None
-
-    prov._call = fake_call
-
-    await prov._await_preparer_job_pods_gone(
-        "test-job-1", job_completed=True, job_completed_reason=None
-    )
-    # initial check + 2 retries + final clear check = 4 calls
-    assert call_count == 4
-
-
-@pytest.mark.asyncio
-async def test_ac1_pods_still_present_times_out() -> None:
-    """When pods never clear before the timeout, a
-    PrepareJobPodsTimeoutError is raised."""
-    prov = _make_provider(wait_seconds=3.0, prepare_timeout=900)
-
-    async def always_pods(*args: Any, **kwargs: Any) -> list[dict[str, Any]] | None:
-        if "list_objects" in str(args):
-            return [{"metadata": {"name": "stuck-pod"}}]
-        return None
-
-    prov._call = always_pods
-
-    with pytest.raises(PrepareJobPodsTimeoutError) as exc_info:
-        await prov._await_preparer_job_pods_gone(
-            "stuck-job",
-            job_completed=True,
-            job_completed_reason=None,
-        )
-
-    msg = str(exc_info.value)
-    assert "were still present after" in msg
-    assert "the Job had completed" in msg
-
-
-@pytest.mark.asyncio
-async def test_ac1_job_still_running_reason_in_message() -> None:
-    """The error message states the Job was still running with a reason."""
-    prov = _make_provider(wait_seconds=2.0, prepare_timeout=900)
-
-    async def always_pods(*args: Any, **kwargs: Any) -> list[dict[str, Any]] | None:
-        if "list_objects" in str(args):
-            return [{"metadata": {"name": "running-job-pod"}}]
-        return None
-
-    prov._call = always_pods
-
-    with pytest.raises(PrepareJobPodsTimeoutError) as exc_info:
-        await prov._await_preparer_job_pods_gone(
-            "running-job",
-            job_completed=False,
-            job_completed_reason="OOMKilled",
-        )
-
-    msg = str(exc_info.value)
-    assert "the Job was still running (reason: OOMKilled)" in msg
-
-
-@pytest.mark.asyncio
-async def test_ac1_unavailable_transient_is_ignored() -> None:
-    """A KubernetesUnavailableError during list is silently ignored and the
-    loop continues (the provider retries)."""
-    from crucible.adapters.execution.k8sapi import (  # noqa: PLC0415 isort: skip
-        KubernetesUnavailableError,
-    )
-
-    prov = _make_provider(wait_seconds=5.0, prepare_timeout=900)
-    pods = [{"metadata": {"name": "pod-1"}}]
-
-    call_count = 0
-
-    async def sometimes_unavailable(*args: Any, **kwargs: Any) -> list[dict[str, Any]] | None:
-        nonlocal call_count
-        call_count += 1
-        if "list_objects" not in str(args):
-            return None
-        if call_count <= 2:
-            raise KubernetesUnavailableError(0, "API unavailable", path="")
-        if call_count == 3:
-            return pods
-        return None
-
-    prov._call = sometimes_unavailable
-
-    async def fake_sleep(seconds: float) -> None:
-        pass  # skip actual sleeps
-
-    with patch("asyncio.sleep", fake_sleep):
-        await prov._await_preparer_job_pods_gone(
-            "unavailable-job", job_completed=True, job_completed_reason=None
-        )
-    assert call_count >= 3
-
-
-# ---------------------------------------------------------------------------
-# AC2 - previous_attempt_bundle_gone is NOT raised after prepare failure
-# ---------------------------------------------------------------------------
-
-
-def test_ac2_workspace_path_none_lets_corrections_resume() -> None:
-    """When the latest work attempt has workspace_path=None (a prepare failure),
-    _unpublished_bundle_problem skips it and uses the previous attempt's
-    bundle instead, returning None (resumable)."""
-    from crucible.application.corrections import (  # noqa: PLC0415 isort: skip
-        _unpublished_bundle_problem,
-    )
-    from crucible.domain.entities import (  # noqa: PLC0415 isort: skip
-        EvidenceRecord,
-    )
-    from crucible.domain.lifecycle import AttemptState  # noqa: PLC0415 isort: skip
-
-    clock = FakeClock()
-    task = _make_task(TaskState.RUNNING)
-
-    # The previous (successful) attempt has workspace_path and a bundle_head.
-    good_attempt = Attempt(
-        id="attempt-good",
-        execution_id=_EXEC_ID,
-        task_id=task.id,
-        number=1,
-        workspace_path="/mnt/harness-workspace-abc",
-        identity_sha256="abc123",
-        state=AttemptState.SUCCEEDED,
-        created_at=clock.now(),
-        ended_at=clock.now(),
-        resume_from_remote=False,
-    )
-
-    # The failed (prepare) attempt has workspace_path=None.
-    failed_attempt = Attempt(
-        id="attempt-failed",
-        execution_id=_EXEC_ID,
-        task_id=task.id,
-        number=2,
-        workspace_path=None,
-        identity_sha256=None,
-        state=AttemptState.PREPARING,
-        created_at=clock.now(),
-        ended_at=None,
-        resume_from_remote=False,
-    )
-
-    execution = _make_execution(task_id=task.id)
-
-    retention_mock = MagicMock()
-    retention_mock.list_recent.return_value = []  # no workspace release
-
-    uow_mock = MagicMock()
-    uow_mock.retention = retention_mock
-
-    def _list_for_task(tid: str) -> list[Attempt]:
-        return [good_attempt, failed_attempt] if tid == task.id else []
-
-    def _list_for_execution(eid: str) -> list[Attempt]:
-        return [good_attempt, failed_attempt] if eid == _EXEC_ID else []
-
-    uow_mock.attempts.list_for_task = _list_for_task
-    uow_mock.attempts.list_for_execution = _list_for_execution
-    uow_mock.executions.get = lambda eid: execution if eid == _EXEC_ID else None
-
-    def _list_for_attempt(aid: str) -> list[EvidenceRecord]:
-        if aid == "attempt-good":
-            return [
-                EvidenceRecord(
-                    id=1,
-                    attempt_id=aid,
-                    task_id=task.id,
-                    kind="bundle_head",
-                    verified=True,
-                    payload={"bundle_verified": True, "bundle_sha256": "abc123"},
-                    observed_at=clock.now(),
-                    source="crucible",
-                )
-            ]
-        return []
-
-    uow_mock.evidence.list_for_attempt = _list_for_attempt
-
-    # Also need to handle latest_work_attempt - it should find the failed_attempt
-
-    def _mock_latest_work(uow_local: Any, task_local: str) -> tuple[Attempt, Execution] | None:
-        # Return the failed attempt (latest)
-        return (failed_attempt, execution)
-
-    with patch(
-        "crucible.application.corrections.latest_work_attempt", side_effect=_mock_latest_work
-    ):
-        result = _unpublished_bundle_problem(
-            uow=uow_mock,
-            task=task,
-            provider="kubernetes",
-        )
-
-    # The fix: when workspace_path is None, we skip to the previous
-    # attempt's bundle and return None (resumable).
-    assert result is None
-
-
-# ---------------------------------------------------------------------------
-# AC3 - prepare failure does NOT consume the attempt budget
-# ---------------------------------------------------------------------------
-
-
-def test_ac3_retry_with_backoff_does_not_count_against_budget() -> None:
-    """_retry_with_backoff moves the attempt to PENDING without incrementing
-    the exit count.  The budget is preserved."""
-    from crucible.application.supervisor import Supervisor  # noqa: PLC0415 isort: skip
-
-    clock = FakeClock()
-    task = _make_task(TaskState.RUNNING)
-
-    attempt = Attempt(
-        id="attempt-1",
-        execution_id=_EXEC_ID,
-        task_id=task.id,
-        number=2,
-        workspace_path=None,
-        identity_sha256=None,
-        state=AttemptState.PREPARING,
-        created_at=clock.now(),
-        ended_at=None,
-        resume_from_remote=False,
-    )
-
-    execution = _make_execution(task_id=task.id)
-
-    supervisor = Supervisor.__new__(Supervisor)
-    supervisor._clock = clock
-
-    uow_mock = MagicMock()
-    uow_mock.attempts.get.return_value = attempt
-    uow_mock.tasks.get.return_value = task
-    uow_mock.executions.get.return_value = execution
-
-    called_save: list[bool] = []
-
-    def fake_commit() -> None:
-        called_save.append(True)
-        assert attempt.state == AttemptState.PENDING
-
-    uow_mock.commit = fake_commit
-
-    @contextmanager
-    def _fenced_cm() -> Generator[Any, None, None]:
-        yield uow_mock
-
-    with patch.object(supervisor, "_fenced", _fenced_cm):
-        captured_payload: dict[str, Any] = {}
-
-        def fake_move(
-            uow: Any,
-            clock_local: Any,
-            att: Any,
-            new_state: Any,
-            kind: Any,
-            payload: Any = None,
-        ) -> None:
-            att.state = new_state
-            captured_payload.update(payload or {})
-
-        with (
-            patch("crucible.application.supervisor.move_attempt", side_effect=fake_move),
-            patch(
-                "crucible.application.supervisor.move_task",
-                return_value=None,
-            ),
+from crucible.domain.events import EventKind
+from crucible.domain.exit_class import ExitClass
+from crucible.domain.lifecycle import ATTEMPT_TERMINAL, AttemptState, ExecutionState, TaskState
+from crucible.ports.execution import LaunchCancelledError, ProviderError
+from crucible.settings import Settings
+from tests.unit.kubernetes_fixtures import ATTEMPT, build, spec
+from tests.unit.test_class_routing import NOW
+from tests.unit.test_issue_423_quota_capacity_waits import _events, _finishing
+
+PREPARER_JOB = k8sspec.object_name("prepare", ATTEMPT)
+
+# ----- the fake clock and the lingering Pod ------------------------------------------
+
+
+class _Clock:
+    """A monotonic clock that the provider's sleeps advance. Pauses of zero (the poll
+    interval the unit tier uses) are not recorded; the pod-gone wait's are."""
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+        self.sleeps: list[float] = []
+        self._real_sleep = asyncio.sleep
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        if seconds > 0:
+            self.sleeps.append(seconds)
+        self.now += seconds
+        await self._real_sleep(0)
+
+
+class _Module:
+    """`time` or `asyncio` as the provider module sees it, with one name replaced."""
+
+    def __init__(self, real: Any, **replaced: Any) -> None:
+        self._real = real
+        self._replaced = replaced
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self._replaced:
+            return self._replaced[name]
+        return getattr(self._real, name)
+
+
+def _fake_clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    clock = _Clock()
+    monkeypatch.setattr(kubernetes_module, "time", _Module(time, monotonic=clock.monotonic))
+    monkeypatch.setattr(kubernetes_module, "asyncio", _Module(asyncio, sleep=clock.sleep))
+    return clock
+
+
+def _linger(api: Any, *, polls: int | None) -> dict[str, Any]:
+    """The Job controller's background propagation, slow: deleting the preparer Job
+    leaves its Pod behind until the provider has listed it `polls` times (None: for
+    good). Returns the state a test reads: the Job's name and the listings seen."""
+    real_delete, real_list = api.delete, api.list_objects
+    state: dict[str, Any] = {"job": None, "polls": 0}
+
+    def delete(kind: str, name: str, **kwargs: Any) -> None:
+        if kind == "jobs" and name == PREPARER_JOB and (kind, name) in api.objects:
+            state["job"] = name
+            kwargs["propagation"] = "Orphan"
+        real_delete(kind, name, **kwargs)
+
+    def list_objects(kind: str, **kwargs: Any) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = real_list(kind, **kwargs)
+        if (
+            kind == "pods"
+            and state["job"] is not None
+            and kwargs.get("label_selector") == f"job-name={state['job']}"
+            and rows
         ):
-            supervisor._retry_with_backoff("attempt-1", "prepare", "pods still present")
+            state["polls"] += 1
+            if polls is not None and state["polls"] > polls:
+                for row in rows:
+                    real_delete("pods", str(row["metadata"]["name"]))
+                rows = []
+        return rows
 
-    assert attempt.state == AttemptState.PENDING
-    assert attempt.workspace_path is None
-    assert len(called_save) == 1
-    assert captured_payload.get("stage") == "prepare"
-    assert "pods still present" in captured_payload.get("detail", "")
-    assert captured_payload.get("quota_wait") is True
-
-
-# ---------------------------------------------------------------------------
-# AC4 - environment detail includes Job completed/running state
-# ---------------------------------------------------------------------------
+    api.delete = delete
+    api.list_objects = list_objects
+    return state
 
 
-@pytest.mark.asyncio
-async def test_ac4_message_includes_job_completed_state() -> None:
-    """When the wait gives up, the error message states whether the Job had
-    completed or was still running."""
-    prov = _make_provider(wait_seconds=2.0, prepare_timeout=900)
+def _config(**overrides: Any) -> KubernetesConfig:
+    values: dict[str, Any] = {
+        "poll_interval_seconds": 0,
+        "launch_timeout_seconds": 5,
+        "storage_class": "lab-ssd",
+        "image_pull_secret": "ghcr-pull",
+        **overrides,
+    }
+    return KubernetesConfig(**values)
 
-    async def always_pods(*args: Any, **kwargs: Any) -> list[dict[str, Any]] | None:
-        if "list_objects" in str(args):
-            return [{"metadata": {"name": "pod"}}]
-        return None
 
-    prov._call = always_pods
+# ----- AC1: pods that clear during the backoff let the attempt launch ----------------
 
-    with pytest.raises(PrepareJobPodsTimeoutError) as exc:
-        await prov._await_preparer_job_pods_gone(
-            "completed-job",
-            job_completed=True,
-            job_completed_reason=None,
+
+async def test_pods_that_clear_during_the_backoff_let_the_attempt_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Pod outlives the first look and the first pause; the second pause is longer,
+    the Pod is gone on the third look, and prepare returns a workspace the attempt
+    launches from."""
+    api, _registry, provider = build()
+    clock = _fake_clock(monkeypatch)
+    lingering = _linger(api, polls=2)
+    launch = spec()
+
+    workspace = await provider.prepare(launch)
+
+    assert lingering["job"] == PREPARER_JOB
+    assert lingering["polls"] == 3
+    assert clock.sleeps == [2.0, 4.0]
+    assert workspace.checkout_path.endswith("/repo")
+    assert not api.list_objects("pods", label_selector=f"job-name={PREPARER_JOB}")
+    handle = await provider.launch(workspace, launch)
+    assert handle.ref.startswith("worker-")
+    assert api.get("jobs", handle.ref)["metadata"]["name"] == handle.ref
+
+
+async def test_an_api_outage_during_the_wait_is_asked_again_not_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api, _registry, provider = build()
+    clock = _fake_clock(monkeypatch)
+    lingering = _linger(api, polls=1)
+    listing = api.list_objects
+    outages = {"left": 2}
+
+    def flaky(kind: str, **kwargs: Any) -> list[dict[str, Any]]:
+        # The outage starts once the Job is deleted, so it lands on the pod-gone wait.
+        if (
+            kind == "pods"
+            and lingering["job"] is not None
+            and kwargs.get("label_selector") == f"job-name={PREPARER_JOB}"
+            and outages["left"] > 0
+        ):
+            outages["left"] -= 1
+            raise KubernetesUnavailableError(503, "the API server is restarting", path="/pods")
+        return listing(kind, **kwargs)
+
+    monkeypatch.setattr(api, "list_objects", flaky)
+
+    await provider.prepare(spec())
+
+    # Two outages, then the Pod seen once, then gone: three pauses, never a failure.
+    assert outages["left"] == 0
+    assert lingering["polls"] == 2
+    assert clock.sleeps == [2.0, 4.0, 8.0]
+
+
+# ----- AC1, AC4: pods that never clear fail the prepare after the whole wait ---------
+
+
+async def test_pods_that_never_clear_fail_the_prepare_after_the_whole_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default wait is 15 s: four tries at 2, 4, 8 and 1 s, the last clipped to
+    what is left, and the message says the Job had completed when the wait gave up."""
+    api, _registry, provider = build()
+    clock = _fake_clock(monkeypatch)
+    _linger(api, polls=None)
+
+    with pytest.raises(PrepareJobPodsTimeoutError) as raised:
+        await provider.prepare(spec())
+
+    message = str(raised.value)
+    assert f"Pods for Job {PREPARER_JOB!r} were still present after 15 seconds" in message
+    assert "(4 retries with backoff)" in message
+    assert "the Job had completed with exit 0" in message
+    assert f"Pod {PREPARER_JOB}" in message
+    assert clock.sleeps == [2.0, 4.0, 8.0, 1.0]
+    assert sum(clock.sleeps) == 15.0
+    assert isinstance(raised.value, ProviderError)
+
+
+@pytest.mark.parametrize(
+    ("wait", "prepare_timeout", "pauses"),
+    [
+        # Each pause is clipped to what is left of the wait: never 2 s and then 3 s.
+        (3.0, 900, [2.0, 1.0]),
+        # The wait is bounded by prepare_timeout_seconds, whatever the setting says.
+        (60.0, 5, [2.0, 3.0]),
+    ],
+)
+async def test_every_pause_is_clipped_to_what_is_left_of_the_wait(
+    monkeypatch: pytest.MonkeyPatch, wait: float, prepare_timeout: int, pauses: list[float]
+) -> None:
+    api, _registry, provider = build(
+        config=_config(
+            prepare_pod_deletion_wait_seconds=wait, prepare_timeout_seconds=prepare_timeout
         )
-    assert "the Job had completed" in str(exc.value)
+    )
+    clock = _fake_clock(monkeypatch)
+    _linger(api, polls=None)
 
-    with pytest.raises(PrepareJobPodsTimeoutError) as exc:
-        await prov._await_preparer_job_pods_gone(
-            "running-job",
-            job_completed=False,
-            job_completed_reason="NodeAffinity",
-        )
-    assert "the Job was still running (reason: NodeAffinity)" in str(exc.value)
+    with pytest.raises(PrepareJobPodsTimeoutError, match="still present after") as raised:
+        await provider.prepare(spec())
 
-
-# ---------------------------------------------------------------------------
-# Additional: verify the backoff is exponential
-# ---------------------------------------------------------------------------
+    assert clock.sleeps == pauses
+    total = min(wait, prepare_timeout)
+    assert sum(clock.sleeps) == total
+    assert f"after {total:g} seconds ({len(pauses)} retries with backoff)" in str(raised.value)
 
 
-@pytest.mark.asyncio
-async def test_ac1_backoff_is_exponential() -> None:
-    """The backoff doubles each time: 2 s, 4 s, 8 s, ... until the cap."""
-    prov = _make_provider(
-        wait_seconds=20.0,
-        prepare_timeout=900,
+async def test_the_message_says_the_job_was_still_running_when_the_wait_gave_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC4: the wait that follows a Job the provider stopped waiting for (a cancel, an
+    API error) reports it as still running, with the lingering Pod's phase."""
+    api, _registry, provider = build(config=_config(prepare_pod_deletion_wait_seconds=2.0))
+    _fake_clock(monkeypatch)
+    api.create(
+        "pods",
+        {
+            "metadata": {
+                "name": "prepare-stuck-x1",
+                "labels": {"job-name": "prepare-stuck"},
+                "deletionTimestamp": "2026-10-07T03:00:00Z",
+            },
+            "status": {"phase": "Running"},
+        },
     )
 
-    call_times: list[float] = []
-    real_sleep = asyncio.sleep
-
-    async def fake_sleep(seconds: float) -> None:
-        call_times.append(seconds)
-        await real_sleep(0)
-
-    async def never_clear(*args: Any, **kwargs: Any) -> list[dict[str, Any]] | None:
-        if "list_objects" in str(args):
-            return [{"metadata": {"name": "pod"}}]
-        return None
-
-    prov._call = never_clear
-
-    with patch("asyncio.sleep", fake_sleep), pytest.raises(PrepareJobPodsTimeoutError):
-        await prov._await_preparer_job_pods_gone(
-            "exp-job",
-            job_completed=True,
-            job_completed_reason=None,
+    with pytest.raises(PrepareJobPodsTimeoutError) as raised:
+        await provider._await_preparer_job_pods_gone(
+            "prepare-stuck", job_outcome="the Job was still running when the wait for it ended"
         )
 
-    # Backoff values should be: 2, 4, 8, 6 (last clipped by max_timeout)
-    assert len(call_times) >= 3
-    assert call_times[0] == 2.0
-    assert call_times[1] == 4.0
-    assert call_times[2] == 8.0
+    message = str(raised.value)
+    assert "the Job was still running when the wait for it ended" in message
+    assert "Pod prepare-stuck-x1 was Running, deletion under way" in message
+
+
+async def test_a_cancel_while_the_preparer_runs_is_still_a_cancel_when_its_pods_linger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancel raised while the Job ran reaches the `finally` before the Job's outcome
+    is known; the pod-gone wait still runs, with the Job reported as still running, and
+    a Pod lingering behind the cancel is logged, not raised over it."""
+    api, _registry, provider = build()
+    clock = _fake_clock(monkeypatch)
+    _linger(api, polls=None)
+    looks = 0
+
+    async def cancelled() -> bool:
+        nonlocal looks
+        looks += 1
+        return looks > 2
+
+    with pytest.raises(LaunchCancelledError, match="cancelled while"):
+        await provider.prepare(spec(), cancelled=cancelled)
+
+    assert clock.sleeps == [2.0, 4.0, 8.0, 1.0]
+    assert api.list_objects("pods", label_selector=f"job-name={PREPARER_JOB}")
+
+
+# ----- the wait is a deployment setting -----------------------------------------------
+
+
+def test_the_deletion_wait_is_a_kubernetes_setting_with_a_15_second_default() -> None:
+    assert Settings().kubernetes.prepare_pod_deletion_wait_seconds == 15.0
+    assert kubernetes_config(Settings()).prepare_pod_deletion_wait_seconds == 15.0
+    settings = Settings(kubernetes={"prepare_pod_deletion_wait_seconds": 40})
+    assert kubernetes_config(settings).prepare_pod_deletion_wait_seconds == 40.0
+
+
+# ----- AC3: the supervisor prepares again, bounded, and charges no attempt ------------
+
+POD_WAIT = (
+    f"Pods for Job {PREPARER_JOB!r} were still present after 15 seconds (4 retries with "
+    f"backoff): the Job had completed with exit 0; Pod {PREPARER_JOB}-x1 was Succeeded, "
+    "deletion under way"
+)
+
+
+def _deferrals(item: Any, count: int) -> list[Event]:
+    """The attempt's earlier deferral events, as the supervisor counts them."""
+    return [
+        Event(
+            seq=n + 1,
+            ts=NOW,
+            kind=EventKind.HARNESS_LAUNCH_DEFERRED.value,
+            principal="crucible",
+            verified=True,
+            payload={"prepare_pod_wait": True, "retry": n + 1, "stage": "prepare"},
+            task_id=item.task.id,
+            execution_id=item.execution.id,
+            attempt_id=item.attempt.id,
+        )
+        for n in range(count)
+    ]
+
+
+def _charged(uow: Any, execution: Execution) -> int:
+    """The attempts `_classify_and_finish` counts against `max_attempts`: the
+    execution's terminal ones, less the classes it exempts."""
+    return sum(
+        prior.exit_class
+        not in {ExitClass.QUOTA_EXHAUSTED, ExitClass.INFRASTRUCTURE, ExitClass.BLOCKED}
+        for prior in uow.attempts.list_for_execution(execution.id)
+        if prior.state in ATTEMPT_TERMINAL
+    )
+
+
+def _pod_wait_failing(monkeypatch: pytest.MonkeyPatch, earlier: int) -> tuple[Any, Any, Any, Any]:
+    supervisor, item, uow, provider, _launch = _finishing(monkeypatch)
+    uow.events.list_for_task.return_value = _deferrals(item, earlier)
+    monkeypatch.setattr(
+        supervisor, "_prepare", AsyncMock(side_effect=PrepareJobPodsTimeoutError(POD_WAIT))
+    )
+    return supervisor, item, uow, provider
+
+
+@pytest.mark.parametrize("earlier", [0, 1, 2])
+async def test_the_pod_wait_error_prepares_the_same_attempt_again_after_a_longer_pause(
+    monkeypatch: pytest.MonkeyPatch, earlier: int
+) -> None:
+    supervisor, item, uow, provider = _pod_wait_failing(monkeypatch, earlier)
+    assert _charged(uow, item.execution) == 0
+
+    assert not await supervisor._finish_launch(item, provider)
+
+    assert item.attempt.state is AttemptState.PENDING
+    assert item.task.state is TaskState.SCHEDULED
+    assert item.attempt.exit_class is None and item.attempt.termination_reason is None
+    assert item.attempt.started_at is None and item.attempt.ended_at is None
+    assert item.attempt.workspace_path is None
+    # AC3: the same attempt row goes around again; nothing terminal was recorded, so
+    # the count the retry policy charges against max_attempts is what it was.
+    assert _charged(uow, item.execution) == 0
+    supervisor._classify_and_finish.assert_not_called()
+    uow.escalations.add.assert_not_called()
+    (deferred,) = _events(uow, EventKind.HARNESS_LAUNCH_DEFERRED)
+    assert deferred.payload["prepare_pod_wait"] is True
+    assert deferred.payload["retry"] == earlier + 1
+    assert deferred.payload["retry_budget"] == PREPARE_POD_WAIT_RETRY_BUDGET == 3
+    assert deferred.payload["stage"] == "prepare"
+    assert "the Job had completed with exit 0" in deferred.payload["detail"]
+    assert deferred.payload["from"] == "preparing" and deferred.payload["to"] == "pending"
+    (scheduled,) = _events(uow, EventKind.TASK_SCHEDULED)
+    assert scheduled.payload["reason"] == "prepare_pod_wait"
+    assert "were still present after 15 seconds" in scheduled.payload["detail"]
+    delay = PREPARE_POD_WAIT_RETRY_DELAY_SECONDS * 2**earlier
+    assert deferred.payload["retry_delay_seconds"] == delay == [30, 60, 120][earlier]
+    assert item.task.resume_at == NOW + timedelta(seconds=delay)
+    supervisor._release_checkout_leases.assert_called_once()
+
+
+async def test_the_fourth_pod_wait_failure_ends_the_attempt_as_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor, item, uow, provider = _pod_wait_failing(monkeypatch, PREPARE_POD_WAIT_RETRY_BUDGET)
+
+    assert not await supervisor._finish_launch(item, provider)
+
+    assert item.attempt.state is AttemptState.COLLECTED
+    assert item.attempt.exit_class is ExitClass.ENVIRONMENT
+    assert item.task.resume_at is None
+    detail = item.attempt.termination_detail or ""
+    assert detail.startswith(f"prepare: Pods for Job {PREPARER_JOB!r} were still present")
+    assert "the Job had completed with exit 0" in detail
+    assert "the prepare was tried 3 more times and the Pods stayed" in detail
+    assert not _events(uow, EventKind.HARNESS_LAUNCH_DEFERRED)
+    (collected,) = _events(uow, EventKind.ATTEMPT_COLLECTED)
+    assert collected.payload["exit_class"] is ExitClass.ENVIRONMENT
+    supervisor._classify_and_finish.assert_called_once()
+    summary = supervisor._classify_and_finish.call_args.kwargs["wake_summary"]
+    assert summary.startswith("attempt 1 ended environment at prepare: ")
+
+
+async def test_a_cancelled_task_ends_the_attempt_as_a_cancel_not_a_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor, item, uow, provider = _pod_wait_failing(monkeypatch, 0)
+    monkeypatch.setattr(supervisor, "_finish_cancelling", MagicMock())
+
+    async def cancel_during_prepare(*_: Any, **__: Any) -> Any:
+        item.task.state = TaskState.CANCELLING
+        raise PrepareJobPodsTimeoutError(POD_WAIT)
+
+    monkeypatch.setattr(supervisor, "_prepare", cancel_during_prepare)
+
+    assert not await supervisor._finish_launch(item, provider)
+
+    assert item.attempt.state is AttemptState.FAILED
+    assert item.attempt.exit_class is ExitClass.KILLED
+    assert not _events(uow, EventKind.HARNESS_LAUNCH_DEFERRED)
+
+
+# ----- AC2: the next correction resumes from the previous attempt's bundle -----------
+
+IMPLEMENT = "01EXECIMPLEMENT0000000000A"
+CORRECT = "01EXECCORRECT000000000000B"
+# The failed prepare is the newer attempt: its id sorts above the sealed one's.
+SEALED = "01ATTEMPT0SEALED000000000A"
+FAILED_PREPARE = "01ATTEMPT1FAILEDPREPARE00B"
+SEALED_WORKSPACE = f"k8s://crucible-workers/{k8sspec.object_name('ws', SEALED)}"
+
+
+def _task() -> Task:
+    return Task(
+        "task",
+        "FDY-0507",
+        "foundry",
+        "p",
+        "t",
+        TaskState.REPORTED,
+        2,
+        "policy",
+        1,
+        "repo",
+        NOW,
+        NOW,
+        head_sha="b" * 40,
+    )
+
+
+def _execution(execution_id: str, role: ExecutionRole, provider: str = "kubernetes") -> Execution:
+    return Execution(
+        execution_id,
+        "task",
+        role,
+        1 if role is ExecutionRole.IMPLEMENT else 2,
+        "codex",
+        "m",
+        None,
+        provider,
+        "img",
+        {},
+        ExecutionState.FAILED,
+        2,
+        ["environment"],
+        60,
+        NOW,
+    )
+
+
+def _bundle_head(attempt_id: str) -> EvidenceRecord:
+    return EvidenceRecord(
+        id=1,
+        attempt_id=attempt_id,
+        task_id="task",
+        kind="bundle_head",
+        verified=True,
+        payload={"bundle_verified": True, "bundle_sha256": "c" * 64, "head_sha": "b" * 40},
+        observed_at=NOW,
+        source="crucible",
+    )
+
+
+def _uow(
+    executions: list[Execution],
+    attempts: list[Attempt],
+    *,
+    released: list[str] = (),  # type: ignore[assignment]
+) -> Any:
+    uow: Any = MagicMock()
+    uow.executions.list_for_task.return_value = executions
+    uow.executions.get.side_effect = lambda execution_id, **_: next(
+        (row for row in executions if row.id == execution_id), None
+    )
+    uow.attempts.list_for_task.return_value = attempts
+    uow.attempts.list_for_execution.side_effect = lambda execution_id: [
+        row for row in attempts if row.execution_id == execution_id
+    ]
+    uow.events.latest_for_task_kind.return_value = None
+    uow.events.list_for_task.return_value = []
+    uow.evidence.list_for_attempt.side_effect = lambda attempt_id: (
+        [_bundle_head(attempt_id)] if attempt_id == SEALED else []
+    )
+    uow.retention.list_recent.return_value = [
+        RetentionAction(
+            id=f"release-{subject}",
+            kind="workspace",
+            subject=subject,
+            policy_name="policy",
+            policy_version=1,
+            acted_at=NOW,
+            detail={},
+        )
+        for subject in released
+    ]
+    return uow
+
+
+def _after_a_failed_prepare(
+    *, same_execution: bool, provider: str = "kubernetes"
+) -> tuple[list[Execution], list[Attempt]]:
+    """An implementing attempt that sealed a bundle, then an attempt whose prepare failed
+    (the preparer's Pods never cleared) and so has no workspace: a retry of the same
+    execution, or the first attempt of a correction execution."""
+    implement = _execution(IMPLEMENT, ExecutionRole.IMPLEMENT, provider)
+    sealed = Attempt(
+        SEALED,
+        IMPLEMENT,
+        "task",
+        1,
+        AttemptState.FAILED,
+        NOW,
+        workspace_path=SEALED_WORKSPACE,
+        exit_class=ExitClass.ENVIRONMENT,
+        ended_at=NOW,
+        cleaned_up_at=NOW,
+    )
+    failed = Attempt(
+        FAILED_PREPARE,
+        IMPLEMENT if same_execution else CORRECT,
+        "task",
+        2 if same_execution else 1,
+        AttemptState.FAILED,
+        NOW + timedelta(hours=1),
+        workspace_path=None,
+        exit_class=ExitClass.ENVIRONMENT,
+        ended_at=NOW + timedelta(hours=1),
+        termination_detail=f"prepare: {POD_WAIT}",
+    )
+    executions = (
+        [implement]
+        if same_execution
+        else [implement, _execution(CORRECT, ExecutionRole.CORRECT, provider)]
+    )
+    return executions, [sealed, failed]
+
+
+@pytest.mark.parametrize("same_execution", [False, True])
+def test_a_correction_after_a_failed_prepare_resumes_from_the_sealed_bundle(
+    same_execution: bool,
+) -> None:
+    """The latest work attempt never prepared, so the bundle it would have resumed from,
+    the task's last sealed one, is the one the next correction resumes from, whether
+    the failed attempt belongs to a correction execution or to the same execution."""
+    executions, attempts = _after_a_failed_prepare(same_execution=same_execution)
+    uow = _uow(executions, attempts)
+
+    assert _unpublished_bundle_problem(uow, _task(), "kubernetes") is None
+    assert _unpublished_bundle_problem(uow, _task(), "kubernetes", last_attempt=True) is None
+
+
+def test_the_sealed_bundle_is_what_the_check_reads_not_the_failed_prepare() -> None:
+    executions, attempts = _after_a_failed_prepare(same_execution=False)
+    # Released by retention: the sealed bundle really is gone, and the answer says so.
+    uow = _uow(executions, attempts, released=[SEALED])
+    problem = _unpublished_bundle_problem(uow, _task(), "kubernetes")
+    assert problem == {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
+    # A release recorded against the attempt that never prepared is no loss at all.
+    uow = _uow(executions, attempts, released=[FAILED_PREPARE])
+    assert _unpublished_bundle_problem(uow, _task(), "kubernetes") is None
+    # The provider that holds the sealed bundle is the one the correction must use.
+    executions, attempts = _after_a_failed_prepare(same_execution=False)
+    uow = _uow(executions, attempts)
+    problem = _unpublished_bundle_problem(uow, _task(), "docker")
+    assert problem == {
+        "path": "execution_request.provider",
+        "message": PREVIOUS_BUNDLE_OTHER_PROVIDER,
+    }
+
+
+@pytest.mark.parametrize("same_execution", [False, True])
+def test_retention_keeps_the_sealed_workspace_while_the_latest_attempt_has_none(
+    same_execution: bool,
+) -> None:
+    """The supervisor's release rule: the workspace the next correction resumes from
+    stays, past the retention window, while the task's latest implementing or
+    correcting attempt has no workspace of its own; once that attempt has prepared,
+    the window applies to the older one again."""
+    executions, attempts = _after_a_failed_prepare(same_execution=same_execution)
+    sealed, failed = attempts
+    uow = _uow(executions, attempts)
+    later: datetime = NOW + timedelta(days=15)
+
+    assert workspace_release_reason(uow, _task(), sealed, later, 14) is None
+
+    failed.workspace_path = "k8s://crucible-workers/ws-prepared-after-all"
+    assert workspace_release_reason(uow, _task(), sealed, later, 14) == "retention_window"

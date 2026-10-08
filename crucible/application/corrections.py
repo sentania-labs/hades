@@ -43,7 +43,7 @@ from crucible.domain.entities import (
 )
 from crucible.domain.events import EventKind
 from crucible.domain.ids import new_id
-from crucible.domain.lifecycle import AttemptState, TaskState
+from crucible.domain.lifecycle import TaskState
 from crucible.ports.clock import Clock
 from crucible.ports.harness import CredentialSource, HarnessGate
 from crucible.ports.repository import UnitOfWork
@@ -96,16 +96,22 @@ def _unpublished_bundle_problem(
         return {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
     attempt, execution = work
     exited = uow.events.latest_for_task_kind(task.id, EventKind.ATTEMPT_EXITED.value)
-    if (
+    never_started = (
         exited is not None
         and exited.attempt_id == attempt.id
         and (
             exited.payload.get("never_started") is True or exited.payload.get("no_commits") is True
         )
-    ):
+    )
+    # hades #503: an attempt whose prepare never produced a workspace (the preparer Job's
+    # Pods outlived the deletion wait, or any other prepare failure) has no bundle of its
+    # own either, whichever execution it belongs to; the bundle it would have resumed
+    # from is the task's last sealed one, and a prepare failure never discards it.
+    if never_started or attempt.workspace_path is None:
         # Hades #346: an attempt that never started (or ended before committing) left
         # no bundle of its own, and it does not discard the work before it. The checks
-        # below run against the last attempt that did start and seal a bundle.
+        # below run against the last attempt that did start and seal a bundle, in any
+        # of the task's implementing or correcting executions.
         sealed = [
             candidate
             for candidate in uow.attempts.list_for_task(task.id)
@@ -125,26 +131,6 @@ def _unpublished_bundle_problem(
         if source_execution is None:
             return {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
         execution = source_execution
-    # hades #503: a prepare failure (pod-gone wait exhausted) moves the attempt
-    # back to PENDING with workspace_path=None; skip it and use the preceding
-    # attempt's bundle (the same pattern as the never_started check above).
-    if attempt.workspace_path is None and attempt.state in (
-        AttemptState.PENDING,
-        AttemptState.PREPARING,
-        AttemptState.LAUNCHING,
-    ):
-        prev_attempts = [
-            a for a in uow.attempts.list_for_execution(execution.id) if a.workspace_path is not None
-        ]
-        if prev_attempts:
-            attempt = max(prev_attempts, key=lambda a: a.id)
-            source_execution = uow.executions.get(attempt.execution_id)
-            if source_execution is not None:
-                execution = source_execution
-            else:
-                return {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
-        else:
-            return {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
     if execution.provider != provider:
         return {"path": "execution_request.provider", "message": PREVIOUS_BUNDLE_OTHER_PROVIDER}
     evidence = next(
@@ -158,14 +144,12 @@ def _unpublished_bundle_problem(
         ),
         None,
     )
-    # hades #503: a prepare failure leaves workspace_path as None; the preceding
-    # attempt's bundle must not be discarded by this check.
     released = any(
         action.kind == "workspace" and action.subject == attempt.id
         for action in uow.retention.list_recent(10_000)
     )
-    path = f"{attempt.workspace_path}/output/work_branch.bundle" if attempt.workspace_path else ""
-    local_missing = bool(path) and "://" not in path and not Path(path).is_file()
+    path = f"{attempt.workspace_path}/output/work_branch.bundle"
+    local_missing = "://" not in path and not Path(path).is_file()
     if evidence is None or released or local_missing:
         return {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
     return None
