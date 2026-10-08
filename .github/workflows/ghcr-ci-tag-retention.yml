@@ -29,6 +29,13 @@ on:
         type: boolean
         default: false
 
+# Serialize against release.yml (24): the same concurrency group means only
+# one workflow (release or retention) can run the job at a time; the other
+# waits.  This prevents a concurrent release from tagging a ci-*-only digest
+# between the retention snapshot and the deletion.
+concurrency:
+  group: release
+
 permissions:
   contents: read
 
@@ -47,6 +54,8 @@ jobs:
       DRY_RUN: ${{ github.event.inputs.dry_run }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: main
       - uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c # v7.0.0
         with:
           enable-cache: true

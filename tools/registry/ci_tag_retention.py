@@ -205,8 +205,19 @@ def run(
             file=out,
         )
     if execute:
+        deleted = 0
         for version in selected:
             client.delete_version(version.id)
+            print(
+                f"deleted {version.digest} id={version.id}",
+                file=out,
+            )
+            deleted += 1
+        print(
+            "ci_tag_retention: run complete, "
+            f"{len(selected)} version(s) selected, {deleted} deleted",
+            file=out,
+        )
     else:
         print(
             f"ci_tag_retention: dry run, {len(selected)} version(s) would be deleted, 0 deleted",
