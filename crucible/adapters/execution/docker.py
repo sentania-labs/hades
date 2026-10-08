@@ -1639,6 +1639,15 @@ class DockerProvider:
             verifications=verifications,
             tail_bytes=self.config.log_tail_bytes,
         )
+        # The service shares the worker's network namespace, but it is still a
+        # separately labelled attempt container. Remove it before the cleanliness
+        # snapshot so an expected service is not reported as leaked workspace state.
+        # A refusal is deliberately suppressed here: the snapshot will then see the
+        # real leftover and keep the workspace_clean gate honest.
+        if launched is not None:
+            for service in launched.services:
+                with contextlib.suppress(Exception):
+                    await self._call(self.client.remove_container, service.container_id, force=True)
         state = await self._workspace_state(spec.attempt_id, keep=h.ref)
         return CollectedOutputs(
             report=outputs.report,

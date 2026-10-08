@@ -56,6 +56,22 @@ class ServiceStub(StubClient):
         self.started.append(container_id)
 
 
+class WorkspaceServiceStub(ServiceStub):
+    """Expose the service as running until collection removes it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.listed_after_removal = False
+
+    def remove_container(self, container_id: str, *, force: bool = True) -> None:
+        super().remove_container(container_id, force=force)
+        self.containers = [row for row in self.containers if row.get("Id") != container_id]
+
+    def list_containers(self, **kw: Any) -> list[dict[str, Any]]:
+        self.listed_after_removal = "container-2" in self.removed
+        return super().list_containers(**kw)
+
+
 def _spec() -> LaunchSpec:
     launch = spec()
     return replace(launch, policy={**launch.policy, "services": [{"kind": "postgres"}]})
@@ -219,3 +235,19 @@ async def test_an_attempt_without_a_service_collects_no_launch_evidence(tmp_path
     handle = await docker.launch(workspace, launch)
     outputs = await docker.collect(handle, workspace, launch)
     assert not any(a.name == "report/docker-launch.json" for a in outputs.artifacts)
+
+
+async def test_collection_removes_the_service_before_the_workspace_snapshot(tmp_path: Path) -> None:
+    client = WorkspaceServiceStub()
+    client.containers = [
+        {"Id": "container-1", "Names": ["/crucible-01ATTEMPT"]},
+        {"Id": "container-2", "Names": ["/svc-postgres-01ATTEMPT"]},
+    ]
+    docker, (workspace, handle), launch = await _launched(tmp_path, client)
+
+    outputs = await docker.collect(handle, workspace, launch)
+
+    assert client.listed_after_removal
+    assert "container-2" in client.removed
+    assert outputs.workspace_state.checked
+    assert outputs.workspace_state.leftover == ()

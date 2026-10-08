@@ -9,12 +9,15 @@ summary and payload. The fakes here stand in for GitHub and the database.
 
 from __future__ import annotations
 
+import io
+import zipfile
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from crucible.adapters.github.client import RestGitHubClient
 from crucible.application.ci_junit import (
     JUNIT_ABSENT,
     JUNIT_NO_ARTIFACT_FOR_JOB,
@@ -206,6 +209,53 @@ def test_a_test_jobs_artifact_is_read_for_its_run_and_attempt() -> None:
         "failing tests (junit-test-2): tests/integration/test_api.py::test_start, "
         "tests/integration/test_db.py::TestMigrations::test_upgrade"
     )
+
+
+class ArtifactRestTransport:
+    """The Actions endpoints used by the production RestGitHubClient."""
+
+    def __init__(self, archive: bytes) -> None:
+        self.archive = archive
+        self.downloaded: list[tuple[str, int]] = []
+
+    def get(self, path: str, *, bearer: str) -> Any:
+        assert bearer.startswith("ghs_")
+        assert path.endswith("/actions/jobs/123")
+        return {"run_id": 77}
+
+    def request(self, method: str, path: str, *, bearer: str, **kwargs: Any) -> Any:
+        assert method == "GET" and bearer.startswith("ghs_")
+        if path.endswith("/actions/runs/77"):
+            return 200, {"id": 77, "run_attempt": 2}, {}
+        assert path.endswith("/actions/artifacts/91/zip")
+        assert kwargs == {"raw": True}
+        return 302, b"", {"location": "https://objects.example/junit.zip"}
+
+    def paginate(self, path: str, *, bearer: str, key: str) -> list[Any]:
+        assert path.endswith("/actions/runs/77/artifacts")
+        assert bearer.startswith("ghs_") and key == "artifacts"
+        return [{"id": 91, "name": "junit-test-2", "expired": False}]
+
+    def download(self, url: str, *, limit_bytes: int) -> bytes:
+        self.downloaded.append((url, limit_bytes))
+        return self.archive
+
+
+def test_the_production_rest_client_downloads_and_reads_the_junit_archive() -> None:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("junit/integration.xml", REPORT)
+        archive.writestr("notes.txt", b"not a report")
+    transport = ArtifactRestTransport(buffer.getvalue())
+    github = RestGitHubClient(MagicMock(), transport)  # type: ignore[arg-type]
+
+    findings = _read(github)
+
+    assert findings.status == JUNIT_PARSED
+    assert findings.artifact == "junit-test-2"
+    assert findings.reports == 1
+    assert findings.failing_tests[0] == "tests/integration/test_api.py::test_start"
+    assert transport.downloaded == [("https://objects.example/junit.zip", 1024)]
 
 
 def test_a_workflow_run_source_is_the_run_itself() -> None:

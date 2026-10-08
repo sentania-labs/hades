@@ -6,14 +6,16 @@ correction starts from the test ids and not from a log. When the run uploaded no
 artifact the wake says so; it never guesses from the log.
 
 The artifact is read through an optional capability of the GitHub client,
-`WorkflowArtifactReader`: a client that has it is asked, one that does not leaves the
-finding `unsupported`, which the wake also says. The GitHub port and its adapter are
-outside this change (the port method lands with the adapter); the reading, the record
-on the certification and the wake's words are all here and tested without it.
+`WorkflowArtifactReader`. The production REST client predates that optional port, so
+this module also uses its existing REST transport to list and download Actions
+artifacts. That keeps the capability available in production without widening the
+long-lived GitHub port for this one derived CI observation.
 """
 
 from __future__ import annotations
 
+import io
+import zipfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -33,6 +35,13 @@ JUNIT_UNREADABLE = "unreadable"
 JUNIT_UNSUPPORTED = "unsupported"
 # How many node ids the wake's summary names before "and N more".
 SUMMARY_TEST_LIMIT = 8
+
+
+class _UnsupportedRest:
+    """The supplied client is not the production REST client."""
+
+
+_UNSUPPORTED_REST = _UnsupportedRest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,7 +167,7 @@ def read_junit_findings(
         return JUnitFindings(JUNIT_NO_ARTIFACT_FOR_JOB, job=job)
     if junit_artifact_name(job, 1) is None:
         return JUnitFindings(JUNIT_NO_ARTIFACT_FOR_JOB, job=job)
-    if not isinstance(github, WorkflowArtifactReader):
+    if not isinstance(github, WorkflowArtifactReader) and not _has_rest_artifact_transport(github):
         return JUnitFindings(JUNIT_UNSUPPORTED, job=job)
     try:
         run_id = _run_id(
@@ -171,13 +180,26 @@ def read_junit_findings(
         run = github.get_workflow_run(token, repository=repository, run_id=run_id)
         attempt = int(run.get("run_attempt") or 1) if isinstance(run, Mapping) else 1
         artifact = junit_artifact_name(job, attempt) or ""
-        reports = github.junit_reports(
-            token,
-            repository=repository,
-            run_id=run_id,
-            artifact=artifact,
-            limit_bytes=limit_bytes,
-        )
+        if isinstance(github, WorkflowArtifactReader):
+            reports = github.junit_reports(
+                token,
+                repository=repository,
+                run_id=run_id,
+                artifact=artifact,
+                limit_bytes=limit_bytes,
+            )
+        else:
+            rest_reports = _rest_junit_reports(
+                github,
+                token,
+                repository=repository,
+                run_id=run_id,
+                artifact=artifact,
+                limit_bytes=limit_bytes,
+            )
+            if isinstance(rest_reports, _UnsupportedRest):
+                return JUnitFindings(JUNIT_UNSUPPORTED, job=job)
+            reports = rest_reports
     except GitHubError as exc:
         if exc.response_class == "rate_limited":
             raise
@@ -210,6 +232,77 @@ def read_junit_findings(
         artifact=artifact,
         failing_tests=tuple(failing),
         reports=len(reports),
+    )
+
+
+def _rest_junit_reports(
+    github: GitHubClient,
+    token: InstallationToken,
+    *,
+    repository: str,
+    run_id: int,
+    artifact: str,
+    limit_bytes: int,
+) -> tuple[JUnitReport, ...] | _UnsupportedRest | None:
+    """Read an Actions artifact with the production client's existing transport.
+
+    GitHub returns a redirect for the archive endpoint. The transport already owns
+    redirect downloads and their credential boundary for job logs, so no token is sent
+    to the signed archive URL. Test doubles without that transport remain unsupported.
+    """
+    transport = getattr(github, "_http", None)
+    if transport is None or not callable(getattr(transport, "paginate", None)):
+        return _UNSUPPORTED_REST
+    rows = transport.paginate(
+        f"/repos/{repository}/actions/runs/{run_id}/artifacts",
+        bearer=token.reveal(),
+        key="artifacts",
+    )
+    matches = [
+        row
+        for row in rows
+        if isinstance(row, Mapping)
+        and row.get("name") == artifact
+        and not bool(row.get("expired", False))
+    ]
+    if not matches:
+        return None
+    chosen = max(matches, key=lambda row: int(row.get("id") or 0))
+    artifact_id = int(chosen.get("id") or 0)
+    if artifact_id <= 0:
+        return ()
+    path = f"/repos/{repository}/actions/artifacts/{artifact_id}/zip"
+    status, payload, headers = transport.request("GET", path, bearer=token.reveal(), raw=True)
+    if status in (301, 302, 303, 307, 308):
+        location = headers.get("location", "")
+        if not location or not callable(getattr(transport, "download", None)):
+            return ()
+        payload = transport.download(location, limit_bytes=limit_bytes)
+        status = 200
+    if status >= 400:
+        raise GitHubError(status, "artifact download was refused", path=path)
+    if not isinstance(payload, bytes) or len(payload) > limit_bytes:
+        return ()
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            reports: list[JUnitReport] = []
+            total = 0
+            for member in archive.infolist():
+                if member.is_dir() or not member.filename.lower().endswith(".xml"):
+                    continue
+                total += member.file_size
+                if total > limit_bytes or member.flag_bits & 0x1:
+                    return ()
+                reports.append(JUnitReport(artifact, member.filename, archive.read(member)))
+            return tuple(reports)
+    except (OSError, ValueError, zipfile.BadZipFile, RuntimeError):
+        return ()
+
+
+def _has_rest_artifact_transport(github: GitHubClient) -> bool:
+    transport = getattr(github, "_http", None)
+    return transport is not None and all(
+        callable(getattr(transport, method, None)) for method in ("paginate", "request", "download")
     )
 
 

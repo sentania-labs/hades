@@ -358,3 +358,9 @@ def test_ci_required_checks_defaults_to_no_narrowing() -> None:
     document = seeded_policy()
     del document["ci_certification"]["required_checks"]
     assert parse_policy(document).ci_certification.required_checks == []
+
+
+def test_a_service_digest_must_have_exactly_64_hexadecimal_digits() -> None:
+    document = seeded_policy()
+    document["services"] = [{"kind": "postgres", "image": "postgres@sha256:" + "z" * 64}]
+    assert any("must be pinned by digest" in error for error in _errors(document))

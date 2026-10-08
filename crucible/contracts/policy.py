@@ -7,6 +7,7 @@ a principal (operator-only fields) live in the application layer.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Literal
@@ -226,7 +227,7 @@ class TestServiceDeclaration(StrictModel):
     @classmethod
     def _pinned_by_digest(cls, value: str) -> str:
         name, separator, digest = value.partition("@")
-        if not separator or not name or not digest.startswith("sha256:") or len(digest) != 71:
+        if not separator or not name or re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest) is None:
             raise ValueError(f"service image {value!r} must be pinned by digest (name@sha256:...)")
         return value
 
