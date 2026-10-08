@@ -71,6 +71,7 @@ from crucible.application.routing import (
     current_routing_version,
     launch_model_name,
     load_attempt_routing,
+    model_mark_key,
     reserve,
     select_model,
 )
@@ -2575,6 +2576,7 @@ class Supervisor:
         item: _Pending,
         *,
         excluded_pools: set[str | None] | None = None,
+        excluded_routes: set[tuple[str, str]] | None = None,
         routing: RoutingPolicyV1 | None = None,
     ) -> Any:
         # hades #254: every attempt, a correction's or a retry's included, routes with
@@ -2593,6 +2595,11 @@ class Supervisor:
                 provider=request.provider.value,
             )
         )
+        # The (harness, model) routes this attempt may not take: the ones the caller
+        # names (a reroute deciding where to go next) and the ones the event that
+        # created the attempt excluded, a capacity refusal's retry or a model-only
+        # quota refusal's reroute (hades #373).
+        all_excluded_routes = set(excluded_routes or set()) | self._capacity_exclusions(uow, item)
         selection = select_model(
             uow,
             routing,
@@ -2611,7 +2618,7 @@ class Supervisor:
                 .get("allowlist", [])
             ],
             excluded_pools={pool for pool in (excluded_pools or set()) if pool is not None},
-            excluded_routes=self._capacity_exclusions(uow, item),
+            excluded_routes=all_excluded_routes,
             pinned_model=request.pinned_model,
             pinned_harness=request.pinned_harness.value if request.pinned_harness else None,
         )
@@ -2662,7 +2669,8 @@ class Supervisor:
         return bool(relevant) and all(
             reasons
             and all(
-                reason.startswith("pool exhausted until ") or reason == "pool is at its soft limit"
+                reason.startswith(("pool exhausted until ", "model excluded until "))
+                or reason == "pool is at its soft limit"
                 for reason in reasons
             )
             for reasons in relevant
@@ -4697,10 +4705,14 @@ class Supervisor:
                 or task.state is not TaskState.RUNNING
             ):
                 return
+            # hades #373: the exit's own verdict, read back from the mark it wrote.
+            excluded_routes = self._model_exclusion_for(uow, attempt)
             if pushed:
                 execution.resume_from_remote = True
                 uow.executions.save(execution)
-                self._handle_quota_exit(uow, task, execution, attempt)
+                self._handle_quota_exit(
+                    uow, task, execution, attempt, excluded_routes=excluded_routes
+                )
             elif checkpoint_skipped:
                 self._handle_quota_exit(
                     uow,
@@ -4708,6 +4720,7 @@ class Supervisor:
                     execution,
                     attempt,
                     checkpoint_skip_detail=detail[:1000],
+                    excluded_routes=excluded_routes,
                 )
             else:
                 bundle_path = f"{attempt.workspace_path}/output/work_branch.bundle"
@@ -5358,11 +5371,24 @@ class Supervisor:
                 if attempt.exit_class is ExitClass.QUOTA_EXHAUSTED and adapter is not None
                 else None
             )
+            # hades #373: a refusal about the model alone (Claude Code's
+            # model_requires_usage_credits, or words that say to switch models) excludes
+            # that model until its reset and leaves the pool open, so the next candidate
+            # in the same pool launches. Only the account's own refusal marks the pool.
             pool_mark: tuple[PoolExhaustion, bool] | None = None
+            excluded_routes: set[tuple[str, str]] | None = None
             if attempt.exit_class is ExitClass.QUOTA_EXHAUSTED:
-                pool_mark = self._mark_pool_exhausted(
-                    uow, attempt, execution, provider_quota.reset_at if provider_quota else None
-                )
+                if provider_quota is not None and provider_quota.model_only:
+                    excluded_routes = self._mark_model_excluded(
+                        uow, attempt, execution, provider_quota.reset_at
+                    )
+                else:
+                    pool_mark = self._mark_pool_exhausted(
+                        uow,
+                        attempt,
+                        execution,
+                        provider_quota.reset_at if provider_quota else None,
+                    )
             # A collection failure makes this exit `environment` below, whatever the
             # harness said, so it is not a gateway failure and marks nothing.
             if attempt.exit_class is ExitClass.PROVIDER_ERROR and collection_error is None:
@@ -5657,6 +5683,7 @@ class Supervisor:
                 turn_cap_reached=parsed is not None and parsed.limit_reached is not None,
                 has_commits=outputs.bundle is not None and outputs.bundle.commits > 0,
                 pool_mark=pool_mark,
+                excluded_routes=excluded_routes,
             )
             # A valid report from a failed or locally capped attempt is evidence,
             # but its dispositions must not settle findings or queue public replies.
@@ -5932,11 +5959,22 @@ class Supervisor:
             and model.capability in tier.allowed_capability
             and (pinned is None or model.id == pinned)
         }
+        # hades #373: a model's own exclusion ends at its reset too; a class whose only
+        # candidates are excluded models resumes when the earliest of them lifts.
+        model_marks = {
+            model_mark_key(model.model, model.harness)
+            for model in routing.models
+            if model.enabled
+            and model.capability in tier.allowed_capability
+            and (pinned is None or model.id == pinned)
+        }
         now = self._clock.now()
         return sorted(
             mark.reset_at
             for mark in uow.pool_exhaustions.list_all()
-            if mark.pool in pools and mark.cleared_at is None and mark.reset_at > now
+            if (mark.pool in pools or mark.pool in model_marks)
+            and mark.cleared_at is None
+            and mark.reset_at > now
         )
 
     def _enter_quota_wait(
@@ -6123,13 +6161,17 @@ class Supervisor:
         latest = max(earlier, key=finished)
         if latest.exit_class != ExitClass.PROVIDER_ERROR.value:
             return
-        self._mark_pool_exhausted(
+        marked = self._mark_pool_exhausted(
             uow,
             attempt,
             execution,
             None,
             reason="local endpoint failed (provider_error)",
         )
+        # hades #373: every pool mark is announced. A provider-error exit goes on to
+        # retry, which raises no wake of its own, so the mark's wake is raised here.
+        if marked is not None and marked[1]:
+            self._wake_pool_exhausted(uow, task, attempt, marked[0])
 
     def _mark_pool_exhausted(
         self,
@@ -6226,9 +6268,89 @@ class Supervisor:
     def _bounded_quota_reset(
         now: Any, candidate: Any, *, max_seconds: int, default_seconds: int
     ) -> tuple[Any, Any]:
+        """The reset a mark gets: the one the signal states, when it lies ahead; else now
+        plus the pool's `default_cooldown_seconds` (hades #373: a mark from a signal that
+        states no reset for the pool expires no later than the default cooldown; a
+        stated reset is the provider's fact and is used as given, 05b)."""
         del max_seconds
         accepted = candidate if candidate is not None and now < candidate else None
         return accepted or now + timedelta(seconds=default_seconds), accepted
+
+    def _mark_model_excluded(
+        self, uow: UnitOfWork, attempt: Attempt, execution: Execution, reset_at: Any
+    ) -> set[tuple[str, str]]:
+        """hades #373: exclude the attempt's model, not its pool, until `reset_at`, or
+        for the pool's default cooldown when the refusal states none. The exclusion is
+        a mark keyed `model:<harness>:<model>` (the route a routing entry is identified
+        by) in the same table as a pool mark, so it is listed on Routing and
+        clearable there, and `select_model` turns the route away while it is in force.
+        Returns the route as the set a reroute excludes."""
+        model = attempt.selected_model or execution.model
+        harness = attempt.selected_harness or execution.harness
+        route = {(harness, model)}
+        task = uow.tasks.get(attempt.task_id)
+        assert task is not None
+        context = self._routing_context(uow, task, execution, attempt.routing_version)
+        if context is None:
+            return route
+        routing, _ = context
+        entry = routing.model(model, harness)
+        pool = attempt.selected_pool or (entry.pool if entry is not None else None)
+        if pool is None or pool not in routing.pools:
+            return route
+        now = self._clock.now()
+        reset, parsed_reset = self._bounded_quota_reset(
+            now,
+            reset_at,
+            max_seconds=routing.reroute.resume_max_wait_seconds,
+            default_seconds=routing.pools[pool].default_cooldown_seconds,
+        )
+        reason = "harness reported quota_exhausted for this model only"
+        mark = uow.pool_exhaustions.put(
+            PoolExhaustion(
+                pool=model_mark_key(model, harness),
+                exhausted_at=now,
+                reset_at=reset,
+                task_id=attempt.task_id,
+                attempt_id=attempt.id,
+                reason=reason,
+            )
+        )
+        record_event(
+            uow,
+            self._clock,
+            EventKind.QUOTA_EXHAUSTED,
+            principal=PRINCIPAL_CRUCIBLE,
+            task_id=attempt.task_id,
+            execution_id=attempt.execution_id,
+            attempt_id=attempt.id,
+            payload={
+                "scope": "model",
+                "model": model,
+                "harness": harness,
+                "pool": pool,
+                "reset_at": mark.reset_at.isoformat(),
+                "source": "harness" if parsed_reset else "policy_default_cooldown",
+                "reason": reason,
+                "detail": f"model {model} excluded until {mark.reset_at.isoformat()}; "
+                f"pool {pool} stays open",
+            },
+        )
+        return route
+
+    def _model_exclusion_for(
+        self, uow: UnitOfWork, attempt: Attempt
+    ) -> set[tuple[str, str]] | None:
+        """The route an attempt's quota exit excluded (hades #373), read back from the
+        mark that exit wrote, for a decision taken after the checkpoint push."""
+        if attempt.selected_model is None or attempt.selected_harness is None:
+            return None
+        mark = uow.pool_exhaustions.get(
+            model_mark_key(attempt.selected_model, attempt.selected_harness)
+        )
+        if mark is not None and mark.attempt_id == attempt.id and mark.cleared_at is None:
+            return {(attempt.selected_harness, attempt.selected_model)}
+        return None
 
     def _handle_quota_exit(
         self,
@@ -6240,7 +6362,10 @@ class Supervisor:
         source: str = "worker",
         pool_mark: tuple[PoolExhaustion, bool] | None = None,
         checkpoint_skip_detail: str | None = None,
+        excluded_routes: set[tuple[str, str]] | None = None,
     ) -> None:
+        # hades #373: `excluded_routes` names the model a model-only refusal excluded;
+        # the pool stays open and the reroute stays inside it.
         # hades #378: one wake per refusal names the pool and its reset. A task that
         # ends or waits says it in the wake it raises anyway; a reroute, which raised
         # none, raises the pool's own, once per exhaustion (when the mark opened).
@@ -6311,15 +6436,29 @@ class Supervisor:
         stored = uow.contracts.get(task.id, execution.contract_version)
         assert stored is not None
         item = _Pending(attempt, execution, task, stored.document)
+        # hades #373: a model-only refusal leaves its pool open and the reroute stays
+        # inside it, with the refused model excluded; an account refusal leaves the pool.
+        excluded_pools: set[str] = set()
+        excluded_model: str | None = None
+        excluded_harness: str | None = None
+        if excluded_routes:
+            excluded_model = attempt.selected_model or execution.model
+            excluded_harness = attempt.selected_harness or execution.harness
+        elif attempt.selected_pool:
+            excluded_pools = {attempt.selected_pool}
         selection = self._selection_for(
-            uow, item, excluded_pools={attempt.selected_pool}, routing=routing
+            uow,
+            item,
+            excluded_pools=set(excluded_pools),
+            excluded_routes=excluded_routes,
+            routing=routing,
         )
         if selection is not None and selection.selected is not None and selection.image is not None:
             nxt = self._create_attempt(
                 uow,
                 execution,
                 number=attempt.number + 1,
-                excluded_pools={attempt.selected_pool} if attempt.selected_pool else None,
+                excluded_pools=excluded_pools or None,
             )
             move_task(
                 uow,
@@ -6335,11 +6474,25 @@ class Supervisor:
                     "from_pool": attempt.selected_pool,
                     "to_attempt_id": nxt.id,
                     "why": (
-                        "previous pool reported quota exhaustion"
+                        "previous model refused this model only; rerouted within its pool"
+                        if excluded_model is not None
+                        else "previous pool reported quota exhaustion"
                         if source == "worker"
                         else "launch reservation found the selected pool unavailable"
                     ),
                     "source": source,
+                    # The next attempt routes with this model excluded (_selection_for
+                    # reads it back by next_attempt_id), the path a capacity refusal's
+                    # retry already takes.
+                    **(
+                        {
+                            "excluded_model": excluded_model,
+                            "excluded_harness": excluded_harness,
+                            "next_attempt_id": nxt.id,
+                        }
+                        if excluded_model is not None
+                        else {}
+                    ),
                     **(
                         {
                             "checkpoint_push": "skipped",
@@ -6467,6 +6620,7 @@ class Supervisor:
         has_commits: bool = True,
         wake_summary: str | None = None,
         pool_mark: tuple[PoolExhaustion, bool] | None = None,
+        excluded_routes: set[tuple[str, str]] | None = None,
     ) -> None:
         """Move the attempt to its terminal state and the task after it (09, 16).
 
@@ -6477,7 +6631,9 @@ class Supervisor:
         before the retry count and never reaches pool accounting.
         `pool_mark` is the exhaustion mark this exit wrote and whether it opened the
         pool's exhaustion (hades #378): the one wake the refusal raises names the pool
-        and its reset, whichever path the attempt takes from here."""
+        and its reset, whichever path the attempt takes from here. `excluded_routes`
+        is the model a model-only refusal excluded (hades #373): the pool is unmarked
+        and the reroute stays inside it."""
         execution = uow.executions.get(attempt.execution_id, for_update=True)
         task = uow.tasks.get(attempt.task_id, for_update=True)
         assert execution is not None and task is not None
@@ -6609,7 +6765,9 @@ class Supervisor:
                 if pool_mark is not None and pool_mark[1]:
                     self._wake_pool_exhausted(uow, task, attempt, pool_mark[0])
                 return
-            self._handle_quota_exit(uow, task, execution, attempt, pool_mark=pool_mark)
+            self._handle_quota_exit(
+                uow, task, execution, attempt, pool_mark=pool_mark, excluded_routes=excluded_routes
+            )
             return
         retryable = retryable_exit(exit_class, execution.retry_on)
         if attempt.termination_reason == TERMINATION_REFUSED:

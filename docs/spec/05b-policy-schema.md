@@ -350,8 +350,13 @@ the pool's fact. Because a mark is shared by every task, it is written only
 when the harness's own provider-error event (07) says the provider refused
 for quota, never from quota-shaped text elsewhere in a transcript; text
 alone may still classify that one attempt `quota_exhausted` and reroute it,
-without a mark. Marks are rows, survive a restart, expire on
-their own, and can be cleared by the administrator with a reason (25). A
+without a mark. A refusal about one model rather than the account (hades
+#373; 07, Claude Code) marks no pool: it writes a mark for the model, keyed
+`model:<harness>:<model>` in the same table, until the refusal's reset or the pool's
+`default_cooldown_seconds`, and selection turns that model away ("model
+excluded until ...") while its pool stays open. Marks are rows, survive a
+restart, expire on their own, and can be cleared by the administrator with
+a reason (25), a model's mark by its `model:<harness>:<model>` key. A
 launch-time reservation that finds the pool over its soft limit does not
 create a mark; the soft limit is Crucible's own count, the mark is the
 provider's word. A harness that is
