@@ -706,17 +706,37 @@ class Wakes:
         since: datetime | None,
         include_acked: bool,
         limit: int,
-        cursor: str | None = None,
+        after_id: str | None = None,
     ) -> Sequence[Wake]:
         stmt = select(WakeRow).where(WakeRow.principal_id == principal_id)
         if not include_acked:
             stmt = stmt.where(WakeRow.acked_at.is_(None))
-        if cursor is not None:
-            # ULIDs are ordered; resume strictly after the cursor id.
-            stmt = stmt.where(WakeRow.id > cursor)
+        if after_id is not None:
+            # hades #502: the page is keyed by the id, which is unique, so a run of wakes
+            # sharing one created_at cannot make the next page repeat the last.
+            stmt = stmt.where(WakeRow.id > after_id)
         if since is not None:
             stmt = stmt.where(WakeRow.created_at >= since)
         rows = self._s.scalars(stmt.order_by(WakeRow.id).limit(limit)).all()
+        return [self._to_entity(r) for r in rows]
+
+    def list_for_task(
+        self, task_id: str, *, reason: str, include_acked: bool = True
+    ) -> Sequence[Wake]:
+        stmt = select(WakeRow).where(WakeRow.task_id == task_id, WakeRow.reason == reason)
+        if not include_acked:
+            stmt = stmt.where(WakeRow.acked_at.is_(None))
+        rows = self._s.scalars(stmt.order_by(WakeRow.id)).all()
+        return [self._to_entity(r) for r in rows]
+
+    def list_unacked_for_reasons(self, reasons: Sequence[str]) -> Sequence[Wake]:
+        if not reasons:
+            return []
+        rows = self._s.scalars(
+            select(WakeRow)
+            .where(WakeRow.acked_at.is_(None), WakeRow.reason.in_(list(reasons)))
+            .order_by(WakeRow.id)
+        ).all()
         return [self._to_entity(r) for r in rows]
 
     def list_undelivered(self, now: datetime) -> Sequence[Wake]:

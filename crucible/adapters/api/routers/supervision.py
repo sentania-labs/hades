@@ -84,9 +84,9 @@ def list_wakes(
 ) -> WakeList:
     """Pending wakes for the caller's principal (04, 17). Poll is the durable fallback.
 
-    Pages by wake id (ULID) through an opaque cursor (FDY-0508).  `since` is still
-    accepted for backward compatibility: callers that still send it get a valid
-    page, but pagination itself uses cursor."""
+    Pages by wake id through `cursor`, the opaque form of the last id returned (hades
+    #502). `since` is the older time filter: a caller that still sends it gets a valid
+    page narrowed to wakes created at or after it."""
     return wake_list(
         uow,
         principal_id=principal.id,

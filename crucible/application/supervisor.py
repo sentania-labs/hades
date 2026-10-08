@@ -83,6 +83,7 @@ from crucible.application.transitions import (
     record_rejected_transition,
 )
 from crucible.application.wakes import (
+    close_wakes_for_finished_pull_requests,
     create_pool_exhausted_wake,
     create_wake,
     pool_exhausted_summary,
@@ -999,6 +1000,7 @@ class Supervisor:
             await self._retention_step()
             await self._db(self._refresh_attempt_metrics)
             await self._db(self._repeat_stale_escalations)
+            await self._db(self._close_wakes_for_finished_pull_requests)
             result.wakes_delivered = await self._deliver_wakes()
             result.counts = await self._db(partial(self._status_step, started))
         except LeaseLostError:
@@ -1583,6 +1585,13 @@ class Supervisor:
             repeat_stale_escalation_wakes(
                 uow, self._clock, stale_hours=self._escalation_stale_hours(uow)
             )
+            uow.commit()
+
+    def _close_wakes_for_finished_pull_requests(self) -> None:
+        """hades #502: an overdue notice about a pull request that has since merged or
+        closed is acked by the system with a reason, on the pass after the observation."""
+        with self._fenced() as uow:
+            close_wakes_for_finished_pull_requests(uow, self._clock)
             uow.commit()
 
     def _escalation_stale_hours(self, uow: UnitOfWork) -> int:

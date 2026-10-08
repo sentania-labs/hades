@@ -900,21 +900,20 @@ def wake_list(
     limit: int | None,
     cursor: str | None = None,
 ) -> WakeList:
-    """Page by wake id (ULIDs are unique and ordered).
+    """The caller's wakes, paged by wake id (hades #502).
 
-    `cursor` is an opaque base64-encoded wake id that resumes strictly after the
-    last id on the previous page (FDY-0508).  `since` is still accepted for
-    backward compatibility: callers that still send it get a valid page, but
-    pagination itself uses cursor."""
+    ULIDs are unique and ordered, so `cursor`, the opaque form of the last id returned,
+    resumes strictly after it: a run of wakes sharing one `created_at` never makes a
+    page repeat. `since` is the older time filter and still narrows the page for a
+    caller that sends it; it is not the pagination key."""
     size = clamp_limit(limit)
-    after_id = decode_cursor(cursor)
     rows = list(
         uow.wakes.list_for_principal(
             principal_id,
             since=since,
             include_acked=include_acked,
             limit=size + 1,
-            cursor=after_id,
+            after_id=decode_cursor(cursor),
         )
     )
     page = rows[:size]

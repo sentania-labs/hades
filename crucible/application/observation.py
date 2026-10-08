@@ -27,7 +27,7 @@ from crucible.application.publish import (
     reopen_or_cancel,
 )
 from crucible.application.transitions import move_task, record_event
-from crucible.application.wakes import create_wake
+from crucible.application.wakes import create_wake, repeat_allowed
 from crucible.contracts.task_contract import contract_sha256
 from crucible.contracts.wake import WakeReason
 from crucible.domain.certification import (
@@ -54,7 +54,6 @@ from crucible.domain.entities import (
     ReviewComment,
     Task,
     TaskContract,
-    Wake,
 )
 from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
 from crucible.domain.external_review import (
@@ -2037,10 +2036,11 @@ def repeat_overdue_wakes(
     with nothing outstanding yet, and measuring from `opened_at` would call it overdue on
     its first poll.
 
-    Only one open wake per task per cause is kept (FDY-0508). While the existing wake is
-    unacknowledged no copy is created; after it is acked and the repeat interval has
-    elapsed again a new copy is raised. A pull request that has since merged or closed
-    causes the wake to be acked by the system with a reason, so it does not linger."""
+    hades #502: exactly one open wake per task per cause. While the last one is unacked
+    no copy is raised, however long the condition persists; once it is acked the notice
+    comes back only when the condition still holds a full `wait_timeout_hours` after
+    the ack. A wake about a pull request that has since merged or closed is acked by
+    the system in the supervisor's sweep (`close_wakes_for_finished_pull_requests`)."""
     now = clock.now()
     if task.state is TaskState.AWAITING_EXTERNAL_REVIEW:
         hours = wait_timeout_hours(policy, "external_review", DEFAULT_EXTERNAL_TIMEOUT_HOURS)
@@ -2062,23 +2062,13 @@ def repeat_overdue_wakes(
         )
     else:
         return False
+    interval = timedelta(hours=hours)
     since = waiting_since(uow, task, entered, fallback=pull_request.opened_at)
-    if now - since < timedelta(hours=hours):
+    if now - since < interval:
         return False
-    latest = _latest_wake_at(uow, task, reason.value)
-    if latest is not None and now - latest < timedelta(hours=hours):
+    previous = uow.wakes.list_for_task(task.id, reason=reason.value)
+    if not repeat_allowed(previous, now=now, interval=interval):
         return False
-
-    # Collapse: if an unacked wake already exists for this task+cause, skip.
-    existing_open = _find_open_wake_for_task_cause(uow, task.principal_id, task.id, reason.value)
-    if existing_open is not None:
-        return False
-
-    # Pull requests that have merged or closed close their own overdue wake.
-    pr_state = _current_pr_state(uow, task)
-    if pr_state is not None and pr_state in (PullRequestState.MERGED, PullRequestState.CLOSED):
-        return False
-
     create_wake(
         uow,
         clock,
@@ -2099,43 +2089,6 @@ def waiting_since(uow: UnitOfWork, task: Task, kind: EventKind, *, fallback: dat
     in the same transaction as the state change (09), so the event is the record."""
     event = uow.events.latest_for_task_kind(task.id, kind.value)
     return event.ts if event is not None else fallback
-
-
-def _latest_wake_at(uow: UnitOfWork, task: Task, reason: str) -> datetime | None:
-    latest: datetime | None = None
-    for wake in uow.wakes.list_for_principal(
-        task.principal_id, since=None, include_acked=True, limit=200
-    ):
-        if (
-            wake.task_id == task.id
-            and wake.reason == reason
-            and (latest is None or wake.created_at > latest)
-        ):
-            latest = wake.created_at
-    return latest
-
-
-def _find_open_wake_for_task_cause(
-    uow: UnitOfWork, principal_id: str, task_id: str, reason: str
-) -> Wake | None:
-    """Return an unacked wake matching task+cause so the caller can collapse (FDY-0508)."""
-    for wake in uow.wakes.list_for_principal(
-        principal_id, since=None, include_acked=False, limit=200
-    ):
-        if wake.task_id == task_id and wake.reason == reason:
-            return wake
-    return None
-
-
-def _current_pr_state(uow: UnitOfWork, task: Task) -> PullRequestState | None:
-    """Return the current state of the task's pull request, or None."""
-    pr = uow.pull_requests.get_for_task(task.id)
-    if pr is None:
-        return None
-    try:
-        return PullRequestState(pr.state)
-    except ValueError:
-        return None
 
 
 def poll_due(
