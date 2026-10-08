@@ -1543,6 +1543,157 @@ def test_0035_to_head_upgrades_a_populated_database(database_url: str) -> None:
         engine.dispose()
 
 
+def test_0051_renames_fenced_rows_both_directions(database_url: str) -> None:
+    """Issue 567: the lab aliases must migrate with fenced rows and no migration lease."""
+    migrate.downgrade(database_url, "0050_status_cache")
+    engine = make_engine(database_url)
+    task = "01MIG5670000000000000TASK1"
+    routes = [("codex", "codex-local:fast", "fast"), ("qwen_code", "qwen-coder", "coder")]
+
+    def assert_rows_and_fences(expected: dict[str, str]) -> None:
+        with engine.connect() as conn:
+            assert {
+                row.harness: row.model
+                for row in conn.execute(
+                    text("SELECT harness, model FROM executions WHERE task_id=:task"),
+                    {"task": task},
+                )
+            } == expected
+            assert {
+                row.selected_harness: row.selected_model
+                for row in conn.execute(
+                    text(
+                        "SELECT selected_harness, selected_model FROM attempts WHERE task_id=:task"
+                    ),
+                    {"task": task},
+                )
+            } == expected
+            assert {
+                row.tgname: row.tgenabled
+                for row in conn.execute(
+                    text(
+                        "SELECT tgname, tgenabled FROM pg_trigger WHERE tgname IN "
+                        "('trg_executions_fenced', 'trg_attempts_fenced')"
+                    )
+                )
+            } == {"trg_executions_fenced": "O", "trg_attempts_fenced": "O"}
+            assert conn.execute(text("SELECT count(*) FROM leases")).scalar_one() == 0
+        for table, column in (("executions", "model"), ("attempts", "selected_model")):
+            with (
+                engine.begin() as conn,
+                pytest.raises(
+                    Exception,
+                    match=f"write to {table} requires a transaction-local crucible.fenced_token",
+                ),
+            ):
+                conn.execute(
+                    text(f"UPDATE {table} SET {column}={column} WHERE task_id=:task"),
+                    {"task": task},
+                )
+
+    try:
+        with engine.begin() as conn:
+            # Reuse #409's schema-aware helper and seed with a transaction-local token.
+            conn.execute(
+                text(
+                    "INSERT INTO leases (id, kind, key, holder, fenced_token, expires_at) "
+                    "VALUES ('01MIG567000000000000LEASE1', 'supervisor', 'supervisor', "
+                    "'migration-test', 567, now() + interval '1 hour')"
+                )
+            )
+            conn.execute(text("SELECT set_config('crucible.fenced_token', '567', true)"))
+            _seed(
+                conn,
+                "principals",
+                {"id": "01MIG567000000000PRINCIPAL", "name": "mig-567", "role": "orchestrator"},
+            )
+            _seed(
+                conn,
+                "repositories",
+                {
+                    "id": "01MIG56700000000000000REPO",
+                    "name": "migration/567",
+                    "url": "https://github.com/migration/567",
+                },
+            )
+            _seed(
+                conn,
+                "tasks",
+                {
+                    "id": task,
+                    "external_id": "MIG-567",
+                    "principal_id": "01MIG567000000000PRINCIPAL",
+                    "repository_id": "01MIG56700000000000000REPO",
+                    "state": "awaiting_external_review",
+                    "contract_version": 1,
+                    "policy_name": "default-software",
+                    "policy_version": 1,
+                },
+            )
+            _seed(
+                conn,
+                "routing_policies",
+                {
+                    "name": "migration-567",
+                    "version": 1,
+                    "document": json.dumps(
+                        {
+                            "models": [
+                                {"harness": harness, "id": alias, "model_name": model}
+                                for harness, alias, model in routes
+                            ]
+                        }
+                    ),
+                },
+            )
+            for number, (harness, alias, _) in enumerate(routes, start=1):
+                execution = f"01MIG5670000000000000EXEC{number}"
+                _seed(
+                    conn,
+                    "executions",
+                    {
+                        "id": execution,
+                        "task_id": task,
+                        "role": "implement",
+                        "contract_version": 1,
+                        "state": "succeeded",
+                        "harness": harness,
+                        "model": alias,
+                        "policy_snapshot": "{}",
+                        "retry_on": "[]",
+                    },
+                )
+                _seed(
+                    conn,
+                    "attempts",
+                    {
+                        "id": f"01MIG56700000000000000ATT{number}",
+                        "execution_id": execution,
+                        "task_id": task,
+                        "number": 1,
+                        "state": "succeeded",
+                        "selected_harness": harness,
+                        "selected_model": alias,
+                        "ordered_candidates": "[]",
+                        "routing_excluded_pools": "[]",
+                    },
+                )
+            conn.execute(text("DELETE FROM leases WHERE kind='supervisor'"))
+
+        assert_rows_and_fences({harness: alias for harness, alias, _ in routes})
+        migrate.upgrade(database_url, "0051_routing_model_references")
+        assert migrate.current_revision(engine) == "0051_routing_model_references"
+        assert_rows_and_fences({harness: model for harness, _, model in routes})
+
+        migrate.downgrade(database_url, "0050_status_cache")
+        assert migrate.current_revision(engine) == "0050_status_cache"
+        # Downgrade chooses canonical legacy ids: codex fast stays fast, while
+        # qwen_code coder becomes qwen-coder again.
+        assert_rows_and_fences({"codex": "fast", "qwen_code": "qwen-coder"})
+    finally:
+        engine.dispose()
+
+
 def test_0051_migrates_populated_qwen_route_without_rerouting_task(database_url: str) -> None:
     """#513: policy references and the attempt's routing version survive the document
     rewrite; only the endpoint model spelling changes from qwen-coder to coder."""
