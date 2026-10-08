@@ -26,9 +26,10 @@ import os
 import re
 import signal
 import subprocess
-import time
 from pathlib import Path
 from typing import ClassVar
+
+from tests.wait import wait_until
 
 # ── paths used by every test ──────────────────────────────────────────
 
@@ -39,6 +40,15 @@ _KIND_PY: Path = _ROOT / "tests" / "e2e" / "test_kind.py"
 _E2E_KIND_SH: Path = _ROOT / "tools" / "kind" / "e2e-kind.sh"
 _MAKEFILE: Path = _ROOT / "Makefile"
 _WATCHDOG_SH: Path = _ROOT / "tools" / "kind" / "watchdog.sh"
+
+
+def _process_finished(pid: int) -> bool:
+    """True once ``pid`` has exited, counting a not-yet-reaped zombie as finished."""
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+    except (FileNotFoundError, ProcessLookupError):
+        return True
+    return bool(state) and state[0] == "Z"
 
 
 # ── AC1: the cancel source ───────────────────────────────────────────
@@ -147,14 +157,19 @@ class TestWatchdogScript:
             stderr=subprocess.PIPE,
             text=True,
         )
-        _, _ = proc.communicate(timeout=2)
+        stdout, _ = proc.communicate(timeout=2)
+        watchdog_pid = int(stdout.strip())
 
         # Kill the child before the watchdog's 3-second timer fires.
         child.kill()
         child.wait()
 
-        # Wait for the watchdog's background sleep to finish (4 seconds).
-        time.sleep(4)
+        # Wait for the watchdog's background timer to run out and the process to end.
+        wait_until(
+            lambda: _process_finished(watchdog_pid),
+            timeout=10,
+            describe="the watchdog's background process to finish",
+        )
 
         # The target was dead when the watchdog woke, so it should NOT fire.
         assert not os.path.exists(marker), (
