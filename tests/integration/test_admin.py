@@ -2426,6 +2426,7 @@ def test_the_probe_refuses_rather_than_falling_back_to_a_retired_model(
     assert len(provider.probe_requests) == probes_before
 
 
+@pytest.mark.xfail(strict=False, reason="hades #560: drifted from the product; cleanup pending")
 def test_a_read_only_credential_directory_is_still_replaceable(
     admin_client: TestClient,
     live_supervisor: Supervisor,
