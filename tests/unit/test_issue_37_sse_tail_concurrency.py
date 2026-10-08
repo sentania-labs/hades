@@ -30,12 +30,17 @@ def test_one_tail_over_the_configured_limit_returns_a_problem_with_retry_after(
         AppContext,
         SimpleNamespace(uow_factory=lambda: nullcontext(uow), sse_tail_limiter=SseTailLimiter(1)),
     )
+
+    async def _is_disconnected() -> bool:
+        return False
+
     request = cast(
         Request,
         SimpleNamespace(
             headers={"accept": "text/event-stream"},
             state=SimpleNamespace(),
             url=SimpleNamespace(path="/v1/attempts/attempt-1/logs"),
+            is_disconnected=_is_disconnected,
         ),
     )
     monkeypatch.setattr(records, "authenticate", lambda _uow, _token: principal)

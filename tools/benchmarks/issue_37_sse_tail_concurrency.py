@@ -15,9 +15,11 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 from sqlalchemy import event
+from starlette.requests import Request
 
 from crucible.adapters.api.deps import SseTailLimiter
 from crucible.adapters.api.routers import records
@@ -25,6 +27,8 @@ from tests.unit.issue_485_fixture import workload
 
 
 class _Request:
+    """Minimal stub that satisfies the async interface the SSE route calls."""
+
     def __init__(self) -> None:
         self.headers = {"accept": "text/event-stream"}
         self.state = SimpleNamespace()
@@ -46,27 +50,30 @@ def run(tails: int = 20, seconds: float = 2.0) -> dict[str, float | int]:
         ctx.sse_tail_limiter = SseTailLimiter(tails)
         principal = SimpleNamespace(id="operator", name="operator")
         lock = threading.Lock()
-        queries = 0
-        checkouts = 0
-        checked_out = 0
-        peak_checked_out = 0
+        counters = {"queries": 0, "checkouts": 0, "checked_out": 0, "peak_checked_out": 0}
 
-        def count_query(_conn, _cursor, _statement, _parameters, _context, _executemany) -> None:
-            nonlocal queries
+        def count_query(  # type: ignore[no-untyped-def]
+            _conn, _cursor, _statement, _parameters, _context, _executemany
+        ) -> None:
             with lock:
-                queries += 1
+                counters["queries"] += 1
 
-        def checkout(_dbapi_connection, _connection_record, _connection_proxy) -> None:
-            nonlocal checkouts, checked_out, peak_checked_out
+        def checkout(  # type: ignore[no-untyped-def]
+            _dbapi_connection, _connection_record, _connection_proxy
+        ) -> None:
             with lock:
-                checkouts += 1
-                checked_out += 1
-                peak_checked_out = max(peak_checked_out, checked_out)
+                counters["checkouts"] += 1
+                counters["checked_out"] += 1
+                peak = counters["peak_checked_out"]
+                current = counters["checked_out"]
+                if current > peak:
+                    counters["peak_checked_out"] = current
 
-        def checkin(_dbapi_connection, _connection_record) -> None:
-            nonlocal checked_out
+        def checkin(  # type: ignore[no-untyped-def]
+            _dbapi_connection, _connection_record
+        ) -> None:
             with lock:
-                checked_out -= 1
+                counters["checked_out"] -= 1
 
         event.listen(engine, "before_cursor_execute", count_query)
         event.listen(engine, "checkout", checkout)
@@ -78,7 +85,10 @@ def run(tails: int = 20, seconds: float = 2.0) -> dict[str, float | int]:
                 responses = await asyncio.gather(
                     *(
                         records.get_attempt_logs(
-                            "attempt-0", request, ctx, authorization="Bearer benchmark"
+                            "attempt-0",
+                            cast(Request, request),
+                            ctx,
+                            authorization="Bearer benchmark",
                         )
                         for request in requests
                     )
@@ -88,6 +98,14 @@ def run(tails: int = 20, seconds: float = 2.0) -> dict[str, float | int]:
                 async def consume(response: object) -> None:
                     async for _item in response.body_iterator:  # type: ignore[attr-defined]
                         pass
+
+                # Reset counters so that queries_per_second and connection metrics
+                # describe only the timed polling interval, not the response-creation
+                # phase above (01M4CF3ME8TP0VFVRATX36MJJ7).
+                counters["queries"] = 0
+                counters["checkouts"] = 0
+                counters["checked_out"] = 0
+                counters["peak_checked_out"] = 0
 
                 consumers = [asyncio.create_task(consume(response)) for response in responses]
                 started = time.perf_counter()
@@ -105,10 +123,10 @@ def run(tails: int = 20, seconds: float = 2.0) -> dict[str, float | int]:
     return {
         "tails": tails,
         "seconds": round(elapsed, 3),
-        "queries": queries,
-        "queries_per_second": round(queries / elapsed, 2),
-        "connection_checkouts": checkouts,
-        "peak_connections_in_use": peak_checked_out,
+        "queries": counters["queries"],
+        "queries_per_second": round(counters["queries"] / elapsed, 2),
+        "connection_checkouts": counters["checkouts"],
+        "peak_connections_in_use": counters["peak_checked_out"],
     }
 
 

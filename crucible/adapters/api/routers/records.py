@@ -114,6 +114,13 @@ async def get_attempt_logs(
             },
         )
 
+    # Guard against a disconnect that arrives between authentication/acquire and
+    # the first generator iteration: without this, the permit is permanently leaked
+    # because aclose() on an unstarted async generator does not execute its finally
+    # body (Starlette races the disconnect signal against the first __anext__).
+    if await request.is_disconnected():
+        return Response(status_code=499, media_type="text/plain")
+
     if not ctx.sse_tail_limiter.try_acquire():
         return problem_response(
             slug="sse-tail-limit-exceeded",
@@ -123,6 +130,13 @@ async def get_attempt_logs(
             instance=str(request.url.path),
             headers={"Retry-After": "1"},
         )
+
+    # Second disconnect check covers the brief window between try_acquire and the
+    # StreamingResponse constructor; the ASGI server may have delivered a disconnect
+    # signal that is_disconnected() now reflects.
+    if await request.is_disconnected():
+        ctx.sse_tail_limiter.release()
+        return Response(status_code=499, media_type="text/plain")
 
     async def events() -> AsyncIterator[str]:
         try:
