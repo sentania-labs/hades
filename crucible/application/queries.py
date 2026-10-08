@@ -10,6 +10,7 @@ from typing import Any
 
 from crucible.application.errors import NotFoundError
 from crucible.application.publish import publishing_waits
+from crucible.application.task_notes import list_notes, note_view
 from crucible.contracts.api import (
     AcceptanceView,
     ArtifactList,
@@ -376,6 +377,7 @@ def task_view(uow: UnitOfWork, task_id: str) -> TaskView:
         ),
         resume_at=task.resume_at,
         reroute_chain=reroutes,
+        notes=[note_view(note) for note in list_notes(uow, task.id)],
         warnings=warnings,
     )
 

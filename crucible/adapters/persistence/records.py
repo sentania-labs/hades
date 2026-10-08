@@ -28,6 +28,7 @@ from crucible.adapters.persistence.models import (
     ReviewDispositionRow,
     ReviewReportRow,
     RoutingPolicyRow,
+    TaskNoteRow,
     TaskRow,
     WakeRow,
 )
@@ -51,6 +52,7 @@ from crucible.domain.entities import (
     ReviewDisposition,
     ReviewReportRecord,
     RoutingPolicyRecord,
+    TaskNote,
     Wake,
 )
 from crucible.domain.time import ensure_utc
@@ -480,6 +482,47 @@ class Decisions:
             select(DecisionRow).where(DecisionRow.task_id == task_id).order_by(DecisionRow.id)
         ).all()
         return [self._to_entity(r) for r in rows]
+
+
+class TaskNotes:
+    """Operator notes on a task (hades #489), newest first."""
+
+    def __init__(self, session: Session) -> None:
+        self._s = session
+
+    @staticmethod
+    def _to_entity(row: TaskNoteRow) -> TaskNote:
+        return TaskNote(
+            id=row.id,
+            task_id=row.task_id,
+            principal_id=row.principal_id,
+            author=row.author,
+            text=row.text,
+            verbatim=bool(row.verbatim),
+            created_at=ensure_utc(row.created_at),
+        )
+
+    def add(self, note: TaskNote) -> None:
+        self._s.add(
+            TaskNoteRow(
+                id=note.id,
+                task_id=note.task_id,
+                principal_id=note.principal_id,
+                author=note.author,
+                text=note.text,
+                verbatim=note.verbatim,
+                created_at=note.created_at,
+            )
+        )
+        self._s.flush()
+
+    def list_for_task(self, task_id: str) -> Sequence[TaskNote]:
+        rows = self._s.scalars(
+            select(TaskNoteRow)
+            .where(TaskNoteRow.task_id == task_id)
+            .order_by(TaskNoteRow.created_at.desc(), TaskNoteRow.id.desc())
+        ).all()
+        return [self._to_entity(row) for row in rows]
 
 
 class Escalations:

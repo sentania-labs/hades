@@ -76,6 +76,7 @@ from crucible.application.routing import (
     select_model,
 )
 from crucible.application.runtime_settings import resolve as resolve_runtime_setting
+from crucible.application.task_notes import operator_notes_for
 from crucible.application.transitions import (
     move_attempt,
     move_execution,
@@ -2246,6 +2247,10 @@ class Supervisor:
                             "head": str(bundle.payload.get("head_sha") or ""),
                             "sha256": str(bundle.payload.get("bundle_sha256") or ""),
                         }
+            # Keep this read inside the managed unit of work.  A SQLAlchemy session can
+            # reopen after close(), which used to leak one connection per launch here
+            # until the supervisor exhausted the pool.
+            operator_notes = operator_notes_for(route_uow, task.id)
         # FDY-0140: the harness's run settings as saved now, read at every launch.
         harness_settings = dict(saved.document) if saved is not None else {}
         # Hades #388: the window, response allowance and thinking setting are fixed for
@@ -2325,6 +2330,8 @@ class Supervisor:
             resume_bundle_ancestor=(
                 str(published.payload["head_sha"]) if published and resume_bundle else None
             ),
+            # hades #489: the operator's notes open the worker's IDENTITY.md.
+            operator_notes=operator_notes,
         )
         adapter = self._harnesses.get(selected_harness) if self._harnesses else None
         if adapter is None:

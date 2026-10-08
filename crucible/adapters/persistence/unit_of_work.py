@@ -59,6 +59,7 @@ from crucible.adapters.persistence.records import (
     ProviderSettings,
     ReviewReports,
     RoutingPolicies,
+    TaskNotes,
     Wakes,
 )
 from crucible.domain.entities import (
@@ -127,6 +128,7 @@ from crucible.ports.repository import (
     ReviewReportRepository,
     RoutingPolicyRepository,
     SupervisorStatusRepository,
+    TaskNoteRepository,
     TaskRepository,
     UiSessionRepository,
     UnitOfWork,
@@ -1565,6 +1567,7 @@ class SqlUnitOfWork:
     gate_results: GateResultRepository
     acceptance: AcceptanceRepository
     decisions: DecisionRepository
+    task_notes: TaskNoteRepository
     escalations: EscalationRepository
     dispositions: DispositionRepository
     wakes: WakeRepository
@@ -1621,6 +1624,7 @@ class SqlUnitOfWork:
         self.gate_results = GateResults(s)
         self.acceptance = Acceptances(s)
         self.decisions = Decisions(s)
+        self.task_notes = TaskNotes(s)
         self.escalations = Escalations(s)
         self.dispositions = Dispositions(s)
         self.wakes = Wakes(s)
