@@ -7,6 +7,7 @@ a principal (operator-only fields) live in the application layer.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Literal
@@ -27,6 +28,12 @@ from crucible.domain.gates import (
     POST_PR_GATES,
     PRE_PR_GATES,
     PUBLICATION_GATES,
+)
+from crucible.domain.test_services import (
+    DEFAULT_SERVICE_CPUS,
+    DEFAULT_SERVICE_MEMORY,
+    DEFAULT_SERVICE_STORAGE,
+    POSTGRES_IMAGE,
 )
 
 # 05b: these two may only be set true by an operator or admin principal.
@@ -189,6 +196,47 @@ class RepositoryRules(StrictModel):
             if not program or program != program.strip() or any(c.isspace() for c in program):
                 raise ValueError(f"{program!r} is not a single program name")
         return value
+
+
+class TestServiceResources(StrictModel):
+    """What one declared service may use. Requests follow the policy's `resources`
+    fractions (`cpu_request_fraction`, `memory_request_fraction`), as the worker's do."""
+
+    cpus: float = Field(default=DEFAULT_SERVICE_CPUS, gt=0)
+    memory: str = Field(default=DEFAULT_SERVICE_MEMORY, min_length=1)
+    # The data directory's size, a Kubernetes quantity (`1Gi`); the Docker provider
+    # reads it as a tmpfs size.
+    storage: str = Field(default=DEFAULT_SERVICE_STORAGE, min_length=1)
+
+
+class TestServiceDeclaration(StrictModel):
+    """hades #558, #85: a service the worker's checks need, run beside the worker.
+
+    The only kind so far is `postgres`; its image defaults to the digest of postgres:16
+    the CI workflow's integration tier runs, and any image given must be pinned by
+    digest, so the worker's database is a build and never a moving tag. A contract's
+    entry under `execution_request.services` replaces the policy's of the same kind, and
+    `enabled: false` there drops it for one task."""
+
+    kind: Literal["postgres"]
+    image: str = Field(default=POSTGRES_IMAGE, min_length=1)
+    enabled: bool = True
+    resources: TestServiceResources = Field(default_factory=TestServiceResources)
+
+    @field_validator("image")
+    @classmethod
+    def _pinned_by_digest(cls, value: str) -> str:
+        name, separator, digest = value.partition("@")
+        if not separator or not name or re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest) is None:
+            raise ValueError(f"service image {value!r} must be pinned by digest (name@sha256:...)")
+        return value
+
+
+def _one_service_per_kind(value: list[TestServiceDeclaration]) -> list[TestServiceDeclaration]:
+    kinds = [service.kind for service in value]
+    if len(set(kinds)) != len(kinds):
+        raise ValueError("services declares a kind more than once")
+    return value
 
 
 class Gates(StrictModel):
@@ -372,11 +420,20 @@ class PolicyV1(StrictModel):
     release: ReleaseRules
     cleanup: Cleanup
     retention: Retention
+    # hades #558, #85: the services a worker's checks need, run beside it (the
+    # integration tier's Postgres). Absent on every version written before the field
+    # existed, which runs none.
+    services: list[TestServiceDeclaration] = Field(default_factory=list)
 
     @field_validator("schema_version")
     @classmethod
     def _version_supported(cls, value: str) -> str:
         return check_major_version(value)
+
+    @field_validator("services")
+    @classmethod
+    def _services_once(cls, value: list[TestServiceDeclaration]) -> list[TestServiceDeclaration]:
+        return _one_service_per_kind(value)
 
     @model_validator(mode="after")
     def _external_rounds_zero_skips_gates(self) -> PolicyV1:

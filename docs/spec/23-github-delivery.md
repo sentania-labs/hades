@@ -564,7 +564,19 @@ reviewer" above).
   signed URL on another host, which Crucible follows without sending the
   token. It is fetched once per failed run, not on every poll, and a log
   that cannot be read leaves the excerpt empty rather than failing the
-  poll.
+  poll. For a job that uploads JUnit XML (`test`, `e2e`, `e2e-kind (N)`,
+  hades #196) the same fetch reads that artifact (`junit-<job>-<attempt>` on
+  the run) and the certification's failure records `junit`: the status, the
+  artifact name, and the failing tests as pytest node ids
+  (`tests/integration/test_api.py::test_start`). The
+  `ci_certification_failed` wake's summary ends with those ids ("failing
+  tests (junit-test-1): ..."), and its payload carries `junit` and
+  `failed_check` beside the summary; when the run uploaded no such artifact
+  the summary says so ("uploaded no junit artifact"), when the job uploads
+  none it says that, and when the artifact could not be read or the GitHub
+  client cannot fetch workflow artifacts it says which; it never names tests
+  it did not read (hades #558, #85). The log excerpt stays on the
+  certification and is never in the wake.
 - Foundry's `POST /tasks/{id}/ci-decision` records the cause from the enum
   `false_pre_pr_evidence`, `wrong_sha_checked`, `correction_without_checks`,
   `environment_drift`, `flaky_test`, `crucible_verification_defect`,

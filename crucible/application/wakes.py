@@ -5,7 +5,7 @@ fallback Foundry polls on every start of session."""
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -66,15 +66,21 @@ def create_wake(
     extra_links: dict[str, str] | None = None,
     raised_by: str = PRINCIPAL_CRUCIBLE,
     for_reviewer: list[dict[str, str]] | None = None,
+    extra: Mapping[str, Any] | None = None,
 ) -> Wake:
     """Write the wake row. The caller commits it with the state change it belongs to.
 
     `raised_by` is the principal on the event: `crucible` for a supervisor wake, the
     acting principal for one an API call causes, because events whose principal is
-    `crucible` are fenced to the supervisor (14)."""
+    `crucible` are fenced to the supervisor (14). `extra` is structured detail the
+    reason carries beside its summary (hades #558: the failing tests of a CI failure);
+    its keys never replace the payload's own."""
     now = clock.now()
     links: dict[str, str] = {}
     payload: dict[str, Any] = {"summary": summary}
+    for key, value in (extra or {}).items():
+        if key not in {"summary", "task", "attempt_id", "links", "for_reviewer"}:
+            payload[key] = value
     if task is not None:
         links["task"] = f"/v1/tasks/{task.id}"
         links["events"] = f"/v1/tasks/{task.id}/events"

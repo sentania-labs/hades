@@ -23,6 +23,7 @@ from functools import partial
 from typing import Any, Protocol, TypeVar
 
 from crucible.application.auto_merge import auto_merge_enabled, certified_jobs_green
+from crucible.application.ci_junit import JUnitFindings, read_junit_findings
 from crucible.application.decisions import open_escalation
 from crucible.application.observation import (
     DIVERGENCE_STATES,
@@ -178,6 +179,8 @@ class DeliveryConfig:
     poll_interval_seconds: int = 120
     reactions_poll_interval_seconds: int = 60
     ci_log_excerpt_bytes: int = 64 * 1024
+    # hades #558: how much of a junit artifact's XML is read for the failing test ids.
+    ci_junit_artifact_bytes: int = 4 * 1024 * 1024
     publisher_timeout_seconds: int = 600
     publisher_image: str | None = None
 
@@ -195,6 +198,8 @@ class PollPlan:
     created_at: datetime
     # The failed check whose log excerpt is still to be fetched: (source, GitHub id).
     failed_check: tuple[str, str] | None = None
+    # hades #558: that check's job name, which names the junit artifact to read.
+    failed_job: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -2066,6 +2071,9 @@ class DeliveryCoordinator:
                                 if correcting
                                 else self._failed_check(uow, pull_request.id, task)
                             ),
+                            failed_job=(
+                                "" if correcting else self._failed_job(uow, pull_request.id, task)
+                            ),
                         )
                     )
             uow.commit()
@@ -2111,6 +2119,13 @@ class DeliveryCoordinator:
             return None
         return str(failure.get("source") or "check_run"), run_id
 
+    def _failed_job(self, uow: UnitOfWork, pull_request_id: str, task: Task) -> str:
+        """hades #558: the failed check's job name, for its junit artifact."""
+        certification = uow.ci_certifications.get_for_head(pull_request_id, task.head_sha or "")
+        if certification is None or certification.state != "failed":
+            return ""
+        return str(certification.failure.get("job") or certification.failure.get("check") or "")
+
     @staticmethod
     def _decided_since_poll(uow: UnitOfWork, task_id: str, last_polled: datetime | None) -> bool:
         """A CI decision or a waiver recorded since the last poll brings the next poll
@@ -2143,6 +2158,7 @@ class DeliveryCoordinator:
                 with_reactions=plan.with_reactions,
             )
             excerpt = ""
+            junit: JUnitFindings | None = None
             if plan.failed_check is not None:
                 source, external_id = plan.failed_check
                 raw = await asyncio.to_thread(
@@ -2157,6 +2173,18 @@ class DeliveryCoordinator:
                 # `ci_certifications.failure`. It is scanned and redacted at the fetch
                 # site, before anything can store it.
                 excerpt = redact(raw.decode("utf-8", "replace")[-4000:]) if raw else ""
+                # hades #558, #85: the failing tests from the job's junit artifact,
+                # read once with the log. Test ids are names, not repository text.
+                junit = await asyncio.to_thread(
+                    read_junit_findings,
+                    self._github,
+                    token,
+                    repository=plan.repository_name,
+                    source=source,
+                    external_id=external_id,
+                    job=plan.failed_job,
+                    limit_bytes=self.config.ci_junit_artifact_bytes,
+                )
         except GitHubError as exc:
             failure = exc
             if failure.response_class == "rate_limited":
@@ -2167,7 +2195,7 @@ class DeliveryCoordinator:
             if token is not None:
                 token.discard()
         fetched = plan.failed_check is not None
-        await self._host._db(lambda: self._apply(plan, observation, excerpt, fetched))
+        await self._host._db(lambda: self._apply(plan, observation, excerpt, fetched, junit))
         ref = observation.pull_request
         if ref.state == "open" and (
             ref.mergeable is False or ref.mergeable_state in ("dirty", "behind")
@@ -2583,7 +2611,14 @@ class DeliveryCoordinator:
             )
             uow.commit()
 
-    def _apply(self, plan: PollPlan, observation: Any, excerpt: str, fetched: bool) -> None:
+    def _apply(
+        self,
+        plan: PollPlan,
+        observation: Any,
+        excerpt: str,
+        fetched: bool,
+        junit: JUnitFindings | None = None,
+    ) -> None:
         with self._host._fenced() as uow:
             task = uow.tasks.get(plan.task_id, for_update=True)
             pull_request = uow.pull_requests.get(plan.pull_request_id, for_update=True)
@@ -2600,6 +2635,7 @@ class DeliveryCoordinator:
                 with_reactions=plan.with_reactions,
                 log_excerpt=excerpt,
                 log_fetched=fetched,
+                junit=junit,
             )
             uow.commit()
 

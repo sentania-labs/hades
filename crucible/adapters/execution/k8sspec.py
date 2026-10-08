@@ -27,6 +27,12 @@ from crucible.domain.cluster_egress import (
     label_problem,
     namespace_problem,
 )
+from crucible.domain.test_services import (
+    POSTGRES_DATA_MOUNT,
+    POSTGRES_RUN_DIR,
+    SERVICE_CONTAINER_PREFIX,
+    DeclaredService,
+)
 from crucible.ports.execution import (
     IDENTITY_MOUNT,
     OUTPUT_MOUNT,
@@ -375,6 +381,8 @@ class PodRequest:
     service_account: str = "crucible-worker"
     image_pull_secret: str | None = None
     host_aliases: Sequence[Mapping[str, Any]] = ()
+    # hades #558, #85: the declared test services, each a native sidecar of this Pod.
+    services: Sequence[DeclaredService] = ()
 
 
 def pod_spec(request: PodRequest) -> dict[str, Any]:
@@ -437,8 +445,13 @@ def pod_spec(request: PodRequest) -> dict[str, Any]:
         "containers": [container],
         "volumes": [dict(v) for v in request.volumes],
     }
-    if request.init_containers:
-        spec["initContainers"] = [dict(c) for c in request.init_containers]
+    init_containers = [dict(c) for c in request.init_containers]
+    for service in request.services:
+        # After the credential seed, so it never waits on a database it does not use.
+        init_containers.append(service_sidecar(service, request.limits))
+        spec["volumes"].extend(service_volumes(service))
+    if init_containers:
+        spec["initContainers"] = init_containers
     if request.image_pull_secret:
         spec["imagePullSecrets"] = [{"name": request.image_pull_secret}]
     if request.host_aliases:
@@ -469,6 +482,95 @@ def base_volumes(limits: Limits) -> list[dict[str, Any]]:
 
 def base_mounts() -> list[Mount]:
     return [Mount("tmp", "/tmp"), Mount("home", "/home/worker")]
+
+
+# ----- declared test services (hades #558, #85) -----------------------------
+
+
+def service_limits(service: DeclaredService, limits: Limits) -> Limits:
+    """The sidecar's own limits, with the policy's request shape (issue 93): its
+    requests are the same fractions of its limits as the worker's are of the policy's,
+    so a service never asks the scheduler for more than the policy's habit."""
+    return Limits(
+        cpus=service.cpus,
+        memory_bytes=_bytes(service.memory, 1024**3),
+        ephemeral_storage=limits.ephemeral_storage,
+        tmpfs_bytes=limits.tmpfs_bytes,
+        grace_seconds=limits.grace_seconds,
+        cpu_request_fraction=limits.cpu_request_fraction,
+        memory_request_fraction=limits.memory_request_fraction,
+    )
+
+
+def service_volume_name(service: DeclaredService, leaf: str) -> str:
+    return f"{service.name}-{leaf}"
+
+
+def service_volumes(service: DeclaredService) -> list[dict[str, Any]]:
+    """What a read-only root filesystem leaves the server to write: its data directory
+    (node-local, bounded by the declared `storage`), its socket directory and `/tmp`,
+    which the image's bootstrap uses for its nss wrapper when it runs as uid 1000."""
+    return [
+        {"name": service_volume_name(service, "data"), "emptyDir": {"sizeLimit": service.storage}},
+        memory_volume(service_volume_name(service, "run"), 16 * 1024**2),
+        memory_volume(service_volume_name(service, "tmp"), 64 * 1024**2),
+    ]
+
+
+def service_sidecar(service: DeclaredService, limits: Limits) -> dict[str, Any]:
+    """One declared service as a native sidecar of the worker Pod (KEP-753, Kubernetes
+    1.29 and later): an init container with `restartPolicy: Always`.
+
+    That one field is what makes it a sidecar rather than an init step: it starts
+    before the worker, keeps running beside it, is restarted if it dies, and is stopped
+    by the kubelet once the worker container has exited, so the Job completes on the
+    worker's exit and never waits on the database. A plain second app container would
+    keep the Pod Running forever after the worker finished (26). The `startupProbe`
+    gates the worker's start on `pg_isready` over the loopback, so the worker never sees
+    a server still initialising; the `readinessProbe` keeps reporting it. The server
+    listens on the Pod's loopback, which is the only address the worker is told, and
+    nothing opens the NetworkPolicy: traffic inside one Pod never leaves it."""
+    own = service_limits(service, limits)
+    probe = {
+        "exec": {"command": service.readiness_command()},
+        "periodSeconds": 2,
+        "timeoutSeconds": 3,
+    }
+    return {
+        "name": service.name,
+        "image": service.image,
+        "restartPolicy": "Always",
+        "env": [{"name": k, "value": v} for k, v in sorted(service.container_env().items())],
+        "ports": [{"name": service.kind, "containerPort": service.port, "protocol": "TCP"}],
+        "securityContext": {
+            "allowPrivilegeEscalation": False,
+            "readOnlyRootFilesystem": True,
+            "capabilities": {"drop": ["ALL"]},
+        },
+        "resources": {
+            "limits": {
+                "cpu": own.cpu,
+                "memory": own.memory,
+                "ephemeral-storage": own.ephemeral_storage,
+            },
+            "requests": {"cpu": own.cpu_request, "memory": own.memory_request},
+        },
+        # The worker starts only once the server answers; the first probe is given the
+        # image's initialisation (initdb, the bootstrap server, the final start).
+        "startupProbe": {**probe, "failureThreshold": 60},
+        "readinessProbe": {**probe, "failureThreshold": 3},
+        "volumeMounts": [
+            {"name": service_volume_name(service, "data"), "mountPath": POSTGRES_DATA_MOUNT},
+            {"name": service_volume_name(service, "run"), "mountPath": POSTGRES_RUN_DIR},
+            {"name": service_volume_name(service, "tmp"), "mountPath": "/tmp"},
+        ],
+        "terminationMessagePolicy": "FallbackToLogsOnError",
+    }
+
+
+def is_service_container(name: str) -> bool:
+    """Whether a container name is a declared service's (`svc-postgres`)."""
+    return name.startswith(SERVICE_CONTAINER_PREFIX)
 
 
 def job(
@@ -936,6 +1038,7 @@ __all__ = [
     "denied_by",
     "egress_policy",
     "host_aliases",
+    "is_service_container",
     "job",
     "labels",
     "limits_from_pod",
@@ -946,5 +1049,9 @@ __all__ = [
     "quantity",
     "secret",
     "selector",
+    "service_limits",
+    "service_sidecar",
+    "service_volume_name",
+    "service_volumes",
     "workspace_claim",
 ]

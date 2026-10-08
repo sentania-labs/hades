@@ -105,6 +105,9 @@ execution_request:                 # the class of work; Crucible selects the mod
   rationale: "mechanical change; standard tier"
   effort: "high"                   # optional; passed through where the selected harness has an effort flag (07)
   pin: null                        # operator pin only: { harness, model, pin_reason }; Foundry never sets it
+  services: null                   # optional (hades #558, #85): test services beside the worker, the policy's
+                                   # `services` shape (05b); an entry replaces the policy's of its kind,
+                                   # `enabled: false` drops it; absent means the policy's list
 
 lifecycle:
   max_attempts: 2                  # must not exceed the policy's cap
@@ -237,6 +240,11 @@ recorded only after the correction attempt succeeds.
   `limits.command_timeout_ms` bounds and never above `timeout_seconds`
   (issue 128). Absent, the attempt launches with the policy default, capped at
   `timeout_seconds`.
+- `execution_request.services`, when set, validates as the policy's `services`
+  does (05b, hades #558): `kind` is `postgres`, each kind once, an `image`
+  pinned by digest. The provider runs the union by kind of the policy's list
+  and this one, this one's entries winning, minus any entry here with
+  `enabled: false`.
 - `timeout_seconds` within policy bounds; `retry_on` a subset of both the
   `ExitClass` enum and the policy's `retry.eligible_classes`.
 - The contract is authoritative for tier, provider, pin, and policy; the

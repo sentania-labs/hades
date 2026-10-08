@@ -100,6 +100,7 @@ from crucible.domain.role_timeouts import (
     parse_role_timeouts,
 )
 from crucible.domain.secrets import redact
+from crucible.domain.test_services import DeclaredService, declared_services, services_env
 from crucible.domain.time import parse_rfc3339
 from crucible.ports.execution import (
     IDENTITY_MOUNT,
@@ -618,6 +619,9 @@ class _Launched:
     allowed: AllowedAddresses | None = None
     # When the names were last looked up (monotonic).
     egress_refreshed_at: float = 0.0
+    # hades #558: each declared service sidecar's image as the live Pod reported it
+    # (`initContainerStatuses[].imageID`), by container name, once seen.
+    service_images: dict[str, str] = field(default_factory=dict)
     # An adopted attempt's live egress rules and the index of the one that carries its
     # allowlisted addresses: a refresh replaces that rule's peers and leaves every
     # other rule as the policy was written, because this process never saw the plan the
@@ -2267,6 +2271,8 @@ class KubernetesProvider:
             launched.node = str((pod.get("spec") or {}).get("nodeName") or "") or None
         if launched is not None and launched.limits_source != "pod":
             _observe_limits(launched, pod)
+        if launched is not None:
+            _observe_service_images(launched, status)
         if phase == "Failed" and str(status.get("reason", "")) in _LOST_REASONS:
             # 26: an evicted Pod, or one whose node is gone, is `lost`, not an exit.
             # Check lost reasons before inspecting the terminated container so that a
@@ -2870,6 +2876,15 @@ class KubernetesProvider:
             "runtime_class": "standard",
             "network_policy": (launched.network_policy if launched else None),
             "egress": list(self._egress_plan(spec, k8sspec.ROLE_WORKER).hosts),
+            # hades #558, #85: the declared services and the sidecar image each ran
+            # from, the declared digest and the one the live Pod reported when seen.
+            "services": [
+                {
+                    **service.as_dict(),
+                    "image_id": (launched.service_images.get(service.name, "") if launched else ""),
+                }
+                for service in self._services(spec)
+            ],
             "final_observation": {
                 "state": observation.state.value,
                 "exit_code": observation.exit_code,
@@ -4070,6 +4085,10 @@ class KubernetesProvider:
         }
         if requires_image_checks(spec.contract):
             env["BUILDKIT_HOST"] = BUILDKIT_HOST
+        # hades #558, #85: the declared test services ride beside the worker as native
+        # sidecars, and the worker is told where each listens on its own loopback.
+        services = self._services(spec)
+        env.update(services_env(services))
         mounts = [
             *k8sspec.base_mounts(),
             # 26's mount layout, with the paths the identity bundle names (06): the
@@ -4107,8 +4126,14 @@ class KubernetesProvider:
                 service_account=self.config.service_account,
                 image_pull_secret=self.config.image_pull_secret,
                 host_aliases=host_aliases,
+                services=services,
             )
         )
+
+    @staticmethod
+    def _services(spec: LaunchSpec) -> tuple[DeclaredService, ...]:
+        """The test services the policy and the contract declare for this attempt."""
+        return declared_services(spec.policy, spec.contract)
 
     def _credential_mounts(
         self,
@@ -6175,6 +6200,18 @@ def _observe_limits(launched: _Launched, pod: Mapping[str, Any]) -> None:
         launched.limits_source = "pod"
 
 
+def _observe_service_images(launched: _Launched, status: Mapping[str, Any]) -> None:
+    """hades #558: the image each service sidecar actually runs from, as the kubelet
+    reports it, for the launch evidence. Read once per sidecar."""
+    for entry in status.get("initContainerStatuses") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "")
+        image_id = str(entry.get("imageID") or "")
+        if k8sspec.is_service_container(name) and image_id and name not in launched.service_images:
+            launched.service_images[name] = image_id
+
+
 def _seconds_until(timestamp: str) -> float:
     """Seconds from now until an RFC 3339 UTC stamp; 0 for one that is past or that
     does not parse, so a lock whose expiry is unreadable is reclaimable."""
@@ -6343,9 +6380,15 @@ def _render_identity(
 
 
 def _terminated_init(status: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    """The first init container that terminated non-zero, with its name attached."""
+    """The first init container that terminated non-zero, with its name attached.
+
+    A declared service sidecar (hades #558) is listed among the init containers too,
+    but it is stopped by the kubelet after the worker exits and its exit code is the
+    server's shutdown, never a failure before the worker started, so it is skipped."""
     for entry in status.get("initContainerStatuses") or []:
         if not isinstance(entry, dict):
+            continue
+        if k8sspec.is_service_container(str(entry.get("name") or "")):
             continue
         terminated = (entry.get("state") or {}).get("terminated")
         if isinstance(terminated, dict) and int(terminated.get("exitCode", 0)) != 0:

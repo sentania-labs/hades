@@ -27,6 +27,15 @@
 # the gate retroactively. required_programs gains buildctl and crane for the same
 # reason.
 #
+# hades #558, #85 (2026-10-08): `services` declares the Postgres the integration tier
+# needs. The Kubernetes provider runs it as a native sidecar of the worker Job and the
+# Docker provider as a container in the worker's network namespace; either way the
+# worker's environment carries CRUCIBLE_TEST_DATABASE_URL, so `make test-integration`
+# runs in the worker (docs/spec/05b, 26, 08). The image is the digest of postgres:16
+# the CI workflow's integration tier runs (tests/integration/postgres.py). An
+# installation that already runs version 2 uploads this document as its next free
+# number; the number below is a template, as the paragraph above says.
+#
 # routing.policy must name the routing policy the default-software in force names, or
 # this policy routes against an older model roster. Read it and fill it in at upload:
 #
@@ -219,3 +228,8 @@ routing:
   policy:
     name: default-routing
     version: 7
+# hades #558, #85: the database `make test-integration` needs, beside the worker. The
+# image defaults to the pinned postgres:16 digest CI runs; `resources` defaults to
+# 1 CPU, 1GiB memory and a 1Gi data directory, requested at the policy's fractions.
+services:
+- kind: postgres

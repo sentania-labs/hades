@@ -90,6 +90,13 @@ from crucible.domain.exit_class import ExitClass
 from crucible.domain.ids import new_id
 from crucible.domain.infrastructure import runtime_seconds
 from crucible.domain.secrets import redact
+from crucible.domain.test_services import (
+    POSTGRES_DATA_MOUNT,
+    POSTGRES_RUN_DIR,
+    DeclaredService,
+    declared_services,
+    services_env,
+)
 from crucible.domain.time import parse_rfc3339
 from crucible.ports.execution import (
     HARNESSES_LABEL,
@@ -106,6 +113,7 @@ from crucible.ports.execution import (
     WORK_MOUNT,
     CancelCheck,
     CleanupPolicy,
+    CollectedArtifact,
     CollectedOutputs,
     CredentialFileSync,
     CredentialSync,
@@ -165,6 +173,11 @@ ROLE_BUNDLE = "bundle-verifier"
 ROLE_VERIFIER = "verifier"
 ROLE_QUOTA_CHECKPOINT = "quota-checkpoint"
 ROLE_LOGIN = "login"
+# hades #558, #85: a declared test service beside the worker (`svc-postgres-<attempt>`),
+# labelled with the attempt like every container of it, so cleanup and the retention
+# sweep remove it with the rest; `crucible.service` names its kind.
+ROLE_SERVICE = "service"
+LABEL_SERVICE = "crucible.service"
 # The per-attempt credential copy, as a workspace leaf and the template subdirectory of
 # the identity bundle the read-only files on top of it come from (12).
 CREDENTIAL_LEAF = "credential"
@@ -407,12 +420,22 @@ class _ResolvedImage:
     labels: dict[str, str]
 
 
+@dataclass(frozen=True, slots=True)
+class _LaunchedService:
+    """One declared service's container (hades #558): what the evidence records."""
+
+    service: DeclaredService
+    container_id: str
+    image_digest: str
+
+
 @dataclass(slots=True)
 class _Launched:
     container_id: str
     image_digest: str
     spec: LaunchSpec
     credential: _CredentialCopy | None = None
+    services: tuple[_LaunchedService, ...] = ()
 
 
 def _mib(value: Any, default: int) -> int:
@@ -922,6 +945,7 @@ class DockerProvider:
         container_id = ""
         seeded_on_disk = False
         starting = False
+        services: list[_LaunchedService] = []
         try:
             container_id = await self._call(self.client.create_container, name, body)
             if copy is not None:
@@ -942,14 +966,28 @@ class DockerProvider:
                     tar,
                 )
                 seeded_on_disk = True
+            # hades #558, #85: each declared service is created now, joined to the
+            # worker's network namespace, so the worker reaches it on its own loopback
+            # and nothing else on the workers network can. Docker lets a container join
+            # another's namespace only once that one runs, so the worker starts first
+            # and each service right after it.
+            for service in declared_services(spec.policy, spec.contract):
+                services.append(await self._create_service(spec, service, container_id))
             starting = True
             await self._call(self.client.start_container, container_id)
+            for launched_service in services:
+                await self._call(self.client.start_container, launched_service.container_id)
         except (DockerApiError, ProviderError) as exc:
             failure = (
                 await self._start_failure(container_id, exc)
                 if starting and isinstance(exc, DockerApiError)
                 else None
             )
+            for launched_service in services:
+                with contextlib.suppress(Exception):
+                    await self._call(
+                        self.client.remove_container, launched_service.container_id, force=True
+                    )
             if container_id:
                 with contextlib.suppress(Exception):
                     await self._call(self.client.remove_container, container_id, force=True)
@@ -963,7 +1001,9 @@ class DockerProvider:
             if isinstance(exc, ProviderError):
                 raise
             raise ProviderError(f"could not start the worker: {exc}") from exc
-        self._launched[spec.attempt_id] = _Launched(container_id, resolved, spec, copy)
+        self._launched[spec.attempt_id] = _Launched(
+            container_id, resolved, spec, copy, services=tuple(services)
+        )
         return Handle(
             provider=self.name,
             ref=container_id,
@@ -1049,6 +1089,9 @@ class DockerProvider:
             *self._credential_mounts(spec),
         ]
         command, launch_env = self._command(spec)
+        # hades #558, #85: where each declared service listens, on the loopback the
+        # service container shares with this one.
+        service_env = services_env(declared_services(spec.policy, spec.contract))
         copy = self._credential_copy(spec)
         if copy is not None and copy.mode is MountMode.RENEWER:
             # A nested config.toml mount can make runc create its parent as root.
@@ -1073,7 +1116,7 @@ class DockerProvider:
             "Cmd": command,
             "User": "1000:1000",
             "WorkingDir": REPO_MOUNT,
-            "Env": [f"{k}={v}" for k, v in sorted({**env, **launch_env}.items())],
+            "Env": [f"{k}={v}" for k, v in sorted({**env, **service_env, **launch_env}.items())],
             "Labels": self._labels(spec, ROLE_WORKER),
             "Tty": False,
             "OpenStdin": False,
@@ -1081,6 +1124,107 @@ class DockerProvider:
             "NetworkDisabled": False,
             "HostConfig": host_config,
         }
+
+    async def _create_service(
+        self, spec: LaunchSpec, service: DeclaredService, worker_id: str
+    ) -> _LaunchedService:
+        """hades #558, #85: one declared service as a container of the attempt.
+
+        The image is the digest the declaration pins, which the daemon must already
+        hold (the provider pulls nothing; `make up` runs Hades's own Postgres from the
+        same digest, so the compose stack has it). The container is hardened the way
+        every container of 13 is, runs as uid 1000 with tmpfs for what the server
+        writes, and joins the worker's network namespace: the worker reaches it at
+        127.0.0.1, the same address the Kubernetes sidecar answers on, and nothing on
+        the workers network can."""
+        try:
+            image = await self._call(self.client.inspect_image, service.image)
+        except DockerApiError as exc:
+            raise ProviderError(
+                f"the declared {service.kind} service image {service.image!r} is not "
+                f"available on the daemon: {exc.message}. Pull it first (compose.yaml runs "
+                "Hades's own Postgres from the same digest)."
+            ) from exc
+        digests = [str(d) for d in (image.get("RepoDigests") or [])]
+        digest = digests[0] if digests else str(image.get("Id", ""))
+        body = self._service_body(spec, service, worker_id)
+        try:
+            check_create(body, self._create_policy(spec, resolved=service.image))
+        except CreateRequestRefusedError as exc:
+            raise ProviderError(
+                f"create-request policy refused the {service.kind} service: {exc}"
+            ) from exc
+        name = f"{service.name}-{spec.attempt_id}"
+        container_id = str(await self._call(self.client.create_container, name, body))
+        return _LaunchedService(service=service, container_id=container_id, image_digest=digest)
+
+    def _service_body(
+        self, spec: LaunchSpec, service: DeclaredService, worker_id: str
+    ) -> dict[str, Any]:
+        resources = spec.policy.get("resources", {})
+        memory = _mib(service.memory, 1024**3)
+        storage = _mib(service.storage, 1024**3)
+        own = "uid=1000,gid=1000,mode=0700"
+        host_config = {
+            **self._hardened(spec, network=f"container:{worker_id}", tmpfs_mb=64),
+            "Memory": memory,
+            "MemorySwap": memory,
+            "NanoCpus": int(service.cpus * 1_000_000_000),
+            "PidsLimit": int(resources.get("pids") or 512),
+            "Tmpfs": {
+                "/tmp": f"rw,nosuid,nodev,size=64m,{own}",
+                POSTGRES_RUN_DIR: f"rw,nosuid,nodev,size=16m,{own}",
+                # The data directory: memory-backed, bounded by the declared storage.
+                POSTGRES_DATA_MOUNT: f"rw,nosuid,nodev,size={storage},{own}",
+            },
+        }
+        return {
+            "Image": service.image,
+            "User": "1000:1000",
+            "Env": [f"{k}={v}" for k, v in sorted(service.container_env().items())],
+            "Labels": {**self._labels(spec, ROLE_SERVICE), LABEL_SERVICE: service.kind},
+            "Tty": False,
+            "OpenStdin": False,
+            "AttachStdin": False,
+            "NetworkDisabled": False,
+            "HostConfig": host_config,
+        }
+
+    def _launch_evidence(self, spec: LaunchSpec) -> tuple[CollectedArtifact, ...]:
+        """hades #558, #85: the declared services and the image each ran from, as one
+        `report/docker-launch.json` artifact of the attempt, the way the Kubernetes
+        provider records its launch (26). Written only when a service was declared, so
+        an attempt without one collects exactly what it did before."""
+        launched = self._launched.get(spec.attempt_id)
+        declared = declared_services(spec.policy, spec.contract)
+        if not declared:
+            return ()
+        by_name = {s.service.name: s for s in launched.services} if launched else {}
+        document = {
+            "provider": self.name,
+            "container": launched.container_id if launched else "",
+            "image_digest": launched.image_digest if launched else "",
+            "services": [
+                {
+                    **service.as_dict(),
+                    "service_container": (
+                        by_name[service.name].container_id if service.name in by_name else ""
+                    ),
+                    "image_id": (
+                        by_name[service.name].image_digest if service.name in by_name else ""
+                    ),
+                }
+                for service in declared
+            ],
+        }
+        return (
+            CollectedArtifact(
+                name="report/docker-launch.json",
+                type="run_evidence",
+                content=json.dumps(document, indent=2, sort_keys=True).encode("utf-8"),
+                content_type="application/json",
+            ),
+        )
 
     def _egress_wanted(self, spec: LaunchSpec) -> tuple[str, ...] | None:
         """Every destination this attempt's egress permits (13, S6): the policy's
@@ -1495,6 +1639,15 @@ class DockerProvider:
             verifications=verifications,
             tail_bytes=self.config.log_tail_bytes,
         )
+        # The service shares the worker's network namespace, but it is still a
+        # separately labelled attempt container. Remove it before the cleanliness
+        # snapshot so an expected service is not reported as leaked workspace state.
+        # A refusal is deliberately suppressed here: the snapshot will then see the
+        # real leftover and keep the workspace_clean gate honest.
+        if launched is not None:
+            for service in launched.services:
+                with contextlib.suppress(Exception):
+                    await self._call(self.client.remove_container, service.container_id, force=True)
         state = await self._workspace_state(spec.attempt_id, keep=h.ref)
         return CollectedOutputs(
             report=outputs.report,
@@ -1510,7 +1663,7 @@ class DockerProvider:
             base_paths=outputs.base_paths,
             over_limit=outputs.over_limit,
             bundle=outputs.bundle,
-            artifacts=outputs.artifacts,
+            artifacts=(*outputs.artifacts, *self._launch_evidence(spec)),
             verifications=outputs.verifications,
             workspace_state=state,
             copy_rejections=outputs.copy_rejections,

@@ -29,7 +29,10 @@ per CPU (`-n auto`), locally and in CI (issue 195). Each integration worker owns
 its own database, named from its worker id and the run's id
 (`crucible_test_gw0_<run>`, and `crucible_test_master_<run>` for a serial
 run), on its own PostgreSQL container or on the server
-`CRUCIBLE_TEST_DATABASE_URL` names, whose role then needs `CREATEDB`; it is
+`CRUCIBLE_TEST_DATABASE_URL` names, whose role then needs `CREATEDB` (a bare
+`postgresql://` there is read as psycopg, the driver this project ships; a
+Crucible worker is handed exactly that form by its declared Postgres service,
+hades #558, 05b); it is
 migrated once per process and dropped at the end. Before and after every test each table is emptied and the
 rows the migrations seed (policies, routing policies, harnesses) are put back
 from a copy taken right after migrating, so no test depends on what an earlier

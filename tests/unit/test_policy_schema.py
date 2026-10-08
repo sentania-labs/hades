@@ -131,8 +131,21 @@ def test_the_self_hosting_policy_is_default_software_with_the_worker_checks() ->
     assert "branch CI" in policy.description and "2026-09-28" in policy.description
     assert policy.ci_certification.require_green_on_final_sha
     assert "image_checks_required" in document["gates"]["pre_pr"]
+    # hades #558, #85: the worker's integration tier needs a database, so the example
+    # declares the Postgres service; the seed declares none.
+    assert [s.kind for s in policy.services] == ["postgres"]
+    assert document["services"] == [{"kind": "postgres"}]
     seed = seeded_policy_v3()
-    ignored = {"name", "version", "description", "repository", "network", "routing", "gates"}
+    ignored = {
+        "name",
+        "version",
+        "description",
+        "repository",
+        "network",
+        "routing",
+        "gates",
+        "services",
+    }
     assert {k: v for k, v in document.items() if k not in ignored} == {
         k: v for k, v in seed.items() if k not in ignored
     }
@@ -345,3 +358,9 @@ def test_ci_required_checks_defaults_to_no_narrowing() -> None:
     document = seeded_policy()
     del document["ci_certification"]["required_checks"]
     assert parse_policy(document).ci_certification.required_checks == []
+
+
+def test_a_service_digest_must_have_exactly_64_hexadecimal_digits() -> None:
+    document = seeded_policy()
+    document["services"] = [{"kind": "postgres", "image": "postgres@sha256:" + "z" * 64}]
+    assert any("must be pinned by digest" in error for error in _errors(document))
