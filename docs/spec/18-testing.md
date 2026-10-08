@@ -67,6 +67,17 @@ their own environment.
 - Release gates against synthetic tag lists and version files.
 - Harness version range refusal.
 
+## Shell tests (CI and locally through `make test-shell`)
+
+`tools/*/*_test.sh` files run as part of `make test-shell` (and so `make test`).
+Each script exercises a piece of the toolchain that is hard to test from Python
+(stubbed external tools, shell-level integration):
+
+- `tools/kind/e2e-kind_cleanup_test.sh` -- proves the kind-cleanup path from
+  issue 77/163: a daemon that cannot confirm removal fails the run, while an
+  isolated pull failure does not. Stubs `docker`, `kind`, and `sleep`; sources
+  `e2e-kind.sh` and invokes `cleanup()`.
+
 ## Integration (PostgreSQL in a container, fake provider)
 
 - Migrations up and down from empty and from previous head.
