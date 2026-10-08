@@ -3029,6 +3029,7 @@ class KubernetesProvider:
             raise ProviderError(f"reconcile failed: {exc}") from exc
         handles: list[Handle] = []
         for row in rows:
+            pod_spec: Mapping[str, Any] | None = None
             metadata = row.get("metadata") or {}
             attempt_id = str((metadata.get("labels") or {}).get(k8sspec.LABEL_ATTEMPT, ""))
             name = str(metadata.get("name", ""))
@@ -3087,6 +3088,12 @@ class KubernetesProvider:
             launched = self._launched[attempt_id]
             if launched.egress_plan is None and launched.network_policy is None:
                 # hades #205: an adopted worker's addresses keep following its names.
+                if pod_spec is None:
+                    template_spec = ((row.get("spec") or {}).get("template") or {}).get(
+                        "spec"
+                    ) or {}
+                    live_spec = (pod or {}).get("spec") or {}
+                    pod_spec = live_spec if live_spec.get("containers") else template_spec
                 await self._adopt_egress(launched, attempt_id, pod_spec)
             if pod is not None and not launched.pod_name:
                 # So a Pod that vanishes between this reconcile and the first `observe`
