@@ -598,7 +598,7 @@ def _candidate(selection: Any, model: str) -> dict[str, Any]:
     return next(c for c in candidates if c["model"] == model)
 
 
-def test_a_provider_error_relaunches_on_the_next_eligible_candidate_without_a_wake(
+def test_one_local_provider_error_blip_relaunches_without_marking_the_pool_or_waking(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     supervisor, pending, uow, attempts, marks = _qwen_on_the_gateway(monkeypatch)
@@ -730,7 +730,7 @@ def test_with_no_other_candidate_the_task_is_reported_as_before(
     assert "no other candidate in the tier was eligible to reroute to" in wake.payload["summary"]
 
 
-def test_a_second_failure_in_a_row_still_marks_the_pool_and_reroutes_past_it(
+def test_two_in_a_row_local_provider_errors_mark_the_pool_and_reroute_past_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """ADR 0028 is untouched: the second provider error in a row on the pool marks it
@@ -757,6 +757,44 @@ def test_a_second_failure_in_a_row_still_marks_the_pool_and_reroutes_past_it(
     selection = _selection(supervisor, uow, pending, attempts[-1])
     assert selection.selected is not None and selection.selected.id == CODEX_FALLBACK
     assert any("pool exhausted" in reason for reason in _candidate(selection, HERMES)["excluded"])
+
+
+def test_provider_error_reroutes_keep_every_failed_route_excluded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subscription failure after a local failure must not send a later reroute back
+    to the failed local route. Every provider-error route in this reroute chain remains
+    excluded, while unrelated candidates remain eligible."""
+    agy_fallback = "gemini-fallback"
+    supervisor, pending, uow, attempts, marks = _qwen_on_the_gateway(
+        monkeypatch,
+        models=[
+            _local_entry(QWEN, "qwen_code"),
+            _model(CODEX_FALLBACK, harness="codex", pool="openai-sub"),
+            _model(agy_fallback, harness="agy", pool="google-sub"),
+        ],
+    )
+    _finish(supervisor, pending.attempt, _dropped_past_the_retries(), exit_code=1)
+    subscription = attempts[-1]
+    subscription.selected_model = CODEX_FALLBACK
+    subscription.selected_harness = "codex"
+    subscription.selected_pool = "openai-sub"
+    subscription.state = AttemptState.RUNNING
+    subscription.started_at = NOW
+    pending.task.state = TaskState.RUNNING
+    uow.attempts.get.side_effect = lambda attempt_id, **_kwargs: next(
+        attempt for attempt in attempts if attempt.id == attempt_id
+    )
+
+    _finish(supervisor, subscription, _dropped_past_the_retries(), exit_code=1)
+    third = attempts[-1]
+    selection = _selection(supervisor, uow, pending, third)
+
+    assert marks == {}
+    assert selection.selected is not None and selection.selected.id == agy_fallback
+    assert not _candidate(selection, QWEN)["eligible"]
+    assert not _candidate(selection, CODEX_FALLBACK)["eligible"]
+    assert _candidate(selection, agy_fallback)["excluded"] == []
 
 
 def test_a_rerouted_subscription_provider_error_does_not_mark_its_pool(

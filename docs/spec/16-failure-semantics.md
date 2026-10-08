@@ -162,8 +162,10 @@ reroute with the failed route excluded, as a model-only refusal does: the
 `(harness, model)` route the attempt ran on is carried on the `reroute`
 event as `excluded_model`, `excluded_harness` and `next_attempt_id`, with
 `why` "previous attempt ended provider_error on its route; rerouted to the
-next eligible candidate", and the next attempt's selection turns that route
-away for this task alone. Nothing is checkpointed or pushed and no `wip`
+next eligible candidate". The next attempt's selection turns that route
+away for this task alone, and later attempts in the same reroute chain keep
+every earlier provider-error route excluded, so they cannot circle back to a
+route that already failed. Nothing is checkpointed or pushed and no `wip`
 commit is made: the next attempt resumes from this attempt's sealed bundle,
 which the collector writes for a failed attempt with no commit too (08). No
 pool mark is written here; ADR 0028's mark for a gateway that failed twice

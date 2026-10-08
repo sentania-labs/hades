@@ -2670,7 +2670,20 @@ class Supervisor:
         excluded = set()
         for event in self._all_task_events(uow, item.task.id):
             model = event.payload.get("excluded_model")
-            if event.payload.get("next_attempt_id") != item.attempt.id or not model:
+            if not model:
+                continue
+            immediate_retry = event.payload.get("next_attempt_id") == item.attempt.id
+            provider_error_reroute = (
+                event.kind == EventKind.TASK_REROUTED.value
+                and event.execution_id == item.execution.id
+                and int(event.payload.get("contract_version", 0)) == item.execution.contract_version
+                and event.payload.get("why")
+                == (
+                    "previous attempt ended provider_error on its route; rerouted to "
+                    "the next eligible candidate"
+                )
+            )
+            if not (immediate_retry or provider_error_reroute):
                 continue
             harness = event.payload.get("excluded_harness")
             if not harness and event.attempt_id:
@@ -2712,7 +2725,9 @@ class Supervisor:
         # The (harness, model) routes this attempt may not take: the ones the caller
         # names (a reroute deciding where to go next) and the ones the event that
         # created the attempt excluded, a capacity refusal's retry or a model-only
-        # quota refusal's reroute (hades #373).
+        # quota refusal's reroute (hades #373). Provider-error exclusions accumulate
+        # across the reroute chain: otherwise attempt N+2 could select the local route
+        # that attempt N proved unavailable (hades #490).
         all_excluded_routes = set(excluded_routes or set()) | self._capacity_exclusions(uow, item)
         selection = select_model(
             uow,
