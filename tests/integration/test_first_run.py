@@ -730,7 +730,7 @@ def test_github_app_is_created_with_one_click_and_installed(
                 "contents": "write",
                 "pull_requests": "write",
                 "checks": "read",
-                "actions": "read",
+                "actions": "write",
                 "issues": "read",
             },
             "default_events": [],
