@@ -213,14 +213,19 @@ class CodexAdapter:
         if ctx.endpoint == "local" and ctx.endpoint_url:
             gateway_credential = HermesAdapter().credential_spec()
             assert gateway_credential is not None
+            # Hades #354: context_length and max_output_tokens here are the model
+            # entry's own, when the routing entry carried either; the supervisor falls
+            # back to the Hermes-administered limits when it did not.
             limits = hermes_run_limits(ctx.harness_settings)
             context_window = limits.context_length or DEFAULT_HERMES_CONTEXT_LENGTH
+            output_tokens = limits.max_output_tokens
             env = {
                 "CODEX_HOME": CONFIG_DIR,
                 "OPENAI_API_KEY": "local-no-auth",
                 "CRUCIBLE_CODEX_CONFIG": (
                     'model_provider = "local_gateway"\n'
                     f"model_context_window = {context_window}\n"
+                    f"model_max_output_tokens = {output_tokens}\n"
                     "[model_providers.local_gateway]\n"
                     'name = "Local gateway"\n'
                     f"base_url = {_toml_string(ctx.endpoint_url)}\n"

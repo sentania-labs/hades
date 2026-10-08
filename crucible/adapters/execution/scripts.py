@@ -292,7 +292,8 @@ _COLLECTOR_OUTPUTS = (
     "base.txt head.txt branch.txt diffstat.txt diff.patch changed.txt log.txt "
     "diff-raw.txt commit-raw.txt base-injected.txt injected-blobs "
     "injected-blob-ids.txt injected-blob-ids.sorted injected-error.txt "
-    "commit-paths.txt work_branch.bundle bundle.log commits.txt commit-policy tree "
+    "commit-paths.txt attempt-commit-paths.txt work_branch.bundle bundle.log commits.txt "
+    "commit-policy tree "
     "clone.log report copy-rejections.tsv collection-failed.txt checkpoint-refusal.txt "
     "leftover-committed.txt leftover-refusal.txt collector.ok attr-text.patch "
     f"{CHANGED_BLOBS_DIR} changed-blob-ids.txt {REVIEW_DIFF_DIR}"
@@ -518,13 +519,20 @@ if ! PREPARED_BASE=$({GIT} rev-parse --verify --quiet "refs/remotes/origin/$BASE
 fi
 printf '%s\\n' "$PREPARED_BASE" > "$OUT/prepared-base.txt"
 STARTED=""
+# hades #230: the commit_policy range's start, resolved to a commit id now, while this
+# is still the only writer. POLICY_FROM_SHA is never a ref read again later from the
+# checkout, so a worker that moves refs/remotes/origin/$WORK_BRANCH afterward cannot
+# change what commit_policy_check sees.
+POLICY_FROM_SHA=""
 if [ -n {_quote(resume_bundle or "")} ]; then
   :
   {bundle_resume}
+  POLICY_FROM_SHA="$ACTUAL_HEAD"
 elif [ "{resume}" = "1" ] \
-  && {GIT} rev-parse --verify --quiet "refs/remotes/origin/$WORK_BRANCH" >/dev/null; then
+  && REMOTE_WORK_HEAD=$({GIT} rev-parse --verify --quiet "refs/remotes/origin/$WORK_BRANCH"); then
   {GIT} checkout -B "$WORK_BRANCH" "origin/$WORK_BRANCH" --
   STARTED="origin/$WORK_BRANCH"
+  POLICY_FROM_SHA="$REMOTE_WORK_HEAD"
 else
   if {GIT} rev-parse --verify --quiet "refs/remotes/origin/$BASE_REF" >/dev/null; then
     TARGET="refs/remotes/origin/$BASE_REF"
@@ -536,6 +544,7 @@ else
   fi
   {GIT} checkout -B "$WORK_BRANCH" "$TARGET" --
   STARTED="$BASE_REF"
+  POLICY_FROM_SHA="$PREPARED_BASE"
 fi
 {GIT} remote set-url origin "$ORIGIN_PLACEHOLDER"
 {GIT} remote set-url --push origin "$ORIGIN_PLACEHOLDER"
@@ -580,6 +589,7 @@ mkdir -p {WORK_MOUNT}/{PACKAGE_CACHE_LEAF} {WORK_MOUNT}/{VERIFIER_CACHE_LEAF}
 mkdir -p "$OUT"
 {GIT} rev-parse HEAD > "$OUT/prepared-head.txt"
 printf '%s\n' "$STARTED" > "$OUT/started-from.txt"
+printf '%s\n' "$POLICY_FROM_SHA" > "$OUT/prepared-policy-from.txt"
 """
 
 
@@ -821,6 +831,18 @@ fi
 printf '%s\\n' "$BASE" > "$OUT/base.txt"
 {GIT} -C "$REPO" rev-parse HEAD > "$OUT/head.txt"
 {GIT} -C "$REPO" rev-parse --abbrev-ref HEAD > "$OUT/branch.txt"
+# Finding coverage is about this attempt, not the whole branch. The preparer records
+# HEAD after resuming a bundle or remote branch, outside the worker's writable tree.
+# Missing or invalid evidence must not fall back to the original branch changes.
+: > "$OUT/attempt-commit-paths.txt"
+ATTEMPT_BASE=$(cat "$OUT/prepared-head.txt" 2>/dev/null || true)
+if printf '%s\\n' "$ATTEMPT_BASE" | grep -Eq '^([0-9a-f]{{40}}|[0-9a-f]{{64}})$' \\
+  && {GIT} -C "$REPO" merge-base --is-ancestor "$ATTEMPT_BASE" HEAD 2>/dev/null; then
+  if ! {GIT} -C "$REPO" log {_DIFF_FLAGS} --no-renames --diff-merges=separate \\
+    --name-only -z --format='' "$ATTEMPT_BASE"..HEAD > "$OUT/attempt-commit-paths.txt"; then
+    : > "$OUT/attempt-commit-paths.txt"
+  fi
+fi
 if [ -n "$BASE" ]; then
   if ! MB=$({GIT} -C "$REPO" merge-base "$BASE" HEAD); then
     printf '%s\\n' "collection failed: cannot resolve merge base between $BASE and HEAD" \
@@ -856,15 +878,18 @@ if [ -n "$BASE" ]; then
     "$BASE..$WORK_BRANCH" > "$OUT/bundle.log" 2>&1 || true
   {GIT} -C "$REPO" rev-list --count "$BASE"..HEAD > "$OUT/commits.txt" \
     || echo 0 > "$OUT/commits.txt"
-  if {GIT} -C "$REPO" rev-parse --verify --quiet "refs/remotes/origin/$WORK_BRANCH" \
-      >/dev/null; then
-    POLICY_FROM="refs/remotes/origin/$WORK_BRANCH"
-  else
-    POLICY_FROM="$BASE"
-  fi
+  # hades #230: never resolve the commit_policy start from a ref in the worker-writable
+  # checkout. refs/remotes/origin/$WORK_BRANCH lives there, and a worker that moved it
+  # to HEAD would otherwise empty the range this checks. POLICY_FROM comes only from
+  # prepared-policy-from.txt, the preparer's own record in the output mount the worker
+  # never gets, resolved to a commit id before the worker ran.
+  POLICY_FROM=$(cat "$OUT/prepared-policy-from.txt" 2>/dev/null || true)
   mkdir -p "$OUT/commit-policy"
-  if commit_policy_check "$POLICY_FROM..HEAD" "$OUT/commit-policy"; then
-    echo done > "$OUT/commit-policy/checked"
+  if printf '%s\\n' "$POLICY_FROM" | grep -Eq '^([0-9a-f]{{40}}|[0-9a-f]{{64}})$' \
+      && [ "$({GIT} -C "$REPO" cat-file -t "$POLICY_FROM" 2>/dev/null || true)" = "commit" ]; then
+    if commit_policy_check "$POLICY_FROM..HEAD" "$OUT/commit-policy"; then
+      echo done > "$OUT/commit-policy/checked"
+    fi
   fi
 else
   REVIEW_DIFF_ERROR="the base ref could not be resolved"
@@ -1187,6 +1212,9 @@ EXPECTED={_quote(expected_head)}
 CLONE_URL={_quote(clone_url)}
 SEAL={_quote(bundle_sha256)}
 OWNED_HEADS={_quote(" ".join(owned_remote_heads))}
+# hades #443: digest-commit author and message prefix for remote-branch checks.
+DIGEST_AUTHOR={_quote(DIGEST_AUTHOR_LOGIN)}
+DIGEST_MSG_PREFIX={_quote(DIGEST_MESSAGE_PREFIX)}
 drop_token() {{ {drop}; }}
 mkdir -p "$OUT"
 # A retried publication of the same attempt writes into the same directory; nothing a
@@ -1265,6 +1293,30 @@ if [ -n "$REMOTE" ]; then
       | grep -q '[^[:space:]]'; then
     OWNED=yes
   fi
+  # hades #443: if the remote is ahead only by digest commits, treat it as owned.
+  if [ "$OWNED" != yes ]; then
+    # Only check if the remote tip is an ancestor of EXPECTED (REMOTE behind or equal)
+    # or if it's ahead of EXPECTED. Digest commits only matter when the remote is ahead.
+    SPOOLS=$(git log --oneline --no-merges "$EXPECTED".."$REMOTE" 2>/dev/null || echo "")
+    if [ -n "$SPOOLS" ]; then
+      # Remote is ahead: check that every ahead commit is a digest commit.
+      DIGEST_OK=yes
+      for COMMIT in $SPOOLS; do
+        COMMIT_SHA=${{COMMIT%% *}}
+        AUTHOR=$(git show -s --format='%an' "$COMMIT_SHA" 2>/dev/null || echo "")
+        MSG=$(git show -s --format='%s' "$COMMIT_SHA" 2>/dev/null || echo "")
+        if [ "$AUTHOR" != "$DIGEST_AUTHOR" ] || \
+           ! printf '%s' "$MSG" | grep -q "^${{DIGEST_MSG_PREFIX}}"; then
+          DIGEST_OK=no
+          break
+        fi
+      done
+      if [ "$DIGEST_OK" = yes ]; then
+        OWNED=yes
+        REMOTE="$REMOTE"
+      fi
+    fi
+  fi
   if [ "$OWNED" != yes ]; then
     AUTHOR=$(git show -s --format='%an <%ae>' "$REMOTE")
     printf 'foreign remote commit %s by %s; no Hades push record or attempt trailer\n' \
@@ -1302,6 +1354,9 @@ MERGE_MAIN_MARKER = "# crucible: merge the base into the remote work branch"
 # and git stopped on conflicts (6). Neither pushed anything.
 MERGE_MAIN_HEAD_MOVED = 4
 MERGE_MAIN_CONFLICT = 6
+# hades #443: the author login that the images-digest workflow uses for digest commits.
+DIGEST_AUTHOR_LOGIN = "github-actions[bot]"
+DIGEST_MESSAGE_PREFIX = "Record the CI-built digest"
 
 
 def merge_main_script(
@@ -1362,6 +1417,9 @@ export CRUCIBLE_AUTHOR_NAME={_quote(author_name)}
 export CRUCIBLE_AUTHOR_EMAIL={_quote(author_email)}
 {_CRED_HELPER}
 echo credential > "$OUT/step.txt"
+# hades #443: digest commit author and message prefix for ownership check.
+DIGEST_AUTHOR={_quote(DIGEST_AUTHOR_LOGIN)}
+DIGEST_MSG_PREFIX={_quote(DIGEST_MESSAGE_PREFIX)}
 if ! printf 'protocol=https\\nhost=%s\\n\\n' "$CRUCIBLE_CREDENTIAL_HOST" \\
     | git credential fill 2>> "$OUT/publisher.log" | grep -q '^password=.'; then
   echo "the credential helper could not read the token" > "$OUT/error.txt"; drop_token; exit 3
@@ -1382,8 +1440,30 @@ fi
 REMOTE=$(git rev-parse "refs/remotes/origin/$WORK_BRANCH")
 printf '%s\\n' "$REMOTE" > "$OUT/remote-head-before.txt"
 if [ "$REMOTE" != "$EXPECTED" ]; then
-  echo "the remote work branch is at $REMOTE, not the known tip $EXPECTED" > "$OUT/error.txt"
-  echo head-moved > "$OUT/step.txt"; drop_token; exit {MERGE_MAIN_HEAD_MOVED}
+  # hades #443: if the remote is ahead only by digest commits, accept it.
+  # Check all commits between EXPECTED and REMOTE are digest commits, but only when
+  # the remote tip is ahead of (not behind) the expected tip.
+  DIGEST_OK=no
+  SPOOLS=$(git log --oneline --no-merges "$EXPECTED".."$REMOTE" 2>/dev/null || echo "")
+  if [ -n "$SPOOLS" ]; then
+    DIGEST_OK=yes
+    for COMMIT in $SPOOLS; do
+      COMMIT_SHA=${{COMMIT%% *}}
+      AUTHOR=$(git show -s --format='%an' "$COMMIT_SHA" 2>/dev/null || echo "")
+      MSG=$(git show -s --format='%s' "$COMMIT_SHA" 2>/dev/null || echo "")
+      if [ "$AUTHOR" != "$DIGEST_AUTHOR" ] || \
+         ! printf '%s' "$MSG" | grep -q "^${{DIGEST_MSG_PREFIX}}"; then
+        DIGEST_OK=no
+        break
+      fi
+    done
+  fi
+  if [ "$DIGEST_OK" = no ]; then
+    echo "the remote work branch is at $REMOTE, not the known tip $EXPECTED" > "$OUT/error.txt"
+    echo head-moved > "$OUT/step.txt"; drop_token; exit {MERGE_MAIN_HEAD_MOVED}
+  fi
+  # Accept: the remote tip now becomes the new expected head.
+  EXPECTED="$REMOTE"
 fi
 git checkout --quiet -B crucible-merge-main "$REMOTE" >> "$OUT/publisher.log" 2>&1
 if git merge-base --is-ancestor "refs/remotes/origin/$BASE_REF" HEAD; then

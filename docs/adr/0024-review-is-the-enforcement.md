@@ -88,3 +88,26 @@ recorded on the upload event, not as a Decision row.
 
 Rolling back to a release before 0028 drops the class and the findings from the stored
 gate rows, and that release blocks on every gate again.
+
+## Amendment: the gates judge the work, not the time sheet (hades #498, 2026-10-06)
+
+The operator's rule: the pre-PR gates judge whether the worker returned work and
+whether it passes, never whether the paperwork is complete. Twelve finished attempts
+had been scored `completed_without_report` because the correction report lacked
+`finding_dispositions`, a field the worker instructions never mention, and budget stops
+with commits had been scored as losses.
+
+1. `report_present` is always advisory, as `commit_policy` is: no report at all, a
+   report that does not parse, a missing self-review and a correction finding without
+   a disposition are each listed for the reviewer with a plain detail and never fail
+   the attempt. Point 2's "no report at all still stops the task" no longer holds.
+   The blocking gates for an attempt with commits are the ones about the work:
+   `commits_present`, `verification_ran`, `scope_contained` (for a prohibited path),
+   `no_injected_files`, `no_secrets`, `dependencies_unchanged`, `ci_unchanged`,
+   `workspace_clean`, `editor_leftovers` and `exit_clean`.
+2. Hades composes the completion record itself from the commits on the branch, the
+   checks it re-ran and the diff against each review finding's path; the worker's
+   report adds to it and never gates it (11, "The completion record").
+3. A clean exit with commits and no report is `completed`, never
+   `completed_without_report`. A stop on the time or turn budget with commits is
+   `ended_by_budget`: a normal end, collected and gated like a completed run.

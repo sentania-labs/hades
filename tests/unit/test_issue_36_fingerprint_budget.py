@@ -10,6 +10,7 @@ Verifies that the supervisor's own workspace_fingerprint:
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -78,8 +79,9 @@ def test_workspace_fingerprint_small_tree_matches_expected(tmp_path: Path) -> No
     assert newest_ns > 0
 
     # Mutating a file changes the fingerprint.
-    time.sleep(0.01)  # ensure mtime moves forward
+    future = time.time_ns() + 10_000_000
     _write_file(repo / "main.py", "print('goodbye')\n")
+    os.utime(repo / "main.py", ns=(future, future))
     new_fp = workspace_fingerprint(ws)
     assert new_fp is not None
     assert new_fp != fingerprint

@@ -80,9 +80,26 @@ jobs:
           else
             echo "value=" >> "$GITHUB_OUTPUT"
           fi
+      # hades #476: ci.yml's `classify` job skips the images job entirely for a
+      # core-only or kind-only change, so there is nothing for this workflow to do.
+      # Checked here, not left to the artifact-presence check below, so a run this
+      # workflow had no reason to start does not spend a job on finding that out.
+      - name: decide whether the images class ran
+        id: images_ran
+        if: steps.allowed.outputs.value == '1'
+        run: |
+          set -euo pipefail
+          CONCLUSION=$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID/jobs" --paginate \
+            --jq '[.jobs[] | select(.name == "images")][0].conclusion // ""')
+          if [ "$CONCLUSION" = "skipped" ] || [ -z "$CONCLUSION" ]; then
+            echo "images-digest: the images job did not run on run $RUN_ID (hades #476); nothing to do"
+            echo "value=" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=1" >> "$GITHUB_OUTPUT"
+          fi
       - name: download the built digests, if the images job uploaded any
         id: artifact
-        if: steps.allowed.outputs.value == '1'
+        if: steps.allowed.outputs.value == '1' && steps.images_ran.outputs.value == '1'
         run: |
           set -euo pipefail
           found=$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID/artifacts" \
