@@ -2684,7 +2684,8 @@ class KubernetesProvider:
     async def cleanup(
         self, ws: Workspace, policy: CleanupPolicy, spec: LaunchSpec | None = None
     ) -> None:
-        """08, 26: only ever called for an attempt that recorded `logs_drained`.
+        """08, 26: only ever called for an attempt that recorded `logs_drained`, or
+        for one that ended before its worker launched (hades #394), under `delete`.
 
         Jobs and the NetworkPolicy go; the per-attempt Secret goes under every policy,
         `keep` included (12, 16); the claim is kept or deleted per policy, and a kept
@@ -4549,39 +4550,81 @@ class KubernetesProvider:
             return CredentialFileSync(
                 auth.name, True, True, True, False, "changed; the copy carries no issued-at"
             )
+
+        def secret_older(secret_body: Mapping[str, Any]) -> datetime | None:
+            raw = (secret_body.get("data") or {}).get(_secret_key(auth.name))
+            if not raw:
+                return None
+            doc: Any = None
+            with contextlib.suppress(UnicodeDecodeError, ValueError):
+                doc = json.loads(base64.b64decode(str(raw)).decode("utf-8"))
+            return _issued_at(doc, auth.issued_at)
+
         try:
             source = await self._call(self.client.get, "secrets", copy.source_secret)
         except KubernetesApiError as exc:
             return CredentialFileSync(
                 auth.name, True, True, True, False, f"changed; source unreadable: {exc.status}"
             )
-        raw = (source.get("data") or {}).get(_secret_key(auth.name))
-        old_document: Any = None
-        if raw:
-            with contextlib.suppress(UnicodeDecodeError, ValueError):
-                old_document = json.loads(base64.b64decode(str(raw)).decode("utf-8"))
-        older = _issued_at(old_document, auth.issued_at)
+        older = secret_older(source)
         if older is not None and newer <= older:
             return CredentialFileSync(
                 auth.name, True, True, True, False, "changed; not newer than the source"
             )
-        try:
-            await self._call(
-                self.client.patch,
-                "secrets",
-                copy.source_secret,
-                {
-                    "metadata": {"labels": _owned_labels(copy.spec.harness)},
-                    "data": {_secret_key(auth.name): base64.b64encode(data).decode("ascii")},
-                },
-            )
-        except KubernetesApiError as exc:
-            return CredentialFileSync(
-                auth.name, True, True, True, False, f"changed; write back failed: {exc.status}"
-            )
-        return CredentialFileSync(
-            auth.name, True, True, True, True, "changed; newer issued-at, written back"
-        )
+        # hades #315: the patch carries the Secret's resourceVersion from the read
+        # above, so the API server itself does the compare-and-swap (339) and answers
+        # 409 when another attempt already wrote the Secret since this read. No shared
+        # pathname is ever involved; this is the whole replace, atomically.
+        # On conflict (409), re-read the Secret and retry the compare-and-swap when
+        # this candidate is still newer rather than treating every 409 as proof that
+        # the source moved past it.
+        while True:
+            resource_version = (source.get("metadata") or {}).get("resourceVersion")
+            try:
+                await self._call(
+                    self.client.patch,
+                    "secrets",
+                    copy.source_secret,
+                    {
+                        "metadata": {"labels": _owned_labels(copy.spec.harness)},
+                        "data": {_secret_key(auth.name): base64.b64encode(data).decode("ascii")},
+                    },
+                    resource_version=resource_version,
+                )
+                return CredentialFileSync(
+                    auth.name, True, True, True, True, "changed; newer issued-at, written back"
+                )
+            except KubernetesApiError as exc:
+                if exc.status != 409:
+                    return CredentialFileSync(
+                        auth.name,
+                        True,
+                        True,
+                        True,
+                        False,
+                        f"changed; write back failed: {exc.status}",
+                    )
+                try:
+                    source = await self._call(self.client.get, "secrets", copy.source_secret)
+                except KubernetesApiError as read_exc:
+                    return CredentialFileSync(
+                        auth.name,
+                        True,
+                        True,
+                        True,
+                        False,
+                        f"changed; source unreadable: {read_exc.status}",
+                    )
+                older = secret_older(source)
+                if older is not None and newer <= older:
+                    return CredentialFileSync(
+                        auth.name,
+                        True,
+                        True,
+                        True,
+                        False,
+                        "changed; source moved past the candidate, skipped",
+                    )
 
     async def _remove_credential(self, spec: LaunchSpec, copy: _CredentialCopy) -> bool:
         removed = await self._delete_credential_secret(spec.attempt_id)

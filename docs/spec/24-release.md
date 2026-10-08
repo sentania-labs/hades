@@ -65,6 +65,7 @@ Immutable once submitted. A change is a new contract.
 | `changelog_satisfied` | when `changelog_required`: the changelog at `target_sha` has an entry for `version` |
 | `tag_absent` | the tag does not exist on the remote |
 | `evidence_present` | every included PR has its internal review, external review dispositions, and CI certification records |
+| `worker_image_policy` | the release workflow's policy check passes: the worker image carries every program a shipped policy's required check starts with or declares (`make images-policy-check`), verified between the build and the first push |
 
 Any failure moves the release to `gates_failed` and wakes Foundry. Nothing
 is pushed.
@@ -110,3 +111,29 @@ release job re-run, leaves `latest` where it is, which the run log and the
 release notes say plainly. The release body records all three images as
 `name:<version>@<digest>`, read back from the registry after the push, so a
 deployer pins from the release, never from a local guess.
+
+**The worker and script-harness images are rebuilt only when their own tag
+changed (hades #476, the operator's design of 2026-10-06, corrected per finding
+01M4CG0K1TQH50GM73R9H9CQRB).** Before building, the tag workflow finds the
+previous release (the highest `vMAJOR.MINOR.PATCH` tag below this one;
+`tools/release/version.py --previous`) and reads that release's own committed
+`images/manifest.env`. `tools/release/worker_decision.py` compares both the
+`WORKER` tag and the `SCRIPT_HARNESS` tag with this release's, independently:
+when both are unchanged, the release skips the image build and push entirely
+and instead copies the previous release's already-published worker and
+script-harness images to this version's tags with `docker buildx imagetools
+create`, by digest, the same way the "move latest" step above moves tags
+without pushing from a local build; when either tag changed, it builds and
+pushes both. `tools/images/images.sh` builds the two images together and is
+not split by this change, so a harness-only change still rebuilds the worker
+alongside it rather than silently republishing the previous release's
+script-harness image under a new version -- there is no way to build only one
+of the two without editing `tools/images/images.sh`, which is out of scope for
+this contract. Either way the candidate's own crane still resolves the
+published worker image (Gate 3, part three) before anything is tagged. The
+release notes name a reused image explicitly (`- the worker image is unchanged
+since ...; republished ... by digest, not rebuilt`), so a reader never mistakes
+a copy for a fresh build; that note, like the reuse decision itself, only fires
+when both tags are unchanged. This does not change what a job tests, and it is
+not the per-harness promotion flow on Images; both are explicitly out of scope
+for #476. Proven directly at `tests/unit/test_issue_476_scoped_ci_classes.py`.

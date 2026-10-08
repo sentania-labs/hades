@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Exercises e2e-kind.sh's cleanup() against a stubbed docker, proving that a daemon
 # which cannot confirm removal fails the run (correction to 77) while a busybox pull
-# failure alone still does not (77's own intent, kept). Not wired into `make test`:
-# there is no other shell-level test in this tree to share a runner with.
+# failure alone still does not (77's own intent, kept). Wired into `make test-shell`
+# (issue 163): a bare `make test` (and CI's test job) now covers it.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

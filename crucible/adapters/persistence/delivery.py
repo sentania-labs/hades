@@ -507,6 +507,7 @@ class CICertifications:
             failure=dict(row.failure),
             detail=row.detail,
             evaluated_at=ensure_utc(row.evaluated_at),
+            change_class=row.change_class,
         )
 
     def put(self, certification: CICertification) -> CICertification:
@@ -534,6 +535,7 @@ class CICertifications:
                     failure=dict(certification.failure),
                     detail=certification.detail,
                     evaluated_at=certification.evaluated_at,
+                    change_class=certification.change_class,
                 )
                 .on_conflict_do_nothing(constraint="uq_ci_certifications_head")
                 .returning(CICertificationRow.id)
@@ -553,6 +555,7 @@ class CICertifications:
         row.failure = dict(certification.failure)
         row.detail = certification.detail
         row.evaluated_at = certification.evaluated_at
+        row.change_class = certification.change_class
         self._s.flush()
         return self._to_entity(row)
 
