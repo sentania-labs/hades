@@ -42,13 +42,13 @@ _MAKEFILE: Path = _ROOT / "Makefile"
 _WATCHDOG_SH: Path = _ROOT / "tools" / "kind" / "watchdog.sh"
 
 
-def _process_finished(pid: int) -> bool:
-    """True once ``pid`` has exited, counting a not-yet-reaped zombie as finished."""
+def _process_gone(pid: int) -> bool:
+    """True once `pid` has exited (a zombie awaiting an unrelated reaper counts)."""
     try:
-        state = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except (FileNotFoundError, ProcessLookupError):
         return True
-    return bool(state) and state[0] == "Z"
+    return stat.rsplit(")", 1)[1].split()[0] == "Z"
 
 
 # ── AC1: the cancel source ───────────────────────────────────────────
@@ -164,11 +164,11 @@ class TestWatchdogScript:
         child.kill()
         child.wait()
 
-        # Wait for the watchdog's background timer to run out and the process to end.
+        # Wait for the watchdog's background job to finish its 3-second timer.
         wait_until(
-            lambda: _process_finished(watchdog_pid),
+            lambda: _process_gone(watchdog_pid),
             timeout=10,
-            describe="the watchdog's background process to finish",
+            describe="the watchdog's background job to exit",
         )
 
         # The target was dead when the watchdog woke, so it should NOT fire.
