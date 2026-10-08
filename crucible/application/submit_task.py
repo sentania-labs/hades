@@ -96,7 +96,7 @@ def _check_branch_ownership(uow: UnitOfWork, repository_id: str, work_branch: st
     still exists.
     """
     problems: list[Problem] = []
-    for task in uow.tasks.list_for_repository(repository_id):
+    for task in uow.tasks.list_for_repository(repository_id):  # type: ignore[attr-defined]
         stored = uow.contracts.get(task.id, task.contract_version)
         if stored is None:
             continue
