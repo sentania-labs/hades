@@ -16,7 +16,7 @@ from pydantic import ValidationError
 
 from crucible.application.decisions import record_decision
 from crucible.client.schema import document
-from crucible.domain.decisions import ACCEPTED_DECISION_KINDS, PUBLIC_DECISION_KINDS
+from crucible.domain.decisions import ACCEPTED_DECISION_KINDS
 
 # ---------------------------------------------------------------------------
 # AC1: unknown kind → 422, escalation stays open
@@ -39,12 +39,10 @@ class TestUnknownKind:
         errors = exc.value.errors()
         # model_validator errors have loc=() but msg contains the kind.
         assert any(e.get("msg") and "__probe__" in e["msg"] for e in errors)
-        # Every public accepted kind must appear in the error body.
-        # Internal closure kinds (task_cancelled, task_closed) are excluded
-        # from the public list, so they should NOT be in the error (Finding 02).
-        for kind in PUBLIC_DECISION_KINDS:
+        # Every accepted kind must appear in the error body.
+        for kind in ACCEPTED_DECISION_KINDS:
             assert any(kind in (e.get("msg") or "") for e in errors), (
-                f"public kind {kind!r} missing from error detail"
+                f"accepted kind {kind!r} missing from error detail"
             )
         # Internal kinds should NOT appear in the public error listing.
         for kind in ("task_cancelled", "task_closed"):
@@ -173,6 +171,7 @@ class TestKnownKindsAndBackwardsCompatibility:
             "escalation_answer",
             "recollect",
             "release_authorization",
+            "scope_clarified",
             "waive_external_review",
         ],
     )
