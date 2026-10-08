@@ -24,7 +24,15 @@ BLOCKED_REASONS: frozenset[str] = frozenset(
 
 class ExitClass(StrEnum):
     COMPLETED = "completed"
+    # Exit 0 with no report file and no commit on the branch: the worker returned
+    # nothing. With commits, the same exit is `completed` and the missing report is
+    # advisory (hades #498): the gates judge the work, not the paperwork.
     COMPLETED_WITHOUT_REPORT = "completed_without_report"
+    # hades #498: the run stopped on a budget (the attempt's time limit or the harness's
+    # turn limit) with commits on the branch. A normal end, not a failure: the bundle is
+    # collected and the same gates run as for a completed run. The class only says how
+    # it ended.
+    ENDED_BY_BUDGET = "ended_by_budget"
     # The harness exited while its own tooling reported a command still running (issue
     # 128): never a clean completion, whatever the exit code and the report say.
     INCOMPLETE = "incomplete"
@@ -85,9 +93,11 @@ def loop_shape(command: str) -> str:
 
 
 # The classes that say the harness finished its turn cleanly. A zero exit code alone
-# is not enough: an `incomplete` attempt exits 0 too (issue 128).
+# is not enough: an `incomplete` attempt exits 0 too (issue 128). A budget end with
+# commits is clean too (hades #498): its exit code is whatever the stop left, so the
+# `exit_clean` gate reads the class before the code for it.
 CLEAN_EXIT_CLASSES: frozenset[ExitClass] = frozenset(
-    {ExitClass.COMPLETED, ExitClass.COMPLETED_WITHOUT_REPORT}
+    {ExitClass.COMPLETED, ExitClass.COMPLETED_WITHOUT_REPORT, ExitClass.ENDED_BY_BUDGET}
 )
 
 

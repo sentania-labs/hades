@@ -76,7 +76,8 @@ def save_model(
     uow: UnitOfWork,
     *,
     principal: Principal,
-    model_id: str,
+    model: str,
+    harness: str,
     enabled: bool,
     disabled_reason: str,
     reason: str | None,
@@ -84,18 +85,26 @@ def save_model(
     reason = guard_mutation(ctx, uow, reason, principal=principal.name, operation="routing model")
     policy, record = active_documents(uow)
     document = copy.deepcopy(record.document)
-    model = next((item for item in document.get("models", []) if item.get("id") == model_id), None)
-    if model is None:
+    entry = next(
+        (
+            item
+            for item in document.get("models", [])
+            if item.get("model") == model and item.get("harness") == harness
+        ),
+        None,
+    )
+    if entry is None:
         raise ContractValidationError(
-            "the routing model does not exist", errors=[{"path": "model", "message": model_id}]
+            "the routing entry does not exist",
+            errors=[{"path": "model", "message": f"{harness}:{model}"}],
         )
     if not enabled and not disabled_reason.strip():
         raise ContractValidationError(
             "a disabled model needs a reason",
             errors=[{"path": "disabled_reason", "message": "required when disabled"}],
         )
-    model["enabled"] = enabled
-    model["disabled_reason"] = None if enabled else disabled_reason.strip()
+    entry["enabled"] = enabled
+    entry["disabled_reason"] = None if enabled else disabled_reason.strip()
     publish_routing(
         ctx,
         uow,

@@ -284,6 +284,9 @@ class BranchBundle:
     # finish it; otherwise the commits whose author email is not the policy's, as
     # (sha, email). Information for the reviewer, not a refusal (FDY-0143).
     commit_policy: CommitPolicyCheck | None = None
+    # Paths touched only by commits after the preparer's trusted head. Branch-wide
+    # paths include earlier attempts and cannot establish correction coverage (#498).
+    attempt_commit_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

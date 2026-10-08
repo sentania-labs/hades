@@ -86,9 +86,18 @@ class TranscriptFormat(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ProviderQuotaEvent:
-    """One authoritative structured provider refusal emitted by a harness."""
+    """One authoritative structured provider refusal emitted by a harness.
+
+    `model_only` is True when the refusal is about the model that was tried and not
+    about the account (hades #373): Claude Code's `model_requires_usage_credits`, or
+    any refusal whose text tells the user to switch models. The supervisor then
+    excludes that model until `reset_at` (the pool's default cooldown when the
+    refusal states none) and reroutes to the next candidate in the same pool; the
+    pool itself is not marked. False is the account-level refusal, which marks the
+    pool."""
 
     reset_at: datetime | None = None
+    model_only: bool = False
 
 
 def parse_version(value: str) -> tuple[int, int, int]:

@@ -405,6 +405,20 @@ After an operator uploads or selects a different routing policy, the proxy confi
 is atomically regenerated from that policy and the proxy is reloaded before an attempt
 can use the route.
 
+Each local routing entry is the pair `(harness, model)`. `model` is the exact name the
+gateway returned for the stored key and the exact value the launch and credential probe
+send. The supervisor repeats that authenticated listing on its normal schedule. A name
+that disappears is pruned by this same reference for every harness, with its first
+missing time retained for the Local gateway page and an orchestrator wake. Newly offered
+models have an unchecked Hermes control on that page so the operator can add them.
+Changing route selections preserves the thinking preference of each existing route.
+
+Migration 0051 keeps policy versions while replacing legacy route IDs with endpoint
+model references. Its downgrade retains `model_name` as the endpoint alias and assigns
+unique legacy IDs across harnesses, consistently across stored versions. Stored execution
+and attempt model references follow that mapping without changing their policy or
+routing versions.
+
 From S6, as each list stood after an authenticated task completed through
 the filter (so none of them is provisional any more): Claude Code
 `api.anthropic.com` (plus `mcp-proxy.anthropic.com` only if account MCP
