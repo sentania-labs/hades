@@ -73,9 +73,13 @@ hades #370 the record says:
   the detail as before.
 - **a stall is named as one.** A preparer whose log does not change for the
   provider's stall bound (26: `preparer_stall_seconds`, 300 by default, well
-  below the 900 s prepare timeout) is ended there with "the preparer stalled:
-  ... wrote no log output for 300s while it ran" and its last output, not
-  after the full prepare timeout with "did not finish".
+  below the 900 s prepare timeout) is ended there with "the preparer Job
+  could not build the checkout (stalled): ... wrote no log output for 300s
+  while it ran" and its last output, not after the full prepare timeout with
+  "(timed out): ... did not finish". Every form of the preparer's failure
+  begins with the words the detail had before hades #370, "the preparer Job
+  could not build the checkout", and names the cause in the parenthesis: the
+  exit code, "stalled", "timed out" or "its Pod never ran".
 - **a quota refusal is a wait, never the attempt's failure.** A worker or
   preparer Job the namespace quota refuses at admission, and any other object
   of the preparation a quota 403 refuses, raises `LaunchWaitError`: the

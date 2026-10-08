@@ -17,8 +17,10 @@ not fetch its resume source did not say which source. This module proves the fou
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import replace
 from hashlib import sha256
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -29,6 +31,7 @@ from crucible.adapters.execution import k8sspec
 from crucible.adapters.execution import kubernetes as kubernetes_module
 from crucible.adapters.execution.k8sapi import KubernetesApiError
 from crucible.adapters.execution.kubernetes import (
+    JOB_API_ERROR,
     JOB_STALLED,
     JOB_TIMED_OUT,
     KubernetesConfig,
@@ -370,7 +373,7 @@ async def test_a_silent_preparer_is_ended_at_the_stall_bound_before_the_prepare_
 
     error = raised.value
     assert error.exit_code == JOB_STALLED
-    assert str(error).startswith("the preparer stalled: ")
+    assert str(error).startswith("the preparer Job could not build the checkout (stalled): ")
     assert "wrote no log output for 60s while it ran" in str(error)
     assert "below its 900s timeout" in str(error)
     assert "its last output: Cloning into '/crucible/work/repo'..." in str(error)
@@ -407,7 +410,7 @@ async def test_a_preparer_that_keeps_writing_is_not_a_stall(
 
     monkeypatch.setattr(api, "pod_log", progressing)
 
-    with pytest.raises(PrepareFailedError, match="the preparer stalled"):
+    with pytest.raises(PrepareFailedError, match=r"could not build the checkout \(stalled\)"):
         await provider.prepare(launch)
 
     # About 150 polls of progress, then the 60 s bound: well past the bound alone.
@@ -431,7 +434,9 @@ async def test_without_a_stall_bound_the_silent_preparer_waits_out_the_prepare_t
         await provider.prepare(launch)
 
     assert raised.value.exit_code == JOB_TIMED_OUT
-    assert str(raised.value).startswith("the preparer timed out: ")
+    assert str(raised.value).startswith(
+        "the preparer Job could not build the checkout (timed out): "
+    )
     # The Pod ran, so what it wrote is read before the Job is deleted: the timeout
     # reason ends with it, and it is the output the attempt keeps.
     assert "did not finish within 900s of running" in str(raised.value)
@@ -472,7 +477,7 @@ async def test_a_preparer_still_writing_at_the_prepare_timeout_keeps_its_log(
 
     error = raised.value
     assert error.exit_code == JOB_TIMED_OUT
-    assert str(error).startswith("the preparer timed out: ")
+    assert str(error).startswith("the preparer Job could not build the checkout (timed out): ")
     assert "Receiving objects: " in str(error)
     # The whole log, from its first line, is the output, not only the tail.
     assert error.output.startswith("Receiving objects: 0%\n")
@@ -538,6 +543,84 @@ def test_the_clone_reports_its_progress_so_a_large_transfer_is_not_a_stall() -> 
         identity_mount="/crucible/identity",
     )
     assert "clone --progress --no-hardlinks --no-checkout" in script
+
+
+# ----- Every form keeps the words the message had before hades #370 -------------------
+
+# The kind tier's hades #191 test (tests/e2e/test_kind.py) expects the preparer that
+# cannot reach its git host to fail with `ProviderError` matching these words, whether
+# its clone exits non-zero or runs to the 45 s prepare timeout the test sets. The first
+# head of this change said "the preparer timed out" there and the run failed (CI run
+# 37718411730); the cause now lives in the parenthesis after the old words.
+KIND_191_PATTERN = "preparer Job could not build"
+
+
+def test_the_kind_tier_still_matches_these_words() -> None:
+    """The pattern this module proves is the one the kind test matches, read from its
+    source, so a change to either is a change to both."""
+    kind = Path(__file__).parents[2] / "tests" / "e2e" / "test_kind.py"
+    assert f'match="{KIND_191_PATTERN}"' in kind.read_text()
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "cause"),
+    [
+        (3, "exit 3"),
+        (128, "exit 128"),
+        (JOB_STALLED, "stalled"),
+        (JOB_TIMED_OUT, "timed out"),
+        (JOB_API_ERROR, "its Pod never ran"),
+    ],
+)
+def test_every_prepare_failure_form_begins_with_the_old_words(exit_code: int, cause: str) -> None:
+    _api, _registry, provider = build(config=_config())
+    for resume_source in (None, "the remote work branch 'crucible/EX-0001'"):
+        error = provider._prepare_failed(exit_code, "fatal: could not connect", resume_source)
+        message = str(error)
+        assert re.search(KIND_191_PATTERN, message), message
+        assert f"the preparer Job could not build the checkout ({cause}): " in message
+        assert message.endswith("fatal: could not connect")
+        assert error.exit_code == exit_code
+
+
+async def test_a_preparer_that_runs_out_its_timeout_still_matches_the_kind_test(
+    clock: dict[str, float],
+) -> None:
+    """hades #191 on the kind tier: the preparer's clone of a git host its policy does
+    not permit hangs until `prepare_timeout_seconds` (45 there, well below the stall
+    bound). Rendered through the new path with the fake, the message the kind test
+    matches is the message the attempt records."""
+    api, _registry, provider = build(
+        config=_config(launch_timeout_seconds=45, prepare_timeout_seconds=45)
+    )
+    launch = spec()
+    api.script(launch.attempt_id, "prepare-hangs")
+
+    with pytest.raises(ProviderError, match=KIND_191_PATTERN) as raised:
+        await provider.prepare(launch)
+
+    assert isinstance(raised.value, PrepareFailedError)
+    assert raised.value.exit_code == JOB_TIMED_OUT
+    assert "did not finish within 45s of running" in str(raised.value)
+
+
+async def test_a_preparer_that_stalls_still_matches_the_kind_test(
+    clock: dict[str, float],
+) -> None:
+    api, _registry, provider = build(
+        config=_config(
+            launch_timeout_seconds=45, prepare_timeout_seconds=900, preparer_stall_seconds=30
+        )
+    )
+    launch = spec()
+    api.script(launch.attempt_id, "prepare-hangs")
+
+    with pytest.raises(ProviderError, match=KIND_191_PATTERN) as raised:
+        await provider.prepare(launch)
+
+    assert isinstance(raised.value, PrepareFailedError)
+    assert raised.value.exit_code == JOB_STALLED
+    assert "wrote no log output for 30s while it ran" in str(raised.value)
 
 
 # ----- AC4: a correction names the resume source it could not fetch -------------------

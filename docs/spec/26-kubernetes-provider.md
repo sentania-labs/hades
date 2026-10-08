@@ -155,7 +155,12 @@ of 2026-10-02) a preparer stuck behind a full claim quota waited the full
 fifteen minutes and left nothing but the exit class.
 
 When the preparer exits non-zero, times out or stalls, the provider raises
-`PrepareFailedError` (08's `ProviderError`, hades #370): its message ends
+`PrepareFailedError` (08's `ProviderError`, hades #370): its message begins
+"the preparer Job could not build the checkout (<cause>)", the words it had
+before hades #370 with the cause in the parenthesis ("exit 128", "stalled",
+"timed out", or "its Pod never ran" for a Job whose Pod the API server never
+ran for a reason other than the quota), so the kind tier's hades #191 test
+and an operator's search still find them; it ends
 with the preparer's last output lines (the last twelve, capped), which become
 the attempt's `termination_detail` ("prepare: ...") and the wake's summary;
 its `output` is the Pod's whole log, read with no line or byte bound before

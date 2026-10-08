@@ -1883,15 +1883,23 @@ class KubernetesProvider:
         Job was deleted) rides as `output` for the attempt's evidence; and a correction
         names the source it was resuming from, so a bundle that is gone or a remote
         branch that could not be fetched is told apart from a clone of the base that
-        failed."""
+        failed.
+
+        Every form begins with the words the message had before hades #370, "the
+        preparer Job could not build the checkout", and names the cause in the
+        parenthesis that used to hold only the exit code: a stall, a timeout and a Pod
+        that never ran are told apart there, and what reads the message for those
+        words (the kind tier's hades #191 test, an operator's search) still finds
+        them."""
         if exit_code == JOB_STALLED:
-            what = "the preparer stalled"
+            cause = "stalled"
         elif exit_code == JOB_TIMED_OUT:
-            what = "the preparer timed out"
+            cause = "timed out"
         elif exit_code == JOB_API_ERROR:
-            what = "the preparer Job could not run"
+            cause = "its Pod never ran"
         else:
-            what = f"the preparer Job could not build the checkout (exit {exit_code})"
+            cause = f"exit {exit_code}"
+        what = f"the preparer Job could not build the checkout ({cause})"
         if resume_source is not None:
             what = f"the correction resumes from {resume_source}, and {what}"
         return PrepareFailedError(
