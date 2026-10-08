@@ -668,6 +668,12 @@ class PullRequest:
     last_polled_at: datetime | None = None
     last_reactions_polled_at: datetime | None = None
     reactions_observable: bool = True
+    schema_tables: list[str] | None = None
+    schema_columns: list[str] | None = None
+    schema_models: list[str] | None = None
+    schema_tables: list[str] | None = None
+    schema_columns: list[str] | None = None
+    schema_models: list[str] | None = None
     cancelled_at: datetime | None = None
     observed_head_sha: str = ""
     observed_base_ref: str = ""

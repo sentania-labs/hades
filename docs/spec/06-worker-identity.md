@@ -141,3 +141,7 @@ Credentials, the Crucible API token, GitHub tokens, other tasks'
 contracts, external review feedback that Foundry has not turned into a
 correction contract, the orchestrator's own identity, or any file the
 contract did not name.
+
+## Migrations
+
+A new migration's number and down_revision are provisional and Hades assigns them at merge.

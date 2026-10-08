@@ -759,6 +759,7 @@ def upsert_pull_request(
     plan: PublishPlan,
     ref: PullRequestRef,
     body_hash: str,
+    schema_changes: dict | None = None,
 ) -> tuple[PullRequest, bool]:
     """Write or refresh the PR row and record the head as one Crucible pushed."""
     now = clock.now()
@@ -778,6 +779,9 @@ def upsert_pull_request(
             head_sha=plan.head_sha,
             observed_head_sha=plan.head_sha,
             title=ref.title or plan.title,
+            schema_tables=schema_changes.get("tables") if schema_changes else None,
+            schema_columns=schema_changes.get("columns") if schema_changes else None,
+            schema_models=schema_changes.get("models") if schema_changes else None,
             body_sha256=body_hash,
             opened_at=now,
         )

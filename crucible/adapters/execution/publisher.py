@@ -429,6 +429,7 @@ OUTCOME_FILES: dict[str, int] = {
     "push.txt": 4000,
     "remote-head-before.txt": 4000,
     "publisher.log": 8000,
+    "schema.json": 131072,
 }
 
 
@@ -446,9 +447,18 @@ def outcome_from_files(files: Mapping[str, str], exit_code: int) -> PublishOutco
     head = text("bundle-head.txt")
     detail = redact(text("error.txt"))
     pushed = text("push.txt") == "ok" and exit_code == 0
+    import json
+
+    schema_changes = None
+    if text("schema.json"):
+        try:
+            schema_changes = json.loads(text("schema.json"))
+        except json.JSONDecodeError:
+            pass
     return PublishOutcome(
         pushed=pushed,
         head_sha=head,
+        schema_changes=schema_changes,
         step=step,
         detail=detail,
         exit_code=exit_code,
@@ -467,6 +477,7 @@ MERGE_OUTCOME_FILES: dict[str, int] = {
     "merge-head.txt": 4000,
     "conflicts.txt": 64 * 1024,
     "remote-head-before.txt": 4000,
+    "schema.json": 131072,
 }
 # Where a merge-main run's output lands beside the publication's, so neither reads the
 # other's files back.
@@ -482,10 +493,19 @@ def merge_outcome_from_files(files: Mapping[str, str], exit_code: int) -> MergeM
 
     merged = text("push.txt") == "ok" and exit_code == 0
     conflicts = tuple(line.strip() for line in text("conflicts.txt").splitlines() if line.strip())
+    import json
+
+    schema_changes = None
+    if text("schema.json"):
+        try:
+            schema_changes = json.loads(text("schema.json"))
+        except json.JSONDecodeError:
+            pass
     return MergeMainOutcome(
         merged=merged,
         head_sha=text("merge-head.txt") if merged else "",
         conflicting_files=conflicts if exit_code == scripts.MERGE_MAIN_CONFLICT else (),
+        schema_changes=schema_changes,
         detail=redact(text("error.txt")),
         step=text("step.txt") or "unknown",
         exit_code=exit_code,

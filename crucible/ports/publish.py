@@ -52,6 +52,7 @@ class PublishOutcome:
     head_sha: str
     step: str
     detail: str = ""
+    schema_changes: dict | None = None
     exit_code: int = 0
     remote_head_before: str = ""
     log_tail: str = ""
@@ -92,6 +93,7 @@ class MergeMainOutcome:
     merged: bool
     head_sha: str = ""
     conflicting_files: tuple[str, ...] = ()
+    schema_changes: dict | None = None
     detail: str = ""
     step: str = ""
     exit_code: int = 0

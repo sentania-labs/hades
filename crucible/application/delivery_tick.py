@@ -1505,6 +1505,31 @@ class DeliveryCoordinator:
         """Compare the live head, then immediately merge with the same SHA precondition."""
         assert self._github is not None
         token: InstallationToken | None = None
+
+        overlap = await self._host._db(lambda: self._check_schema_overlap(plan))
+        if overlap is not None:
+            other_number, should_hold = overlap
+            if should_hold:
+                await self._host._db(lambda: self._hold_for_overlap(plan, other_number))
+                return False
+
+        has_mig = await self._host._db(lambda: self._has_migrations(plan))
+        if has_mig:
+            token = await asyncio.to_thread(
+                self._github.mint_installation_token,
+                installation_id=plan.installation_id or 0,
+                repository=plan.repository_name,
+            )
+            req = await self._host._db(lambda: self._get_merge_main_request(plan))
+            if req:
+                outcome = await self._publisher.merge_main(req, token)
+                await self._host._db(
+                    lambda: self._record_merge_main_push(plan.task_id, outcome.head_sha)
+                )
+                token.discard()
+                if outcome.merged or outcome.exit_code != 0:
+                    return False
+
         try:
             token = await asyncio.to_thread(
                 self._github.installation_token,
@@ -1603,6 +1628,59 @@ class DeliveryCoordinator:
                 token.discard()
         await self._host._db(lambda: self._record_merge(plan, result))
         return True
+
+    def _check_schema_overlap(self, plan: MergePlan) -> tuple[int, bool] | None:
+        """Returns (other_pr_number, should_hold)."""
+        with self._host._fenced() as uow:
+            pr = uow.pull_requests.get(plan.pull_request_id)
+            if not pr or not pr.schema_tables:
+                return None
+            open_prs = uow.pull_requests.list_open_for_repository(plan.repository_name)
+            for other in open_prs:
+                if other.id == pr.id:
+                    continue
+                if other.schema_tables and set(other.schema_tables).intersection(pr.schema_tables):
+                    if other.number < pr.number:
+                        return (other.number, True)
+            return None
+
+    def _hold_for_overlap(self, plan: MergePlan, other_number: int) -> None:
+        from crucible.application.delivery_decisions import create_wake
+
+        with self._host._fenced() as uow:
+            task = uow.tasks.get(plan.task_id, for_update=True)
+            if task and task.state == TaskState.READY_FOR_MERGE:
+                create_wake(
+                    uow,
+                    self._clock,
+                    principal_id=task.principal_id,
+                    reason="schema_overlap",
+                    payload={"summary": f"schema_overlap naming #{other_number}"},
+                    task_id=task.id,
+                )
+                uow.commit()
+
+    def _has_migrations(self, plan: MergePlan) -> bool:
+        with self._host._fenced() as uow:
+            pr = uow.pull_requests.get(plan.pull_request_id)
+            return bool(pr and pr.schema_tables)
+
+    def _get_merge_main_request(self, plan: MergePlan):
+        from crucible.contracts.api import MergeMainRequest
+
+        with self._host._fenced() as uow:
+            pr = uow.pull_requests.get(plan.pull_request_id)
+            if not pr:
+                return None
+            return MergeMainRequest(
+                attempt_id=plan.task_id,  # Or something unique
+                clone_url=pr.url,
+                base_ref=pr.base_ref,
+                work_branch=pr.work_branch,
+                expected_head_sha=plan.certified_head_sha,
+                author_name="Crucible",
+                author_email="crucible@localhost",
+            )
 
     def _merge_still_allowed(self, plan: MergePlan) -> bool:
         with self._host._fenced() as uow:

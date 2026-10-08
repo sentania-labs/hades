@@ -530,11 +530,11 @@ def _integer(value: object) -> int | None:
 
 
 def _check_columns(database: sqlite3.Connection) -> None:
-    tables = {row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    tables = {
+        row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
     if "sessions" not in tables:
-        raise SessionSchemaChanged(
-            f"crucible-hermes: Hermes's state.db has no sessions table"
-        )
+        raise SessionSchemaChanged("crucible-hermes: Hermes's state.db has no sessions table")
     present = {row[1] for row in database.execute("PRAGMA table_info(sessions)")}
     missing = sorted(SESSION_COLUMNS - present)
     if missing:
@@ -553,8 +553,7 @@ def _run_sessions(database: sqlite3.Connection) -> dict[str, object] | None:
     The session id is the run's top-level row; model and provider are the newest row's.
     """
     root = database.execute(
-        "SELECT id FROM sessions WHERE parent_session_id IS NULL "
-        "ORDER BY started_at DESC LIMIT 1"
+        "SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY started_at DESC LIMIT 1"
     ).fetchone()
     if root is None:
         return None
@@ -712,9 +711,7 @@ def _session_stamp(home: Path) -> tuple[int, ...]:
     return tuple(stamps)
 
 
-def watch_progress(
-    home: Path, stop: threading.Event, interval: float = PROGRESS_SECONDS
-) -> None:
+def watch_progress(home: Path, stop: threading.Event, interval: float = PROGRESS_SECONDS) -> None:
     """Write PROGRESS_LINE to stderr whenever Hermes's session store has changed since
     the last look. Hermes writes it after every model turn and tool call."""
     last = _session_stamp(home)

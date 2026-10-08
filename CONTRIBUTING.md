@@ -95,7 +95,7 @@ time in operator-facing text.
 
 ## Migrations
 
-A migration that has been applied to any database, including a
+A new migration's number and down_revision are provisional and Hades assigns them at merge. A migration that has been applied to any database, including a
 developer's, is never edited. Schema changes are a new revision. Before the
 first tagged release the initial revision may be squashed, only together with a
 `make reset` (compose down with volumes) called out in the PR, because every
