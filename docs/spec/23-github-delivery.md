@@ -306,14 +306,34 @@ issue comments and the event before posting, so the request is once per pull
 request. A correction never posts another trigger.
 
 Crucible never posts that trigger when `external_review.automatic` is false,
-or when a refusal was already observed on the repository
-(`repositories.codex_review_refused_at`, hades #343): either way the
-provider only refuses the App's comment again, the same way it refused the
-first one. Publication wakes the orchestrator instead, with reason
+or when a refusal was already observed on the repository for the `codex`
+provider specifically (`repositories.codex_review_refused_at`, hades #343:
+the marker records only a Codex connector failure, so it never silences
+another provider a repository has since moved to): either way the provider
+only refuses the App's comment again, the same way it refused the first
+one. Publication wakes the orchestrator instead, with reason
 `external_review_trigger_needed`, asking a person to request the round
 under their own account; the pull request is still opened or updated, and
 the task still waits in `awaiting_external_review` for whatever round
-follows. `external_review.automatic` absent reads as `true`.
+follows. `external_review.automatic` absent reads as `true`. Like the
+App-authored trigger, this wake is owed only while a round is actually
+outstanding: if the pull request already carries the required completed
+rounds (round counting is per PR, across heads), publication proceeds
+straight to `awaiting_ci_certification` and nothing is asked of anyone. On a
+correction specifically, the wake additionally follows
+`external_review.retrigger_after_correction`: with the default (`false`), a
+correction never causes a second round (above), so an outstanding round from
+before the correction is not this publish's to ask a person for either; set
+it `true` to have every corrected head wake the orchestrator for a fresh,
+person-requested round the same way the first publish would.
+
+A repository's remembered refusal is a fact about that repository, not
+about any one registration call: re-registering it (`PUT
+/repositories/{name}`, including an administrative update of its URL,
+policy, installation, or attestation) leaves `codex_review_refused_at`
+exactly as it was. There is no operation yet that clears it; an operator
+who has resolved the connector refusal reaches for one directly against the
+record rather than through registration.
 
 **Crucible authors the trigger phrase only as the configured issue comment.** The
 provider's trigger is an at-mention of its own name, and the provider acts

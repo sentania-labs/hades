@@ -79,7 +79,7 @@ from crucible.domain.entities import (
 )
 from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
 from crucible.domain.exit_class import ExitClass
-from crucible.domain.external_review import completed_rounds
+from crucible.domain.external_review import completed_rounds, required_rounds
 from crucible.domain.ids import new_id
 from crucible.domain.lifecycle import CORRECTION_STATES, TaskState
 from crucible.domain.publication import body_sha256
@@ -936,6 +936,23 @@ class DeliveryCoordinator:
                 return
             pull_request = uow.pull_requests.get_for_task(task.id)
             if pull_request is None:
+                return
+            cycles = uow.review_cycles.list_for_pull_request(pull_request.id)
+            rounds = completed_rounds([to_cycle(row) for row in cycles])
+            if rounds >= required_rounds(plan.policy):
+                # hades #343 (01M4CDWQN19WNJTM0BD2NZ7HXN): the required rounds are
+                # already satisfied; `_finish` sends this publish straight to CI
+                # certification, so no further round, and no wake for one, is needed.
+                return
+            section = plan.policy.get("external_review", {})
+            retrigger = isinstance(section, dict) and bool(
+                section.get("retrigger_after_correction")
+            )
+            if plan.existing_pr_number is not None and not retrigger:
+                # A correction publish, and the policy does not ask for a new round
+                # after a correction (23's default): the outstanding round is not this
+                # publish's to request, the same gate `maybe_request_trigger` applies
+                # on the re-request path.
                 return
             record_external_review_needs_person(
                 uow, self._clock, task=task, pull_request=pull_request

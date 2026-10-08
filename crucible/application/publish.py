@@ -98,7 +98,10 @@ def external_review_requires_person(policy: dict[str, Any], repository: Reposito
         return False
     if not bool(review.get("request_on_publish", True)):
         return False
-    return not bool(review.get("automatic", True)) or repository.codex_review_refused_at is not None
+    # The marker records only a Codex connector failure (hades #343); a repository that
+    # has since moved to another provider is not held to a refusal that was never its.
+    refused = provider == "codex" and repository.codex_review_refused_at is not None
+    return not bool(review.get("automatic", True)) or refused
 
 
 def external_review_request_exists(
