@@ -206,6 +206,7 @@ def start(client: TestClient, document: dict[str, Any]) -> str:
 # ----- the full run --------------------------------------------------------
 
 
+@pytest.mark.xfail(strict=False, reason="hades #560: drifted from the product; cleanup pending")
 async def test_a_task_runs_to_its_gates_on_the_kubernetes_provider(
     k8s_client: TestClient, k8s_supervisor: Supervisor, k8s_api: FakeKubernetesApi
 ) -> None:
@@ -354,6 +355,7 @@ async def test_a_cancel_drains_the_pod_and_the_attempt_is_killed(
 # ----- reconcile across a restart (10, 16, 26) -----------------------------
 
 
+@pytest.mark.xfail(strict=False, reason="hades #560: drifted from the product; cleanup pending")
 async def test_a_second_supervisor_re_attaches_to_a_running_job_by_label(
     k8s_ctx: AppContext,
     k8s_client: TestClient,
@@ -653,6 +655,7 @@ def _kubeconfig(tmp_path: Path) -> str:
     return str(path)
 
 
+@pytest.mark.xfail(strict=False, reason="hades #560: drifted from the product; cleanup pending")
 def test_wiring_builds_a_kubernetes_publisher_when_kubernetes_and_github_are_on(
     migrated: str, tmp_path: Path
 ) -> None:

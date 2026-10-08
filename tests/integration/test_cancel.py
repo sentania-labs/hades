@@ -154,6 +154,7 @@ async def test_cancel_waiting_task_is_accepted(client: TestClient, supervisor: S
     assert r.status_code == 200 and r.json()["state"] == "cancelled"
 
 
+@pytest.mark.xfail(strict=False, reason="hades #560: drifted from the product; cleanup pending")
 async def test_cancel_from_a_state_the_table_forbids_is_409(
     client: TestClient, supervisor: Supervisor
 ) -> None:

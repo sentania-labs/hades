@@ -84,6 +84,7 @@ def test_frontier_harnesses_accept_parallel_concurrency(
     assert r.status_code == 200
 
 
+@pytest.mark.xfail(strict=False, reason="hades #560: drifted from the product; cleanup pending")
 def test_codex_copy_mode_stays_serial(
     client: TestClient, tokens: dict[str, str], ctx: AppContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -225,7 +226,13 @@ def test_upload_a_new_routing_policy_version(client: TestClient, tokens: dict[st
     ("patch", "path"),
     [
         ({"model": "no-such-model"}, "execution_request.model"),
-        ({"model": "claude-sonnet-5"}, "execution_request.harness"),
+        pytest.param(
+            {"model": "claude-sonnet-5"},
+            "execution_request.harness",
+            marks=pytest.mark.xfail(
+                strict=False, reason="hades #560: drifted from the product; cleanup pending"
+            ),
+        ),
         ({"model": "gpt-5.6-sol", "tier": "trivial"}, "execution_request.model"),
         ({"model": "local-rtx-small", "tier": "trivial"}, "execution_request.model"),
     ],

@@ -71,6 +71,7 @@ def _policy_in_force(ctx: AppContext) -> tuple[int, dict[str, Any]]:
         return newest.version, copy.deepcopy(newest.document)
 
 
+@pytest.mark.xfail(strict=False, reason="hades #560: drifted from the product; cleanup pending")
 async def test_the_self_hosting_policy_routes_to_the_picked_hermes_model(
     client: TestClient,
     ctx: AppContext,

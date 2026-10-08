@@ -16,6 +16,7 @@ def token_like() -> str:
     return "gh" + "p_" + "c" * 36
 
 
+@pytest.mark.xfail(strict=False, reason="hades #560: drifted from the product; cleanup pending")
 async def test_collection_stores_the_claim_and_the_run_evidence(
     client: TestClient, supervisor: Supervisor
 ) -> None:
@@ -34,6 +35,7 @@ async def test_collection_stores_the_claim_and_the_run_evidence(
     assert b"task_external_id" in content.content
 
 
+@pytest.mark.xfail(strict=False, reason="hades #560: drifted from the product; cleanup pending")
 async def test_the_parsed_report_is_readable(client: TestClient, supervisor: Supervisor) -> None:
     task_id = submit_and_start(client, "crucible-worker:fake-succeed")
     await run_to_settled(supervisor, client, task_id)

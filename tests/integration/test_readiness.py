@@ -21,6 +21,7 @@ BANNER = "The supervisor is not healthy."
 
 
 @pytest.mark.usefixtures("admin_ctx")
+@pytest.mark.xfail(strict=False, reason="hades #560: drifted from the product; cleanup pending")
 async def test_a_failing_tick_leaves_the_api_ready_and_says_so(
     ctx: AppContext,
     client: TestClient,

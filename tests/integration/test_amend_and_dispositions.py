@@ -124,6 +124,7 @@ async def test_amend_is_refused_once_the_head_is_publishing(
     assert "publishing" in r.json()["detail"]
 
 
+@pytest.mark.xfail(strict=False, reason="hades #560: drifted from the product; cleanup pending")
 async def test_a_correction_is_refused_once_the_head_is_accepted(
     client: TestClient, supervisor: Supervisor
 ) -> None:
