@@ -127,9 +127,9 @@ reset: ## DESTRUCTIVE: down plus postgres, artifact, and credential volumes
 
 lint: check-image-manifest
 	$(UV) sync --frozen --quiet
-	$(UV) run ruff format --check crucible tests tools/release tools/smoke tools/registry tools/images
-	$(UV) run ruff check crucible tests tools/release tools/smoke tools/registry tools/images
-	$(UV) run mypy crucible tests tools/release tools/smoke tools/registry tools/images
+	$(UV) run ruff format --check crucible tests tools/release tools/smoke tools/registry tools/images tools/ci
+	$(UV) run ruff check crucible tests tools/release tools/smoke tools/registry tools/images tools/ci
+	$(UV) run mypy crucible tests tools/release tools/smoke tools/registry tools/images tools/ci
 	$(UV) run lint-imports
 
 check-image-manifest: ## fail when a declared worker-image tag is stale
@@ -185,11 +185,14 @@ test-unit-in-image: ## the unit tier inside the worker image, as a worker Pod ru
 	DOCKER="$(DOCKER)" tools/images/unit_in_image.sh
 
 # Reads the registry through DOCKER, so log it in first: reading a manifest back is
-# still an authenticated registry call.
+# still an authenticated registry call. WORKER_REUSED_FROM (hades #476) is the
+# previous release's version when that run decided the worker image is unchanged and
+# republished it by digest instead of building one; empty when it built fresh.
+WORKER_REUSED_FROM ?=
 release-notes: ## release only: print the published service and worker image digests, read back from the registry, as release notes markdown
 	@test -n "$(CRUCIBLE_IMAGE)" || { echo "set CRUCIBLE_IMAGE"; exit 2; }
 	@DOCKER="$(DOCKER)" python3 tools/release/release_notes.py --service-image "$(CRUCIBLE_IMAGE)" \
-	  --worker-repository "$(WORKER_REGISTRY)"
+	  --worker-repository "$(WORKER_REGISTRY)" --worker-reused-from "$(WORKER_REUSED_FROM)"
 
 scan: scan-tree scan-history ## secret scan; needs gitleaks on PATH
 

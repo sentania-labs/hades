@@ -1098,6 +1098,10 @@ class DeliveryInput:
     comment_count: int = 0
     certification_state: str = ""
     certification_detail: str = ""
+    # hades #476: the class `crucible.domain.certification.certify` recorded on the
+    # computed certification, carried here so `ci_green_for_head` can record it too.
+    # Never changes the gate's result.
+    change_class: str = ""
     final_sha: tuple[bool, str] | None = None
 
 
@@ -1166,6 +1170,11 @@ def feedback_dispositions_complete(di: DeliveryInput) -> GateOutcome:
 
 
 def ci_green_for_head(di: DeliveryInput) -> GateOutcome:
+    """A job the change classifier filtered out is not a missing job: the certification
+    this reads already excludes a skipped run from its counted set (hades #476,
+    `crucible.domain.certification._counts`), so this gate's PASS/FAIL/PENDING mapping
+    never branches on `change_class`. It only names the class in the detail, so a
+    reader of this gate's outcome sees which classification explains what ran."""
     mapping = {
         "green": GateResult.PASS,
         "failed": GateResult.FAIL,
@@ -1174,6 +1183,8 @@ def ci_green_for_head(di: DeliveryInput) -> GateOutcome:
     }
     result = mapping.get(di.certification_state, GateResult.PENDING)
     detail = di.certification_detail or "no CI certification has been computed yet"
+    if di.change_class:
+        detail += f" (change class: {di.change_class})"
     return GateOutcome(result, detail)
 
 
