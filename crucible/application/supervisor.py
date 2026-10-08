@@ -2030,7 +2030,15 @@ class Supervisor:
             self._workspaces[attempt.id] = ws
             if getattr(provider, "activity", None) is None:
                 self._workspace_fingerprints[attempt.id] = workspace_fingerprint(ws)
-            await self._db(partial(self._record_prepared, attempt.id, ws, spec.effective_settings))
+            await self._db(
+                partial(
+                    self._record_prepared,
+                    attempt.id,
+                    ws,
+                    spec.effective_settings,
+                    spec.credential_mode,
+                )
+            )
             if not await self._db(partial(self._mark_launching, attempt.id, ws)):
                 await self._discard(provider, ws, spec)
                 self._forget_workspace(attempt.id)
@@ -4035,7 +4043,11 @@ class Supervisor:
                 )
 
     def _record_prepared(
-        self, attempt_id: str, ws: Workspace, effective: dict[str, Any] | None = None
+        self,
+        attempt_id: str,
+        ws: Workspace,
+        effective: dict[str, Any] | None = None,
+        credential_mode: str | None = None,
     ) -> None:
         """08 wants it recorded as an event which branch the checkout started from.
         Hades #388: the effective model settings the worker is launched with are recorded
@@ -4058,6 +4070,7 @@ class Supervisor:
                     "work_branch": ws.work_branch,
                     "started_from": ws.started_from,
                     "identity_sha256": ws.identity_sha256,
+                    "credential_mode": credential_mode,
                 },
             )
             uow.commit()
@@ -5619,6 +5632,12 @@ class Supervisor:
             # 07: a report file that is present but does not parse is a parse failure,
             # recorded as one; only a missing file is "without report".
             report_present = outputs.report_raw is not None or outputs.report is not None
+            prepared = uow.events.latest_for_task_kind(task.id, EventKind.WORKSPACE_PREPARED.value)
+            credential_mode = (
+                prepared.payload.get("credential_mode")
+                if prepared is not None and prepared.attempt_id == attempt.id
+                else None
+            )
             exit_info = ExitInfo(
                 exit_code=exit_code,
                 report_present=report_present,
@@ -5626,6 +5645,12 @@ class Supervisor:
                 oom_killed=oom_killed,
                 timed_out=timed_out,
                 killed=killed,
+                duration_seconds=final_observation.duration_seconds
+                if final_observation is not None and final_observation.duration_seconds is not None
+                else (attempt.ended_at - attempt.started_at).total_seconds()
+                if attempt.started_at is not None
+                else None,
+                credential_mode=credential_mode,
             )
             adapter = self._harnesses.get(execution.harness) if self._harnesses else None
             report_dir = (
@@ -5656,6 +5681,13 @@ class Supervisor:
                 interruption = adapter.interruption(
                     exit_info, outputs.stdout_tail, outputs.stderr_tail, report_dir
                 )
+            if (
+                attempt.exit_class is ExitClass.ENVIRONMENT
+                and interruption is not None
+                and interruption.environment
+            ):
+                attempt.termination_reason = "credential_directory"
+                attempt.termination_detail = redact(interruption.message)[:1000]
             never_started = final_observation is not None and final_observation.never_started
             if not (timed_out or killed or oom_killed):
                 if never_started:
@@ -7169,7 +7201,7 @@ class Supervisor:
             )
             return
         retryable = retryable_exit(exit_class, execution.retry_on)
-        if attempt.termination_reason == TERMINATION_REFUSED:
+        if attempt.termination_reason in {TERMINATION_REFUSED, "credential_directory"}:
             # 07: a refused launch would be refused again; Foundry has the wake.
             retryable = False
         # hades #393: a blocked attempt is a question, not a failure, so it consumes no
@@ -7177,7 +7209,8 @@ class Supervisor:
         ordinary_attempts = sum(
             prior.exit_class
             not in {ExitClass.QUOTA_EXHAUSTED, ExitClass.INFRASTRUCTURE, ExitClass.BLOCKED}
-            and prior.termination_reason not in {"gate_proves_nothing", "check_cannot_run"}
+            and prior.termination_reason
+            not in {"gate_proves_nothing", "check_cannot_run", "credential_directory"}
             for prior in uow.attempts.list_for_execution(execution.id)
             if prior.state in ATTEMPT_TERMINAL
         )

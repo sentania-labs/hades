@@ -259,6 +259,8 @@ class CodexAdapter:
         self, exit: ExitInfo, stdout_tail: str, stderr_tail: str, report_dir: Path | None = None
     ) -> ExitClass:
         interruption = self.interruption(exit, stdout_tail, stderr_tail, report_dir)
+        if interruption is not None and interruption.environment:
+            return ExitClass.ENVIRONMENT
         if exit.exit_code == 0 and interruption is not None and not exit.blocked_present:
             # The app-server host exits 0 after a turn that ended `failed`; with no
             # report the failed turn, not the exit code, says how the run ended.
@@ -281,6 +283,28 @@ class CodexAdapter:
     ) -> Interruption | None:
         if exit.lost or exit.timed_out or exit.killed or exit.oom_killed:
             return None
+        if (
+            exit.exit_code not in (None, 0)
+            and not exit.blocked_present
+            and exit.duration_seconds is not None
+            and 0 <= exit.duration_seconds < 60
+        ):
+            for line in (stdout_tail + "\n" + stderr_tail).splitlines():
+                lower = line.lower()
+                if CONFIG_DIR in line and any(
+                    marker in lower
+                    for marker in (
+                        "read-only file system",
+                        "permission denied",
+                        "failed to initialize sqlite state runtime",
+                        "failed to initialize state runtime",
+                    )
+                ):
+                    return Interruption(
+                        f"credential directory {CONFIG_DIR} (mount mode "
+                        f"{exit.credential_mode or 'unknown'}): {line.strip()}",
+                        environment=True,
+                    )
         # The app-server host writes the transcript itself and nothing to stdout; `codex
         # exec --json` writes its events to stdout, which the launch also keeps as the
         # transcript.

@@ -33,6 +33,7 @@ from crucible.application.admin.context import AdminContext, guard_mutation
 from crucible.application.errors import ApplicationError, NotFoundError
 from crucible.application.harnesses import HarnessUnavailableError, harness_state
 from crucible.domain.exit_class import ExitClass
+from crucible.ports.harness import MountMode
 from crucible.ports.repository import UnitOfWork
 
 log = logging.getLogger(__name__)
@@ -362,6 +363,7 @@ async def test_harness(
     harness: str,
     reason: str | None = None,
     started_at: str | None = None,
+    credential_mode: MountMode | None = None,
 ) -> dict[str, Any]:
     """Run the steps in the foreground, store the result as the harness's `last_test`
     and return it: {harness, status, ok, failed_step, steps, started_at, tested_at,
@@ -375,7 +377,15 @@ async def test_harness(
     started = started_at or ctx.clock.now().isoformat()
     steps = _Steps([])
     try:
-        await _run(ctx, uow, steps, principal=principal, harness=harness, reason=reason)
+        await _run(
+            ctx,
+            uow,
+            steps,
+            principal=principal,
+            harness=harness,
+            reason=reason,
+            credential_mode=credential_mode,
+        )
     except Exception as exc:
         log.exception("the %s test raised at step %d", harness, len(steps.items) + 1)
         steps.fail_in_progress(harness, exc)
@@ -405,6 +415,7 @@ async def _run(
     principal: str,
     harness: str,
     reason: str,
+    credential_mode: MountMode | None = None,
 ) -> None:
     adapter = ctx.harnesses.require(harness)
     try:
@@ -479,7 +490,12 @@ async def _run(
 
     try:
         record = await credentials.worker_probe(
-            ctx, uow, harness=harness, principal=principal, reason=reason
+            ctx,
+            uow,
+            harness=harness,
+            principal=principal,
+            reason=reason,
+            credential_mode=credential_mode,
         )
     except ApplicationError as exc:
         detail = exc.detail or exc.title
@@ -491,9 +507,9 @@ async def _run(
         detail = f"the harness cannot be launched on this route: {exc}"
         steps.failed(WORKER, detail, title=f"Fix the route for {harness} on Routing.")
         return
-    if record.cause == "provider_unavailable":
+    if record.cause == "provider_unavailable" or record.exit_class == ExitClass.ENVIRONMENT.value:
         detail = f"the worker did not start: {record.detail}"
-        steps.failed(WORKER, detail, title=f"Check the worker's egress for {harness}.")
+        steps.failed(WORKER, detail, title=f"Check the worker's environment for {harness}.")
         return
     seconds = f"{record.duration_seconds:g} s"
     steps.passed(WORKER, f"ran {record.image_digest or record.image} under the worker's egress")

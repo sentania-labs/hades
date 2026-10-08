@@ -350,6 +350,13 @@ definitions. Each verb would become a tool whose result is the envelope, and
 
 ### Codex on the Local gateway page
 
+Changing a credential mount mode first runs the Harnesses Test under the requested
+mode. A failed test refuses the change with the failing step's detail and keeps the
+previous setting. In Codex renewer mode, `/home/worker/.codex` is writable for runtime
+state; only the access-token projection and Hades-owned `config.toml` are read-only.
+Early credential-directory filesystem failures stop as `environment`, name the path
+and mount mode, and do not spend an attempt.
+
 Subscription Codex now uses the Hades credential renewer and can run workers in
 parallel up to the policy cap. The Credentials page shows renewer health and offers
 administrators a reasoned Refresh now action. Local-endpoint Codex continues to use

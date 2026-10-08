@@ -26,7 +26,9 @@ path the harness expects (read-only or narrow-writable per the adapter and the
 configuration) with the Crucible-owned templates read-only on top, reads the named files
 back the same way after exit, syncs back only a valid, newer file, and removes the copy
 at once. No credential value is ever in `Env`, in `Cmd`, in a bind source, in a log, or
-in this process's argv.
+in this process's argv. In renewer mode the credential directory is mounted at a
+separate read-only path; a worker-owned tmpfs at the Codex home links to its token
+and carries the read-only configuration template alongside writable runtime state.
 """
 
 from __future__ import annotations
@@ -86,6 +88,7 @@ from crucible.contracts.completion_claim import CompletionClaimV1
 from crucible.domain.acceptance_checks import verifier_checks
 from crucible.domain.exit_class import ExitClass
 from crucible.domain.ids import new_id
+from crucible.domain.infrastructure import runtime_seconds
 from crucible.domain.secrets import redact
 from crucible.domain.time import parse_rfc3339
 from crucible.ports.execution import (
@@ -930,7 +933,14 @@ class DockerProvider:
                 else:
                     tar, seeded = await asyncio.to_thread(_seed_tar, copy.spec, copy.source)
                 copy = replace(copy, seeded=seeded)
-                await self._call(self.client.put_archive, container_id, copy.spec.mount_target, tar)
+                await self._call(
+                    self.client.put_archive,
+                    container_id,
+                    "/crucible/credential-source"
+                    if copy.mode is MountMode.RENEWER
+                    else copy.spec.mount_target,
+                    tar,
+                )
                 seeded_on_disk = True
             starting = True
             await self._call(self.client.start_container, container_id)
@@ -1039,6 +1049,25 @@ class DockerProvider:
             *self._credential_mounts(spec),
         ]
         command, launch_env = self._command(spec)
+        copy = self._credential_copy(spec)
+        if copy is not None and copy.mode is MountMode.RENEWER:
+            # A nested config.toml mount can make runc create its parent as root.
+            # Give the runtime directory its own worker-owned tmpfs, sharing the
+            # existing 512 MiB home allowance rather than adding to it.
+            runtime_tmpfs = "rw,nosuid,nodev,size=256m,uid=1000,gid=1000,mode=0750"
+            host_config["Tmpfs"]["/home/worker"] = runtime_tmpfs
+            host_config["Tmpfs"][copy.spec.mount_target] = runtime_tmpfs
+            # The home tmpfs holds runtime state. Keep the source directory mount
+            # read-only and follow its atomic token replacements through a symlink.
+            command = [
+                "sh",
+                "-c",
+                "set -eu; mkdir -p /home/worker/.codex; "
+                "ln -sfn /crucible/credential-source/access-token.json "
+                '/home/worker/.codex/access-token.json; exec "$@"',
+                "crucible-credential",
+                *command,
+            ]
         return {
             "Image": resolved,
             "Cmd": command,
@@ -1184,7 +1213,7 @@ class DockerProvider:
             self._daemon_mount(
                 spec.attempt_id,
                 CREDENTIAL_LEAF,
-                target,
+                "/crucible/credential-source" if copy.mode is MountMode.RENEWER else target,
                 read_only=copy.mode is not MountMode.RW_NARROW,
             )
         ]
@@ -1323,6 +1352,7 @@ class DockerProvider:
             exit_code=int(state.get("ExitCode", -1)),
             detail=detail,
             oom_killed=oom,
+            duration_seconds=runtime_seconds(state.get("StartedAt"), state.get("FinishedAt")),
         )
 
     async def logs(self, h: Handle, since: LogOffset) -> list[LogChunk]:
@@ -1905,6 +1935,7 @@ class DockerProvider:
             stdin_text=request.stdin_text,
             endpoint=request.endpoint,
             endpoint_url=request.endpoint_url,
+            credential_mode=request.credential_mode,
         )
         root = self._root(probe_id)
         await asyncio.to_thread(shutil.rmtree, root, True)

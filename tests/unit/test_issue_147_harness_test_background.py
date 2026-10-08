@@ -95,7 +95,14 @@ def _gated_run(gate: threading.Event, calls: list[str]) -> Any:
     """A stand-in for the six steps: it waits on the gate, then passes every step."""
 
     async def _run(
-        ctx: Any, uow: Any, steps: Any, *, principal: str, harness: str, reason: str
+        ctx: Any,
+        uow: Any,
+        steps: Any,
+        *,
+        principal: str,
+        harness: str,
+        reason: str,
+        credential_mode: Any = None,
     ) -> None:
         calls.append(harness)
         wait_until(gate.is_set, timeout=2.0, describe="gate to open")
@@ -237,7 +244,14 @@ def test_a_run_that_raises_fails_the_step_it_was_on_and_never_stays_running(
     ctx = _context(store)
 
     async def exploding(
-        ctx: Any, uow: Any, steps: Any, *, principal: str, harness: str, reason: str
+        ctx: Any,
+        uow: Any,
+        steps: Any,
+        *,
+        principal: str,
+        harness: str,
+        reason: str,
+        credential_mode: Any = None,
     ) -> None:
         steps.passed(harness_test.ENABLED, "yes")
         steps.passed(harness_test.IMAGE, "yes")
