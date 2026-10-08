@@ -768,6 +768,7 @@ def gate_summary(uow: UnitOfWork, task_id: str) -> dict[str, Any]:
         "head_sha": task.head_sha if task else None,
         "counts": counts,
         "results": {row.gate: row.result for row in rows},
+        "details": {row.gate: row.detail for row in rows},
         "classification": {row.gate: "blocking" if row.blocking else "advisory" for row in rows},
         # Only a failure that stops the task; an advisory one is under for_reviewer.
         "failing": sorted(
@@ -1109,6 +1110,7 @@ def pull_request_view(uow: UnitOfWork, task_id: str) -> PullRequestView:
                 check_runs=list(c.check_runs),
                 failure=dict(c.failure),
                 evaluated_at=c.evaluated_at,
+                change_class=c.change_class,
             )
             for c in certifications
         ],

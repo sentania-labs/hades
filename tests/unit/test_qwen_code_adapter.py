@@ -300,7 +300,7 @@ async def test_supervisor_passes_and_freezes_routing_context(
 
     attempt = _attempt()
     attempt.selected_harness = "qwen_code"
-    attempt.selected_model = "qwen-local"
+    attempt.selected_model = "qwen-lane"
     uow = _Uow({"context_length": 999999}, attempt)
     supervisor = _supervisor(monkeypatch, tmp_path, uow, thinking=False)
     route = _routing([model_entry(context_length=limit, model_name="qwen-lane").model_dump()])
@@ -371,9 +371,12 @@ async def test_images_workflow_offers_qwen_its_own_promotion(
         }
     ]
     rendered = _image_rows([qwen], admin=True)
-    action = rendered[0][-1]["items"][0]
-    assert action["action"] == "/ui/actions/image-promote"
+    items = rendered[0][-1]["items"]
+    assert len(items) == 1
+    action = items[0]
+    assert action["action"] == "/ui/actions/image-change"
     assert action["hidden"] == {"harness": "qwen_code"}
+    assert action["select"]["options"] == [(image.digest, image.reference)]
 
 
 def test_worker_node_and_qwen_pins_are_checksum_verified() -> None:

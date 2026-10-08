@@ -46,6 +46,7 @@ from crucible.application.harnesses import (
     set_harness_enabled,
 )
 from crucible.application.runtime_settings import RuntimeValue, resolve, save_scalar
+from crucible.contracts.policy import routing_model_name
 from crucible.domain.events import EventKind
 from crucible.domain.exit_class import ExitClass
 from crucible.ports.execution import (
@@ -1013,16 +1014,26 @@ def _http_status(url: str, *, bearer: str | None, timeout: float) -> int:
     return _http_get(url, bearer=bearer, timeout=timeout)[0]
 
 
-def model_ids(body: bytes) -> list[str]:
+def model_ids(body: bytes, *, strict: bool = False) -> list[str]:
     """The model ids of an OpenAI-compatible `/models` answer, `{"data": [{"id": ...}]}`,
-    in the order the gateway lists them. Anything else is no models."""
+    in the order the gateway lists them. Strict mode rejects inconclusive listings;
+    otherwise anything else is no models."""
     try:
-        document = json.loads(body.decode("utf-8", "replace"))
+        document = json.loads(body.decode("utf-8", "strict" if strict else "replace"))
     except ValueError:
+        if strict:
+            raise ValueError("invalid models response") from None
         return []
     items = document.get("data") if isinstance(document, dict) else None
     if not isinstance(items, list):
+        if strict:
+            raise ValueError("invalid models response")
         return []
+    if strict and any(
+        not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"].strip()
+        for item in items
+    ):
+        raise ValueError("invalid models response")
     ids = [str(item["id"]) for item in items if isinstance(item, dict) and item.get("id")]
     return list(dict.fromkeys(ids))
 
@@ -1238,11 +1249,12 @@ def probe_route(
             "model the operator disabled or removed"
         )
     model = best[1]
+    endpoint_model = routing_model_name(model)
     if model.get("endpoint") == "local" and model.get("endpoint_url"):
-        return str(model["id"]), "local", str(model["endpoint_url"])
+        return endpoint_model, "local", str(model["endpoint_url"])
     if not needs_model:
         return "none", "subscription", None
-    return str(model["id"]), "subscription", None
+    return endpoint_model, "subscription", None
 
 
 async def worker_probe(

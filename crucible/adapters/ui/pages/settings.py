@@ -5,17 +5,18 @@ import tomllib
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from fastapi import APIRouter, Request
+from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.adapters.ui.actions import register
 from crucible.adapters.ui.render import _page, _redirect
 from crucible.adapters.ui.session import _require
-from crucible.application.admin import credentials, delivery
+from crucible.application.admin import credentials, delivery, kubernetes, status_cache
 from crucible.domain.entities import Principal, Role
 
-router = APIRouter(prefix="/ui", include_in_schema=False)
+router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
 
 
 def _flatten(value: Any, prefix: str = "") -> list[tuple[str, Any]]:
@@ -134,12 +135,43 @@ def _runtime_rows(ctx: Ctx, uow: UoW, principal: Principal) -> list[list[Any]]:
     rows: list[list[Any]] = []
     settings: Any = ctx.settings
     if ctx.admin is not None:
+        ttl = status_cache.ttl_value(ctx.admin, uow)
+        action: Any = "Administrator only"
+        if principal.role is Role.ADMIN:
+            action = {
+                "kind": "form",
+                "action": "/ui/actions/status-cache",
+                "label": "Save cache TTL",
+                "reason": "optional",
+                "select": {
+                    "name": "seconds",
+                    "label": "Cache TTL (seconds)",
+                    "selected": str(float(ttl.value)),
+                    "options": [
+                        (str(seconds), f"{seconds:g} seconds")
+                        for seconds in sorted(
+                            {5.0, 15.0, 30.0, 60.0, 120.0, 300.0, float(ttl.value)}
+                        )
+                    ],
+                },
+            }
+        rows.append([ttl.name + ".ttl_seconds", ttl.value, ttl.source, ttl.applies, action])
+        timeouts = kubernetes.timeouts_view(ctx.admin, uow)
+        rows.append(
+            [
+                "kubernetes.timeouts.api_retry_seconds",
+                timeouts["document"]["api_retry_seconds"],
+                timeouts["api_retry_seconds_source"],
+                timeouts["api_retry_seconds_applies"],
+                {"kind": "link", "href": "/ui/routing", "label": "Edit on Routing"},
+            ]
+        )
         names = ctx.admin.harnesses.names()
         for name in names if isinstance(names, (list, tuple)) else ():
             adapter = ctx.admin.harnesses.get(name)
             if adapter is not None and adapter.credential_spec() is not None:
                 value = credentials.mount_mode_value(ctx.admin, uow, name)
-                action: Any = "Administrator only"
+                action = "Administrator only"
                 if principal.role is Role.ADMIN:
                     action = {
                         "kind": "link",
@@ -183,7 +215,6 @@ def settings_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         "kind": "form",
         "action": "/ui/actions/auto-merge",
         "label": "Disable auto-merge" if enabled else "Enable auto-merge",
-        "reason": "optional",
         "hidden": {"enabled": "false" if enabled else "true"},
     }
     rows = _settings_rows(ctx.settings)
@@ -260,3 +291,28 @@ async def _action_auto_merge(
 
 
 register("auto-merge", _action_auto_merge)
+
+
+async def _action_status_cache(
+    request: Request,
+    action: str,
+    ctx: Ctx,
+    uow: UoW,
+    principal: Principal,
+    csrf: str,
+    form: dict[str, str],
+    reason: str | None,
+) -> Response | None:
+    assert ctx.admin is not None
+    status_cache.save_ttl(
+        ctx.admin,
+        uow,
+        principal=principal,
+        seconds=float(form["seconds"]),
+        reason=reason,
+    )
+    uow.commit()
+    return _redirect(form, "Status cache TTL saved.")
+
+
+register("status-cache", _action_status_cache)

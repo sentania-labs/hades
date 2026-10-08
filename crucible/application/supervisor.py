@@ -31,6 +31,13 @@ from typing import Any, ClassVar, Literal, TypeVar
 
 import yaml
 
+from crucible.application.admin import credentials as admin_credentials
+from crucible.application.admin import gateway as admin_gateway
+from crucible.application.admin import routing as admin_routing
+from crucible.application.admin import status_cache as admin_status_cache
+from crucible.application.admin.context import AdminContext
+from crucible.application.admin.harnesses import refresh_images
+from crucible.application.admin.providers import refresh_providers_status
 from crucible.application.checkout import (
     CheckoutRefusedError,
     checkout_token_for,
@@ -42,7 +49,7 @@ from crucible.application.decisions import (
     repeat_stale_escalation_wakes,
 )
 from crucible.application.delivery_tick import DeliveryConfig, DeliveryCoordinator
-from crucible.application.errors import ApplicationError
+from crucible.application.errors import ApplicationError, NotFoundError
 from crucible.application.evidence import claim_facts, record_collection_evidence, store_artifact
 from crucible.application.gates import evaluate_and_advance, gate_input
 from crucible.application.harnesses import (
@@ -62,7 +69,9 @@ from crucible.application.review import (
 from crucible.application.routing import (
     count_blocking_failures,
     current_routing_version,
+    launch_model_name,
     load_attempt_routing,
+    model_mark_key,
     reserve,
     select_model,
 )
@@ -91,7 +100,7 @@ from crucible.contracts.completion_claim import (
     parse_claim,
 )
 from crucible.contracts.evidence import ROLE_RUN_EVIDENCE, EvidenceKind, EvidenceSource
-from crucible.contracts.policy import RoutingPolicyV1, window_seconds
+from crucible.contracts.policy import RoutingPolicyV1, routing_model_name, window_seconds
 from crucible.contracts.task_contract import TaskContractV1
 from crucible.contracts.wake import WakeReason
 from crucible.domain.command_timeout import effective_command_timeout_ms
@@ -113,10 +122,12 @@ from crucible.domain.entities import (
     Heartbeat,
     LogChunkRecord,
     PoolExhaustion,
+    Principal,
     PullRequestState,
     Repository,
     RetentionAction,
     ReviewDisposition,
+    Role,
     Task,
 )
 from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
@@ -658,6 +669,7 @@ class Supervisor:
         credential_sources: Mapping[str, CredentialSource] | None = None,
         credential_sweep: Callable[[UnitOfWork], int] | None = None,
         credential_renewal: Callable[[], bool] | None = None,
+        admin_context: AdminContext | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._providers = providers
@@ -672,6 +684,7 @@ class Supervisor:
         # window has elapsed; the retention step calls this with the fenced unit of work.
         self._credential_sweep = credential_sweep
         self._credential_renewal = credential_renewal
+        self._admin_context = admin_context
         self._artifacts = artifact_store
         self._wakes = wake_deliverer
         self.holder = holder
@@ -946,6 +959,8 @@ class Supervisor:
         if not held:
             return result
         try:
+            await self._refresh_admin_status()
+            await self._check_gateway_models()
             result.orphans = await self._reconcile_provider_handles()
             await self._resume_quota_checkpoints()
             await self._db(self._resume_quota_waits)
@@ -999,6 +1014,31 @@ class Supervisor:
         result.duration_ms = int((time.monotonic() - started) * 1000)
         return result
 
+    async def _refresh_admin_status(self) -> None:
+        """Refresh expensive admin reads at most once per configured TTL."""
+        ctx = self._admin_context
+        if ctx is None:
+            return
+
+        def ttl() -> float:
+            with self._uow_factory() as uow:
+                return float(admin_status_cache.ttl_value(ctx, uow).value)
+
+        if not ctx.status_cache.due(await self._db(ttl)):
+            return
+        images, providers = await asyncio.gather(refresh_images(ctx), refresh_providers_status(ctx))
+        if ctx.status_cache_shared:
+
+            def persist() -> None:
+                with self._fenced() as uow:
+                    admin_status_cache.write(ctx, uow, images, providers)
+                    uow.commit()
+
+            await self._db(persist)
+        ctx.status_cache.images = images
+        ctx.status_cache.providers = providers
+        ctx.status_cache.refreshed_at = time.monotonic()
+
     def _record_failure(self, summary: str) -> None:
         try:
             with self._fenced() as uow:
@@ -1016,6 +1056,97 @@ class Supervisor:
     async def reconcile(self) -> TickResult:
         """Reconciliation is the tick; running it twice changes nothing the second time."""
         return await self.tick()
+
+    async def _check_gateway_models(self) -> None:
+        """Disable local routes missing from a successful gateway model listing.
+
+        Listing is deliberately outside the write transaction. A missing configuration,
+        missing key, timeout, or gateway refusal makes this check a no-op. The fenced
+        write re-reads routing before it applies the result, and only turns routes off.
+        """
+        ctx = self._admin_context
+        if ctx is None:
+            return
+        endpoint = await self._db(self._gateway_endpoint)
+        if endpoint is None:
+            return
+        bearer = await asyncio.to_thread(admin_credentials.read_api_key, ctx, admin_gateway.HERMES)
+        if bearer is None:
+            return
+        try:
+            offered = await asyncio.to_thread(admin_gateway.fetch_models, endpoint, bearer)
+        except (admin_gateway.GatewayError, TimeoutError):
+            return
+        await self._db(partial(self._disable_unoffered_gateway_models, endpoint, offered))
+
+    def _gateway_endpoint(self) -> str | None:
+        with self._fenced() as uow:
+            endpoint, _source = admin_routing.gateway_url(uow)
+            return endpoint
+
+    def _disable_unoffered_gateway_models(self, endpoint: str, offered: Sequence[str]) -> None:
+        ctx = self._admin_context
+        if ctx is None:
+            return
+        offered_set = set(offered)
+        with self._fenced() as uow:
+            active_endpoint, _source = admin_routing.gateway_url(uow)
+            if active_endpoint != endpoint:
+                return
+            try:
+                policy, routing = admin_routing.active_documents(uow)
+            except NotFoundError:
+                return
+            document = copy.deepcopy(routing.document)
+            disabled: list[str] = []
+            gateway_models: set[str] = set()
+            for entry in document.get("models") or []:
+                if entry.get("endpoint") != "local" or entry.get("enabled") is not True:
+                    continue
+                model_name = routing_model_name(entry)
+                if model_name in offered_set:
+                    continue
+                entry["enabled"] = False
+                entry["disabled_reason"] = admin_gateway.NOT_OFFERED
+                entry["vanished_at"] = self._clock.now().isoformat()
+                disabled.append(f"{entry.get('harness')}:{model_name}")
+                gateway_models.add(model_name)
+            if not disabled:
+                return
+            checked_at = self._clock.now()
+            names = ", ".join(sorted(gateway_models))
+            reason = f"gateway listing at {checked_at.isoformat()} no longer offers {names}"
+            principal = Principal(
+                id=PRINCIPAL_CRUCIBLE,
+                name=PRINCIPAL_CRUCIBLE,
+                role=Role.ADMIN,
+                created_at=checked_at,
+            )
+            _policy_version, routing_version = admin_routing.publish_routing(
+                ctx,
+                uow,
+                principal=principal,
+                policy=policy,
+                routing=routing,
+                routing_document=document,
+                reason=reason,
+                note="Gateway listing removed local models",
+            )
+            record_event(
+                uow,
+                self._clock,
+                EventKind.LOCAL_GATEWAY_UPDATED,
+                principal=PRINCIPAL_CRUCIBLE,
+                payload={
+                    "change": "models automatically disabled",
+                    "models": sorted(gateway_models),
+                    "routes": sorted(disabled),
+                    "checked_at": checked_at.isoformat(),
+                    "routing_version": routing_version,
+                    "reason": reason,
+                },
+            )
+            uow.commit()
 
     # ----- step: provider reconcile ---------------------------------------
 
@@ -1653,6 +1784,11 @@ class Supervisor:
         # Read per attempt, not per pass: a login started while this pass runs holds
         # back the next launch of its harness rather than racing it (12).
         self._logins_now = await self._logins_in_progress()
+        # hades #478: update the Kubernetes provider's active policy so its quota
+        # read divides by the correct shape, not the last launch.
+        self._set_provider_policy(
+            provider_name=execution.provider, policy=execution.policy_snapshot
+        )
         # hades #423: a provider whose capacity comes from its own ceiling (the namespace
         # quota) says how many workers it admits at once; a launch past that waits
         # here, pending and scheduled, rather than being refused by the quota later.
@@ -1710,6 +1846,15 @@ class Supervisor:
             await self._db(partial(self._refuse_launch, item.attempt.id, "registry", refusal))
             return None
         return item, provider
+
+    def _set_provider_policy(self, provider_name: str, policy: dict[str, Any] | None) -> None:
+        """hades #478: update a provider's active policy so capacity and launch
+        shape come from the policy, not the last launch."""
+        provider = self._providers.get(provider_name)
+        setter = getattr(provider, "set_policy", None)
+        if provider is None or not callable(setter):
+            return
+        setter(policy or {})
 
     async def _provider_capacity_wait(self, provider_name: str) -> str | None:
         """hades #423: why a launch on this provider waits for room, or None. Only a
@@ -1885,7 +2030,7 @@ class Supervisor:
             routing = load_attempt_routing(
                 route_uow, execution.policy_snapshot or {}, attempt.routing_version
             )
-            route = routing.model(selected_model) if routing is not None else None
+            route = None if routing is None else routing.model(selected_model, selected_harness)
             if route is not None:
                 endpoint = route.endpoint
                 endpoint_url = route.endpoint_url
@@ -2035,10 +2180,35 @@ class Supervisor:
         # that record rather than a value saved since.
         effective: dict[str, Any] | None = None
         if settings_harness == "hermes":
-            effective = attempt.effective_settings or effective_settings(
-                harness_settings,
-                thinking=route.chat_template_kwargs.enable_thinking if route else False,
-            )
+            if attempt.effective_settings is not None:
+                effective = attempt.effective_settings
+            else:
+                effective = effective_settings(
+                    harness_settings,
+                    thinking=route.chat_template_kwargs.enable_thinking if route else False,
+                )
+                # Hades #354: Codex's own provider config takes model_context_window and
+                # the max output tokens from the routing entry, not the Hermes default,
+                # when the entry carries its own. Resolved once per attempt, like the
+                # rest of `effective`.
+                if selected_harness == "codex" and route is not None:
+                    if route.context_length:
+                        effective["context_length"] = route.context_length
+                    if route.max_output_tokens:
+                        effective["max_output_tokens"] = route.max_output_tokens
+                    # Review of #354: `context_length` and `max_output_tokens` are
+                    # independent overrides, so a route can carry a pair the saved
+                    # Hermes settings would reject (`hermes_limit_problems`) without
+                    # either value alone looking wrong. A response reservation that
+                    # consumes the whole window leaves no input budget, so the launch
+                    # is refused rather than sent to fail at request time.
+                    window = effective["context_length"]
+                    allowance = effective["max_output_tokens"]
+                    if window and allowance >= window:
+                        raise LaunchRefusedError(
+                            f"model {route.model!r} max_output_tokens {allowance} leaves no "
+                            f"input budget in its {window}-token context window"
+                        )
         if selected_harness == "qwen_code":
             effective = attempt.effective_settings or {
                 "context_length": route.context_length
@@ -2113,7 +2283,7 @@ class Supervisor:
         launch = adapter.build_launch(
             LaunchContext(
                 attempt_id=attempt.id,
-                model=(route.model_name or route.id) if route else selected_model,
+                model=launch_model_name(route, selected_model),
                 effort=execution.effort,
                 timeout_seconds=execution.timeout_seconds,
                 identity_mount=IDENTITY_MOUNT,
@@ -2217,7 +2387,9 @@ class Supervisor:
     ) -> str | None:
         policy = execution.policy_snapshot or {}
         routing = load_attempt_routing(uow, policy, routing_version)
-        selected = routing.model(execution.model) if routing is not None else None
+        selected = (
+            routing.model(execution.model, execution.harness) if routing is not None else None
+        )
         local_codex = (
             execution.harness == "codex" and selected is not None and selected.endpoint == "local"
         )
@@ -2268,7 +2440,14 @@ class Supervisor:
                 other_routing = load_attempt_routing(
                     uow, other_execution.policy_snapshot or {}, other.routing_version
                 )
-                other_model = other_routing.model(other_execution.model) if other_routing else None
+                other_model = (
+                    other_routing.model(
+                        other.selected_model or other_execution.model,
+                        other.selected_harness or other_execution.harness,
+                    )
+                    if other_routing
+                    else None
+                )
                 if execution.harness == "codex" and other_model and other_model.endpoint == "local":
                     continue
                 running += 1
@@ -2373,12 +2552,31 @@ class Supervisor:
                 eligible.add(name)
         return eligible
 
+    def _capacity_exclusions(self, uow: UnitOfWork, item: _Pending) -> set[tuple[str, str]]:
+        excluded = set()
+        for event in self._all_task_events(uow, item.task.id):
+            model = event.payload.get("excluded_model")
+            if event.payload.get("next_attempt_id") != item.attempt.id or not model:
+                continue
+            harness = event.payload.get("excluded_harness")
+            if not harness and event.attempt_id:
+                # Retry events saved before pair identity can be resolved from the
+                # refusing attempt; never turn them into a model-wide exclusion.
+                previous = uow.attempts.get(event.attempt_id)
+                if previous is not None:
+                    harness = previous.selected_harness
+                    model = previous.selected_model or model
+            if harness:
+                excluded.add((str(harness), str(model)))
+        return excluded
+
     def _selection_for(
         self,
         uow: UnitOfWork,
         item: _Pending,
         *,
         excluded_pools: set[str | None] | None = None,
+        excluded_routes: set[tuple[str, str]] | None = None,
         routing: RoutingPolicyV1 | None = None,
     ) -> Any:
         # hades #254: every attempt, a correction's or a retry's included, routes with
@@ -2397,6 +2595,11 @@ class Supervisor:
                 provider=request.provider.value,
             )
         )
+        # The (harness, model) routes this attempt may not take: the ones the caller
+        # names (a reroute deciding where to go next) and the ones the event that
+        # created the attempt excluded, a capacity refusal's retry or a model-only
+        # quota refusal's reroute (hades #373).
+        all_excluded_routes = set(excluded_routes or set()) | self._capacity_exclusions(uow, item)
         selection = select_model(
             uow,
             routing,
@@ -2415,12 +2618,7 @@ class Supervisor:
                 .get("allowlist", [])
             ],
             excluded_pools={pool for pool in (excluded_pools or set()) if pool is not None},
-            excluded_models={
-                str(event.payload["excluded_model"])
-                for event in self._all_task_events(uow, item.task.id)
-                if event.payload.get("next_attempt_id") == item.attempt.id
-                and event.payload.get("excluded_model")
-            },
+            excluded_routes=all_excluded_routes,
             pinned_model=request.pinned_model,
             pinned_harness=request.pinned_harness.value if request.pinned_harness else None,
         )
@@ -2471,7 +2669,8 @@ class Supervisor:
         return bool(relevant) and all(
             reasons
             and all(
-                reason.startswith("pool exhausted until ") or reason == "pool is at its soft limit"
+                reason.startswith(("pool exhausted until ", "model excluded until "))
+                or reason == "pool is at its soft limit"
                 for reason in reasons
             )
             for reasons in relevant
@@ -2513,7 +2712,7 @@ class Supervisor:
             for candidate in candidates:
                 if not candidate.get("eligible"):
                     continue
-                model = routing.model(str(candidate["model"]))
+                model = routing.model(str(candidate["model"]), str(candidate["harness"]))
                 assert model is not None
                 execution.model = model.id
                 execution.harness = model.harness
@@ -2964,7 +3163,10 @@ class Supervisor:
             routing = load_attempt_routing(
                 uow, execution.policy_snapshot or {}, attempt.routing_version
             )
-            entry = routing.model(execution.model) if routing is not None else None
+            # Resolve the exact route; models can be shared by several harnesses.
+            entry = (
+                routing.model(execution.model, execution.harness) if routing is not None else None
+            )
             refusal = self._review_route_refusal(routing, entry, execution)
             if refusal is None:
                 busy = self._harness_busy_in_uow(uow, execution, attempt.routing_version)
@@ -2998,9 +3200,13 @@ class Supervisor:
         routing: RoutingPolicyV1 | None, entry: Any, execution: Execution
     ) -> str | None:
         """Why a review may not launch with its model and harness, if it may not."""
-        if routing is None or entry is None:
+        if routing is None:
             return None
         where = f"routing policy {routing.name}/{routing.version}"
+        if entry is None:
+            return (
+                f"model {execution.model} is not paired with harness {execution.harness} in {where}"
+            )
         if not entry.enabled:
             reason = f": {entry.disabled_reason}" if entry.disabled_reason else ""
             return f"model {entry.id} is disabled in {where}{reason}"
@@ -3138,6 +3344,19 @@ class Supervisor:
             )
             attempt.workspace_path = ws.checkout_path.removesuffix("/repo")
             attempt.identity_sha256 = ws.identity_sha256 or attempt.identity_sha256
+            # Hades #354: the evidence records the lane (`model`, above) and the name the
+            # launch actually sends the harness, when a routing entry overrides it.
+            routing = load_attempt_routing(
+                uow, execution.policy_snapshot or {}, attempt.routing_version
+            )
+            route = (
+                routing.model(
+                    attempt.selected_model or execution.model,
+                    attempt.selected_harness or execution.harness,
+                )
+                if routing is not None
+                else None
+            )
             move_attempt(
                 uow,
                 self._clock,
@@ -3147,6 +3366,9 @@ class Supervisor:
                 payload={
                     "workspace": attempt.workspace_path,
                     "model": attempt.selected_model,
+                    "sent_model_name": launch_model_name(
+                        route, attempt.selected_model or execution.model
+                    ),
                     "harness": attempt.selected_harness,
                     "image": attempt.selected_image,
                     "pool": attempt.selected_pool,
@@ -4418,9 +4640,20 @@ class Supervisor:
         outcome = await local_push(self._workspace_for(attempt), spec) if local_push else None
         if outcome is None:
             repository_url = spec.repository_url
-            required = provider_name == "docker" and not (
-                repository_url.startswith("/") or repository_url.startswith("file://")
-            )
+            local_origin = repository_url.startswith("/") or repository_url.startswith("file://")
+            if local_push is None and local_origin:
+                await self._db(
+                    partial(
+                        self._finish_deferred_quota,
+                        attempt_id,
+                        False,
+                        f"local-origin quota checkpoints are Docker-only; provider "
+                        f"{provider_name} did not push a checkpoint",
+                        checkpoint_skipped=True,
+                    )
+                )
+                return
+            required = provider_name == "docker" and not (local_origin)
             outcome = await self.delivery.push_quota_checkpoint(attempt_id, required=required)
             if outcome is None:
                 # GitHub's rate limit: the checkpoint stays pending and a later tick pushes
@@ -4452,7 +4685,14 @@ class Supervisor:
                 and not self._quota_checkpoint_has_disposition(uow, attempt)
             )
 
-    def _finish_deferred_quota(self, attempt_id: str, pushed: bool, detail: str) -> None:
+    def _finish_deferred_quota(
+        self,
+        attempt_id: str,
+        pushed: bool,
+        detail: str,
+        *,
+        checkpoint_skipped: bool = False,
+    ) -> None:
         with self._fenced() as uow:
             attempt = uow.attempts.get(attempt_id, for_update=True)
             assert attempt is not None
@@ -4465,10 +4705,23 @@ class Supervisor:
                 or task.state is not TaskState.RUNNING
             ):
                 return
+            # hades #373: the exit's own verdict, read back from the mark it wrote.
+            excluded_routes = self._model_exclusion_for(uow, attempt)
             if pushed:
                 execution.resume_from_remote = True
                 uow.executions.save(execution)
-                self._handle_quota_exit(uow, task, execution, attempt)
+                self._handle_quota_exit(
+                    uow, task, execution, attempt, excluded_routes=excluded_routes
+                )
+            elif checkpoint_skipped:
+                self._handle_quota_exit(
+                    uow,
+                    task,
+                    execution,
+                    attempt,
+                    checkpoint_skip_detail=detail[:1000],
+                    excluded_routes=excluded_routes,
+                )
             else:
                 bundle_path = f"{attempt.workspace_path}/output/work_branch.bundle"
                 record_event(
@@ -4828,7 +5081,11 @@ class Supervisor:
                     uow, execution.policy_snapshot or {}, attempt.routing_version
                 )
                 model = attempt.selected_model or execution.model
-                route = routing.model(model) if routing is not None else None
+                route = (
+                    None
+                    if routing is None
+                    else routing.model(model, attempt.selected_harness or execution.harness)
+                )
                 watch.local = route is not None and route.endpoint == "local"
             except Exception:
                 # Issue 278 must not cost the attempt its command tracking (issue 152):
@@ -5114,11 +5371,24 @@ class Supervisor:
                 if attempt.exit_class is ExitClass.QUOTA_EXHAUSTED and adapter is not None
                 else None
             )
+            # hades #373: a refusal about the model alone (Claude Code's
+            # model_requires_usage_credits, or words that say to switch models) excludes
+            # that model until its reset and leaves the pool open, so the next candidate
+            # in the same pool launches. Only the account's own refusal marks the pool.
             pool_mark: tuple[PoolExhaustion, bool] | None = None
+            excluded_routes: set[tuple[str, str]] | None = None
             if attempt.exit_class is ExitClass.QUOTA_EXHAUSTED:
-                pool_mark = self._mark_pool_exhausted(
-                    uow, attempt, execution, provider_quota.reset_at if provider_quota else None
-                )
+                if provider_quota is not None and provider_quota.model_only:
+                    excluded_routes = self._mark_model_excluded(
+                        uow, attempt, execution, provider_quota.reset_at
+                    )
+                else:
+                    pool_mark = self._mark_pool_exhausted(
+                        uow,
+                        attempt,
+                        execution,
+                        provider_quota.reset_at if provider_quota else None,
+                    )
             # A collection failure makes this exit `environment` below, whatever the
             # harness said, so it is not a gateway failure and marks nothing.
             if attempt.exit_class is ExitClass.PROVIDER_ERROR and collection_error is None:
@@ -5162,7 +5432,12 @@ class Supervisor:
                     uow, execution.policy_snapshot or {}, attempt.routing_version
                 )
                 model = (
-                    routing.model(attempt.selected_model or execution.model) if routing else None
+                    routing.model(
+                        attempt.selected_model or execution.model,
+                        attempt.selected_harness or execution.harness,
+                    )
+                    if routing
+                    else None
                 )
                 interruption_payload = {
                     "interruption_message": redact(interruption_detail),
@@ -5408,6 +5683,7 @@ class Supervisor:
                 turn_cap_reached=parsed is not None and parsed.limit_reached is not None,
                 has_commits=outputs.bundle is not None and outputs.bundle.commits > 0,
                 pool_mark=pool_mark,
+                excluded_routes=excluded_routes,
             )
             # A valid report from a failed or locally capped attempt is evidence,
             # but its dispositions must not settle findings or queue public replies.
@@ -5683,11 +5959,22 @@ class Supervisor:
             and model.capability in tier.allowed_capability
             and (pinned is None or model.id == pinned)
         }
+        # hades #373: a model's own exclusion ends at its reset too; a class whose only
+        # candidates are excluded models resumes when the earliest of them lifts.
+        model_marks = {
+            model_mark_key(model.model, model.harness)
+            for model in routing.models
+            if model.enabled
+            and model.capability in tier.allowed_capability
+            and (pinned is None or model.id == pinned)
+        }
         now = self._clock.now()
         return sorted(
             mark.reset_at
             for mark in uow.pool_exhaustions.list_all()
-            if mark.pool in pools and mark.cleared_at is None and mark.reset_at > now
+            if (mark.pool in pools or mark.pool in model_marks)
+            and mark.cleared_at is None
+            and mark.reset_at > now
         )
 
     def _enter_quota_wait(
@@ -5850,7 +6137,7 @@ class Supervisor:
         if context is None:
             return
         routing = context[0]
-        entry = routing.model(execution.model)
+        entry = routing.model(execution.model, execution.harness)
         if entry is None or entry.endpoint != "local":
             return
         since = self._clock.now() - timedelta(
@@ -5874,13 +6161,17 @@ class Supervisor:
         latest = max(earlier, key=finished)
         if latest.exit_class != ExitClass.PROVIDER_ERROR.value:
             return
-        self._mark_pool_exhausted(
+        marked = self._mark_pool_exhausted(
             uow,
             attempt,
             execution,
             None,
             reason="local endpoint failed (provider_error)",
         )
+        # hades #373: every pool mark is announced. A provider-error exit goes on to
+        # retry, which raises no wake of its own, so the mark's wake is raised here.
+        if marked is not None and marked[1]:
+            self._wake_pool_exhausted(uow, task, attempt, marked[0])
 
     def _mark_pool_exhausted(
         self,
@@ -5906,7 +6197,10 @@ class Supervisor:
         # Only the pool of the route the attempt was verified to launch on is marked:
         # its model's entry in the attempt's routing version, paired with the harness
         # that ran and whose output was read (hades #359).
-        entry = routing.model(attempt.selected_model or execution.model)
+        entry = routing.model(
+            attempt.selected_model or execution.model,
+            attempt.selected_harness or execution.harness,
+        )
         if (
             entry is None
             or entry.pool != attempt.selected_pool
@@ -5974,9 +6268,89 @@ class Supervisor:
     def _bounded_quota_reset(
         now: Any, candidate: Any, *, max_seconds: int, default_seconds: int
     ) -> tuple[Any, Any]:
+        """The reset a mark gets: the one the signal states, when it lies ahead; else now
+        plus the pool's `default_cooldown_seconds` (hades #373: a mark from a signal that
+        states no reset for the pool expires no later than the default cooldown; a
+        stated reset is the provider's fact and is used as given, 05b)."""
         del max_seconds
         accepted = candidate if candidate is not None and now < candidate else None
         return accepted or now + timedelta(seconds=default_seconds), accepted
+
+    def _mark_model_excluded(
+        self, uow: UnitOfWork, attempt: Attempt, execution: Execution, reset_at: Any
+    ) -> set[tuple[str, str]]:
+        """hades #373: exclude the attempt's model, not its pool, until `reset_at`, or
+        for the pool's default cooldown when the refusal states none. The exclusion is
+        a mark keyed `model:<harness>:<model>` (the route a routing entry is identified
+        by) in the same table as a pool mark, so it is listed on Routing and
+        clearable there, and `select_model` turns the route away while it is in force.
+        Returns the route as the set a reroute excludes."""
+        model = attempt.selected_model or execution.model
+        harness = attempt.selected_harness or execution.harness
+        route = {(harness, model)}
+        task = uow.tasks.get(attempt.task_id)
+        assert task is not None
+        context = self._routing_context(uow, task, execution, attempt.routing_version)
+        if context is None:
+            return route
+        routing, _ = context
+        entry = routing.model(model, harness)
+        pool = attempt.selected_pool or (entry.pool if entry is not None else None)
+        if pool is None or pool not in routing.pools:
+            return route
+        now = self._clock.now()
+        reset, parsed_reset = self._bounded_quota_reset(
+            now,
+            reset_at,
+            max_seconds=routing.reroute.resume_max_wait_seconds,
+            default_seconds=routing.pools[pool].default_cooldown_seconds,
+        )
+        reason = "harness reported quota_exhausted for this model only"
+        mark = uow.pool_exhaustions.put(
+            PoolExhaustion(
+                pool=model_mark_key(model, harness),
+                exhausted_at=now,
+                reset_at=reset,
+                task_id=attempt.task_id,
+                attempt_id=attempt.id,
+                reason=reason,
+            )
+        )
+        record_event(
+            uow,
+            self._clock,
+            EventKind.QUOTA_EXHAUSTED,
+            principal=PRINCIPAL_CRUCIBLE,
+            task_id=attempt.task_id,
+            execution_id=attempt.execution_id,
+            attempt_id=attempt.id,
+            payload={
+                "scope": "model",
+                "model": model,
+                "harness": harness,
+                "pool": pool,
+                "reset_at": mark.reset_at.isoformat(),
+                "source": "harness" if parsed_reset else "policy_default_cooldown",
+                "reason": reason,
+                "detail": f"model {model} excluded until {mark.reset_at.isoformat()}; "
+                f"pool {pool} stays open",
+            },
+        )
+        return route
+
+    def _model_exclusion_for(
+        self, uow: UnitOfWork, attempt: Attempt
+    ) -> set[tuple[str, str]] | None:
+        """The route an attempt's quota exit excluded (hades #373), read back from the
+        mark that exit wrote, for a decision taken after the checkpoint push."""
+        if attempt.selected_model is None or attempt.selected_harness is None:
+            return None
+        mark = uow.pool_exhaustions.get(
+            model_mark_key(attempt.selected_model, attempt.selected_harness)
+        )
+        if mark is not None and mark.attempt_id == attempt.id and mark.cleared_at is None:
+            return {(attempt.selected_harness, attempt.selected_model)}
+        return None
 
     def _handle_quota_exit(
         self,
@@ -5987,7 +6361,11 @@ class Supervisor:
         *,
         source: str = "worker",
         pool_mark: tuple[PoolExhaustion, bool] | None = None,
+        checkpoint_skip_detail: str | None = None,
+        excluded_routes: set[tuple[str, str]] | None = None,
     ) -> None:
+        # hades #373: `excluded_routes` names the model a model-only refusal excluded;
+        # the pool stays open and the reroute stays inside it.
         # hades #378: one wake per refusal names the pool and its reset. A task that
         # ends or waits says it in the wake it raises anyway; a reroute, which raised
         # none, raises the pool's own, once per exhaustion (when the mark opened).
@@ -6058,15 +6436,29 @@ class Supervisor:
         stored = uow.contracts.get(task.id, execution.contract_version)
         assert stored is not None
         item = _Pending(attempt, execution, task, stored.document)
+        # hades #373: a model-only refusal leaves its pool open and the reroute stays
+        # inside it, with the refused model excluded; an account refusal leaves the pool.
+        excluded_pools: set[str] = set()
+        excluded_model: str | None = None
+        excluded_harness: str | None = None
+        if excluded_routes:
+            excluded_model = attempt.selected_model or execution.model
+            excluded_harness = attempt.selected_harness or execution.harness
+        elif attempt.selected_pool:
+            excluded_pools = {attempt.selected_pool}
         selection = self._selection_for(
-            uow, item, excluded_pools={attempt.selected_pool}, routing=routing
+            uow,
+            item,
+            excluded_pools=set(excluded_pools),
+            excluded_routes=excluded_routes,
+            routing=routing,
         )
         if selection is not None and selection.selected is not None and selection.image is not None:
             nxt = self._create_attempt(
                 uow,
                 execution,
                 number=attempt.number + 1,
-                excluded_pools={attempt.selected_pool} if attempt.selected_pool else None,
+                excluded_pools=excluded_pools or None,
             )
             move_task(
                 uow,
@@ -6082,11 +6474,33 @@ class Supervisor:
                     "from_pool": attempt.selected_pool,
                     "to_attempt_id": nxt.id,
                     "why": (
-                        "previous pool reported quota exhaustion"
+                        "previous model refused this model only; rerouted within its pool"
+                        if excluded_model is not None
+                        else "previous pool reported quota exhaustion"
                         if source == "worker"
                         else "launch reservation found the selected pool unavailable"
                     ),
                     "source": source,
+                    # The next attempt routes with this model excluded (_selection_for
+                    # reads it back by next_attempt_id), the path a capacity refusal's
+                    # retry already takes.
+                    **(
+                        {
+                            "excluded_model": excluded_model,
+                            "excluded_harness": excluded_harness,
+                            "next_attempt_id": nxt.id,
+                        }
+                        if excluded_model is not None
+                        else {}
+                    ),
+                    **(
+                        {
+                            "checkpoint_push": "skipped",
+                            "checkpoint_detail": checkpoint_skip_detail,
+                        }
+                        if checkpoint_skip_detail is not None
+                        else {}
+                    ),
                     **({"wip_commit_sha": task.head_sha} if source == "worker" else {}),
                     "ordered_candidates": list(selection.candidates),
                 },
@@ -6206,6 +6620,7 @@ class Supervisor:
         has_commits: bool = True,
         wake_summary: str | None = None,
         pool_mark: tuple[PoolExhaustion, bool] | None = None,
+        excluded_routes: set[tuple[str, str]] | None = None,
     ) -> None:
         """Move the attempt to its terminal state and the task after it (09, 16).
 
@@ -6216,7 +6631,9 @@ class Supervisor:
         before the retry count and never reaches pool accounting.
         `pool_mark` is the exhaustion mark this exit wrote and whether it opened the
         pool's exhaustion (hades #378): the one wake the refusal raises names the pool
-        and its reset, whichever path the attempt takes from here."""
+        and its reset, whichever path the attempt takes from here. `excluded_routes`
+        is the model a model-only refusal excluded (hades #373): the pool is unmarked
+        and the reroute stays inside it."""
         execution = uow.executions.get(attempt.execution_id, for_update=True)
         task = uow.tasks.get(attempt.task_id, for_update=True)
         assert execution is not None and task is not None
@@ -6348,7 +6765,9 @@ class Supervisor:
                 if pool_mark is not None and pool_mark[1]:
                     self._wake_pool_exhausted(uow, task, attempt, pool_mark[0])
                 return
-            self._handle_quota_exit(uow, task, execution, attempt, pool_mark=pool_mark)
+            self._handle_quota_exit(
+                uow, task, execution, attempt, pool_mark=pool_mark, excluded_routes=excluded_routes
+            )
             return
         retryable = retryable_exit(exit_class, execution.retry_on)
         if attempt.termination_reason == TERMINATION_REFUSED:
@@ -6482,7 +6901,14 @@ class Supervisor:
             routing = load_attempt_routing(
                 uow, execution.policy_snapshot or {}, attempt.routing_version
             )
-            model = routing.model(attempt.selected_model or execution.model) if routing else None
+            model = (
+                routing.model(
+                    attempt.selected_model or execution.model,
+                    attempt.selected_harness or execution.harness,
+                )
+                if routing
+                else None
+            )
             endpoint_url = model.endpoint_url if model is not None else None
             # The first block waits for the endpoint's health probe and may resume on
             # its own once; the second needs a person and opens the one escalation.
@@ -6553,6 +6979,9 @@ class Supervisor:
                 "cause": message,
                 "next_attempt_id": nxt.id,
                 "resume_at": task.resume_at.isoformat(),
+                "excluded_harness": (attempt.selected_harness or execution.harness)
+                if detail.get("capacity_refused")
+                else None,
                 "excluded_model": (attempt.selected_model or execution.model)
                 if detail.get("capacity_refused")
                 else None,
@@ -6571,7 +7000,11 @@ class Supervisor:
             uow, execution.policy_snapshot or {}, attempt.routing_version
         )
         model = attempt.selected_model or execution.model
-        entry = routing.model(model) if routing is not None else None
+        entry = (
+            routing.model(model, attempt.selected_harness or execution.harness)
+            if routing is not None
+            else None
+        )
         return local_cap_kind(
             entry.endpoint if entry is not None else None, exit_class, turn_cap_reached
         )

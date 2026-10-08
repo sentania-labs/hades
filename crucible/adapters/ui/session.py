@@ -7,11 +7,12 @@ from datetime import timedelta
 from typing import Any
 from urllib.parse import parse_qs, quote
 
-from fastapi import APIRouter, Request
+from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from crucible.adapters.api.deps import Ctx, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.adapters.ui.render import _base, templates
 from crucible.application.auth import authenticate
 from crucible.application.errors import (
@@ -21,7 +22,7 @@ from crucible.application.first_run import discard_after_use
 from crucible.domain.entities import Principal, Role, UiSession
 from crucible.ports.repository import UnitOfWork
 
-router = APIRouter(prefix="/ui", include_in_schema=False)
+router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
 
 COOKIE = "crucible_ui"
 

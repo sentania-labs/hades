@@ -387,7 +387,13 @@ def scope_contained(gi: GateInput) -> GateOutcome:
     scope = gi.contract.get("scope", {})
     allowed = [str(p) for p in scope.get("allowed_paths", [])]
     prohibited = [str(p) for p in scope.get("prohibited_paths", [])]
-    paths = [str(p) for p in item.payload.get("paths", [])]
+    bundle = gi.one("bundle_head")
+    if bundle is None:
+        return _missing("bundle_head")
+    # The collector builds commit_paths from BASE..HEAD. That records the worker's
+    # complete contribution (including paths later reverted) while excluding commits
+    # reachable from the trusted prepared base, including a merge of that base.
+    paths = list(dict.fromkeys(str(p) for p in bundle.payload.get("commit_paths", [])))
     outside = [p for p in paths if not _matches_any(p, allowed)]
     forbidden = [p for p in paths if _matches_any(p, prohibited)]
     if outside or forbidden:
@@ -397,10 +403,15 @@ def scope_contained(gi: GateInput) -> GateOutcome:
         if outside:
             parts.append(f"outside allowed_paths: {sorted(outside)[:10]}")
         return GateOutcome(
-            GateResult.FAIL, "; ".join(parts), (item.id,), always_blocks=bool(forbidden)
+            GateResult.FAIL,
+            "; ".join(parts),
+            (item.id, bundle.id),
+            always_blocks=bool(forbidden),
         )
     return GateOutcome(
-        GateResult.PASS, f"all {len(paths)} changed path(s) inside allowed_paths", (item.id,)
+        GateResult.PASS,
+        f"all {len(paths)} worker commit path(s) inside allowed_paths",
+        (item.id, bundle.id),
     )
 
 
@@ -567,7 +578,9 @@ def no_secrets(gi: GateInput) -> GateOutcome:
     findings = item.payload.get("findings") or []
     if findings:
         # Findings carry the location and the pattern name, never the matched value.
-        where = [f"{f.get('where')}:{f.get('pattern')}" for f in findings][:10]
+        where = [f"{f.get('where')}:{f.get('pattern')}:{f.get('excerpt', '')}" for f in findings][
+            :10
+        ]
         return GateOutcome(GateResult.FAIL, f"secret pattern matched at {where}", (item.id,))
     scanned = item.payload.get("scanned") or []
     unscanned = item.payload.get("unscanned") or []
@@ -1096,6 +1109,10 @@ class DeliveryInput:
     comment_count: int = 0
     certification_state: str = ""
     certification_detail: str = ""
+    # hades #476: the class `crucible.domain.certification.certify` recorded on the
+    # computed certification, carried here so `ci_green_for_head` can record it too.
+    # Never changes the gate's result.
+    change_class: str = ""
     final_sha: tuple[bool, str] | None = None
 
 
@@ -1164,6 +1181,11 @@ def feedback_dispositions_complete(di: DeliveryInput) -> GateOutcome:
 
 
 def ci_green_for_head(di: DeliveryInput) -> GateOutcome:
+    """A job the change classifier filtered out is not a missing job: the certification
+    this reads already excludes a skipped run from its counted set (hades #476,
+    `crucible.domain.certification._counts`), so this gate's PASS/FAIL/PENDING mapping
+    never branches on `change_class`. It only names the class in the detail, so a
+    reader of this gate's outcome sees which classification explains what ran."""
     mapping = {
         "green": GateResult.PASS,
         "failed": GateResult.FAIL,
@@ -1172,6 +1194,8 @@ def ci_green_for_head(di: DeliveryInput) -> GateOutcome:
     }
     result = mapping.get(di.certification_state, GateResult.PENDING)
     detail = di.certification_detail or "no CI certification has been computed yet"
+    if di.change_class:
+        detail += f" (change class: {di.change_class})"
     return GateOutcome(result, detail)
 
 

@@ -7,7 +7,9 @@ operations (the operator's decision of 2026-09-25, crucible#117)."""
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+import threading
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -39,6 +41,53 @@ class GitHubAppInfo:
 
 
 @dataclass(slots=True)
+class ProviderStatusCache:
+    """Snapshot written by the supervisor and shared with API processes through the database."""
+
+    images: list[tuple[str, Any]] = field(default_factory=list)
+    providers: list[dict[str, Any]] = field(default_factory=list)
+    refreshed_at: float | None = None
+
+    def due(self, ttl_seconds: float) -> bool:
+        return self.refreshed_at is None or time.monotonic() - self.refreshed_at >= ttl_seconds
+
+
+@dataclass(slots=True)
+class BackgroundRuns:
+    """The background runs of this process, one per key (issue 147: the harness test).
+
+    A run is a daemon thread and the marker it was started with. `running` says whether
+    the key's thread is still alive, so a second start while one runs can hand back the
+    first run's marker instead of starting a duplicate. The check sees this process only;
+    what every api replica sees is what the run stores (the harness row's `last_test`)."""
+
+    guard: threading.Lock = field(default_factory=threading.Lock)
+    _threads: dict[str, threading.Thread] = field(default_factory=dict)
+    _markers: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def running(self, key: str) -> dict[str, Any] | None:
+        """The marker of the run in progress for `key`, or None when none is."""
+        thread = self._threads.get(key)
+        if thread is None or not thread.is_alive():
+            return None
+        return self._markers.get(key)
+
+    def start(self, key: str, marker: dict[str, Any], target: Callable[[], None]) -> None:
+        thread = threading.Thread(target=target, daemon=True, name=f"background-{key}")
+        self._threads[key] = thread
+        self._markers[key] = marker
+        thread.start()
+
+    def wait(self, key: str, timeout: float | None = None) -> bool:
+        """Wait for the key's run to end; True when it has (or none was running)."""
+        thread = self._threads.get(key)
+        if thread is None:
+            return True
+        thread.join(timeout)
+        return not thread.is_alive()
+
+
+@dataclass(slots=True)
 class AdminContext:
     uow_factory: UnitOfWorkFactory
     clock: Clock
@@ -57,6 +106,10 @@ class AdminContext:
     credential_retention_hours: int = 24
     probe_timeout_seconds: int = 120
     login_timeout_seconds: int = 900
+    status_cache_ttl_seconds: float = 60.0
+    status_cache_shared: bool = False
+    status_cache_enabled: bool = False
+    status_cache: ProviderStatusCache = field(default_factory=ProviderStatusCache)
     proxy_config_path: str | None = None
     proxy_subnet: str = "10.88.0.0/24"
     proxy_hosts: tuple[str, ...] = ()
@@ -76,6 +129,8 @@ class AdminContext:
     # Where the first-run administrator token was delivered; a revoke of that principal
     # removes it (ADR 0016).
     first_run: FirstRunDelivery | None = None
+    # The harness tests running in this process (issue 147), one per harness.
+    harness_tests: BackgroundRuns = field(default_factory=BackgroundRuns)
 
 
 def record_refusal(ctx: AdminContext, *, principal: str, operation: str, detail: str) -> None:
@@ -141,7 +196,9 @@ def require_reason(
             f"a reason is required for {operation}" if operation else "a reason is required",
             errors=[{"path": "reason", "message": "must not be empty"}],
         )
-    cleaned = reason.strip()
+    # Preserve the operator's words exactly. Whitespace is used only to decide whether
+    # a reason was supplied; audit is not an editor.
+    cleaned = reason
     try:
         refuse_secret_shaped(cleaned, field="reason")
     except ContractValidationError:

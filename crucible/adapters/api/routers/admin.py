@@ -6,10 +6,11 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Query
+from fastapi import Body, Query
 from fastapi.exceptions import RequestValidationError
 
 from crucible.adapters.api.deps import Admin, Ctx, Orchestrator, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.application.admin import (
     audit,
     board,
@@ -36,7 +37,7 @@ from crucible.application.admin.context import AdminContext
 from crucible.application.errors import ConflictError, ContractValidationError
 from crucible.contracts.api import ExternalReviewAttestation, RepositoryRegistration
 
-router = APIRouter()
+router = ThreadedAPIRouter()
 
 
 @router.get("/admin/board")
@@ -419,13 +420,15 @@ def admin_save_kubernetes_timeouts(
     principal: Admin,
     body: Annotated[dict[str, Any], Body()],
 ) -> dict[str, Any]:
-    """The body is the `kubernetes.timeouts` document (`role_timeout_seconds`) and a
-    `reason`; the service refuses a value that is not a whole number within bounds."""
+    """The body is the `kubernetes.timeouts` document and a `reason`; the service
+    refuses timeout and retry values that are not whole numbers within bounds."""
     result = kubernetes_admin.save_timeouts(
         _admin(ctx),
         uow,
         principal=principal.name,
-        document={key: body[key] for key in ("role_timeout_seconds",) if key in body},
+        document={
+            key: body[key] for key in ("role_timeout_seconds", "api_retry_seconds") if key in body
+        },
         reason=_reason(body),
     )
     uow.commit()
@@ -482,8 +485,8 @@ def admin_disable(
     return result
 
 
-@router.post("/admin/harnesses/{name}/test")
-async def admin_test_harness(
+@router.post("/admin/harnesses/{name}/test", status_code=202)
+def admin_test_harness(
     name: str,
     ctx: Ctx,
     uow: UoW,
@@ -491,12 +494,19 @@ async def admin_test_harness(
     body: Annotated[dict[str, Any] | None, Body()] = None,
 ) -> dict[str, Any]:
     """crucible#118: the path a real task takes, step by step, pass or fail in plain
-    words. A check, so no reason is asked for; one given is recorded."""
-    result = await harness_test.test_harness(
+    words. A check, so no reason is asked for; one given is recorded. The run is a
+    background job (issue 147): the answer is its running marker, at once, and the result
+    lands on the harness row, where `GET /admin/harnesses/{name}/test` reads it. A second
+    POST while the run is in progress returns the same marker and starts nothing."""
+    return harness_test.start_test(
         _admin(ctx), uow, principal=principal.name, harness=name, reason=_reason(body)
     )
-    uow.commit()
-    return result
+
+
+@router.get("/admin/harnesses/{name}/test")
+def admin_harness_test_result(name: str, ctx: Ctx, uow: UoW, _principal: Admin) -> dict[str, Any]:
+    """The harness's stored test: the running marker, the last result, or not tested."""
+    return harness_test.last_result(_admin(ctx), uow, harness=name)
 
 
 # ----- credentials -------------------------------------------------------------

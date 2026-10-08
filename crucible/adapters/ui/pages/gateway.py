@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.adapters.ui.actions import register
 from crucible.adapters.ui.render import _page, _redirect, _without_migration
 from crucible.adapters.ui.session import _require
@@ -19,7 +20,7 @@ from crucible.application.errors import (
 )
 from crucible.domain.entities import Principal, Role
 
-router = APIRouter(prefix="/ui", include_in_schema=False)
+router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
 
 CAPABILITY_OPTIONS = [("small", "small"), ("mid", "mid"), ("frontier", "frontier")]
 # hades #437: a routing version that flips a model or a pool cap overrides a decision.
@@ -85,15 +86,17 @@ async def gateway_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         # Build rows and model-choice form only when the operator asked for models.
         if principal.role is not Role.ADMIN:
             listing.update(
-                columns=["Model", "Offered", "Hermes", "Codex", "Thinking", "Capability", "Note"],
+                columns=["Model", "Offered", "Harnesses", "Note"],
                 rows=[
                     [
-                        row["id"],
+                        row["model"],
                         row["offered"],
-                        row["enabled"],
-                        row["codex_enabled"],
-                        row["enable_thinking"],
-                        row["capability"],
+                        ", ".join(
+                            f"{control['harness']} "
+                            f"({'enabled' if control['enabled'] else 'disabled'})"
+                            for control in row["harnesses"]
+                        )
+                        or "none",
                         _without_migration(row["note"]),
                     ]
                     for row in offered["models"]
@@ -101,35 +104,32 @@ async def gateway_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             )
         else:
             rows: list[list[Any]] = []
-            for index, row in enumerate(offered["models"]):
+            route_index = 0
+            for row in offered["models"]:
+                controls = []
+                for control in row["harnesses"]:
+                    controls.append(
+                        {
+                            "name": f"route.{route_index}.enabled",
+                            "model_name": f"route.{route_index}.model",
+                            "harness_name": f"route.{route_index}.harness",
+                            "model": row["model"],
+                            "harness": control["harness"],
+                            "value": control["enabled"],
+                            "label": control["harness"],
+                            "note": (
+                                f"vanished {control['vanished_at']}"
+                                if control.get("vanished_at")
+                                else control.get("disabled_reason") or ""
+                            ),
+                        }
+                    )
+                    route_index += 1
                 rows.append(
                     [
-                        {"kind": "hidden", "name": f"model.{index}.id", "value": row["id"]},
-                        {
-                            "kind": "checkbox",
-                            "name": f"model.{index}.enabled",
-                            "value": row["enabled"],
-                            "label": f"use {row['id']}",
-                        },
-                        {
-                            "kind": "checkbox",
-                            "name": f"model.{index}.codex",
-                            "value": row["codex_enabled"],
-                            "label": f"use Codex for {row['id']}",
-                        },
-                        {
-                            "kind": "checkbox",
-                            "name": f"model.{index}.thinking",
-                            "value": row["enable_thinking"],
-                            "label": f"thinking for {row['id']}",
-                        },
-                        {
-                            "kind": "select",
-                            "name": f"model.{index}.capability",
-                            "value": row["capability"],
-                            "options": CAPABILITY_OPTIONS,
-                            "label": f"capability of {row['id']}",
-                        },
+                        {"value": row["model"]},
+                        {"value": row["offered"]},
+                        {"kind": "checkboxes", "items": controls},
                         {"value": _without_migration(row["note"])},
                     ]
                 )
@@ -140,7 +140,7 @@ async def gateway_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                     {
                         "kind": "grid",
                         "label": "",
-                        "columns": ["Model", "Hermes", "Codex", "Thinking", "Capability", "Note"],
+                        "columns": ["Model", "Offered", "Harnesses", "Note"],
                         "rows": rows,
                     },
                     {
@@ -382,13 +382,27 @@ async def _action_gateway_models(
 ) -> Response | None:
     assert ctx.admin is not None
     picks = []
+    route_index = 0
+    while f"route.{route_index}.model" in form:
+        picks.append(
+            {
+                "model": form[f"route.{route_index}.model"],
+                "harness": form[f"route.{route_index}.harness"],
+                "enabled": form.get(f"route.{route_index}.enabled") == "true",
+            }
+        )
+        route_index += 1
     index = 0
     while f"model.{index}.id" in form:
         picks.append(
             {
                 "id": form[f"model.{index}.id"],
                 "enabled": form.get(f"model.{index}.enabled") == "true",
-                "codex_enabled": form.get(f"model.{index}.codex") == "true",
+                **(
+                    {"codex_enabled": form.get(f"model.{index}.codex") == "true"}
+                    if form.get(f"model.{index}.codex_shared") != "true"
+                    else {}
+                ),
                 "enable_thinking": form.get(f"model.{index}.thinking") == "true",
                 "capability": form.get(f"model.{index}.capability") or None,
             }

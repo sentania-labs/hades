@@ -87,7 +87,11 @@ from crucible.domain.command_timeout import effective_command_timeout_ms
 from crucible.domain.exit_class import ExitClass
 from crucible.domain.ids import new_id
 from crucible.domain.infrastructure import START_FAILURES
-from crucible.domain.role_timeouts import DEFAULT_ROLE_TIMEOUT_SECONDS, parse_role_timeouts
+from crucible.domain.role_timeouts import (
+    DEFAULT_API_RETRY_SECONDS,
+    DEFAULT_ROLE_TIMEOUT_SECONDS,
+    parse_role_timeouts,
+)
 from crucible.domain.secrets import redact
 from crucible.domain.time import parse_rfc3339
 from crucible.ports.execution import (
@@ -375,7 +379,7 @@ class KubernetesConfig:
     short_role_pods: int = 1
     poll_interval_seconds: float = 2.0
     api_timeout_seconds: float = 30.0
-    api_retry_seconds: float = 60.0
+    api_retry_seconds: float = DEFAULT_API_RETRY_SECONDS
     # The cluster's DNS service address. 26 allows port 53 on this address and nothing
     # else on it; every other destination inside the cluster stays denied.
     cluster_dns_ip: str = "10.96.0.10"
@@ -649,6 +653,7 @@ class KubernetesProvider:
         self._timeouts_source = timeouts_source
         self._credential_dead = credential_dead or (lambda: False)
         self._file_role_timeout = config.role_timeout_seconds
+        self._file_api_retry = config.api_retry_seconds
         self._settings_read_at: float | None = None
         self._file_egress = config.egress
         # Injected so the unit tier resolves without a network and the e2e tier can
@@ -712,6 +717,9 @@ class KubernetesProvider:
         # One Pod's limits as the most recent launch asked for them, which is what the
         # quota's CPU and memory are divided by for the advertised capacity.
         self._last_limits: Limits | None = None
+        # The active delivery policy document; used by _read_quota to derive the
+        # per-attempt resource shape when no launch has happened yet (hades #423 / #478).
+        self._policy: dict[str, Any] = {}
         self._pull_auths_loaded = False
         self._resolved: dict[str, tuple[float, tuple[str, ...]]] = {}
         # Registry reads run crane and wait on another host; they get threads of their
@@ -805,6 +813,20 @@ class KubernetesProvider:
 
     def _limits(self, spec: LaunchSpec) -> Limits:
         return k8sspec.limits_from_policy(spec.policy)
+
+    def _fallback_shape(self) -> Limits:
+        """hades #478: the Limits derived from the active policy, or the policy
+        store's default. Used by the capacity source string when no quota exists."""
+        return k8sspec.limits_from_policy(self._policy)
+
+    def set_policy(self, policy: dict[str, Any]) -> None:
+        """hades #478: record the active delivery policy so the quota read can use it.
+
+        The policy document is set by the supervisor from the current execution's
+        policy_snapshot; _read_quota uses it to derive the per-attempt resource shape
+        when no launch has happened yet, so the quota is never overstated.
+        """
+        self._policy = policy
 
     def _image_allowlist(self, spec: LaunchSpec) -> list[str]:
         return [
@@ -917,14 +939,24 @@ class KubernetesProvider:
         """Take the `kubernetes.timeouts` document (None: the settings file's value).
         A timeout is not a rule a canary proves, so the readiness probe stands."""
         seconds = self._file_role_timeout
+        api_retry = self._file_api_retry
         if document is not None:
             try:
-                seconds = parse_role_timeouts(document)["role_timeout_seconds"]
+                checked = parse_role_timeouts(document)
+                seconds = checked["role_timeout_seconds"]
+                api_retry = checked.get("api_retry_seconds", api_retry)
             except ValueError as exc:
                 log.error("the kubernetes.timeouts setting is refused: %s", exc)
                 return
-        if seconds != self.config.role_timeout_seconds:
-            self.config = replace(self.config, role_timeout_seconds=seconds)
+        if (
+            seconds != self.config.role_timeout_seconds
+            or api_retry != self.config.api_retry_seconds
+        ):
+            self.config = replace(
+                self.config,
+                role_timeout_seconds=seconds,
+                api_retry_seconds=api_retry,
+            )
 
     @staticmethod
     def _probe_is_settled(probe: NamespaceProbe) -> bool:
@@ -4428,39 +4460,81 @@ class KubernetesProvider:
             return CredentialFileSync(
                 auth.name, True, True, True, False, "changed; the copy carries no issued-at"
             )
+
+        def secret_older(secret_body: Mapping[str, Any]) -> datetime | None:
+            raw = (secret_body.get("data") or {}).get(_secret_key(auth.name))
+            if not raw:
+                return None
+            doc: Any = None
+            with contextlib.suppress(UnicodeDecodeError, ValueError):
+                doc = json.loads(base64.b64decode(str(raw)).decode("utf-8"))
+            return _issued_at(doc, auth.issued_at)
+
         try:
             source = await self._call(self.client.get, "secrets", copy.source_secret)
         except KubernetesApiError as exc:
             return CredentialFileSync(
                 auth.name, True, True, True, False, f"changed; source unreadable: {exc.status}"
             )
-        raw = (source.get("data") or {}).get(_secret_key(auth.name))
-        old_document: Any = None
-        if raw:
-            with contextlib.suppress(UnicodeDecodeError, ValueError):
-                old_document = json.loads(base64.b64decode(str(raw)).decode("utf-8"))
-        older = _issued_at(old_document, auth.issued_at)
+        older = secret_older(source)
         if older is not None and newer <= older:
             return CredentialFileSync(
                 auth.name, True, True, True, False, "changed; not newer than the source"
             )
-        try:
-            await self._call(
-                self.client.patch,
-                "secrets",
-                copy.source_secret,
-                {
-                    "metadata": {"labels": _owned_labels(copy.spec.harness)},
-                    "data": {_secret_key(auth.name): base64.b64encode(data).decode("ascii")},
-                },
-            )
-        except KubernetesApiError as exc:
-            return CredentialFileSync(
-                auth.name, True, True, True, False, f"changed; write back failed: {exc.status}"
-            )
-        return CredentialFileSync(
-            auth.name, True, True, True, True, "changed; newer issued-at, written back"
-        )
+        # hades #315: the patch carries the Secret's resourceVersion from the read
+        # above, so the API server itself does the compare-and-swap (339) and answers
+        # 409 when another attempt already wrote the Secret since this read. No shared
+        # pathname is ever involved; this is the whole replace, atomically.
+        # On conflict (409), re-read the Secret and retry the compare-and-swap when
+        # this candidate is still newer rather than treating every 409 as proof that
+        # the source moved past it.
+        while True:
+            resource_version = (source.get("metadata") or {}).get("resourceVersion")
+            try:
+                await self._call(
+                    self.client.patch,
+                    "secrets",
+                    copy.source_secret,
+                    {
+                        "metadata": {"labels": _owned_labels(copy.spec.harness)},
+                        "data": {_secret_key(auth.name): base64.b64encode(data).decode("ascii")},
+                    },
+                    resource_version=resource_version,
+                )
+                return CredentialFileSync(
+                    auth.name, True, True, True, True, "changed; newer issued-at, written back"
+                )
+            except KubernetesApiError as exc:
+                if exc.status != 409:
+                    return CredentialFileSync(
+                        auth.name,
+                        True,
+                        True,
+                        True,
+                        False,
+                        f"changed; write back failed: {exc.status}",
+                    )
+                try:
+                    source = await self._call(self.client.get, "secrets", copy.source_secret)
+                except KubernetesApiError as read_exc:
+                    return CredentialFileSync(
+                        auth.name,
+                        True,
+                        True,
+                        True,
+                        False,
+                        f"changed; source unreadable: {read_exc.status}",
+                    )
+                older = secret_older(source)
+                if older is not None and newer <= older:
+                    return CredentialFileSync(
+                        auth.name,
+                        True,
+                        True,
+                        True,
+                        False,
+                        "changed; source moved past the candidate, skipped",
+                    )
 
     async def _remove_credential(self, spec: LaunchSpec, copy: _CredentialCopy) -> bool:
         removed = await self._delete_credential_secret(spec.attempt_id)
@@ -5318,9 +5392,17 @@ class KubernetesProvider:
             return self._quota
         return WorkerCapacity(
             workers=self.config.max_concurrency,
-            source="kubernetes.max_concurrency (no ResourceQuota in the namespace)",
+            source=(
+                "kubernetes.max_concurrency (no ResourceQuota in the namespace; "
+                f"shape from the active policy: "
+                f"{self._fallback_shape().cpu_request} CPU / "
+                f"{self._fallback_shape().memory_request} memory)"
+            ),
             reserved_pods=self.config.short_role_pods,
             detail=(
+                f"shape from the active policy: "
+                f"{self._fallback_shape().cpu_request} CPU / "
+                f"{self._fallback_shape().memory_request} memory; "
                 f"no ResourceQuota names a counted resource in {self.config.namespace}; "
                 f"the configured fallback of {self.config.max_concurrency} applies"
             ),
@@ -5344,7 +5426,7 @@ class KubernetesProvider:
         count was read; before hades #423 nothing was reserved, so with workers at
         capacity every probe was refused. None when no quota names a counted resource."""
         rows = await self._call(self.client.list_objects, "resourcequotas")
-        limits = self._last_limits or k8sspec.limits_from_policy({})
+        limits = k8sspec.limits_from_policy(self._policy)
         reserved = max(0, self.config.short_role_pods - await self._active_short_role_pods())
         # Per attempt, and per reserved short-role Pod (one Job, one Pod, the worker's
         # shape), for each resource a quota may count.
@@ -5380,6 +5462,20 @@ class KubernetesProvider:
                     binding = f"{name} {key}".strip()
         if headroom is None or workers is None:
             return None
+        policy_name = self._policy.get("name") if isinstance(self._policy, dict) else None
+        policy_version = self._policy.get("version") if isinstance(self._policy, dict) else None
+        if policy_name is not None and policy_version is not None:
+            limits_source = f"policy {policy_name} v{policy_version}"
+        elif policy_name is not None:
+            limits_source = f"policy {policy_name}"
+        else:
+            limits_source = "the active policy"
+        shape_source = (
+            f"policy {policy_name} v{policy_version} "
+            f"{limits.cpu_request} CPU / {limits.memory_request} memory"
+            if policy_name is not None and policy_version is not None
+            else f"{limits.cpu_request} CPU / {limits.memory_request} memory from {limits_source}"
+        )
         shape = {
             "cpu": limits.cpu,
             "memory": limits.memory,
@@ -5389,14 +5485,14 @@ class KubernetesProvider:
         }
         return WorkerCapacity(
             workers=workers,
-            source=f"ResourceQuota {', '.join(names)}; {binding} binds",
+            source=f"ResourceQuota {', '.join(names)}; {binding} binds; shape from {limits_source}",
             headroom=headroom,
             reserved_pods=reserved,
             reservation={"pods": reserved, "each": shape},
             detail=(
-                f"the quota admits {headroom} Pod(s) of the worker's shape; {reserved} kept "
-                f"for Hades's short-role Pods (gate probe, collector, canary, login, "
-                f"preparer) leaves {workers} worker(s) at once"
+                f"shape from {shape_source}; the quota admits {headroom} Pod(s) of the worker's "
+                f"shape; {reserved} kept for Hades's short-role Pods (gate probe, collector, "
+                f"canary, login, preparer) leaves {workers} worker(s) at once"
             ),
         )
 

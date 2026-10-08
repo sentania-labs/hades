@@ -602,15 +602,22 @@ def kubernetes_egress_actions(document: Any, prefix: Sequence[str]) -> list[dict
 
 
 def kubernetes_timeouts_actions(document: Any, prefix: Sequence[str]) -> list[dict[str, Any]]:
-    """One action: replace the short-role timeout, prefilled with the value in force."""
+    """Update the timeouts, prefilled with the values in force."""
     if not isinstance(document, dict) or not isinstance(document.get("document"), dict):
         return []
     current = document["document"].get("role_timeout_seconds", "")
+    retry = document["document"].get("api_retry_seconds", 60)
     return [
         action(
             "set-timeouts",
-            "replace the short roles' timeout, counted from their Pod Running",
-            [*prefix, "kubernetes", "set-timeouts", f"--role-seconds={current}"],
+            "update the short-role timeout and pre-launch API retry budget",
+            [
+                *prefix,
+                "kubernetes",
+                "set-timeouts",
+                f"--role-seconds={current}",
+                f"--api-retry-seconds={retry}",
+            ],
             optional=OPTIONAL_REASON,
             roles=(ADMIN,),
         )
@@ -630,14 +637,18 @@ def local_endpoint_actions(document: Any, prefix: Sequence[str]) -> list[dict[st
         return []
     out: list[dict[str, Any]] = []
     for model in models:
-        if not isinstance(model, dict) or not model.get("id"):
+        if not isinstance(model, dict) or not (model.get("model") or model.get("id")):
             continue
-        model_id = str(model["id"])
+        model_id = str(model.get("model") or model["id"])
+        harness = str(model.get("harness") or "")
         verb = "disable" if model.get("enabled") is True else "enable"
+        label = f"{harness} / {model_id}" if harness else model_id
         out.append(
             action(
-                f"set-local-endpoint:{model_id}",
-                f"{verb} the {model_id} model on the local endpoint",
+                f"set-local-endpoint:{harness}:{model_id}"
+                if harness
+                else f"set-local-endpoint:{model_id}",
+                f"{verb} the {label} route on the local endpoint",
                 [
                     *prefix,
                     "routing",
@@ -645,6 +656,7 @@ def local_endpoint_actions(document: Any, prefix: Sequence[str]) -> list[dict[st
                     "--endpoint-url",
                     "{endpoint_url}",
                     f"--model={model_id}",
+                    *([f"--harness={harness}"] if harness else []),
                     f"--{verb}",
                 ],
                 needs={"endpoint_url": "the local endpoint's base URL"},

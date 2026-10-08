@@ -260,6 +260,7 @@ def provider_quota_event(
     *tails: str,
     predicate: Callable[[Mapping[str, Any]], bool],
     now: datetime | None = None,
+    model_only: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> ProviderQuotaEvent | None:
     """Return the refusal and reset from the same structured harness event.
 
@@ -267,7 +268,11 @@ def provider_quota_event(
     the event states ("Resets in 3h52m", hades #378) counted from `now`, the moment
     the refusal was observed (the supervisor's clock; the wall clock when no caller
     says). An event that says neither leaves `reset_at` None and the pool's default
-    cooldown applies."""
+    cooldown applies.
+
+    `model_only`, when a harness gives one, is asked about the accepted event: True
+    makes the result a model-only refusal (hades #373), which excludes the model and
+    leaves the pool unmarked. Without it every refusal is the account's."""
     for tail in tails:
         for line in reversed(tail[-TAIL_LIMIT:].splitlines()):
             try:
@@ -280,13 +285,27 @@ def provider_quota_event(
                     after = _reset_after_from_document(document)
                     if after is not None:
                         reset_at = (now or datetime.now(UTC)) + after
-                return ProviderQuotaEvent(reset_at=reset_at)
+                return ProviderQuotaEvent(
+                    reset_at=reset_at,
+                    model_only=model_only is not None and model_only(document),
+                )
     return None
 
 
 def provider_quota_exhausted(*tails: str, signals: Sequence[Pattern]) -> bool:
     """Shared pool state requires a structured signal emitted by the harness itself."""
+    return text_matches(signals, *tails)
+
+
+def text_matches(signals: Sequence[Pattern], *tails: str) -> bool:
+    """Whether any of `signals` appears in the tails, structured or not."""
     return first_match(tuple(tail[-TAIL_LIMIT:] for tail in tails), signals) is not None
+
+
+def document_strings(document: Mapping[str, Any]) -> Iterator[str]:
+    """Every string value in a harness event, nested ones included: the words an
+    adapter reads when a refusal's meaning is in its text (hades #373)."""
+    return _strings(document)
 
 
 def read_text(path: Path, limit: int = 8 * 1024 * 1024) -> str | None:

@@ -19,6 +19,7 @@ from typing import Any
 
 from crucible.application.admin.context import AdminContext, admin_event, guard_mutation
 from crucible.application.errors import ContractValidationError
+from crucible.application.runtime_settings import resolve
 from crucible.domain import role_timeouts
 from crucible.domain.cluster_egress import SETTING_NAME, ClusterEgress, parse_cluster_egress
 from crucible.domain.entities import ProviderSetting
@@ -124,15 +125,35 @@ def save_egress(
 def timeouts_view(ctx: AdminContext, uow: UnitOfWork) -> dict[str, Any]:
     """The short-role timeout in force and where it came from, as `egress_view` says."""
     row = uow.provider_settings.get(role_timeouts.SETTING_NAME)
-    seed = {"role_timeout_seconds": ctx.kubernetes_role_timeout_seed}
+    retry = resolve(
+        uow,
+        name=role_timeouts.SETTING_NAME,
+        field="api_retry_seconds",
+        seed=None,
+        seed_source="environment",
+        default=role_timeouts.DEFAULT_API_RETRY_SECONDS,
+        applies="next launch",
+    )
+    seed = {
+        "role_timeout_seconds": ctx.kubernetes_role_timeout_seed,
+        "api_retry_seconds": role_timeouts.DEFAULT_API_RETRY_SECONDS,
+    }
+    document = {**seed, **(row.document if row is not None else {})}
     return {
         "setting": role_timeouts.SETTING_NAME,
         "source": "database" if row is not None else "settings",
-        "document": row.document if row is not None else seed,
+        "document": document,
         "settings_file": seed,
+        "api_retry_seconds_source": retry.source,
+        "api_retry_seconds_applies": retry.applies,
+        "applies": "next launch",
         "bounds": {
             "min": role_timeouts.MIN_ROLE_TIMEOUT_SECONDS,
             "max": role_timeouts.MAX_ROLE_TIMEOUT_SECONDS,
+        },
+        "api_retry_bounds": {
+            "min": role_timeouts.MIN_API_RETRY_SECONDS,
+            "max": role_timeouts.MAX_API_RETRY_SECONDS,
         },
         "updated_at": row.updated_at.isoformat() if row is not None else None,
         "updated_by": row.updated_by if row is not None else None,
@@ -153,7 +174,8 @@ def save_timeouts(
         ctx, uow, reason, principal=principal, operation="kubernetes set-timeouts"
     )
     try:
-        checked = role_timeouts.parse_role_timeouts(document)
+        current = timeouts_view(ctx, uow)["document"]
+        checked = role_timeouts.parse_role_timeouts({**current, **document})
     except ValueError as exc:
         raise ContractValidationError(
             f"the {role_timeouts.SETTING_NAME} setting is not valid: {exc}",

@@ -5,12 +5,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Response
+from fastapi import Query, Response
 from sqlalchemy import text
 
 from crucible import __version__
 from crucible.adapters.api.deps import Ctx, Mutator, Reader, UoW
 from crucible.adapters.persistence.migrate import is_current
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.application.queries import (
     supervisor_health,
     supervisor_view,
@@ -28,7 +29,7 @@ from crucible.contracts.api import (
     WakeView,
 )
 
-router = APIRouter()
+router = ThreadedAPIRouter()
 
 
 @router.get("/health", response_model=HealthView)

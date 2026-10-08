@@ -30,6 +30,7 @@ FROZEN_ROUTES = [
     ("GET", "/ui/tasks"),
     ("GET", "/ui/tasks/{task_id}"),
     ("GET", "/ui/tokens"),
+    ("GET", "/ui/usage"),
     ("GET", "/ui/wakes"),
     ("GET", "/ui/workers"),
     ("GET", "/ui/workers/{attempt_id}/logs"),
@@ -44,6 +45,7 @@ FROZEN_ROUTES = [
 
 FROZEN_ACTIONS = [
     "auto-merge",
+    "status-cache",
     "bootstrap-commit",
     "bootstrap-discard",
     "command-timeout",
@@ -59,8 +61,7 @@ FROZEN_ACTIONS = [
     "harness",
     "harness-test",
     "hermes-limits",
-    "image-promote",
-    "image-rollback",
+    "image-change",
     "kubernetes-egress",
     "kubernetes-timeouts",
     "login-cancel",
@@ -69,6 +70,8 @@ FROZEN_ACTIONS = [
     "login-start",
     "policy-upload",
     "repository-register",
+    # hades #265: the Repositories page's picker registers its ticked repositories together.
+    "repository-register-batch",
     "repository-remove",
     "routing-clear",
     "routing-model",

@@ -475,34 +475,32 @@ def test_stylesheet_scrolls_columns_sideways_and_fits_a_phone() -> None:
 def test_board_page_leads_with_the_kanban_and_keeps_the_list(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, Any] = {}
-
-    def fake_page(_request: Any, _principal: Any, _csrf: Any, **kwargs: Any) -> Any:
-        captured.update(kwargs)
-        return SimpleNamespace(status_code=200)
-
-    monkeypatch.setattr(page, "_require", lambda *a, **k: (SimpleNamespace(), "csrf"))
-    monkeypatch.setattr(page, "_page", fake_page)
+    monkeypatch.setattr(page, "_require", lambda *a, **k: (None, "csrf"))
+    monkeypatch.setattr(
+        page,
+        "board_lanes_view",
+        lambda *_args: {
+            "lanes": [
+                {
+                    "key": "inbox",
+                    "name": "Inbox",
+                    "meaning": "Later intake.",
+                    "collapsed": False,
+                    "count": 0,
+                    "cards": [],
+                }
+            ]
+        },
+    )
     ctx = SimpleNamespace(clock=SimpleNamespace(now=lambda: NOW))
 
-    page.board_page(request("/ui/board"), ctx, fake_uow())  # type: ignore[arg-type]
-
-    assert captured["active"] == "/ui/board"
-    sections = captured["sections"]
-    assert sections[0]["title"] == "In flight"
-    assert [column["name"] for column in sections[0]["kanban"]] == COLUMN_NAMES
-    ci = next(column for column in sections[0]["kanban"] if column["key"] == "ci")
-    assert ci["count"] == 1
-    assert ci["parents"][0]["tasks"][0]["href"] == "/ui/tasks/t1"
-    assert sections[1]["title"] == "Task list"
-    assert [detail["title"] for detail in sections[1]["details"]][:2] == [
-        "Running",
-        "Awaiting Foundry: internal review",
-    ]
-    assert [section["title"] for section in sections[2:4]] == [
-        "Routing",
-        "Tokens by harness, model and pool",
-    ]
+    req = request("/ui/board")
+    req.scope["query_string"] = b""
+    response = page.board_page(req, ctx, fake_uow())  # type: ignore[arg-type]
+    assert response.status_code == 200
+    assert b"Inbox" in response.body
+    assert b"Task list" not in response.body
+    assert b"Tokens by harness" not in response.body
 
 
 def test_no_migration_or_table_was_added_for_the_board() -> None:

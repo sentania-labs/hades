@@ -21,6 +21,7 @@ from crucible.adapters.ui.pages import (
     settings,
     tasks,
     tokens,
+    usage,
     wakes,
     workers,
 )
@@ -39,6 +40,7 @@ router.routes.extend(routing.router.routes)
 router.routes.extend(routing_models.router.routes)
 router.routes.extend(repositories.router.routes)
 router.routes.extend(tokens.router.routes)
+router.routes.extend(usage.router.routes)
 router.routes.extend(github.router.routes)
 router.routes.extend(workers.router.routes)
 router.routes.extend(proposals.router.routes)

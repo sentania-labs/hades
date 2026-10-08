@@ -139,6 +139,7 @@ class Wiring:
             credential_renewal=(
                 self._credential_renewal if self.credential_renewer is not None else None
             ),
+            admin_context=self.admin,
         )
 
     def _credential_renewal(self) -> bool:
@@ -571,6 +572,9 @@ def wire(settings: Settings, *, role: ProcessRole) -> Wiring:
         credential_retention_hours=settings.admin.credential_retention_hours,
         probe_timeout_seconds=settings.admin.probe_timeout_seconds,
         login_timeout_seconds=settings.admin.login_timeout_seconds,
+        status_cache_ttl_seconds=settings.admin.status_cache_ttl_seconds,
+        status_cache_enabled=role != "admin",
+        status_cache_shared=role != "admin",
         login_commands={k: tuple(v) for k, v in settings.admin.login_commands.items()},
         proxy_config_path=settings.admin.proxy_config_path,
         proxy_subnet=settings.admin.proxy_subnet,

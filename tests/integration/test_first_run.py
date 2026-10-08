@@ -273,12 +273,12 @@ def test_the_gateway_is_set_tested_and_its_models_picked(
     assert result["gateway"]["credential_state"] == "validated"
     assert "GET /health/readiness" in stubs.stubs.seen and "GET /v1/models" in stubs.stubs.seen
 
-    # #121: what the key can see, beside the seeded `coder` entry the gateway lacks.
+    # #121: only what the key can see, without the seeded `coder` entry it lacks.
     listing = admin.get("/v1/admin/gateway/models").json()
     rows = {row["id"]: row for row in listing["models"]}
     assert listing["reachable"] is True and listing["offered_count"] == 2
     assert rows["fast"]["offered"] is True and rows["fast"]["in_policy"] is False
-    assert rows["coder"]["offered"] is False and rows["coder"]["in_policy"] is True
+    assert set(rows) == {"fast", "coder-large"}
 
     refused = admin.post(
         "/v1/admin/gateway/models",
@@ -304,9 +304,8 @@ def test_the_gateway_is_set_tested_and_its_models_picked(
     codes = [s["code"] for s in _readiness(admin, "hermes")["steps"]]
     assert codes == ["no_promoted_image"]
 
-    # A model the gateway stops offering is disabled with that reason, not removed. The
-    # page still shows `fast` ticked, and saving it exactly as shown does that rather
-    # than refuse.
+    # The page only shows what the key can still see. Saving that view disables the
+    # missing `fast` route with the not-offered reason rather than removing it.
     stubs.stubs.config["models"] = ["coder-large"]
     with TestClient(create_app(ctx)) as browser:
         csrf = ui_sign_in(browser, tokens["admin"])
@@ -315,7 +314,7 @@ def test_the_gateway_is_set_tested_and_its_models_picked(
         assert "Set the gateway URL and key" in plain_page
         assert "List the gateway" in plain_page
         page = browser.get("/ui/gateway?models=1").text
-        assert "not offered by the gateway; saving disables it" in page
+        assert 'value="fast"' not in page
         shown_rows = re.findall(r'name="model\.(\d+)\.id" value="([^"]+)"', page)
         form = {"csrf": csrf, "reason": "saved as shown", "return_to": "/ui/gateway"}
         form["max_concurrency"] = "2"
@@ -505,36 +504,44 @@ def test_github_is_connected_installed_and_a_repository_picked(
     steps = admin.get("/v1/admin/status").json()["readiness"]["steps"]
     assert "no_repository" not in [s["code"] for s in steps]
 
-    # The UI: the install link, the picker's select of unregistered repositories.
+    # The UI: the install link on GitHub, and the picker on Repositories (#265), which
+    # offers a tick only for the unregistered repositories it can register.
     with TestClient(create_app(ctx)) as browser:
         csrf = ui_sign_in(browser, tokens["admin"])
         page = browser.get("/ui/github")
         assert page.status_code == 200
         assert 'href="https://github.com/apps/crucible-test/installations/new"' in page.text
-        assert '<option value="octo-lab/gadgets"' in page.text
-        assert '<option value="octo-lab/widgets"' not in page.text
+        assert 'href="/ui/repositories?installation=7#installation-7"' in page.text
+        assert "octo-lab/gadgets" not in page.text
+        assert "PRIVATE KEY" not in page.text
+        page = browser.get("/ui/repositories")
+        assert page.status_code == 200
+        assert 'name="pick:octo-lab/gadgets"' in page.text
+        assert 'name="pick:octo-lab/widgets"' not in page.text
         # Registered already, and the archived one is marked and never offered.
-        assert '<option value="octo-lab/secret"' not in page.text
-        assert '<option value="octo-lab/old"' not in page.text
+        assert 'name="pick:octo-lab/secret"' not in page.text
+        assert 'name="pick:octo-lab/old"' not in page.text
         assert "archived: cannot take a pull request" in page.text
         assert "not supported yet" not in page.text
         assert "PRIVATE KEY" not in page.text
         posted = browser.post(
-            "/ui/actions/github-add-repository",
+            "/ui/actions/repository-register-batch",
             data={
                 "csrf": csrf,
                 "installation_id": "7",
-                "repository": "octo-lab/gadgets",
-                "name": "",
+                "pick:octo-lab/gadgets": "true",
+                "pick:octo-lab/old": "true",
                 "policy_name": "default-software",
                 "attested_all_prs": "true",
                 "reason": "second repository",
-                "return_to": "/ui/github",
+                "return_to": "/ui/repositories?installation=7",
             },
             follow_redirects=False,
         )
         assert posted.status_code == 303
-        assert "Registered gadgets" in unquote(posted.headers["location"])
+        location = unquote(posted.headers["location"])
+        assert "Registered 1: octo-lab/gadgets as gadgets." in location
+        assert "octo-lab/old (archived: cannot take a pull request)" in location
     names = {r["repository"] for r in admin.get("/v1/admin/repositories").json()["items"]}
     assert {"widgets", "gadgets"} <= names
 
@@ -843,11 +850,11 @@ def test_github_app_is_created_with_one_click_and_installed(
         setup = installed.headers["location"]
         assert setup.startswith(f"{HADES}/ui/github/installed?installation_id=31")
         landed = browser.get(setup[len(HADES) :], follow_redirects=False)
-        assert _flash(landed).startswith("/ui/github?kind=ok&message=Installed on GitHub")
-        picker = browser.get("/ui/github").text
+        assert _flash(landed).startswith("/ui/repositories?kind=ok&message=Installed on GitHub")
+        picker = browser.get("/ui/repositories").text
         responses.append(picker)
         assert "octo-lab (Organization), installation 31" in picker
-        assert '<option value="octo-lab/widgets"' in picker
+        assert 'name="pick:octo-lab/widgets"' in picker
 
     # The key and the webhook secret are never in an answer, a page or the audit.
     audit_response = admin.get("/v1/admin/audit", params={"limit": 200})

@@ -3,13 +3,19 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.adapters.ui.actions import register
 from crucible.adapters.ui.pages import routing_models as routing_models_page
-from crucible.adapters.ui.render import _document_section, _duration_words, _page
+from crucible.adapters.ui.render import (
+    _document_section,
+    _duration_words,
+    _page,
+    _routing_policy_details,
+)
 from crucible.adapters.ui.session import _require
 from crucible.application.admin import credentials as credentials_admin
 from crucible.application.admin import gate_classes as gate_classes_admin
@@ -19,12 +25,13 @@ from crucible.application.admin import routing, routing_preference
 from crucible.application.admin.context import guard_mutation
 from crucible.application.errors import ConflictError, ContractValidationError
 from crucible.application.policies import put_policy, put_routing_policy
+from crucible.contracts.policy import routing_model_name
 from crucible.domain.cluster_egress import format_labels, parse_labels
 from crucible.domain.entities import Principal, Role
 from crucible.domain.gates import ALWAYS_BLOCKING_GATES, PRE_PR_GATES
 from crucible.domain.secrets import scan_text
 
-router = APIRouter(prefix="/ui", include_in_schema=False)
+router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
 
 
 @router.get("/routing", response_class=HTMLResponse)
@@ -52,6 +59,7 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     role_timeouts = kubernetes_admin.timeouts_view(ctx.admin, uow)
     capacity = await kubernetes_admin.capacity_view(ctx.admin)
     role_seconds = int(role_timeouts["document"].get("role_timeout_seconds") or 0)
+    api_retry_seconds = int(role_timeouts["document"].get("api_retry_seconds") or 0)
     gateway_endpoint, _source = routing.gateway_url(uow)
     command_timeout = limits_admin.command_timeout_view(uow)
     preference = routing_preference.preference_view(uow)
@@ -61,7 +69,9 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     bounds = command_timeout["command_timeout_ms"]
     dns = egress["document"].get("dns") or {}
     endpoint = egress["document"].get("local_endpoint") or {}
-    local_models = ", ".join(m["id"] for m in local["models"] if m.get("enabled")) or "none"
+    local_models = (
+        ", ".join(routing_model_name(m) for m in local["models"] if m.get("enabled")) or "none"
+    )
     per_harness = (
         (policy.document.get("concurrency", {}).get("per_harness") or {}) if policy else {}
     )
@@ -189,6 +199,18 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             "",
         ],
         [
+            "Kubernetes launch API retry budget",
+            {
+                "kind": "note",
+                "value": f"{api_retry_seconds} seconds",
+                "hint": (
+                    f"source: {role_timeouts['api_retry_seconds_source']}; applies: "
+                    f"{role_timeouts['api_retry_seconds_applies']}"
+                ),
+            },
+            "",
+        ],
+        [
             "Kubernetes worker capacity",
             {
                 "kind": "note",
@@ -216,9 +238,12 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                 _document_section("Kubernetes worker capacity", capacity),
                 _document_section("Per-command timeout", command_timeout),
                 _document_section("Gate classes", classes),
-                _document_section("Delivery policy document", policy.document if policy else {}),
-                _document_section(
-                    "Routing policy document", routing_record.document if routing_record else {}
+                *(
+                    _routing_policy_details(
+                        routing_record.document if routing_record else None,
+                        policy.document if policy else None,
+                    )
+                    for _ in [1]
                 ),
             ],
         },
@@ -237,7 +262,6 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                         "kind": "form",
                         "action": "/ui/actions/routing-clear",
                         "label": "Clear",
-                        "reason": "optional",
                         "hidden": {"pool": item["pool"]},
                     }
                     if admin
@@ -459,7 +483,9 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                     "workspace for a publish. Pulling the image and waiting for a node "
                     "count against the launch timeout instead. Seconds, "
                     f"{role_timeouts['bounds']['min']} to {role_timeouts['bounds']['max']}. "
-                    "Every process picks a save up within 15 seconds."
+                    "The launch API retry budget covers transport failures before a worker "
+                    "starts and applies on the next launch. Every process picks a save up "
+                    "within 15 seconds."
                 ),
                 "form": {
                     "action": "/ui/actions/kubernetes-timeouts",
@@ -471,6 +497,13 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                             "label": "Short-role timeout (seconds)",
                             "kind": "number",
                             "value": role_seconds,
+                            "required": True,
+                        },
+                        {
+                            "name": "api_retry_seconds",
+                            "label": "Launch API retry budget (seconds)",
+                            "kind": "number",
+                            "value": api_retry_seconds,
                             "required": True,
                         },
                         {"name": "reason", "label": "Reason", "required": True},
@@ -592,7 +625,8 @@ def _versions_section(uow: UoW, name: str) -> dict[str, Any]:
 
 
 def _capacity_words(capacity: dict[str, Any]) -> str:
-    """hades #423: the worker capacity in one line: headroom, reservation, result."""
+    """hades #423, #478: the worker capacity in one line: headroom, reservation, result,
+    and the quota row that produced the number."""
     if not capacity.get("provider_enabled"):
         return "not in use: the Kubernetes provider is off"
     if capacity.get("error"):
@@ -600,15 +634,19 @@ def _capacity_words(capacity: dict[str, Any]) -> str:
     workers = capacity.get("worker_capacity")
     headroom = capacity.get("quota_headroom")
     reserved = capacity.get("short_role_pods_reserved") or 0
+    source = capacity.get("capacity_source", "")
     if headroom is None:
         return (
             f"{workers} worker(s) at once from kubernetes.max_concurrency; "
             "no quota in the namespace"
         )
-    return (
-        f"{workers} worker(s) at once: the quota admits {headroom} Pod(s), "
-        f"{reserved} kept for short-role Pods"
-    )
+    parts = [f"{workers} worker(s) at once: the quota admits {headroom} Pod(s)"]
+    # AC3: show the quota row and the shape source that produced the capacity
+    if "shape from " in source:
+        shape_segment = source.split("shape from ")[1].split(";")[0].strip()
+        parts.append(f"shape from {shape_segment}")
+    parts.append(f"{reserved} kept for short-role Pods")
+    return ", ".join(parts)
 
 
 def _milliseconds(form: dict[str, str], name: str) -> int | None:
@@ -737,15 +775,23 @@ async def _actions(
         )
     elif action == "kubernetes-timeouts":
         raw_seconds = form.get("role_timeout_seconds", "").strip()
+        raw_retry_seconds = form.get("api_retry_seconds", "").strip()
+        document: dict[str, Any] = {
+            "role_timeout_seconds": int(raw_seconds)
+            if raw_seconds.lstrip("-").isdigit()
+            else raw_seconds
+        }
+        if raw_retry_seconds:
+            document["api_retry_seconds"] = (
+                int(raw_retry_seconds)
+                if raw_retry_seconds.lstrip("-").isdigit()
+                else raw_retry_seconds
+            )
         kubernetes_admin.save_timeouts(
             ctx.admin,
             uow,
             principal=principal.name,
-            document={
-                "role_timeout_seconds": int(raw_seconds)
-                if raw_seconds.lstrip("-").isdigit()
-                else raw_seconds
-            },
+            document=document,
             reason=reason,
         )
     elif action in ("routing-upload", "policy-upload"):

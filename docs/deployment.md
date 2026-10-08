@@ -133,13 +133,15 @@ and is its only writer (crucible#168). No public DNS record is needed: every red
 of your own browser, so the internal hostname you use for the UI is enough, and the App
 has no webhook (Crucible polls). If Crucible sees a different address than your browser
 uses, set it under Return address (`crucible admin github set-external-url`). Then press
-Install on GitHub; GitHub sends you back to the repository picker. Create is the only
+Install on GitHub; GitHub sends you back to the repository picker on Repositories, where
+each installation's repositories can be filtered by name, paged, and ticked to register
+several at once under one policy. Create is the only
 way to connect an App. To change Apps, use Replace the App on the same page, install the
 new App, and register each repository again on Repositories with its new installation.
 A deployment that sealed `crucible-github-app` before this change takes it out of its
 GitOps repository without pruning it, or creates the App again afterwards.
 
-**Private repositories need the App and nothing else** (ADR 0019). The picker registers a
+**Private repositories need the App and nothing else** (ADR 0019). The picker on Repositories registers a
 private repository as private; the Repositories form and `crucible admin repository
 register --private` do the same for one it cannot show, with the installation ID that
 covers it. Registration asks GitHub for a read-only token for that repository and revokes
@@ -319,13 +321,20 @@ that older image is no longer offered for it; roll the Crucible release back wit
 
 For Hermes, use **Local gateway** to set the HTTPS `/v1` gateway URL and the LiteLLM
 virtual key together (also `crucible admin gateway set --endpoint-url URL --key` or
-`POST /v1/admin/gateway`), then tick the gateway's models to use, their thinking
-preference and capability, and the pool concurrency; saving the models writes a new
-routing policy version. Crucible writes the key into the `crucible-harness-hermes`
+`POST /v1/admin/gateway`), then tick the harness routes to use under each gateway model
+and set the pool concurrency; saving the models writes a new routing policy version. Crucible writes the key into the `crucible-harness-hermes`
 Secret, creating it if it is absent, and tests both: unauthenticated
 `/health/readiness` must return 200, then authenticated `/v1/models` decides. The key is
 never shown again; the page and `GET /v1/admin/credentials/hermes` report only
 `key_set`. The committed lab CA is already installed in the worker image trust store.
+The model list is one row per name returned by that authenticated request, with the
+harnesses using the model as controls beneath it. A newly offered model has an unchecked
+Hermes control; selecting it creates its first route. Saving model choices preserves
+existing thinking preferences, which remain editable in the routing policy.
+Routing publishes may reference only names in that listing. The same `model` value is used by task launches, credential
+probes, and the Harnesses page Test. If the gateway later drops a name, the supervisor's
+scheduled listing disables every harness route under it, records the disappearance time,
+and raises an orchestrator wake.
 
 The operator's own daily-use harness directories are never read, copied or referenced
 (12). These are dedicated Crucible logins.

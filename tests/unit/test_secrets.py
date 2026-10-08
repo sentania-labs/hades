@@ -75,7 +75,8 @@ def test_find_secrets_reports_path_not_value() -> None:
     doc = {"a": {"b": ["fine", _join("ghp_", _repeat("c", 36))]}, "c": "ok"}
     matches = find_secrets(doc)
     assert [(m.path, m.pattern) for m in matches] == [("a.b[1]", "github_token")]
-    assert "ccc" not in repr(matches)
+    assert matches[0].excerpt == "ghp...ccc"
+    assert _repeat("c", 4) not in repr(matches)
 
 
 def test_gitleaks_config_carries_every_scanner_pattern() -> None:

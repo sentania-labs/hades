@@ -655,8 +655,8 @@ def test_every_remaining_ui_mutation_dispatches_to_the_shared_application_servic
         (ui.login, "submit_code", stub("login-code")),
         (ui.login, "cancel_login", stub("login-cancel")),
         (ui.login, "finish_login", stub("login-finish")),
-        (ui.images, "promote", async_stub("image-promote")),
-        (ui.images, "rollback", async_stub("image-rollback")),
+        (ui.images, "defaults", async_stub("image-change")),
+        (ui.images, "list_all", async_stub("image-change")),
         (ui.routing, "clear_exhaustion", stub("routing-clear")),
         (ui.repositories, "register", stub("repository-register")),
         (ui.repositories, "remove", stub("repository-remove")),
@@ -681,8 +681,7 @@ def test_every_remaining_ui_mutation_dispatches_to_the_shared_application_servic
         ("login-code", {"harness": "codex", "code": "fixture-code"}),
         ("login-cancel", {"harness": "codex"}),
         ("login-finish", {"harness": "codex"}),
-        ("image-promote", {"harness": "hermes", "digest": "sha256:" + "a" * 64}),
-        ("image-rollback", {"harness": "hermes"}),
+        ("image-change", {"harness": "hermes", "digest": "sha256:" + "a" * 64}),
         ("routing-clear", {"pool": "primary"}),
         (
             "routing-upload",
@@ -723,8 +722,7 @@ def test_every_remaining_ui_mutation_dispatches_to_the_shared_application_servic
         "login-code",
         "login-cancel",
         "login-finish",
-        "image-promote",
-        "image-rollback",
+        "image-change",
         "routing-clear",
         "routing-upload",
         "policy-upload",
@@ -1445,8 +1443,7 @@ def test_row_actions_offer_an_optional_reason_and_destructive_ones_require_it(
         }
         for path, action in (
             ("/ui/harnesses", "/ui/actions/harness"),
-            ("/ui/images", "/ui/actions/image-promote"),
-            ("/ui/images", "/ui/actions/image-rollback"),
+            ("/ui/images", "/ui/actions/image-change"),
             ("/ui/routing", "/ui/actions/routing-clear"),
         ):
             for found in reason_inputs(pages[path], action):
@@ -1456,13 +1453,17 @@ def test_row_actions_offer_an_optional_reason_and_destructive_ones_require_it(
             assert 'placeholder="Reason (required)"' in found and found.endswith("required>")
         # The Test action is a read-only check and asks for no reason at all.
         assert reason_inputs(pages["/ui/harnesses"], "/ui/actions/harness-test")[0] == ""
+        # The images page no longer has reason inputs on its row actions.
+        # Verify the image-change form has no reason field.
+        assert 'name="reason"' not in pages["/ui/images"]
 
+        # Post the unified image-change action with the previous digest to trigger a rollback.
         noted = browser.post(
-            "/ui/actions/image-rollback",
+            "/ui/actions/image-change",
             data={
                 "csrf": csrf,
                 "harness": "hermes",
-                "reason": "0.5.6 regressed the gateway call",
+                "digest": "sha256:" + "b" * 64,
                 "return_to": "/ui/images",
             },
             follow_redirects=False,
@@ -1478,7 +1479,7 @@ def test_row_actions_offer_an_optional_reason_and_destructive_ones_require_it(
     rollback = next(
         e for e in events if e["kind"] == "image_promoted" and e["payload"].get("rollback")
     )
-    assert rollback["payload"]["reason"] == "0.5.6 regressed the gateway call"
+    assert rollback["payload"]["reason"] is None
     with ctx.uow_factory() as uow:
         mark = uow.pool_exhaustions.get("primary")
         assert mark is not None and mark.cleared_at is not None
@@ -2634,16 +2635,23 @@ def test_kubernetes_timeouts_through_api_cli_and_ui(
     admin_ctx.providers["kubernetes"] = probe
     first = admin_client.get("/v1/admin/kubernetes/timeouts").json()
     assert first["source"] == "settings"
-    assert first["document"] == {"role_timeout_seconds": 120}
+    assert first["document"] == {"role_timeout_seconds": 120, "api_retry_seconds": 60}
     assert first["bounds"] == {"min": 10, "max": 3600}
+    assert first["api_retry_bounds"] == {"min": 1, "max": 600}
+    assert first["api_retry_seconds_source"] == "default"
+    assert first["api_retry_seconds_applies"] == "next launch"
 
     saved = admin_client.post(
         "/v1/admin/kubernetes/timeouts",
-        json={"role_timeout_seconds": 300, "reason": "api: slow NFS"},
+        json={
+            "role_timeout_seconds": 300,
+            "api_retry_seconds": 45,
+            "reason": "api: slow NFS",
+        },
     )
     assert saved.status_code == 200, saved.text
     assert saved.json()["source"] == "database"
-    assert saved.json()["document"] == {"role_timeout_seconds": 300}
+    assert saved.json()["document"] == {"role_timeout_seconds": 300, "api_retry_seconds": 45}
     assert probe.reloads == 1
     for bad in (5, 99999, "300", None):
         refused = admin_client.post(
@@ -2651,11 +2659,13 @@ def test_kubernetes_timeouts_through_api_cli_and_ui(
         )
         assert refused.status_code == 422, (bad, refused.text)
     assert admin_client.get("/v1/admin/kubernetes/timeouts").json()["document"] == {
-        "role_timeout_seconds": 300
+        "role_timeout_seconds": 300,
+        "api_retry_seconds": 45,
     }
 
     assert run_cli(config_file, "kubernetes", "timeouts", capsys=capsys)["document"] == {
-        "role_timeout_seconds": 300
+        "role_timeout_seconds": 300,
+        "api_retry_seconds": 45,
     }
     cli_saved = run_cli(
         config_file,
@@ -2664,7 +2674,7 @@ def test_kubernetes_timeouts_through_api_cli_and_ui(
         "--role-seconds=240",
         capsys=capsys,
     )
-    assert cli_saved["document"] == {"role_timeout_seconds": 240}
+    assert cli_saved["document"] == {"role_timeout_seconds": 240, "api_retry_seconds": 45}
 
     with TestClient(create_app(ctx)) as browser:
         csrf = ui_sign_in(browser, tokens["admin"])
@@ -2672,11 +2682,15 @@ def test_kubernetes_timeouts_through_api_cli_and_ui(
         assert page.status_code == 200
         assert 'action="/ui/actions/kubernetes-timeouts"' in page.text
         assert 'value="240"' in page.text
+        assert 'name="api_retry_seconds"' in page.text
+        assert 'value="45"' in page.text
+        assert "source: saved; applies: next launch" in page.text
         ui_saved = browser.post(
             "/ui/actions/kubernetes-timeouts",
             data={
                 "csrf": csrf,
                 "role_timeout_seconds": "180",
+                "api_retry_seconds": "30",
                 "reason": "ui: back down",
                 "return_to": "/ui/routing",
             },
@@ -2685,7 +2699,7 @@ def test_kubernetes_timeouts_through_api_cli_and_ui(
         assert ui_saved.status_code == 303
         assert "Completed" in unquote(ui_saved.headers.get("location", ""))
     final = admin_client.get("/v1/admin/kubernetes/timeouts").json()
-    assert final["document"] == {"role_timeout_seconds": 180}
+    assert final["document"] == {"role_timeout_seconds": 180, "api_retry_seconds": 30}
     assert final["reason"] == "ui: back down"
     assert probe.reloads == 2
     kinds = audit_kinds(admin_client)
@@ -2763,11 +2777,26 @@ def test_a_harness_test_reports_each_step_and_stops_at_the_first_failure(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """crucible#118: one Test per harness runs the path a task takes and says, per step,
-    pass or fail in plain words. It asks for no reason (crucible#117)."""
+    pass or fail in plain words. It asks for no reason (crucible#117). The POST starts the
+    run in the background and answers its running marker at once; the result lands on
+    the harness row, where `GET /admin/harnesses/{name}/test` reads it (issue 147)."""
+
+    def tested(harness: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        started = admin_client.post(f"/v1/admin/harnesses/{harness}/test", json=body)
+        assert started.status_code == 202, started.text
+        marker = started.json()
+        assert marker["status"] == "running" and marker["ok"] is None, marker
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            latest: dict[str, Any] = admin_client.get(f"/v1/admin/harnesses/{harness}/test").json()
+            if latest["status"] == "finished" and latest["started_at"] >= marker["started_at"]:
+                return latest
+            time.sleep(0.05)
+        raise AssertionError(f"the {harness} test did not land within 30 s")
+
     asyncio.run(live_supervisor.tick())
-    untested = admin_client.post("/v1/admin/harnesses/hermes/test")
-    assert untested.status_code == 200, untested.text
-    result = untested.json()
+    assert admin_client.get("/v1/admin/harnesses/hermes/test").json()["status"] == "not tested"
+    result = tested("hermes")
     assert result["ok"] is False and result["failed_step"] == "Worker image"
     assert [s["result"] for s in result["steps"]] == [
         "pass",
@@ -2790,7 +2819,7 @@ def test_a_harness_test_reports_each_step_and_stops_at_the_first_failure(
         uow.commit()
     # Hermes has no key in this tier: the test stops at the credential, before a worker.
     probes_before = len(provider.probes)
-    missing = admin_client.post("/v1/admin/harnesses/hermes/test", json={}).json()
+    missing = tested("hermes", {})
     assert missing["failed_step"] == "Credential"
     assert "no API key is stored" in missing["steps"][2]["detail"]
     assert "Local gateway" in missing["steps"][2]["detail"]
@@ -2808,13 +2837,13 @@ def test_a_harness_test_reports_each_step_and_stops_at_the_first_failure(
         "Model call",
     ]
     assert passed["steps"][2]["detail"] == "this harness needs none"
-    through_api = admin_client.post("/v1/admin/harnesses/script-harness/test").json()
+    through_api = tested("script-harness")
     assert through_api["ok"] is True
     assert provider.probe_requests[-1].harness == "script-harness"
 
     # A model provider that refuses the credential fails the model call, named as such.
     provider.probe_outcome = "auth_failure"
-    refused = admin_client.post("/v1/admin/harnesses/codex/test").json()
+    refused = tested("codex")
     assert refused["failed_step"] == "Model call", refused
     assert "refused the credential" in refused["steps"][-1]["detail"]
 

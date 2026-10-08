@@ -80,6 +80,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("--service-image", required=True, help="repository:version")
     parser.add_argument("--worker-repository", required=True)
+    # hades #476: set when the release decided the worker image is unchanged and
+    # republished the previous release's image by digest instead of building one.
+    parser.add_argument(
+        "--worker-reused-from",
+        default="",
+        help="the previous release's version, when the worker image was reused by digest",
+    )
     args = parser.parse_args(argv)
     try:
         _, sep, version = args.service_image.rpartition(":")
@@ -98,7 +105,17 @@ def main(argv: list[str] | None = None) -> int:
             if registry_digest(latest) == refs[1][1]
             else f"- `{latest}` was left alone: {version} is not the highest published version.\n"
         )
-        sys.stdout.write(render(refs, latest_note))
+        # The worker image's own digest is still read back above, from the tag this
+        # release just copied it to; this note only says plainly that it is a copy,
+        # not a fresh build, naming the release it was reused from.
+        reused_note = (
+            f"- the worker image is unchanged since `{args.worker_repository}:"
+            f"{args.worker_reused_from}`; republished at `{worker}@{refs[1][1]}` by digest, "
+            "not rebuilt.\n"
+            if args.worker_reused_from
+            else ""
+        )
+        sys.stdout.write(render(refs, latest_note + reused_note))
     except NotesError as exc:
         print(f"release_notes: {exc}", file=sys.stderr)
         return 1

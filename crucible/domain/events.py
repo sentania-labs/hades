@@ -174,6 +174,7 @@ class EventKind(StrEnum):
     WORKER_QUIET = "worker_quiet"
     WORKER_STALLED = "worker_stalled"
     # administration (25): every mutation, with principal, reason, before and after
+    STATUS_CACHE_UPDATED = "status_cache_updated"
     AUTO_MERGE_UPDATED = "auto_merge_updated"
     CREDENTIAL_VALIDATED = "credential_validated"
     CREDENTIAL_PROBED = "credential_probed"
@@ -215,6 +216,7 @@ class EventKind(StrEnum):
     PRINCIPAL_REVOKED = "principal_revoked"
     PRINCIPAL_RENAMED = "principal_renamed"
     REPOSITORY_REGISTERED = "repository_registered"
+    REPOSITORY_BATCH_REGISTERED = "repository_batch_registered"
     REPOSITORY_REBOUND = "repository_rebound"
     REPOSITORY_REMOVED = "repository_removed"
     REPOSITORY_ATTESTATION_RECORDED = "repository_attestation_recorded"

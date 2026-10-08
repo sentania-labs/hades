@@ -133,17 +133,17 @@ def test_preparer_checks_seal_and_task_ancestry_before_using_bundle(
         .replace("/tmp/gitconfig", str(tmp_path / "gitconfig"))
     )
     result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False)
-    if mode == "descendant":
+    if mode in {"descendant", "secret"}:
         assert result.returncode == 0, result.stderr
         assert _git(work / "repo", "rev-parse", "HEAD") == failed
+        if mode == "secret":
+            assert "path=credential.txt" in result.stderr
+            assert "rule=github_installation_token" in result.stderr
+            assert "excerpt=ghs...AAA" in result.stderr
     else:
         assert result.returncode == 4
         assert (
-            "does not descend from task head"
-            if mode == "divergent"
-            else "contains a secret pattern"
-            if mode == "secret"
-            else "does not match its seal"
+            "does not descend from task head" if mode == "divergent" else "does not match its seal"
         ) in result.stderr
         assert not (work / "output" / "prepared-head.txt").exists()
     # Preparing the next attempt never publishes the failed work.
@@ -178,7 +178,7 @@ def test_gate_failure_wake_names_next_starting_head(monkeypatch: pytest.MonkeyPa
     assert "remote_branch is an explicit alternative" in wake.payload["summary"]
 
 
-def test_no_secrets_failure_wake_names_published_head(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_secrets_failure_wake_names_correctable_match(monkeypatch: pytest.MonkeyPatch) -> None:
     supervisor, pending, uow = _routing_setup(monkeypatch, all_busy=False)
     pending.task.state = TaskState.REPORTED
     pending.task.head_sha = "unsafe-head"
@@ -203,5 +203,6 @@ def test_no_secrets_failure_wake_names_published_head(monkeypatch: pytest.Monkey
         execution=pending.execution,
     )
     wake = uow.wakes.add.call_args.args[0]
-    assert "failed bundle is unsafe because no_secrets failed" in wake.payload["summary"]
-    assert "published head published-head" in wake.payload["summary"]
+    assert "secret pattern matched" in wake.payload["summary"]
+    assert "defaults to last_attempt at unsafe-head" in wake.payload["summary"]
+    assert "where the match can be removed" in wake.payload["summary"]

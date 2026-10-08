@@ -21,7 +21,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from crucible.domain.gates import injected_shim_text
-from crucible.domain.secrets import secret_pattern_expressions
+from crucible.domain.secrets import named_secret_pattern_expressions
 from crucible.ports.execution import (
     OUTPUT_MOUNT,
     PACKAGE_CACHE_LEAF,
@@ -396,7 +396,22 @@ fi
     resume = "1" if from_remote_branch else "0"
     bundle_resume = ""
     if resume_bundle is not None:
-        secret_patterns = " ".join(_quote(pattern) for pattern in secret_pattern_expressions())
+        secret_rules = "\n".join(
+            f"scan_added {_quote(name)} {_quote(pattern)}"
+            for name, pattern in named_secret_pattern_expressions()
+        )
+        harness_excludes = tuple(
+            entry.removeprefix("/").removesuffix("/")
+            for entry in exclude_entries
+            if entry in {"/.hermes/", "/.qwen/"}
+        )
+        harness_case = (
+            "      "
+            + "|".join(part for path in harness_excludes for part in (path, f"{path}/*"))
+            + ") continue ;;"
+            if harness_excludes
+            else "      __crucible_no_harness_state__) continue ;;"
+        )
         bundle_resume = f"""
 if [ ! -f {_quote(resume_bundle)} ] || [ -L {_quote(resume_bundle)} ]; then
   printf 'previous attempt bundle is gone\\n' >&2
@@ -425,20 +440,34 @@ for ANCESTOR in {_quote(resume_bundle_ancestor or "")} "refs/remotes/origin/$WOR
   fi
 done
 {GIT} checkout -B "$WORK_BRANCH" refs/crucible/resume --
-# A seal authenticates the failed tree but does not make its contents safe. Scan the
-# restored tracked tree before any worker or harness credential can reach it.
-for SECRET_PATTERN in {secret_patterns}; do
-  if {GIT} grep -P -q -e "$SECRET_PATTERN" HEAD --; then
-    printf 'previous attempt bundle contains a secret pattern; refusing restored tree\n' >&2
-    exit 4
-  else
-    SCAN_STATUS=$?
-    if [ "$SCAN_STATUS" -ne 1 ]; then
-      printf 'previous attempt bundle secret scan failed\n' >&2
-      exit 4
+# A seal authenticates the failed tree but does not make its additions safe. Use the
+# same merge-base and added-line scope as no_secrets. A finding is diagnostic here: the
+# worker must be allowed to remove it, then the collected gate makes that correction
+# enforceable instead of turning preparation into a dead launch.
+# Only extract additions inside hunks; +++ can also start an added source line.
+SECRET_BASE=$({GIT} merge-base "refs/remotes/origin/$BASE_REF" HEAD)
+scan_added() {{
+  SECRET_RULE=$1
+  SECRET_PATTERN=$2
+  {GIT} diff --name-only "$SECRET_BASE" HEAD -- | while IFS= read -r SECRET_PATH; do
+    case "$SECRET_PATH" in
+{harness_case}
+    esac
+    MATCH=$({GIT} diff --no-ext-diff --no-textconv --unified=0 "$SECRET_BASE" HEAD \
+      -- "$SECRET_PATH" | awk '/^diff --git / {{ hunk=0; next }} /^@@ / {{ hunk=1; next }}
+        hunk && /^\\+/ {{ print substr($0, 2) }}' | grep -P -o -m1 -e "$SECRET_PATTERN" \
+      || true)
+    if [ -n "$MATCH" ]; then
+      FIRST=$(printf '%s' "$MATCH" | cut -c1-3)
+      LAST=$(printf '%s' "$MATCH" | rev | cut -c1-3 | rev)
+      printf '%s\n' \
+        "previous attempt added secret pattern: path=$SECRET_PATH rule=$SECRET_RULE "\
+"excerpt=$FIRST...$LAST; correction required" \
+        >&2
     fi
-  fi
-done
+  done
+}}
+{secret_rules}
 STARTED="$ACTUAL_HEAD"
 """
     credential = drop = ""
@@ -489,13 +518,20 @@ if ! PREPARED_BASE=$({GIT} rev-parse --verify --quiet "refs/remotes/origin/$BASE
 fi
 printf '%s\\n' "$PREPARED_BASE" > "$OUT/prepared-base.txt"
 STARTED=""
+# hades #230: the commit_policy range's start, resolved to a commit id now, while this
+# is still the only writer. POLICY_FROM_SHA is never a ref read again later from the
+# checkout, so a worker that moves refs/remotes/origin/$WORK_BRANCH afterward cannot
+# change what commit_policy_check sees.
+POLICY_FROM_SHA=""
 if [ -n {_quote(resume_bundle or "")} ]; then
   :
   {bundle_resume}
+  POLICY_FROM_SHA="$ACTUAL_HEAD"
 elif [ "{resume}" = "1" ] \
-  && {GIT} rev-parse --verify --quiet "refs/remotes/origin/$WORK_BRANCH" >/dev/null; then
+  && REMOTE_WORK_HEAD=$({GIT} rev-parse --verify --quiet "refs/remotes/origin/$WORK_BRANCH"); then
   {GIT} checkout -B "$WORK_BRANCH" "origin/$WORK_BRANCH" --
   STARTED="origin/$WORK_BRANCH"
+  POLICY_FROM_SHA="$REMOTE_WORK_HEAD"
 else
   if {GIT} rev-parse --verify --quiet "refs/remotes/origin/$BASE_REF" >/dev/null; then
     TARGET="refs/remotes/origin/$BASE_REF"
@@ -507,6 +543,7 @@ else
   fi
   {GIT} checkout -B "$WORK_BRANCH" "$TARGET" --
   STARTED="$BASE_REF"
+  POLICY_FROM_SHA="$PREPARED_BASE"
 fi
 {GIT} remote set-url origin "$ORIGIN_PLACEHOLDER"
 {GIT} remote set-url --push origin "$ORIGIN_PLACEHOLDER"
@@ -551,6 +588,7 @@ mkdir -p {WORK_MOUNT}/{PACKAGE_CACHE_LEAF} {WORK_MOUNT}/{VERIFIER_CACHE_LEAF}
 mkdir -p "$OUT"
 {GIT} rev-parse HEAD > "$OUT/prepared-head.txt"
 printf '%s\n' "$STARTED" > "$OUT/started-from.txt"
+printf '%s\n' "$POLICY_FROM_SHA" > "$OUT/prepared-policy-from.txt"
 """
 
 
@@ -827,15 +865,18 @@ if [ -n "$BASE" ]; then
     "$BASE..$WORK_BRANCH" > "$OUT/bundle.log" 2>&1 || true
   {GIT} -C "$REPO" rev-list --count "$BASE"..HEAD > "$OUT/commits.txt" \
     || echo 0 > "$OUT/commits.txt"
-  if {GIT} -C "$REPO" rev-parse --verify --quiet "refs/remotes/origin/$WORK_BRANCH" \
-      >/dev/null; then
-    POLICY_FROM="refs/remotes/origin/$WORK_BRANCH"
-  else
-    POLICY_FROM="$BASE"
-  fi
+  # hades #230: never resolve the commit_policy start from a ref in the worker-writable
+  # checkout. refs/remotes/origin/$WORK_BRANCH lives there, and a worker that moved it
+  # to HEAD would otherwise empty the range this checks. POLICY_FROM comes only from
+  # prepared-policy-from.txt, the preparer's own record in the output mount the worker
+  # never gets, resolved to a commit id before the worker ran.
+  POLICY_FROM=$(cat "$OUT/prepared-policy-from.txt" 2>/dev/null || true)
   mkdir -p "$OUT/commit-policy"
-  if commit_policy_check "$POLICY_FROM..HEAD" "$OUT/commit-policy"; then
-    echo done > "$OUT/commit-policy/checked"
+  if printf '%s\\n' "$POLICY_FROM" | grep -Eq '^([0-9a-f]{{40}}|[0-9a-f]{{64}})$' \
+      && [ "$({GIT} -C "$REPO" cat-file -t "$POLICY_FROM" 2>/dev/null || true)" = "commit" ]; then
+    if commit_policy_check "$POLICY_FROM..HEAD" "$OUT/commit-policy"; then
+      echo done > "$OUT/commit-policy/checked"
+    fi
   fi
 else
   REVIEW_DIFF_ERROR="the base ref could not be resolved"

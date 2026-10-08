@@ -8,10 +8,11 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Header, Query, Request, Response
+from fastapi import Header, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
 from crucible.adapters.api.deps import Admin, Ctx, Orchestrator, Reader, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.application.artifacts import read_artifact, upload_artifact
 from crucible.application.auth import authenticate
 from crucible.application.errors import NotFoundError, UnauthorizedError
@@ -40,7 +41,7 @@ from crucible.contracts.api import (
 )
 from crucible.domain.entities import LogChunkRecord, Repository
 
-router = APIRouter()
+router = ThreadedAPIRouter()
 
 
 @router.get("/events", response_model=EventList)

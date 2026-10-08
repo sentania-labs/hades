@@ -90,7 +90,7 @@ endpoint's existing role requirements.
 | POST | `/attempts/{id}/artifacts` | Upload an artifact: raw request body with `type` and `filename` as query parameters (no multipart dependency). The logical filename is kept apart from the content-addressed storage path. Principal recorded. Becomes evidence on the next supervisor tick. Orchestrator role. |
 | GET | `/artifacts/{id}` | Metadata; `/artifacts/{id}/content` streams bytes. |
 | GET | `/attempts/{id}/report` | Parsed `CompletionClaimV1` or 404 if none. |
-| GET | `/attempts/{id}/gates` | Gate results with evidence links, each marked `classification` `blocking` or `advisory` with its advisory `findings`, and `for_reviewer`: the failed advisory gates and findings with their detail (ADR 0024). The task's `gate_summary` carries the same `classification` and `for_reviewer`, and its `failing` names only what stops the task. |
+| GET | `/attempts/{id}/gates` | Gate results with evidence links, each marked `classification` `blocking` or `advisory` with its advisory `findings`, and `for_reviewer`: the failed advisory gates and findings with their detail (ADR 0024). The task's `gate_summary` keeps verdict strings in `results`, carries gate messages in the sibling `details` map, carries the same `classification` and `for_reviewer`, and names only blocking failures in `failing`. |
 | POST | `/attempts/{id}/terminate` | Stop the worker: `mode=drain|kill`, reason, verbatim words. |
 
 ### Releases

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.adapters.ui.actions import register
 from crucible.adapters.ui.render import _page
 from crucible.adapters.ui.session import _require
@@ -14,7 +15,7 @@ from crucible.application.admin import (
 )
 from crucible.domain.entities import Principal, Role
 
-router = APIRouter(prefix="/ui", include_in_schema=False)
+router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
 
 
 def _image_label(entry: dict[str, Any] | None, harness: str) -> str:
@@ -23,42 +24,55 @@ def _image_label(entry: dict[str, Any] | None, harness: str) -> str:
     return f"{entry['reference']} ({harness} {entry['version']})"
 
 
+def _image_tag(reference: str) -> str:
+    """Return the tag portion of a worker reference (the part after the first colon)."""
+    if ":" in reference:
+        return reference.split(":", 1)[1]
+    return reference
+
+
 def _image_rows(rows: list[dict[str, Any]], *, admin: bool) -> list[list[Any]]:
     """One row per harness (ADR 0018): its default, the image a rollback returns to, and
-    a pulldown of the images that carry it at a supported version."""
+    a single pulldown of all available images. Selecting the previous image triggers a
+    rollback; selecting any other image promotes it."""
     out: list[list[Any]] = []
     for row in rows:
         harness = row["harness"]
         current = row.get("current")
         previous = row.get("previous")
+        previous_digest = (previous or {}).get("digest")
         actions: list[dict[str, Any]] = []
         if admin and row["choices"]:
+            # Build options: all choices, with the previous one marked "(previous)".
+            # Include current image (always in choices) and previous image (if separate).
+            # Ensure previous_digest appears even if it is not in choices (rare edge).
+            choice_digests: set[str] = set()
+            options: list[tuple[str, str]] = []
+            for choice in row["choices"]:
+                digest = choice["digest"]
+                reference = choice["reference"]
+                choice_digests.add(digest)
+                if digest == previous_digest:
+                    options.append((digest, f"{reference} (previous)"))
+                else:
+                    options.append((digest, reference))
+            if previous_digest and previous_digest not in choice_digests:
+                # Previous is not available through promote; include it with its label.
+                prev_label = _image_label(previous, harness) if previous else "previous"
+                options.append((previous_digest, f"{prev_label} (previous)"))
             actions.append(
                 {
                     "kind": "form",
-                    "action": "/ui/actions/image-promote",
-                    "label": "Promote",
+                    "action": "/ui/actions/image-change",
+                    "label": "Change image",
                     "primary": True,
-                    "reason": "optional",
                     "hidden": {"harness": harness},
                     "select": {
                         "name": "digest",
                         "label": f"Image for {harness}",
-                        "options": [
-                            (choice["digest"], choice["reference"]) for choice in row["choices"]
-                        ],
+                        "options": options,
                         "selected": (current or {}).get("digest"),
                     },
-                }
-            )
-        if admin and previous:
-            actions.append(
-                {
-                    "kind": "form",
-                    "action": "/ui/actions/image-rollback",
-                    "label": f"Roll back to {previous['reference']}",
-                    "reason": "optional",
-                    "hidden": {"harness": harness},
                 }
             )
         out.append(
@@ -67,13 +81,20 @@ def _image_rows(rows: list[dict[str, Any]], *, admin: bool) -> list[list[Any]]:
                 (
                     {
                         "kind": "note",
-                        "value": current["reference"],
+                        "value": _image_tag(current["reference"]),
+                        "title": current["reference"],
                         "hint": f"{harness} {current['version']}",
                     }
                     if current
                     else {"kind": "status", "value": "none promoted", "tone": "warn"}
                 ),
-                _image_label(previous, harness) if previous else "none",
+                {
+                    "kind": "note",
+                    "value": _image_tag(previous["reference"]),
+                    "title": previous["reference"],
+                }
+                if previous
+                else "none",
                 {"kind": "actions", "items": actions}
                 if actions
                 else {
@@ -114,7 +135,11 @@ async def images_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                     "columns": ["Reference", "Harnesses", "Default for", "Digest"],
                     "rows": [
                         [
-                            item.get("reference"),
+                            {
+                                "kind": "note",
+                                "value": _image_tag(item.get("reference") or ""),
+                                "title": item.get("reference"),
+                            },
                             ", ".join(
                                 f"{name} {version}"
                                 for name, version in sorted((item.get("harnesses") or {}).items())
@@ -139,7 +164,7 @@ async def images_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     )
 
 
-async def _action_image_promote(
+async def _action_image_change(
     request: Request,
     action: str,
     ctx: Ctx,
@@ -149,40 +174,37 @@ async def _action_image_promote(
     form: dict[str, str],
     reason: str | None,
 ) -> Response | None:
+    """Unified handler: promote or roll back based on whether the selected digest
+    matches the previous image. The dropdown in _image_rows includes every choice
+    with the previous one marked '(previous)'; selecting it is a rollback."""
     assert ctx.admin is not None
-    await images.promote(
-        ctx.admin,
-        uow,
-        principal=principal.name,
-        harness=form.get("harness", ""),
-        digest=form.get("digest", ""),
-        reason=reason,
-    )
+    harness = form.get("harness", "")
+    digest = form.get("digest", "")
+    if not harness or not digest:
+        return None
+    # Determine if this is a rollback: the selected digest is the previous one.
+    existing = uow.harness_images.get(harness)
+    is_rollback = False
+    if existing is not None and existing.previous_digest:
+        is_rollback = existing.previous_digest == digest
+    if is_rollback:
+        await images.rollback(
+            ctx.admin,
+            uow,
+            principal=principal.name,
+            harness=harness,
+            reason=reason,
+        )
+    else:
+        await images.promote(
+            ctx.admin,
+            uow,
+            principal=principal.name,
+            harness=harness,
+            digest=digest,
+            reason=reason,
+        )
     return None
 
 
-register("image-promote", _action_image_promote)
-
-
-async def _action_image_rollback(
-    request: Request,
-    action: str,
-    ctx: Ctx,
-    uow: UoW,
-    principal: Principal,
-    csrf: str,
-    form: dict[str, str],
-    reason: str | None,
-) -> Response | None:
-    assert ctx.admin is not None
-    await images.rollback(
-        ctx.admin,
-        uow,
-        principal=principal.name,
-        harness=form.get("harness", ""),
-        reason=reason,
-    )
-    return None
-
-
-register("image-rollback", _action_image_rollback)
+register("image-change", _action_image_change)

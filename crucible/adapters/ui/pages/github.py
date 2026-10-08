@@ -4,10 +4,11 @@ import json
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, Request
+from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.adapters.ui.actions import register
 from crucible.adapters.ui.render import (
     _base,
@@ -29,20 +30,21 @@ from crucible.application.errors import (
 from crucible.domain.entities import Principal, Role
 from crucible.ports.repository import UnitOfWork
 
-router = APIRouter(prefix="/ui", include_in_schema=False)
+router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
 
 
 @router.get("/github", response_class=HTMLResponse)
 def github_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
-    """crucible#120, #168: create the App with one click, install it from its own link,
-    then pick repositories from what each installation covers."""
+    """crucible#120, #168: create the App with one click and install it from its own
+    link. Picking repositories from what each installation covers is on Repositories
+    (crucible#265), which this page links to."""
     found = _require(request, ctx, uow)
     if isinstance(found, RedirectResponse):
         return found
     principal, csrf = found
     assert ctx.admin is not None
     state = github.status(ctx.admin, uow)
-    picker = github.apps_view(ctx.admin, uow) if state["configured"] else None
+    apps = github.apps_view(ctx.admin, uow, repositories=False) if state["configured"] else None
     admin = principal.role is Role.ADMIN
     # crucible#115: the connection in plain words and the registered repositories first;
     # the stored-credential document is behind Details.
@@ -81,11 +83,11 @@ def github_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     if state["configured"]:
         connection["rows"].append(
             [
-                "A repository the picker cannot show",
+                "Repositories",
                 {
                     "kind": "link",
                     "href": "/ui/repositories",
-                    "label": "Register it on Repositories",
+                    "label": "Pick and register repositories on Repositories",
                 },
             ]
         )
@@ -97,28 +99,28 @@ def github_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             "fields": [{"name": "reason", "label": "Reason"}],
         }
     sections: list[dict[str, Any]] = [connection]
-    if picker is not None:
-        if picker["error"]:
-            sections.append({"title": "Installations", "note": picker["error"]})
-        if picker["install_url"]:
-            installed = bool(picker["installations"])
+    if apps is not None:
+        if apps["error"]:
+            sections.append({"title": "Installations", "note": apps["error"]})
+        if apps["install_url"]:
+            installed = bool(apps["installations"])
             install_section: dict[str, Any] = {
                 "title": "Install the App" if not installed else "Install it somewhere else",
                 "note": (
                     "GitHub asks which account or organization, and which of its "
-                    "repositories, the App may see, then sends you back here to pick "
-                    "them."
+                    "repositories, the App may see, then sends you back to Repositories "
+                    "to pick them."
                     if not installed
                     else "To deliver to another account or organization, or to more of "
                     "its repositories, install or configure the App there; GitHub sends "
-                    "you back here."
+                    "you back to Repositories."
                 ),
-                "button": {"href": picker["install_url"], "label": "Install on GitHub"},
+                "button": {"href": apps["install_url"], "label": "Install on GitHub"},
                 "columns": ["App", "Install link"],
                 "rows": [
                     [
-                        (picker["app"] or {}).get("name") or (picker["app"] or {}).get("slug"),
-                        {"href": picker["install_url"], "label": picker["install_url"]},
+                        (apps["app"] or {}).get("name") or (apps["app"] or {}).get("slug"),
+                        {"href": apps["install_url"], "label": apps["install_url"]},
                     ]
                 ],
             }
@@ -126,17 +128,17 @@ def github_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             app_info: list[list[Any]] = [
                 [
                     "App visibility",
-                    {"kind": "note", "value": "public" if picker.get("app_public") else "private"},
+                    {"kind": "note", "value": "public" if apps.get("app_public") else "private"},
                 ]
             ]
-            if picker.get("app_public") and picker.get("install_target_url"):
+            if apps.get("app_public") and apps.get("install_target_url"):
                 # AC1: install-on-another-account link
                 app_info.append(
                     [
                         "Install on another account",
                         {
                             "kind": "link",
-                            "href": picker["install_target_url"],
+                            "href": apps["install_target_url"],
                             "label": "Select another account or organization",
                         },
                     ]
@@ -161,65 +163,29 @@ def github_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
                 )
             install_section["rows"] = app_info + install_section["rows"]
             sections.append(install_section)
-        for installation in picker["installations"]:
-            title = (
-                f"{installation.get('account')} ({installation.get('account_type') or 'account'}), "
-                f"installation {installation['id']}"
-            )
-            repositories = installation["repositories"]
-            section: dict[str, Any] = {
-                "title": title,
-                "note": installation["error"]
-                or f"{len(repositories)} repositor{'y' if len(repositories) == 1 else 'ies'} "
-                "this installation covers.",
-                "columns": ["Repository", "Default branch", "Private", "Archived", "Registered as"],
-                "rows": [
-                    [
-                        repo["full_name"],
-                        repo["default_branch"],
-                        repo["private"],
-                        repo.get("unsupported") or repo["archived"],
-                        repo["registered_as"] or "not registered",
-                    ]
-                    for repo in repositories
-                ],
-            }
-            choices = [
-                (repo["full_name"], repo["full_name"])
-                for repo in repositories
-                if not (repo["archived"] or repo["registered_as"] or repo.get("unsupported"))
-            ]
-            if admin and choices:
-                section["form"] = {
-                    "action": "/ui/actions/github-add-repository",
-                    "label": "Register repository",
-                    "fields": [
-                        {"name": "installation_id", "kind": "hidden", "value": installation["id"]},
-                        {
-                            "name": "repository",
-                            "label": "Repository",
-                            "kind": "select",
-                            "options": choices,
-                        },
-                        {
-                            "name": "name",
-                            "label": "Registered name (empty: the repository's own)",
-                        },
-                        {
-                            "name": "policy_name",
-                            "label": "Policy",
-                            "value": "default-software",
-                            "required": True,
-                        },
-                        {
-                            "name": "attested_all_prs",
-                            "label": "External reviewer covers all PRs",
-                            "kind": "checkbox",
-                        },
-                        {"name": "reason", "label": "Reason", "required": True},
+        if apps["installations"]:
+            sections.append(
+                {
+                    "title": "Installations",
+                    "note": "Pick the repositories each installation covers on Repositories.",
+                    "button": {"href": "/ui/repositories", "label": "Pick repositories"},
+                    "columns": ["Account", "Installation", ""],
+                    "rows": [
+                        [
+                            f"{installation.get('account')} "
+                            f"({installation.get('account_type') or 'account'})",
+                            installation["id"],
+                            {
+                                "kind": "link",
+                                "href": f"/ui/repositories?installation={installation['id']}"
+                                f"#installation-{installation['id']}",
+                                "label": "Pick repositories",
+                            },
+                        ]
+                        for installation in apps["installations"]
                     ],
                 }
-            sections.append(section)
+            )
     if admin:
         sections.append(_github_create_section(configured=state["configured"]))
         sections.append(_github_external_url_section(ctx, uow))
@@ -229,7 +195,10 @@ def github_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         csrf,
         active="/ui/github",
         heading="GitHub",
-        intro="Create the App, install it, and pick the repositories Crucible delivers to.",
+        intro=(
+            "Create the App and install it. Pick the repositories Crucible delivers to on "
+            "Repositories."
+        ),
         sections=sections,
         badge="connected" if state["configured"] else "not connected",
         badge_kind="ok" if state["configured"] else "warn",
@@ -333,10 +302,10 @@ def _github_return(request: Request, ctx: Any, uow: UnitOfWork) -> Response | No
     return response
 
 
-def _to_github_page(message: str, kind: str = "ok") -> RedirectResponse:
-    return RedirectResponse(
-        f"/ui/github?kind={quote(kind)}&message={quote(message)}", status_code=303
-    )
+def _to_github_page(
+    message: str, kind: str = "ok", *, page: str = "/ui/github"
+) -> RedirectResponse:
+    return RedirectResponse(f"{page}?kind={quote(kind)}&message={quote(message)}", status_code=303)
 
 
 @router.get("/github/callback", response_class=HTMLResponse)
@@ -404,7 +373,9 @@ def github_installed(request: Request, ctx: Ctx, uow: UoW) -> Response:
         )
     if not result["rebound"] and not result["unavailable"]:
         parts.append("No registered repositories needed rebinding.")
-    return _to_github_page(" ".join(parts))
+    parts.append("Pick the repositories to deliver to below.")
+    # crucible#265: the apps is on Repositories now, so an install lands there.
+    return _to_github_page(" ".join(parts), page="/ui/repositories")
 
 
 async def _action_github_create_app(
@@ -490,40 +461,6 @@ async def _action_github_external_url(
 
 
 register("github-external-url", _action_github_external_url)
-
-
-async def _action_github_add_repository(
-    request: Request,
-    action: str,
-    ctx: Ctx,
-    uow: UoW,
-    principal: Principal,
-    csrf: str,
-    form: dict[str, str],
-    reason: str | None,
-) -> Response | None:
-    assert ctx.admin is not None
-    added = github.add_repository(
-        ctx.admin,
-        uow,
-        principal=principal.name,
-        installation_id=int(form.get("installation_id") or "0"),
-        repository=form.get("repository", ""),
-        name=form.get("name") or None,
-        policy_name=form.get("policy_name") or "default-software",
-        attested_all_prs=form.get("attested_all_prs") == "true",
-        attested_by=None,
-        reason=reason,
-    )
-    uow.commit()
-    return _redirect(
-        form,
-        f"Registered {added['repository']} ({added['url']}, default branch "
-        f"{added['default_branch']}, installation {added['installation_id']}).",
-    )
-
-
-register("github-add-repository", _action_github_add_repository)
 
 
 async def _action_github_check(

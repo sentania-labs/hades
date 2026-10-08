@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import Request
 from fastapi.responses import RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
+from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.adapters.ui.actions import register
 from crucible.application.admin import routing_models
 from crucible.domain.entities import Principal
 
-router = APIRouter(prefix="/ui", include_in_schema=False)
+router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
 
 
 @router.get("/routing/models")
@@ -47,7 +48,7 @@ def control_sections(uow: UoW, *, admin: bool) -> list[dict[str, Any]]:
             "columns": ["Model", "Harness", "Pool", "Capability", "Availability"],
             "rows": [
                 [
-                    model["id"],
+                    model["model"],
                     model["harness"],
                     model["pool"],
                     model["capability"],
@@ -55,10 +56,13 @@ def control_sections(uow: UoW, *, admin: bool) -> list[dict[str, Any]]:
                         "kind": "form",
                         "action": "/ui/actions/routing-model",
                         "label": "Save model",
-                        "hidden": {"model_id": model["id"]},
+                        "hidden": {
+                            "model": model["model"],
+                            "harness": model["harness"],
+                        },
                         "select": {
                             "name": "enabled",
-                            "label": f"{model['id']} availability",
+                            "label": f"{model['harness']} / {model['model']} availability",
                             "selected": "true" if model["enabled"] else "false",
                             "options": [("true", "Enabled"), ("false", "Disabled")],
                         },
@@ -133,7 +137,8 @@ async def _actions(
             ctx.admin,
             uow,
             principal=principal,
-            model_id=form.get("model_id", ""),
+            model=form.get("model", ""),
+            harness=form.get("harness", ""),
             enabled=form.get("enabled") == "true",
             disabled_reason=reason or "",
             reason=reason,

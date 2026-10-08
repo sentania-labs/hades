@@ -16,7 +16,7 @@ from crucible.application.admin.routing import gateway_url
 from crucible.application.publish import publishing_waits
 from crucible.application.queries import reviewer_items, supervisor_view
 from crucible.domain.entities import Principal, Role
-from crucible.domain.lifecycle import AttemptState, TaskState
+from crucible.domain.lifecycle import TaskState
 from crucible.ports.repository import UnitOfWork
 
 LISTED_STATES = (
@@ -38,18 +38,8 @@ CAPABILITY_PARTS = ("harnesses", "providers", "github", "workers", "tasks", "wak
 def workers(uow: UnitOfWork, *, owner: str | None = None) -> list[dict[str, Any]]:
     """Active attempts; with `owner`, only those of tasks that principal submitted."""
     out: list[dict[str, Any]] = []
-    for attempt in uow.attempts.list_in_states(
-        [
-            AttemptState.PREPARING,
-            AttemptState.LAUNCHING,
-            AttemptState.RUNNING,
-            AttemptState.TERMINATING,
-        ]
-    ):
-        execution = uow.executions.get(attempt.execution_id)
-        task = uow.tasks.get(attempt.task_id)
-        if owner is not None and (task is None or task.principal_id != owner):
-            continue
+    for row in uow.attempts.worker_rows(principal_id=owner):
+        attempt, execution, task = row["attempt"], row["execution"], row["task"]
         out.append(
             {
                 "attempt_id": attempt.id,
@@ -70,40 +60,59 @@ def workers(uow: UnitOfWork, *, owner: str | None = None) -> list[dict[str, Any]
 
 def tasks(uow: UnitOfWork, *, owner: str | None = None) -> dict[str, Any]:
     """Counts by state and the listed states; with `owner`, only that principal's tasks."""
-    counts: dict[str, int] = {}
-    lists: dict[str, list[dict[str, Any]]] = {}
-    for state in TaskState:
-        rows = [
-            t for t in uow.tasks.list_by_state(state) if owner is None or t.principal_id == owner
-        ]
-        if rows:
-            counts[state.value] = len(rows)
-        if state in LISTED_STATES:
-            lists[state.value] = [
-                {"id": t.id, "external_id": t.external_id, "updated_at": t.updated_at.isoformat()}
-                for t in rows
-            ]
-    mine = {
-        t.id
-        for t in uow.tasks.list_by_state(TaskState.PUBLISHING)
-        if owner is None or t.principal_id == owner
+    if not hasattr(uow.tasks, "count_by_state"):
+        counts: dict[str, int] = {}
+        lists: dict[str, list[dict[str, Any]]] = {}
+        for state in TaskState:
+            rows = list(uow.tasks.list_by_state(state))
+            if rows:
+                counts[state.value] = len(rows)
+            if state in LISTED_STATES:
+                lists[state.value] = [
+                    {
+                        "id": task.id,
+                        "external_id": task.external_id,
+                        "updated_at": task.updated_at.isoformat(),
+                    }
+                    for task in rows
+                ]
+        return {"counts": counts, "lists": lists, "publishing_waiting": [], "gates": []}
+    counts = {
+        state.value: count
+        for state, count in uow.tasks.count_by_state(principal_id=owner).items()
+        if count
     }
-    waiting = [item for item in publishing_waits(uow) if item["task_id"] in mine]
-    gates = [
-        _task_gates(uow, t)
-        for state in GATE_STATES
-        for t in uow.tasks.list_by_state(state)
-        if owner is None or t.principal_id == owner
-    ]
+    detail_states = (*LISTED_STATES, TaskState.PUBLISHING, *GATE_STATES)
+    detail_tasks = uow.tasks.list_in_states(detail_states, principal_id=owner)
+    lists = {
+        state.value: [
+            {
+                "id": task.id,
+                "external_id": task.external_id,
+                "principal_id": task.principal_id,
+                "updated_at": task.updated_at.isoformat(),
+            }
+            for task in detail_tasks
+            if task.state is state
+        ]
+        for state in LISTED_STATES
+    }
+    publishing_tasks = [task for task in detail_tasks if task.state is TaskState.PUBLISHING]
+    waiting = publishing_waits(uow, publishing_tasks)
+    gate_tasks = [task for task in detail_tasks if task.state in GATE_STATES]
+    gate_rows: dict[str, list[Any]] = {task.id: [] for task in gate_tasks}
+    for row in uow.gate_results.list_for_tasks(list(gate_rows)):
+        gate_rows[row.task_id].append(row)
+    gates = [_task_gates(uow, task, rows=gate_rows[task.id]) for task in gate_tasks]
     return {"counts": counts, "lists": lists, "publishing_waiting": waiting, "gates": gates}
 
 
-def _task_gates(uow: UnitOfWork, task: Any) -> dict[str, Any]:
+def _task_gates(uow: UnitOfWork, task: Any, *, rows: list[Any] | None = None) -> dict[str, Any]:
     """Each pre-PR gate on the task's current head, marked blocking or advisory, and
     what the reviewer is asked to weigh (ADR 0024)."""
     rows = [
         r
-        for r in uow.gate_results.list_for_task(task.id)
+        for r in (rows if rows is not None else uow.gate_results.list_for_task(task.id))
         if r.phase == "pre_pr" and r.head_sha == (task.head_sha or "")
     ]
     return {
@@ -128,22 +137,34 @@ def wakes(uow: UnitOfWork, *, owner: str | None = None) -> dict[str, Any]:
     counts only its own. Each principal's count comes from a count query, not the
     (page-limited) list, so a principal with more than the page limit of pending
     wakes still reports its true count."""
-    per_principal: dict[str, int] = {}
-    oldest: str | None = None
-    for principal in uow.principals.list_all():
-        if owner is not None and principal.id != owner:
-            continue
-        pending = uow.wakes.list_for_principal(
-            principal.id, since=None, include_acked=False, limit=200
-        )
-        if pending:
-            per_principal[principal.name] = uow.wakes.count_unacked_for_principal(principal.id)
-            first = min(w.created_at for w in pending).isoformat()
-            oldest = first if oldest is None or first < oldest else oldest
+    if not hasattr(uow.wakes, "pending_summary"):
+        pending = [
+            (
+                principal,
+                list(
+                    uow.wakes.list_for_principal(
+                        principal.id, since=None, include_acked=False, limit=200
+                    )
+                ),
+            )
+            for principal in uow.principals.list_all()
+            if owner is None or principal.id == owner
+        ]
+        per_principal = {
+            principal.name: uow.wakes.count_unacked_for_principal(principal.id)
+            for principal, rows in pending
+            if rows
+        }
+        oldest_values = [wake.created_at for _principal, rows in pending for wake in rows]
+        oldest_at = min(oldest_values, default=None)
+        total = uow.wakes.count_unacked() if owner is None else sum(per_principal.values())
+    else:
+        summary, oldest_at, total = uow.wakes.pending_summary(principal_id=owner)
+        per_principal = dict(summary)
     return {
         "pending": per_principal,
-        "oldest_pending": oldest,
-        "unacked": uow.wakes.count_unacked() if owner is None else sum(per_principal.values()),
+        "oldest_pending": oldest_at.isoformat() if oldest_at else None,
+        "unacked": total,
     }
 
 
@@ -313,6 +334,10 @@ def harness_readiness(
         if is_test_fixture(ctx, name):
             continue
         if not item["enabled_by_configuration"] and not item.get("decided_by_administrator"):
+            # Preserve default_image and images from the source so the
+            # first-run path can inspect image promotion state (crucible#169).
+            default_image = item.get("default_image")
+            images = item.get("images")
             harnesses.append(
                 {
                     "name": name,
@@ -323,6 +348,8 @@ def harness_readiness(
                         "to use it"
                     ),
                     "steps": [],
+                    "default_image": default_image,
+                    "images": images,
                 }
             )
             continue
@@ -335,12 +362,18 @@ def harness_readiness(
             unreachable=unreachable,
             secret=(secrets or {}).get(name),
         )
+        # Preserve default_image and images from the source so the
+        # first-run path can inspect image promotion state (crucible#169).
+        default_image = item.get("default_image")
+        images = item.get("images")
         harnesses.append(
             {
                 "name": name,
                 "state": "not_ready" if harness_steps else "ready",
                 "note": "" if harness_steps else "ready for a task",
                 "steps": harness_steps,
+                "default_image": default_image,
+                "images": images,
             }
         )
     return harnesses

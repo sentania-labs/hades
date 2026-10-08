@@ -237,12 +237,6 @@ def evaluate_and_advance(
     ):
         return outcomes
     if verdict is PrePrVerdict.FAILED:
-        published = uow.events.latest_for_task_kind(task.id, EventKind.PUBLISH_COMPLETED.value)
-        published_head = (
-            str(published.payload.get("head_sha"))
-            if published is not None and published.payload.get("head_sha")
-            else "the remote branch head"
-        )
         move_task(
             uow,
             clock,
@@ -261,8 +255,9 @@ def evaluate_and_advance(
             summary=(
                 f"pre-PR gates failed on {task.head_sha}: {', '.join(failing)}. "
                 + (
-                    "The failed bundle is unsafe because no_secrets failed; the next "
-                    f"correction will start from the published head {published_head}."
+                    f"{outcomes['no_secrets'].detail}. The next pre_pr_gates correction "
+                    f"defaults to last_attempt at {task.head_sha}, where the match can be "
+                    "removed; remote_branch is an explicit alternative."
                     if outcomes.get("no_secrets") is not None
                     and outcomes["no_secrets"].result is GateResult.FAIL
                     else f"The next pre_pr_gates correction defaults to last_attempt at "

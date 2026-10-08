@@ -36,7 +36,8 @@ worker and are CI's; a missing one is expected and is not a reason to stop.
 The tiers split by who has the tools:
 
 - Worker-local tiers, run before the commit and listed in the report's
-  checks: `make lint`, `make test-unit`, `make scan`, and the unit test file
+  checks: `make lint`, `make test-shell` (every `*_test.sh` under `tools/`),
+  `make test-unit`, `make scan`, and the unit test file
   the contract names (`uv run pytest -q tests/unit/test_issue_<n>_<slug>.py`).
   These are the only checks a contract may require; the contract model
   refuses a `required_verification` command that runs `docker`, `kind` or
@@ -125,6 +126,22 @@ runs one shard. Every test's time is in the job log (`--durations=0`), which is 
 data for rebalancing. CI runs on every push, main included: the run on main proves the
 squashed result and builds the images from scratch, saving the BuildKit cache branches
 restore.
+
+## Flaky tests
+
+A job that fails on attempt 1 and passes on a later attempt at the same commit is a
+flake, not a success: nothing about the code changed between attempts, only the
+result did. The `test`, `e2e` and `e2e-kind` jobs keep their JUnit XML as CI artifacts,
+and a weekly scheduled workflow (`.github/workflows/flakes.yml`, `tools/ci/flakes.py`,
+also runnable locally as `make flakes REPO=owner/repo`) reads them, names the tests
+that flaked, and opens or updates one issue per flaky test, labelled `flaky`, with the
+flake rate (reruns per 100 runs); it also keeps a weekly summary issue with the
+overall rate.
+
+Never mark a test flaky in code as a fix: not a retry wrapper, not a widened
+assertion, not a skip, not a rerun marker. A test that flakes gets fixed, or its wait
+or polling gets rewritten to wait on the real condition instead of a sleep. The
+tracking issue records the flake; it is not a substitute for fixing it.
 
 ## Harness changes
 
