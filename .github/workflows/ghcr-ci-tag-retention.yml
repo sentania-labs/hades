@@ -1,0 +1,61 @@
+# Deletes `ci-*` proof-tag versions from the GHCR `crucible-worker` package once they
+# have aged past N days (hades#140). Image listing stopped resolving them (#111), but
+# nothing pruned the versions behind them, so they accumulated in the package's
+# storage forever. N=14 days. Decision: Foundry, on Scott's delegation of 2026-10-07
+# 5:22 PM ("You know the vision- choose answers that align to the vision"), recorded
+# here and in docs/spec/24-release.md.
+#
+# The selection logic lives in tools/registry/ci_tag_retention.py, not here, so it is
+# unit-testable (tests/unit/test_issue_140_ghcr_ci_tag_retention.py): it never selects
+# a version carrying a release tag or `latest`, and never one whose digest is named by
+# `images/manifest.env` on main or appears in a release body for this repository. This
+# job only supplies the schedule and the token.
+#
+# `packages: write` is the narrowest permission that allows the delete (GitHub
+# Packages has no separate delete scope; write includes it); `contents: read` checks
+# out the script and images/manifest.env, nothing more. Always runs this file's copy
+# on main (a scheduled or manually dispatched run always uses the default branch's
+# workflow, never a branch's own edit of it), so no branch can widen what this token
+# may delete.
+name: ghcr-ci-tag-retention
+
+on:
+  schedule:
+    - cron: "17 3 * * *" # once a day, off the hour
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "print what would be deleted without deleting"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  retire-ci-tags:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      # Empty (not "true") for every trigger but a manual dispatch that asked for one,
+      # so a scheduled run always executes and this never depends on the `inputs`
+      # context, which only exists for workflow_dispatch and workflow_call.
+      DRY_RUN: ${{ github.event.inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c # v7.0.0
+        with:
+          enable-cache: true
+      - name: delete ci-* versions older than 14 days (dry run on manual request)
+        run: |
+          set -euo pipefail
+          flags=(--org sentania-labs --package crucible-worker --repo sentania-labs/hades \
+            --max-age-days 14)
+          if [ "$DRY_RUN" != "true" ]; then
+            flags+=(--execute)
+          fi
+          uv run python tools/registry/ci_tag_retention.py "${flags[@]}"

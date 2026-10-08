@@ -526,7 +526,8 @@ the namespace. A deployment therefore names one exact, pullable reference in
   running is killed, and tags not resolved in time are left out of that listing.
   Tags starting `ci-` are CI proof pushes, never promotable, and are skipped before
   anything is resolved, so their number does not add to the listing's cost (111);
-  the Images page says so. Nothing on the registry is pruned.
+  the Images page says so. This provider prunes nothing itself: a daily scheduled
+  workflow deletes the accumulated `ci-*` versions instead (140, 24).
 - `observe`: read the Job and its Pod.
 
   | Job | Pod | Result |
