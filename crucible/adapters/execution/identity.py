@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ __all__ = [
     "REPO_MOUNT",
     "WORKER_ABSENT_PROGRAMS_SENTENCE",
     "bundle_sha256",
+    "render_operator_notes",
     "write_bundle",
 ]
 
@@ -96,6 +98,26 @@ def _criterion(criterion: dict[str, Any]) -> str:
     return f"{line}\n  - check: {_check(check)}"
 
 
+OPERATOR_NOTES_HEADING = "## Operator notes"
+
+
+def render_operator_notes(notes: Sequence[Mapping[str, Any]]) -> str:
+    """hades #489: the operator's notes, newest first, as the section that opens
+    IDENTITY.md so the worker reads them before the contract. Each note is the words as
+    typed; a note of several lines keeps its lines, indented under its bullet."""
+    lines = []
+    for note in notes:
+        text_lines = str(note.get("text", "")).strip().splitlines() or [""]
+        head = f"- {note.get('author', 'operator')} at {note.get('created_at', '')}: "
+        lines.append(head + text_lines[0])
+        lines.extend(f"  {line}" for line in text_lines[1:])
+    return (
+        f"{OPERATOR_NOTES_HEADING}\n\n"
+        "The operator's words on this task, newest first. Read them before the "
+        "contract; where they direct the work, they stand.\n\n" + "\n".join(lines)
+    )
+
+
 def render_identity_md(
     *,
     contract: dict[str, Any],
@@ -104,6 +126,7 @@ def render_identity_md(
     owner: str,
     work_branch: str,
     network_mode: str,
+    operator_notes: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     """What the worker is told (06, FDY-0140): the task, its scope, the checks, the report
     and how to stop, in plain words and as short as that allows. Everything else is in
@@ -119,6 +142,8 @@ def render_identity_md(
     ids = ", ".join(f"`{c.get('id')}`" for c in criteria) or "none"
     sections = [
         f"# Task {external_id}: {contract.get('title', '(no title)')}",
+        # hades #489: the operator's notes come first, above the role and the contract.
+        *([render_operator_notes(operator_notes)] if operator_notes else []),
         f"You are working on task `{external_id}` for `{owner}` in the repository "
         f"`{repository.get('name', '(unnamed)')}`, checked out at `{REPO_MOUNT}` on "
         f"branch `{work_branch}` from `{repository.get('base_ref', 'main')}`. Do the task "
@@ -244,6 +269,7 @@ def write_bundle(
     network_mode: str,
     report_schema: dict[str, Any],
     history: list[tuple[str, str]] | None = None,
+    operator_notes: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[str, str]:
     """Write the bundle and return (IDENTITY.md text, bundle sha256)."""
     directory.mkdir(parents=True, exist_ok=True)
@@ -254,6 +280,7 @@ def write_bundle(
         owner=owner,
         work_branch=work_branch,
         network_mode=network_mode,
+        operator_notes=operator_notes,
     )
     contract_yaml = yaml.safe_dump(contract, sort_keys=True, default_flow_style=False)
     files: dict[str, str] = {

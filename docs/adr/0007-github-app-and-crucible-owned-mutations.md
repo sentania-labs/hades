@@ -48,3 +48,12 @@ reviewer must be set to review all pull requests there (so App-authored
 PRs are reviewed, S12 rerun), and CI must run on `crucible/*` PRs. Re-running
 a failed workflow needs Actions write, which is not granted; the operator
 re-runs by hand until they choose to widen the permission.
+
+## Amendment: Actions write for re-runs (hades #435, 2026-10-05)
+
+The operator widened the permission set by one: the App manifest asks for Actions write,
+so a `ci-decision` `rerun` re-runs the failed jobs through the App
+(`POST /actions/runs/{id}/rerun-failed-jobs`) and records the attempt it started. Hades
+reads the installation's granted permissions on every rerun decision; an installation
+that still holds Actions read keeps the `ci_rerun_needed` hand-off to the operator (23).
+No other permission changes.

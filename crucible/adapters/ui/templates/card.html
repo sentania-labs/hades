@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card-head">
+  <span class="board-card-id">{{ safe_value("external id", card.external_id) }}</span>
+  <h1>{{ safe_value("title", card.title) }}</h1>
+  <span class="card-lane card-lane--{{ card.lane.key }}">{{ card.lane.name }}</span>
+  <span class="admin-hint">{{ safe_value("project", card.project) }} · {{ safe_value("state", card.state_words) }} · contract v{{ card.contract_version }}</span>
+</div>
+<div class="card-links">
+  <a href="{{ card.links.board }}">Back to the board</a>
+  <a href="{{ card.links.task }}">Full task page</a>
+  {% for issue in card.contract.issues %}{% if issue.url %}<a href="{{ issue.url }}" rel="noopener noreferrer" target="_blank">Issue {{ safe_value("issue", issue.label) }}</a>{% else %}<span>Issue {{ safe_value("issue", issue.label) }}</span>{% endif %}{% endfor %}
+  {% if card.pull_request %}<a href="{{ card.pull_request.url }}" rel="noopener noreferrer" target="_blank">PR #{{ card.pull_request.number }} ({{ card.pull_request.state }})</a>{% else %}<span class="admin-empty">No pull request yet</span>{% endif %}
+</div>
+<div class="card-grid">
+  <section class="lat-card card-stuck card-wide" aria-label="Where it is and what it is stuck on">
+    <h2>Where it is and what it is stuck on</h2>
+    <p>{{ safe_value("headline", card.stuck.headline) }}</p>
+    <ul>{% for line in card.stuck.lines %}<li>{{ safe_value("line", line) }}</li>{% endfor %}</ul>
+    {% if card.escalation %}<p class="admin-hint">Escalation {{ card.escalation.id }} opened {{ card.escalation.opened_at }}{% if card.escalation.reason %}, reason {{ card.escalation.reason }}{% endif %}.</p>{% endif %}
+  </section>
+
+  <section class="lat-card" aria-label="Head and CI">
+    <h2>Head and CI</h2>
+    <dl class="card-facts">
+      <div><dt>Collected head</dt><dd>{{ card.head.sha or "none yet" }}</dd></div>
+      <div><dt>Pushed head</dt><dd>{% if card.pull_request %}{{ card.pull_request.head_sha }} on {{ safe_value("branch", card.pull_request.work_branch) }}{% else %}not pushed{% endif %}</dd></div>
+      <div><dt>CI</dt><dd>{% if card.head.ci %}<span class="lat-badge lat-badge--{% if card.head.ci.status == 'green' %}ok{% elif card.head.ci.status == 'red' %}bad{% else %}accent{% endif %}">{{ card.head.ci.state }}</span> {{ safe_value("detail", card.head.ci.detail) }}{% else %}not certified yet{% endif %}</dd></div>
+      <div><dt>Gates</dt><dd>{% if card.gates.results %}{% for gate, result in card.gates.results.items() %}{{ gate }}: {{ result }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}none evaluated on this head{% endif %}</dd></div>
+    </dl>
+  </section>
+
+  <section class="lat-card" aria-label="Cost so far">
+    <h2>Cost so far</h2>
+    <ul class="card-cost">
+      <li><b>{{ card.cost.attempts }}</b><span>attempts</span></li>
+      <li><b>{{ card.cost.worker_minutes }}</b><span>worker minutes</span></li>
+      <li><b>{{ card.cost.codex_rounds }}</b><span>Codex rounds</span></li>
+    </ul>
+  </section>
+
+  <section class="lat-card card-wide" aria-label="Contract">
+    <h2>Contract</h2>
+    <p class="card-prose">{{ safe_value("objective", card.contract.objective) }}</p>
+    <dl class="card-facts">
+      <div><dt>Scope</dt><dd>Change only {{ card.contract.scope.allowed_paths | join(", ") or "nothing named" }}. Never touch {{ card.contract.scope.prohibited_paths | join(", ") or "nothing named" }}. Add dependencies: {{ "yes" if card.contract.scope.may_add_dependencies else "no" }}. Change CI: {{ "yes" if card.contract.scope.may_modify_ci else "no" }}. Network: {{ card.contract.scope.network }}.{% for action in card.contract.scope.prohibited_actions %} Do not {{ safe_value("action", action) }}.{% endfor %}</dd></div>
+      <div><dt>Acceptance criteria</dt><dd><ul class="card-list">{% for criterion in card.contract.acceptance_criteria %}<li><b>{{ criterion.id }}</b> {{ safe_value("criterion", criterion.text) }}</li>{% else %}<li class="admin-empty">none</li>{% endfor %}</ul></dd></div>
+      <div><dt>Required checks</dt><dd><ul class="card-list">{% for check in card.contract.checks %}<li><code>{{ safe_value("check", check) }}</code></li>{% else %}<li class="admin-empty">none</li>{% endfor %}</ul></dd></div>
+      <div><dt>Dispatch tier</dt><dd>{{ card.contract.tier }}{% if card.contract.rationale %} · {{ safe_value("rationale", card.contract.rationale) }}{% endif %}</dd></div>
+      <div><dt>Expected deliverable</dt><dd>{{ card.contract.deliverables | join("; ") }}{% if card.contract.repository.name %} in {{ safe_value("repository", card.contract.repository.name) }} from {{ safe_value("base", card.contract.repository.base_ref) }}{% endif %}</dd></div>
+    </dl>
+  </section>
+
+  <section class="lat-card" aria-label="Attempt timeline">
+    <h2>Attempt timeline</h2>
+    {% if card.timeline %}<ol class="card-timeline">{% for row in card.timeline %}<li>
+      <span><b>{{ row.role }} attempt {{ row.number }}</b> · {{ safe_value("harness", row.harness) }} / {{ safe_value("model", row.model) }} · {{ row.exit_class }}</span>
+      <span class="card-when">{{ row.started_at or "not started" }} to {{ row.ended_at or "now" }}</span>
+      <span>{{ safe_value("line", row.line) }}</span>
+    </li>{% endfor %}</ol>{% else %}<p class="admin-empty">No attempt yet.</p>{% endif %}
+  </section>
+
+  <section class="lat-card" aria-label="Correction history">
+    <h2>Correction history</h2>
+    {% if card.corrections %}<ol class="card-timeline">{% for row in card.corrections %}<li>
+      <span><b>Version {{ row.version }}</b> corrects {{ row.of_version }} · {{ row.reason }} · resume from {{ row.resume_from }}</span>
+      <span class="card-when">{{ row.submitted_at }}</span>
+      <span>{{ safe_value("instructions", row.instructions) }}</span>
+    </li>{% endfor %}</ol>{% else %}<p class="admin-empty">No correction yet.</p>{% endif %}
+  </section>
+
+  <section class="lat-card" aria-label="Operator notes" id="notes">
+    <h2>Operator notes</h2>
+    {% if card.notes %}<ul class="card-notes">{% for note in card.notes %}<li>
+      <div class="card-note-head"><b>{{ safe_value("author", note.author) }}</b><span>{{ note.created_at }}</span>{% if note.verbatim %}<span class="admin-chip">verbatim</span>{% endif %}</div>
+      <p class="card-note-text">{{ safe_value("note", note.text) }}</p>
+    </li>{% endfor %}</ul>{% else %}<p class="admin-empty">No note yet.</p>{% endif %}
+    {% if can_act %}
+    <form class="card-form" method="post" action="/ui/board/{{ card.id }}/notes">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="return_to" value="{{ return_to }}">
+      <label><span class="lat-label">Add a note (the worker reads it at the top of its next IDENTITY.md)</span>
+        <textarea class="lat-textarea" name="note" rows="3" required></textarea></label>
+      <div class="card-form-buttons"><button class="lat-btn lat-btn--ghost" type="submit">Save note</button></div>
+    </form>
+    {% endif %}
+  </section>
+
+  <section class="lat-card" aria-label="Phase actions" id="actions">
+    <h2>Phase actions</h2>
+    {% if can_act %}
+    {% if card.moves %}
+    <form class="card-form" method="post" action="/ui/board/{{ card.id }}/actions">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="return_to" value="{{ return_to }}">
+      <label><span class="lat-label">Move</span>
+        <select class="lat-select" name="move">{% for move in card.moves %}<option value="{{ move.key }}" {% if move.key == card.default_move %}selected{% endif %}>{{ move.label }}</option>{% endfor %}</select></label>
+      <label><span class="lat-label">Your words (required; recorded as the decision's verbatim and as a note)</span>
+        <textarea class="lat-textarea" name="note" rows="3" required></textarea></label>
+      <div class="card-form-buttons">
+        <button class="lat-btn lat-btn--primary" type="submit" name="apply" value="go">Go</button>
+        {% if card.default_move %}<button class="lat-btn lat-btn--ghost" type="submit" name="apply" value="next" title="{{ card.default_move_label }}">Next phase: {{ card.default_move_label }}</button>{% endif %}
+      </div>
+    </form>
+    {% else %}<p class="admin-empty">No move applies to a task in {{ card.state_words }}.</p>{% endif %}
+    {% else %}<p class="admin-empty">Operators act here; you are reading only.</p>{% endif %}
+    <details class="admin-details"><summary>Default move per lane</summary>
+      <table class="card-defaults"><thead><tr><th>From</th><th>To</th><th>Next phase applies</th></tr></thead><tbody>
+      {% for row in card.default_table %}<tr data-current="{{ 'true' if row.from_key == card.lane.key else 'false' }}"><td>{{ row.from }}</td><td>{{ row.to }}</td><td>{{ row.label }}</td></tr>{% endfor %}
+      </tbody></table>
+    </details>
+  </section>
+</div>
+{% endblock %}

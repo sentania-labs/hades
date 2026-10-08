@@ -50,6 +50,11 @@ ROLE_REVIEW_REPORT = "review_report"
 ROLE_REVIEW_DIFF = "review_diff"
 REVIEW_DIFF_NAME = "crucible/diff.patch"
 REVIEW_DIFF_TYPE = "diff"
+# hades #370: the preparer's stdout and stderr, kept when the attempt died before its
+# worker ran, so a failed clone or resume says why without a cluster to look at.
+ROLE_PREPARER_LOG = "preparer_log"
+PREPARER_LOG_NAME = "crucible/preparer.log"
+PREPARER_LOG_TYPE = "preparer_log"
 
 
 class EvidenceV1(StrictModel):

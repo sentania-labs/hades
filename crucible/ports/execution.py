@@ -154,6 +154,9 @@ class LaunchSpec:
     resume_bundle_head: str | None = None
     resume_bundle_sha256: str | None = None
     resume_bundle_ancestor: str | None = None
+    # hades #489: the operator's notes on the task, newest first, each `author`,
+    # `created_at`, `text` and `verbatim`; rendered at the top of IDENTITY.md (06).
+    operator_notes: tuple[dict[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         validate_endpoint(self.endpoint, self.endpoint_url)
@@ -567,6 +570,30 @@ class LaunchWaitError(ProviderError):
     probe, the preparer or the worker. The supervisor puts the attempt back to pending
     with this message as the reason and launches it on a later tick; the attempt is
     not consumed and no exit class is recorded."""
+
+
+class PrepareFailedError(ProviderError):
+    """The preparer ran and could not build the checkout (hades #370). The message is
+    the environment detail and the wake's summary, so it carries the preparer's last
+    output lines; `output` is the preparer's whole stdout and stderr tail, verbatim,
+    which the supervisor keeps as attempt evidence; `exit_code` is the preparer's own
+    exit, or the provider's sentinel for a wait that ran out or a stall; and
+    `resume_source` names what a correction was resuming from (the remote work branch
+    or the preceding attempt's sealed bundle), None for an attempt that starts from the
+    base ref."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        output: str = "",
+        exit_code: int | None = None,
+        resume_source: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.output = output
+        self.exit_code = exit_code
+        self.resume_source = resume_source
 
 
 class WorkerStartError(ProviderError):

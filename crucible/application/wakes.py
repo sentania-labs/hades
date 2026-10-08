@@ -122,6 +122,16 @@ def pool_exhausted_summary(pool: str, reset_at: datetime, reason: str) -> str:
     )
 
 
+def environment_failure_summary(attempt_number: int, stage: str, detail: str) -> str:
+    """The one sentence an attempt that died before its worker ran tells Foundry
+    (hades #370, #423): which attempt, at which step (prepare or launch), and the
+    provider's words for why, which for a preparer that failed are its last output
+    lines, for a stalled clone the stall bound, and for a correction the resume source
+    it could not fetch. Shared by the supervisor's environment end, so the wake and the
+    attempt's termination detail say the same thing."""
+    return f"attempt {attempt_number} ended environment at {stage}: {detail}; no retry remaining"
+
+
 def create_pool_exhausted_wake(
     uow: UnitOfWork,
     clock: Clock,

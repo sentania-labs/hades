@@ -50,6 +50,10 @@ ADMIN_KINDS: frozenset[str] = frozenset(
         EventKind.TASK_APPROVED.value,
         EventKind.TASK_SENT_BACK.value,
         EventKind.TASK_PROPOSAL_REJECTED.value,
+        # hades #489: an operator's note on a task, and a phase action applied from the
+        # board card, each with the note's words as its reason.
+        EventKind.TASK_NOTE_RECORDED.value,
+        EventKind.TASK_PHASE_ACTION_APPLIED.value,
     }
 )
 

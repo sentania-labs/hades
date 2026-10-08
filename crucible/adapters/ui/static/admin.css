@@ -95,6 +95,48 @@ details > summary { cursor: pointer; color: var(--accent); }
 .board-card-facts dd { margin: 0; overflow-wrap: anywhere; }
 .board-card-reason { margin: 2px 0 0; }
 @media (max-width: 700px) { .board-cards { grid-auto-flow: row; grid-auto-columns: auto; grid-template-columns: 1fr; overflow-x: visible; } }
+/* hades #489: the opened card. Panels flow into one column at phone width. */
+.card-head { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: baseline; margin-bottom: 6px; }
+.card-head h1 { margin: 0; font-size: 20px; }
+.card-head .board-card-id { font-size: 12px; }
+.card-lane { display: inline-block; padding: 2px 9px; border-radius: var(--radius-pill); background: var(--accent-soft); color: var(--accent-ink); font-size: 11px; font-weight: 600; }
+.card-lane--stuck, .card-lane--waiting_on_scott { background: var(--warn-soft); color: var(--warn-ink); }
+.card-lane--wins { background: var(--ok-soft); color: var(--ok-ink); }
+.card-lane--graveyard { background: var(--surface-sunken); color: var(--ink-muted); }
+.card-links { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 0 0 12px; font-size: 12px; }
+.card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 12px; align-items: start; }
+.card-grid .lat-card { min-width: 0; }
+.card-grid .lat-card h2 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-subtle); }
+.card-wide { grid-column: 1 / -1; }
+.card-stuck { border-left: 3px solid var(--warn); }
+.card-stuck p { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
+.card-stuck ul, .card-list { margin: 0; padding-left: 18px; }
+.card-stuck li, .card-list li { margin: 3px 0; overflow-wrap: anywhere; }
+.card-prose { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 8px; }
+.card-facts { display: grid; gap: 4px; margin: 0; }
+.card-facts div { display: grid; grid-template-columns: minmax(7rem, 10rem) minmax(0, 1fr); gap: 8px; }
+.card-facts dt { color: var(--ink-subtle); font-size: 11px; font-weight: 600; }
+.card-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.card-timeline { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.card-timeline li { display: grid; gap: 2px; padding: 6px 8px; background: var(--surface-sunken); border-radius: var(--radius-md); font-size: 12px; }
+.card-timeline .card-when { color: var(--ink-muted); font: 11px/1.4 var(--font-mono); }
+.card-cost { display: flex; flex-wrap: wrap; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.card-cost li { flex: 1 1 100px; padding: 8px; background: var(--surface-sunken); border-radius: var(--radius-md); text-align: center; }
+.card-cost b { display: block; font-size: 20px; }
+.card-cost span { color: var(--ink-muted); font-size: 11px; }
+.card-notes { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.card-notes li { padding: 8px; background: var(--surface-sunken); border-radius: var(--radius-md); }
+.card-notes .card-note-head { display: flex; flex-wrap: wrap; gap: 6px 10px; font-size: 11px; color: var(--ink-muted); margin-bottom: 3px; }
+.card-notes .card-note-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.card-form { display: grid; gap: 8px; }
+.card-form .lat-textarea { width: 100%; box-sizing: border-box; }
+.card-form .lat-select { width: 100%; box-sizing: border-box; }
+.card-form-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.card-defaults { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+.card-defaults th, .card-defaults td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line-soft); }
+.card-defaults th { color: var(--ink-subtle); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.card-defaults tr[data-current="true"] td { font-weight: 600; }
+@media (max-width: 700px) { .card-grid { grid-template-columns: 1fr; } .card-facts div { grid-template-columns: 1fr; gap: 2px; } .card-form-buttons .lat-btn { flex: 1 1 100%; } }
 .login-guidance { margin: 0 0 1rem; padding-left: 1.25rem; }
 .login-guidance li { margin-bottom: 0.4rem; }
 .login-url { display: block; overflow-wrap: anywhere; word-break: break-all; font: 11px/1.5 var(--font-mono); }

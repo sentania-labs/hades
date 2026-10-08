@@ -76,6 +76,7 @@ from crucible.application.routing import (
     select_model,
 )
 from crucible.application.runtime_settings import resolve as resolve_runtime_setting
+from crucible.application.task_notes import operator_notes_for
 from crucible.application.transitions import (
     move_attempt,
     move_execution,
@@ -88,6 +89,7 @@ from crucible.application.wakes import (
     close_wakes_for_finished_pull_requests,
     create_pool_exhausted_wake,
     create_wake,
+    environment_failure_summary,
     pool_exhausted_summary,
     record_delivery,
     retry_hours_from_policy,
@@ -100,7 +102,14 @@ from crucible.contracts.completion_claim import (
     parse_blocked_md,
     parse_claim,
 )
-from crucible.contracts.evidence import ROLE_RUN_EVIDENCE, EvidenceKind, EvidenceSource
+from crucible.contracts.evidence import (
+    PREPARER_LOG_NAME,
+    PREPARER_LOG_TYPE,
+    ROLE_PREPARER_LOG,
+    ROLE_RUN_EVIDENCE,
+    EvidenceKind,
+    EvidenceSource,
+)
 from crucible.contracts.policy import RoutingPolicyV1, routing_model_name, window_seconds
 from crucible.contracts.task_contract import TaskContractV1
 from crucible.contracts.wake import WakeReason
@@ -191,6 +200,7 @@ from crucible.ports.execution import (
     LogOffset,
     Observation,
     ObservationState,
+    PrepareFailedError,
     PrepareJobPodsTimeoutError,
     ProviderError,
     ProviderUnavailableError,
@@ -2008,8 +2018,14 @@ class Supervisor:
                 )
                 return False
             except ProviderError as exc:
-                detail = str(exc)
-                await self._db(partial(self._environment_failure, attempt.id, "prepare", detail))
+                # hades #370: a preparer that ran and failed carries its stdout and
+                # stderr, which the attempt keeps as evidence beside the detail.
+                output = exc.output if isinstance(exc, PrepareFailedError) else None
+                await self._db(
+                    partial(
+                        self._environment_failure, attempt.id, "prepare", str(exc), output=output
+                    )
+                )
                 return False
             self._workspaces[attempt.id] = ws
             if getattr(provider, "activity", None) is None:
@@ -2246,6 +2262,10 @@ class Supervisor:
                             "head": str(bundle.payload.get("head_sha") or ""),
                             "sha256": str(bundle.payload.get("bundle_sha256") or ""),
                         }
+            # Keep this read inside the managed unit of work.  A SQLAlchemy session can
+            # reopen after close(), which used to leak one connection per launch here
+            # until the supervisor exhausted the pool.
+            operator_notes = operator_notes_for(route_uow, task.id)
         # FDY-0140: the harness's run settings as saved now, read at every launch.
         harness_settings = dict(saved.document) if saved is not None else {}
         # Hades #388: the window, response allowance and thinking setting are fixed for
@@ -2325,6 +2345,8 @@ class Supervisor:
             resume_bundle_ancestor=(
                 str(published.payload["head_sha"]) if published and resume_bundle else None
             ),
+            # hades #489: the operator's notes open the worker's IDENTITY.md.
+            operator_notes=operator_notes,
         )
         adapter = self._harnesses.get(selected_harness) if self._harnesses else None
         if adapter is None:
@@ -3537,17 +3559,23 @@ class Supervisor:
             uow.commit()
             return True
 
-    def _environment_failure(self, attempt_id: str, stage: str, detail: str) -> None:
+    def _environment_failure(
+        self, attempt_id: str, stage: str, detail: str, *, output: str | None = None
+    ) -> None:
         """A prepare or launch the provider could not carry out (a create the API server
         refused, a preparer that failed). hades #423: the provider's message is the
         attempt's recorded failure reason and the wake's summary, so the record says
-        more than the exit class."""
+        more than the exit class. hades #370: for a preparer that ran, that message ends
+        with its last output lines, and `output` is its whole stdout and stderr, kept as
+        an artifact of the attempt with an `artifact_present` evidence row of role
+        `preparer_log`."""
         with self._fenced() as uow:
             attempt = uow.attempts.get(attempt_id, for_update=True)
             assert attempt is not None
             attempt.exit_class = ExitClass.ENVIRONMENT
             attempt.ended_at = self._clock.now()
-            attempt.termination_detail = redact(f"{stage}: {detail}")[:1000]
+            reason = redact(detail)[:1000]
+            attempt.termination_detail = f"{stage}: {reason}"[:1000]
             move_attempt(
                 uow,
                 self._clock,
@@ -3556,21 +3584,57 @@ class Supervisor:
                 EventKind.ATTEMPT_COLLECTED,
                 payload={
                     "stage": stage,
-                    "detail": redact(detail)[:1000],
+                    "detail": reason,
                     "exit_class": ExitClass.ENVIRONMENT,
                 },
             )
             self._record_bare_evidence(uow, attempt)
+            if output:
+                self._record_preparer_output(uow, attempt, output)
             self._classify_and_finish(
                 uow,
                 attempt,
                 None,
-                wake_summary=(
-                    f"attempt {attempt.number} ended environment at {stage}: "
-                    f"{attempt.termination_detail}; no retry remaining"
-                ),
+                wake_summary=environment_failure_summary(attempt.number, stage, reason),
             )
             uow.commit()
+
+    def _record_preparer_output(self, uow: UnitOfWork, attempt: Attempt, output: str) -> None:
+        """hades #370: the preparer's stdout and stderr (one stream on Kubernetes), kept
+        verbatim as an artifact of the attempt and pointed at by an `artifact_present`
+        evidence row of role `preparer_log`, so a clone or resume that failed can be read
+        after the Pod is gone. A secret pattern in it is redacted first (14): a token in a
+        clone URL git echoed would be the usual way one gets there."""
+        text = redact(output) if find_secrets(output) else output
+        artifact = store_artifact(
+            uow,
+            self._clock,
+            self._artifacts,
+            attempt=attempt,
+            name=PREPARER_LOG_NAME,
+            artifact_type=PREPARER_LOG_TYPE,
+            content=text.encode("utf-8"),
+            content_type="text/plain",
+        )
+        uow.evidence.add(
+            EvidenceRecord(
+                id=None,
+                attempt_id=attempt.id,
+                task_id=attempt.task_id,
+                kind=EvidenceKind.ARTIFACT_PRESENT.value,
+                observed_at=self._clock.now(),
+                source=EvidenceSource.CRUCIBLE.value,
+                verified=True,
+                payload={
+                    "role": ROLE_PREPARER_LOG,
+                    "path": PREPARER_LOG_NAME,
+                    "stored_at": artifact.path,
+                    "size": artifact.size,
+                    "lines": len(text.splitlines()),
+                },
+                artifact_id=artifact.id,
+            )
+        )
 
     def _return_to_pending(self, attempt_id: str, stage: str, detail: str) -> None:
         """hades #423: the provider could not take the attempt's Pod right now (the
@@ -3591,8 +3655,17 @@ class Supervisor:
                 self._end_cancelled_launch(uow, attempt, task, stage)
                 uow.commit()
                 return
+            # hades #370: the refusal is the API server's own words (the quota 403 body,
+            # or the Job's FailedCreate event) and is recorded as they came, uncut.
             reason = self._pending_again(
-                uow, attempt, task, stage, detail, reason="quota_wait", mark={"quota_wait": True}
+                uow,
+                attempt,
+                task,
+                stage,
+                detail,
+                reason="quota_wait",
+                mark={"quota_wait": True},
+                uncut=True,
             )
             log.info(
                 "launch waits for room; the attempt is pending again",
@@ -3675,12 +3748,14 @@ class Supervisor:
         *,
         reason: str,
         mark: dict[str, Any],
+        uncut: bool = False,
     ) -> str:
         """Send a preparing or launching attempt back to pending with nothing recorded
         against it, and its task back to the queue where it stood; `reason` names why on
         the scheduling event and `mark` rides on the deferral event. Returns the redacted
-        detail."""
-        redacted = redact(detail)[:1000]
+        detail, cut to the usual bound unless `uncut` (hades #370: a quota refusal is the
+        API server's own words and is recorded as they came)."""
+        redacted = redact(detail) if uncut else redact(detail)[:1000]
         attempt.workspace_path = None
         attempt.identity_sha256 = None
         attempt.handle = None

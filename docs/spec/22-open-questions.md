@@ -102,7 +102,8 @@ None at this revision.
   push, but a worker could still read public repositories the contract did
   not name. Accepted for now; tighten per policy if needed.
 - **App permissions versus re-run.** Re-requesting a failed workflow run
-  needs Actions write, which the decided permission set excludes. This
-  specification keeps Actions read; the `rerun` action in `ci-decision`
-  therefore records the intent and asks the operator to re-run, unless the
-  operator later grants Actions write. Flagged rather than silently widened.
+  needs Actions write. Resolved by the operator (hades #435, 2026-10-05):
+  the App manifest asks for Actions write, and a `ci-decision` `rerun`
+  re-runs the failed jobs itself when the installation grants it. An
+  installation that still holds Actions read gets the operator hand-off
+  as before (23).

@@ -873,6 +873,11 @@ class FakeKubernetesApi:
             self.logs[obj.name] = ["the fake preparer could not clone"]
             self._finish(obj, 3, reason="Error")
             return
+        if behavior == "prepare-hangs":
+            # hades #370: a clone that makes no progress. The Pod stays Running with the
+            # clone's first line as its whole log, so only the stall bound ends it.
+            self.logs[obj.name] = [f"{_stamp(0)} Cloning into '/crucible/work/repo'..."]
+            return
         if not self.claims_suppress_head:
             claim["output/prepared-head.txt"] = (synthetic_head_sha(attempt_id) + "\n").encode()
         claim["output/started-from.txt"] = b"main\n"

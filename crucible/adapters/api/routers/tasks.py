@@ -32,6 +32,7 @@ from crucible.application.republish import republish_task
 from crucible.application.review import request_review
 from crucible.application.start_task import start_task
 from crucible.application.submit_task import submit_task
+from crucible.application.task_notes import add_note
 from crucible.contracts.api import (
     AcceptRequest,
     AmendRequest,
@@ -45,6 +46,7 @@ from crucible.contracts.api import (
     DispositionRequest,
     EventList,
     HeadDecisionRequest,
+    NoteRequest,
     PublishRetryRequest,
     PullRequestView,
     RejectProposalRequest,
@@ -530,6 +532,41 @@ async def close(
     )
 
 
+@router.post("/{task_id}/notes", response_model=TaskView, status_code=201)
+async def notes(
+    task_id: str,
+    body: NoteRequest,
+    request: Request,
+    ctx: Ctx,
+    principal: Operator,
+    idempotency_key: IdemKey = None,
+) -> JSONResponse:
+    """hades #489: an operator's note on the task, listed on the task read newest first
+    and put at the top of the next attempt's IDENTITY.md."""
+    raw = await request.body()
+
+    async def produce(uow: UnitOfWork) -> tuple[int, dict[str, Any]]:
+        add_note(
+            uow,
+            ctx.clock,
+            principal=principal,
+            task_id=task_id,
+            text=body.text,
+            verbatim=body.verbatim,
+        )
+        return 201, task_view(uow, task_id).model_dump(mode="json")
+
+    return await with_idempotency(
+        uow_factory=ctx.uow_factory,
+        clock=ctx.clock,
+        principal=principal,
+        key=idempotency_key,
+        body=raw,
+        scope=str(request.url.path),
+        produce=produce,
+    )
+
+
 @router.get("/{task_id}/pull-request", response_model=PullRequestView)
 def get_pull_request(task_id: str, uow: UoW, _principal: Reader) -> PullRequestView:
     """The PR record with head history, external reviews, dispositions, reactions, and
@@ -550,7 +587,12 @@ async def ci_decision(
 
     async def produce(uow: UnitOfWork) -> tuple[int, dict[str, Any]]:
         task = record_ci_decision(
-            uow, ctx.clock, principal=principal, task_id=task_id, request=body
+            uow,
+            ctx.clock,
+            principal=principal,
+            task_id=task_id,
+            request=body,
+            github_client=ctx.github_client,
         )
         return 200, task_view(uow, task.id).model_dump(mode="json")
 

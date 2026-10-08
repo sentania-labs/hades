@@ -1011,6 +1011,47 @@ def pending_rerun(
     return None
 
 
+def rerun_attempt(
+    uow: UnitOfWork,
+    task: Task,
+    observation: Observation,
+    *,
+    head_sha: str,
+    previous: CICertification | None,
+) -> tuple[str, int] | None:
+    """The rerun decision on this head and the workflow run attempt it is judged on.
+
+    Issue 435: GitHub numbers each re-run of a workflow run with `run_attempt`. The
+    newest attempt above 1 still running on the head is the one being judged; when none
+    is running, the attempt already recorded for the same decision is kept (the one
+    Hades started itself with Actions write, or one seen running before it concluded).
+    An attempt recorded for an earlier decision is not this decision's."""
+    event = uow.events.latest_for_task_kind(task.id, EventKind.CI_DECISION_RECORDED.value)
+    if event is None:
+        return None
+    payload = event.payload
+    if payload.get("action") != CIAction.RERUN.value or payload.get("head_sha") != head_sha:
+        return None
+    decision_id = str(payload.get("ci_decision_id", ""))
+    running = [
+        check.run_attempt
+        for check in observation.checks
+        if check.head_sha == head_sha
+        and check.source == CheckSource.WORKFLOW_RUN.value
+        and check.status != "completed"
+        and check.run_attempt is not None
+        and check.run_attempt > 1
+    ]
+    if running:
+        return decision_id, max(running)
+    if previous is None or previous.failure.get("rerun_decision") != decision_id:
+        return None
+    kept = previous.failure.get("rerun_attempt")
+    if isinstance(kept, int) and not isinstance(kept, bool):
+        return decision_id, kept
+    return None
+
+
 def certification_failures(certification: CICertification) -> list[FailedRun]:
     """The failed runs a stored certification recorded."""
     rows = certification.failure.get("all")
@@ -1084,6 +1125,7 @@ def certify_head(
                     "conclusion": c.conclusion,
                     "url": c.url,
                     "run_id": c.external_id,
+                    "source": c.source.value,
                     "completed_at": _iso(c.completed_at),
                 }
                 for c in outcome.failures
@@ -1109,9 +1151,9 @@ def certify_head(
             state = CertificationState.PENDING
             names = ", ".join(sorted({c.name for c in outcome.failures}))
             detail = (
-                f"a CI re-run was decided (ci decision {rerun}); the failure it was about "
-                f"({names}) is not counted again. Waiting for a result on {head_sha} that "
-                "is not the one the decision was about"
+                f"waiting on a re-run: a CI re-run was decided (ci decision {rerun}); "
+                f"the failure it was about ({names}) is not counted again. Waiting for a "
+                f"result on {head_sha} that is not the one the decision was about"
             )
             failure["stale_after_rerun"] = rerun
     elif state is CertificationState.PENDING:
@@ -1133,6 +1175,13 @@ def certify_head(
                 f"the operator accepted that this repository has no CI for this task "
                 f"({waiver_words(waiver)})"
             )
+    # Issue 435: once a rerun has been decided for this head, the certification keeps
+    # the attempt that is being judged, and while it runs the detail says so.
+    judged = rerun_attempt(uow, task, observation, head_sha=head_sha, previous=previous)
+    if judged is not None:
+        failure["rerun_decision"], failure["rerun_attempt"] = judged
+        if state is CertificationState.PENDING:
+            detail = f"re-run requested, attempt {judged[1]} running"
     certification = CICertification(
         id=new_id(),
         pull_request_id=pull_request.id,
