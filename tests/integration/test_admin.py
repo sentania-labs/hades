@@ -2786,17 +2786,16 @@ def test_a_harness_test_reports_each_step_and_stops_at_the_first_failure(
         assert started.status_code == 202, started.text
         marker = started.json()
         assert marker["status"] == "running" and marker["ok"] is None, marker
-        _latest: dict[str, Any]
-        wait_until(
-            lambda: (
-                (_latest := admin_client.get(f"/v1/admin/harnesses/{harness}/test").json())
-                and _latest["status"] == "finished"
-                and _latest["started_at"] >= marker["started_at"]
-            ),
-            timeout=30,
-            describe=f"the {harness} test to land within 30 s",
-        )
-        return _latest
+        _result: dict[str, Any] | None = None
+
+        def _check() -> bool:
+            nonlocal _result
+            _result = admin_client.get(f"/v1/admin/harnesses/{harness}/test").json()
+            return _result["status"] == "finished" and _result["started_at"] >= marker["started_at"]
+
+        wait_until(_check, timeout=30, describe=f"the {harness} test to land within 30 s")
+        assert _result is not None
+        return _result
 
     asyncio.run(live_supervisor.tick())
     assert admin_client.get("/v1/admin/harnesses/hermes/test").json()["status"] == "not tested"
