@@ -12,7 +12,7 @@ is carried to the reviewer.
 | `exit_clean` | blocking | The worker exited with a clean class; a budget end with commits (`ended_by_budget`) is clean whatever the code |
 | `commits_present` | blocking | The branch has at least one commit |
 | `scope_contained` | blocking (prohibited paths) / advisory | Worker commit paths are inside `allowed_paths` |
-| `no_injected_files` | blocking | No injected-name or harness paths appear on the branch |
+| `no_injected_files` | blocking | No injected-name or harness paths appear on the branch; shim content is checked on every added or modified path (hades #377, #400) |
 | `no_secrets` | blocking | The scanner found no secrets in the diff or artifacts |
 | `editor_leftovers` | blocking | No editor or merge leftovers were added to the branch |
 | `verification_ran` | blocking | Crucible's own re-run of required commands passed |
