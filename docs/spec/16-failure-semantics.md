@@ -8,7 +8,7 @@
 | `blocked` | `blocked.md` present on a clean exit: exit 0, or 75 where the harness does not use 75 itself (a model cannot set its harness's exit code, FDY-0140). The file's reason line, `missing_capability` or `ambiguous_contract`, and its statement verbatim go on the attempt and the escalation (hades #393) | escalation carrying the reason and the statement, wake, task `blocked`; never retried, no retry consumed, no pool marked |
 | `environment` | exit 70, the provider failed before the harness ran, the kernel killed the worker out of memory (exit 137 with the daemon's OOM flag), or the harness was refused | retry if attempts remain; else `failed`. A harness refusal (07, 25) is the exception: it is never retried, because the same refusal would come back |
 | `auth_failure` | harness reported auth problem (adapter classified) | retry per policy (`retry.auth_failure_max`, after `auth_retry_delay_seconds`); wake regardless |
-| `quota_exhausted` | harness reported rate or quota limit | reroute (below): mark the pool, commit WIP, new attempt on the next candidate in the tier; if none, `awaiting_quota` until the earliest reset; caps exceeded or task pinned to the exhausted pool: task `reported` with the class visible, wake |
+| `quota_exhausted` | harness reported rate or quota limit | reroute (below): mark the pool (or, for a model-only refusal, exclude the model and leave the pool open, hades #373), commit WIP, new attempt on the next candidate in the tier; if none, `awaiting_quota` until the earliest reset; caps exceeded or task pinned to the exhausted pool: task `reported` with the class visible, wake |
 | `timeout` | contract timeout with no commit on the branch; with commits the exit is `ended_by_budget` (hades #498) | no retry; gates run on what exists; wake |
 | `ended_by_budget` | the attempt's time limit or the harness's turn limit stopped the run with commits on the branch (hades #498) | a normal end, not a failure: the bundle is collected and the same gates run as for `completed`; passing gates publish, failing ones go to correction; no retry consumed, no wake for the stop itself |
 | `stalled` | Crucible ended the worker for a stall (below) | as `timeout`: no retry; gates run on what exists; wake (`timed_out`) |
@@ -67,21 +67,36 @@ step:
    names the attempt, then pushed; the SHA goes in the event. Nothing is
    discarded silently and nothing is left uncommitted. Squash on merge
    removes the WIP commit from `main`.
-2. The attempt's pool is marked exhausted until `reset_at` (05b). The one
-   wake the refusal raises names the pool, the reason and the reset time
-   (hades #378): the `reported` or `awaiting_quota` wake of steps 3 and 4
-   carries that sentence when the refusal wrote the mark, and an attempt
-   refused while the mark is already in force extends the mark without a
-   wake of the pool's own.
+2. The attempt's pool is marked exhausted until `reset_at` (05b): the reset
+   the refusal states, else now plus the pool's `default_cooldown_seconds`,
+   so a mark from a signal that states no reset for the pool expires no
+   later than the default cooldown (hades #373). Every pool mark that opens
+   an exhaustion raises one wake naming the pool, the reason and the reset
+   time (hades #378): the `reported` or `awaiting_quota` wake of steps 3 and
+   4 carries that sentence when the refusal wrote the mark, the reroute of
+   step 3 raises the pool's own, and an attempt refused while the mark is
+   already in force extends the mark without a wake of the pool's own. The
+   local-endpoint mark of ADR 0028 (05b) raises the same wake when it opens.
+   A model-only refusal (hades #373; 07, Claude Code) writes no pool mark:
+   the refused model is excluded until the refusal's reset, or the pool's
+   `default_cooldown_seconds` when it states none, as a mark keyed
+   `model:<harness>:<model>` (the route) in the same table, listed and cleared like a pool mark, with
+   a `quota_exhausted` event of scope `model`; the pool stays open and no
+   pool wake is raised.
 3. Selection runs again for the tier with marked pools excluded. A
    candidate: a new attempt on the same contract version, resumed from the
    remote work branch as corrections are, and a `reroute` event naming the
    pool left, the model chosen, and the ordered candidates. One
    `quota_exhausted` wake naming the pool and its reset when this refusal
-   opened the pool's exhaustion; otherwise no wake.
+   opened the pool's exhaustion; otherwise no wake. After a model-only
+   refusal the reroute stays inside the pool: selection runs with that
+   model excluded (the `excluded_routes` path a capacity refusal's retry
+   takes, carried on the `reroute` event as `excluded_model`, `excluded_harness` and
+   `next_attempt_id`) and its mark turns the model away for every task until
+   the reset; the next candidate in the same pool launches.
 4. No candidate: the task moves to `awaiting_quota` with `resume_at` the
-   earliest `reset_at` among the tier's pools, and one informational wake
-   (17). The supervisor tick relaunches at `resume_at` through step 3. Past
+   earliest `reset_at` among the tier's pools and its models' own exclusions,
+   and one informational wake (17). The supervisor tick relaunches at `resume_at` through step 3. Past
    `reroute.resume_max_wait_seconds`, or past `reroute_max`, the task ends
    `reported` with the class visible and a wake, which is the pre-C6b
    behaviour.

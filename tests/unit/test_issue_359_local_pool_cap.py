@@ -321,8 +321,7 @@ async def test_a_review_whose_harness_its_routing_entry_does_not_pair_is_refused
     assert [event.attempt_id for event in refused] == [attempt.id]
     assert refused[0].payload["stage"] == "routing"
     assert refused[0].payload["detail"] == (
-        "model review-model is paired with harness agy in routing policy test-routing/1, "
-        "not with claude_code"
+        "model review-model is not paired with harness claude_code in routing policy test-routing/1"
     )
     # The refused review took no slot: the second implement attempt launches.
     assert await supervisor._begin_launch(second) is not None

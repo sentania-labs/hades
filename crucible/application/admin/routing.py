@@ -23,7 +23,7 @@ from crucible.application.proxy_config import (
     worker_proxy_config,
 )
 from crucible.application.wakes import create_wake
-from crucible.contracts.policy import RoutingModel
+from crucible.contracts.policy import RoutingModel, routing_model_name
 from crucible.contracts.wake import WakeReason
 from crucible.domain.endpoints import validate_endpoint
 from crucible.domain.entities import Policy, Principal, ProviderSetting, Role
@@ -119,7 +119,7 @@ def gateway_url(uow: UnitOfWork) -> tuple[str | None, str]:
 
 def _models_enabled(document: Mapping[str, Any]) -> dict[str, bool]:
     return {
-        str(model.get("id", "")): model.get("enabled") is True
+        f"{model.get('harness')}:{routing_model_name(model)}": model.get("enabled") is True
         for model in document.get("models") or []
     }
 
@@ -335,7 +335,7 @@ def publish_routing(
     `routing_changed` wake listing the delta and the projects that follow it."""
     delta = publish_delta(uow, policy=policy, routing=routing, routing_document=routing_document)
     material = delta_needs_reason(delta)
-    if material and not (reason or "").strip():
+    if material and principal.role is Role.ORCHESTRATOR and not (reason or "").strip():
         changes = "; ".join(delta_words(delta)[:-1])
         record_refusal(
             ctx,
@@ -350,6 +350,16 @@ def publish_routing(
     routing_versions = uow.routing_policies.list_versions(routing.name)
     next_routing_version = max(item.version for item in routing_versions) + 1
     routing_document["version"] = next_routing_version
+    prior = None
+    if hasattr(uow, "events"):
+        prior = next(
+            (
+                row
+                for row in routing_history(uow, routing.name, limit=1000)
+                if row["version"] == routing.version
+            ),
+            None,
+        )
     put_routing_policy(
         uow,
         ctx.clock,
@@ -358,7 +368,12 @@ def publish_routing(
         version=next_routing_version,
         document=routing_document,
         reason=reason,
-        extra={"delta": delta, "note": note, "previous_version": routing.version},
+        extra={
+            "delta": delta,
+            "note": note,
+            "previous_version": routing.version,
+            "superseded_decision": prior,
+        },
     )
     ref = (policy.document.get("routing") or {}).get("policy") or {}
     pinned = ref.get("pinned") is True
@@ -471,18 +486,32 @@ def save_local_endpoint(
     policy, routing = _active_documents(uow)
     before = local_endpoint_view(uow)
     routing_document = copy.deepcopy(routing.document)
-    updates = {str(item.get("id", "")): item for item in models}
+    updates = {
+        f"{item.get('harness', '')}:{item.get('model') or item.get('id', '')}": item
+        for item in models
+    }
     local_models = [
         model for model in routing_document.get("models", []) if model.get("endpoint") == "local"
     ]
     if not local_models:
         raise NotFoundError("the active routing policy has no local model entries")
-    unknown = sorted(set(updates) - {str(model.get("id")) for model in local_models})
+    local_keys = {f"{model.get('harness')}:{routing_model_name(model)}" for model in local_models}
+    # Legacy callers supplied only the model id when it was globally unique.
+    for item in models:
+        if not item.get("harness"):
+            matches = [
+                key
+                for key in local_keys
+                if key.endswith(f":{item.get('model') or item.get('id', '')}")
+            ]
+            if len(matches) == 1:
+                updates[matches[0]] = updates.pop(f":{item.get('model') or item.get('id', '')}")
+    unknown = sorted(set(updates) - local_keys)
     if unknown:
         raise ValueError(f"models are not local entries in the active routing policy: {unknown}")
     for model in local_models:
         model["endpoint_url"] = endpoint_url
-        update = updates.get(str(model.get("id")))
+        update = updates.get(f"{model.get('harness')}:{routing_model_name(model)}")
         if update is None:
             continue
         # Only a real True turns a flag on; the API rejects non-booleans before this.

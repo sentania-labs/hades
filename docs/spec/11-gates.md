@@ -11,7 +11,7 @@ is carried to the reviewer.
 | `report_present` | advisory (always, hades #498) | The worker submitted a parseable report with self-review; a gap is listed for the reviewer and Hades composes the completion record itself |
 | `exit_clean` | blocking | The worker exited with a clean class; a budget end with commits (`ended_by_budget`) is clean whatever the code |
 | `commits_present` | blocking | The branch has at least one commit |
-| `scope_contained` | blocking (prohibited paths) / advisory | Changed paths are inside `allowed_paths` |
+| `scope_contained` | blocking (prohibited paths) / advisory | Worker commit paths are inside `allowed_paths` |
 | `no_injected_files` | blocking | No injected-name or harness paths appear on the branch |
 | `no_secrets` | blocking | The scanner found no secrets in the diff or artifacts |
 | `editor_leftovers` | blocking | No editor or merge leftovers were added to the branch |
@@ -43,3 +43,37 @@ path component — either the start of the path or immediately after a `/`):
 Only newly added files (diff status ``A``) are checked. A leftover that exists on
 the base ref and is only edited or deleted is not flagged.  When diff change-status
 information is unavailable the gate conservatively checks all changed paths.
+
+## Commit authorship range (`commit_policy`, hades #230)
+
+`scope_contained` checks the complete path list from commits in `BASE..HEAD`, rather
+than the merge-base diff. The prepared base is a trusted commit id, not a ref the worker
+can move. Two-dot reachability excludes every commit already reachable from the base,
+so merging a newer base into the work branch cannot charge the base's paths to the
+worker. Paths in the worker's own commits remain in the list even if a later commit or
+base merge hides them from the final diff.
+
+The collector's author check (`commit_policy_check`, FDY-0135) runs over a range,
+`POLICY_FROM..HEAD`, so a correction only re-checks the commits added since the branch
+was last published rather than every commit back to `base_ref`. `POLICY_FROM` is never
+resolved from `refs/remotes/origin/$WORK_BRANCH` in the checkout the worker runs in: a
+worker that moved that ref to `HEAD` could otherwise empty the range and hide every
+commit's author from the check.
+
+Instead the preparer resolves the range's start to a commit id while it is still the
+checkout's only writer, before the worker starts, and records it in
+`prepared-policy-from.txt` on the output mount, which the worker never gets (the same
+mount and the same pattern `prepared-base.txt` already uses for the diff's base, 08).
+It is the previous `origin/$WORK_BRANCH` head on a resume, the verified bundle head on
+a correction resumed from a sealed bundle, or the prepared base when the attempt starts
+fresh and there is nothing prior to exclude. The collector reads only that file; when it
+is missing or not a commit id, the check does not run and the gate reports it could not
+read the commits, same as any other failure to list or read them. `commit_policy` stays
+advisory either way (FDY-0143): this changes what range is trusted, not whether the
+gate can block a branch.
+
+This only changes where the collector's advisory check gets its range inside the
+worker's checkout. The publisher never shares that problem: at merge time it reads
+`refs/heads/$WORK_BRANCH` from the real remote over the network (23), never from the
+worker-writable checkout, so its own view of the branch stays authoritative and this
+change leaves it untouched.

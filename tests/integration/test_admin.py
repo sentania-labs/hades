@@ -642,8 +642,8 @@ def test_every_remaining_ui_mutation_dispatches_to_the_shared_application_servic
         (ui.login, "submit_code", stub("login-code")),
         (ui.login, "cancel_login", stub("login-cancel")),
         (ui.login, "finish_login", stub("login-finish")),
-        (ui.images, "promote", async_stub("image-promote")),
-        (ui.images, "rollback", async_stub("image-rollback")),
+        (ui.images, "defaults", async_stub("image-change")),
+        (ui.images, "list_all", async_stub("image-change")),
         (ui.routing, "clear_exhaustion", stub("routing-clear")),
         (ui.repositories, "register", stub("repository-register")),
         (ui.repositories, "remove", stub("repository-remove")),
@@ -668,8 +668,7 @@ def test_every_remaining_ui_mutation_dispatches_to_the_shared_application_servic
         ("login-code", {"harness": "codex", "code": "fixture-code"}),
         ("login-cancel", {"harness": "codex"}),
         ("login-finish", {"harness": "codex"}),
-        ("image-promote", {"harness": "hermes", "digest": "sha256:" + "a" * 64}),
-        ("image-rollback", {"harness": "hermes"}),
+        ("image-change", {"harness": "hermes", "digest": "sha256:" + "a" * 64}),
         ("routing-clear", {"pool": "primary"}),
         (
             "routing-upload",
@@ -710,8 +709,7 @@ def test_every_remaining_ui_mutation_dispatches_to_the_shared_application_servic
         "login-code",
         "login-cancel",
         "login-finish",
-        "image-promote",
-        "image-rollback",
+        "image-change",
         "routing-clear",
         "routing-upload",
         "policy-upload",
@@ -1439,8 +1437,7 @@ def test_row_actions_offer_an_optional_reason_and_destructive_ones_require_it(
         }
         for path, action in (
             ("/ui/harnesses", "/ui/actions/harness"),
-            ("/ui/images", "/ui/actions/image-promote"),
-            ("/ui/images", "/ui/actions/image-rollback"),
+            ("/ui/images", "/ui/actions/image-change"),
             ("/ui/routing", "/ui/actions/routing-clear"),
         ):
             for found in reason_inputs(pages[path], action):
@@ -1450,13 +1447,17 @@ def test_row_actions_offer_an_optional_reason_and_destructive_ones_require_it(
             assert 'placeholder="Reason (required)"' in found and found.endswith("required>")
         # The Test action is a read-only check and asks for no reason at all.
         assert reason_inputs(pages["/ui/harnesses"], "/ui/actions/harness-test")[0] == ""
+        # The images page no longer has reason inputs on its row actions.
+        # Verify the image-change form has no reason field.
+        assert 'name="reason"' not in pages["/ui/images"]
 
+        # Post the unified image-change action with the previous digest to trigger a rollback.
         noted = browser.post(
-            "/ui/actions/image-rollback",
+            "/ui/actions/image-change",
             data={
                 "csrf": csrf,
                 "harness": "hermes",
-                "reason": "0.5.6 regressed the gateway call",
+                "digest": "sha256:" + "b" * 64,
                 "return_to": "/ui/images",
             },
             follow_redirects=False,
@@ -1472,7 +1473,7 @@ def test_row_actions_offer_an_optional_reason_and_destructive_ones_require_it(
     rollback = next(
         e for e in events if e["kind"] == "image_promoted" and e["payload"].get("rollback")
     )
-    assert rollback["payload"]["reason"] == "0.5.6 regressed the gateway call"
+    assert rollback["payload"]["reason"] is None
     with ctx.uow_factory() as uow:
         mark = uow.pool_exhaustions.get("primary")
         assert mark is not None and mark.cleared_at is not None
@@ -2778,11 +2779,26 @@ def test_a_harness_test_reports_each_step_and_stops_at_the_first_failure(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """crucible#118: one Test per harness runs the path a task takes and says, per step,
-    pass or fail in plain words. It asks for no reason (crucible#117)."""
+    pass or fail in plain words. It asks for no reason (crucible#117). The POST starts the
+    run in the background and answers its running marker at once; the result lands on
+    the harness row, where `GET /admin/harnesses/{name}/test` reads it (issue 147)."""
+
+    def tested(harness: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        started = admin_client.post(f"/v1/admin/harnesses/{harness}/test", json=body)
+        assert started.status_code == 202, started.text
+        marker = started.json()
+        assert marker["status"] == "running" and marker["ok"] is None, marker
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            latest: dict[str, Any] = admin_client.get(f"/v1/admin/harnesses/{harness}/test").json()
+            if latest["status"] == "finished" and latest["started_at"] >= marker["started_at"]:
+                return latest
+            time.sleep(0.05)
+        raise AssertionError(f"the {harness} test did not land within 30 s")
+
     asyncio.run(live_supervisor.tick())
-    untested = admin_client.post("/v1/admin/harnesses/hermes/test")
-    assert untested.status_code == 200, untested.text
-    result = untested.json()
+    assert admin_client.get("/v1/admin/harnesses/hermes/test").json()["status"] == "not tested"
+    result = tested("hermes")
     assert result["ok"] is False and result["failed_step"] == "Worker image"
     assert [s["result"] for s in result["steps"]] == [
         "pass",
@@ -2805,7 +2821,7 @@ def test_a_harness_test_reports_each_step_and_stops_at_the_first_failure(
         uow.commit()
     # Hermes has no key in this tier: the test stops at the credential, before a worker.
     probes_before = len(provider.probes)
-    missing = admin_client.post("/v1/admin/harnesses/hermes/test", json={}).json()
+    missing = tested("hermes", {})
     assert missing["failed_step"] == "Credential"
     assert "no API key is stored" in missing["steps"][2]["detail"]
     assert "Local gateway" in missing["steps"][2]["detail"]
@@ -2823,13 +2839,13 @@ def test_a_harness_test_reports_each_step_and_stops_at_the_first_failure(
         "Model call",
     ]
     assert passed["steps"][2]["detail"] == "this harness needs none"
-    through_api = admin_client.post("/v1/admin/harnesses/script-harness/test").json()
+    through_api = tested("script-harness")
     assert through_api["ok"] is True
     assert provider.probe_requests[-1].harness == "script-harness"
 
     # A model provider that refuses the credential fails the model call, named as such.
     provider.probe_outcome = "auth_failure"
-    refused = admin_client.post("/v1/admin/harnesses/codex/test").json()
+    refused = tested("codex")
     assert refused["failed_step"] == "Model call", refused
     assert "refused the credential" in refused["steps"][-1]["detail"]
 

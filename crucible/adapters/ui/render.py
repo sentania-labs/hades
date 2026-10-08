@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.staticfiles import StaticFiles
 
 from crucible.application.queries import supervisor_health
+from crucible.contracts.policy import routing_model_name
 from crucible.contracts.task_contract import HarnessName
 from crucible.domain.entities import Principal
 from crucible.domain.secrets import redact
@@ -187,7 +188,12 @@ REASON_REQUIRED_ACTIONS = frozenset(
 
 
 NO_REASON_ACTIONS = frozenset(
-    {"/ui/actions/github-check", "/ui/actions/harness-test", "/ui/actions/gateway-test"}
+    {
+        "/ui/actions/github-check",
+        "/ui/actions/harness-test",
+        "/ui/actions/gateway-test",
+        "/ui/actions/image-change",
+    }
 )
 
 
@@ -402,11 +408,9 @@ def _routing_policy_details(
     pools_dict = routing_policy.get("pools", {})
 
     models_by_harness: dict[str, list[dict[str, Any]]] = {}
-    model_name_map: dict[str, str] = {}
     for m in models_list:
         harness = m.get("harness", "unknown")
         models_by_harness.setdefault(harness, []).append(m)
-        model_name_map[m.get("id", "")] = m.get("model_name", m.get("id", ""))
 
     # Per-harness sentences
     # Derive the gateway text from each harness's own endpoint (crucible/FDY-0417):
@@ -422,10 +426,10 @@ def _routing_policy_details(
         harness_models = models_by_harness[harness]
         enabled = [m for m in harness_models if m.get("enabled")]
         disabled = [m for m in harness_models if not m.get("enabled")]
-        model_ids = ", ".join(m["id"] for m in enabled) if enabled else "none"
+        model_ids = ", ".join(routing_model_name(m) for m in enabled) if enabled else "none"
         line = f"{harness}: models {model_ids}"
         if disabled:
-            disabled_ids = ", ".join(m["id"] for m in disabled)
+            disabled_ids = ", ".join(routing_model_name(m) for m in disabled)
             line += f"; disabled: {disabled_ids}"
         harness_endpoints = endpoints_by_harness.get(harness)
         if harness_endpoints and len(harness_endpoints) == 1:
@@ -470,7 +474,7 @@ def _routing_policy_details(
         enabled_label = "on" if m.get("enabled") else "off"
         harness = m.get("harness", "")
         row: dict[str, Any] = {
-            "id": m.get("id", ""),
+            "model": routing_model_name(m),
             "enabled": enabled_label,
             "harness": harness,
         }
@@ -501,7 +505,7 @@ def _routing_policy_details(
     return {
         "title": "Routing policy details",
         "columns": columns,
-        "rows": [[r["id"], r["enabled"], r["harness"]] for r in model_rows],
+        "rows": [[r["model"], r["enabled"], r["harness"]] for r in model_rows],
         "note": " ".join(lines) if lines else "",
         "details": detail_items,
         "details_label": "View policy JSON",
@@ -563,7 +567,10 @@ def _page(
     sections: list[dict[str, Any]],
     badge: str | None = None,
     badge_kind: str = "accent",
+    refresh_seconds: int | None = None,
 ) -> HTMLResponse:
+    """`refresh_seconds` makes the browser reload the page (at its own path, without the
+    flash message) every so many seconds while something on it is in progress."""
     timezone = "America/Chicago"
     settings = getattr(request.app.state.ctx, "settings", None)
     if settings is not None:
@@ -579,6 +586,7 @@ def _page(
         sections=sections,
         badge=badge,
         badge_kind=badge_kind,
+        refresh_seconds=refresh_seconds,
     )
     return templates.TemplateResponse(request=request, name="page.html", context=context)
 

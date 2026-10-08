@@ -568,9 +568,11 @@ class SupervisorStatusRepository(Protocol):
 
 
 class HarnessStateRepository(Protocol):
-    """The runtime record per harness (25): enable flag, compatibility, observations."""
+    """The runtime record per harness (25): enable flag, compatibility, observations.
+    `for_update` locks the row until the unit of work ends, so a read-then-write (the
+    harness test's running marker, issue 147) is one claim across api replicas."""
 
-    def get(self, name: str) -> HarnessState | None: ...
+    def get(self, name: str, *, for_update: bool = False) -> HarnessState | None: ...
 
     def list_all(self) -> Sequence[HarnessState]: ...
 

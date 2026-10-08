@@ -192,7 +192,11 @@ def _collected(
             commits=1,
             verified=True,
             sha256="f" * 64,
-            commit_paths=("src/ledger/change.py",),
+            commit_paths=(
+                ("infrastructure/outside-the-contract.txt",)
+                if advisory_failed
+                else ("src/ledger/change.py",)
+            ),
             commit_messages=("Return 409",),
             commit_policy=CommitPolicyCheck(),
         ),
