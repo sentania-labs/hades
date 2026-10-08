@@ -1463,15 +1463,16 @@ if [ -s "$OUT/ls-remote-before.txt" ]; then
     >> "$OUT/publisher.log" 2>&1
   REMOTE=$(git rev-parse FETCH_HEAD)
 fi
-OWNED_HEADS={_quote_owned_remote_heads()}
+printf '%s\n' "$REMOTE" > "$OUT/remote-head-before.txt"
 # hades #564: determine own_pr_number from the PR list if OWNED_HEADS already
 # includes EXPECTED_HEAD (the expected head is our own branch tip).
 OWN_PR_NUMBER=0
 if [ -n "$EXPECTED_HEAD" ] && echo "$OWNED_HEADS" | grep -q "^$EXPECTED_HEAD$"; then
+  OWN_PR_URL="https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/pulls"
+  OWN_PR_URL="$OWN_PR_URL?state=open&head=$REPO_OWNER:$WORK_BRANCH"
   OWN_PR_NUMBER=$(curl -s -f --max-time 10 \
     -H "Authorization: token ***" \
-    "https://api.github.com/repos/${REPO_OWNER:-}/pulls?state=open&head=${REPO_OWNER:-}:${WORK_BRANCH}" \
-    2>/dev/null | python3 -c "
+    "$OWN_PR_URL" 2>/dev/null | python3 -c "
 import json,sys
 prs=json.loads(sys.stdin.read())
 for p in prs:
