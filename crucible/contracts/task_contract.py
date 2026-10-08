@@ -13,6 +13,7 @@ from typing import Any, Literal
 from pydantic import Field, ValidationError, field_validator, model_validator
 
 from crucible.contracts.common import StrictModel, check_major_version
+from crucible.domain.acceptance_checks import ACCEPTANCE_CHECK_PREFIX
 from crucible.domain.exit_class import ExitClass
 from crucible.domain.refs import ref_problem
 from crucible.domain.secrets import find_secrets
@@ -418,6 +419,19 @@ class TaskContractV1(StrictModel):
         rv_ids = [v.id for v in self.required_verification]
         if len(set(rv_ids)) != len(rv_ids):
             raise ValueError("required_verification ids must be unique")
+        # hades #449: criterion checks are run under the id
+        # `acceptance:<criterion id>` (domain/acceptance_checks); a required
+        # verification must not use a prefixed id or it would collide on the
+        # collected tree (01M4CS2Q6CD3D8QECEYKRQW503).
+        if any(str(v.id).startswith(ACCEPTANCE_CHECK_PREFIX) for v in self.required_verification):
+            raised = [
+                str(v.id) for v in self.required_verification
+                if str(v.id).startswith(ACCEPTANCE_CHECK_PREFIX)
+            ]
+            raise ValueError(
+                f"required_verification ids must not start with {ACCEPTANCE_CHECK_PREFIX!r}; "
+                f"these collide with criterion checks: {raised}"
+            )
         return self
 
     @model_validator(mode="after")

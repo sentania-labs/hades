@@ -21,6 +21,7 @@ from crucible.adapters.execution.collected import read_verifications
 from crucible.adapters.execution.fake import verification_runs
 from crucible.adapters.execution.identity import render_identity_md
 from crucible.application import gates as app_gates
+from crucible.application.errors import ContractValidationError
 from crucible.application.submit_task import parse_contract
 from crucible.contracts.task_contract import TaskContractV1
 from crucible.domain.acceptance_checks import criterion_checks, verifier_checks
@@ -40,7 +41,7 @@ from crucible.domain.gates import (
     pre_pr_verdict,
 )
 from crucible.ports.execution import LaunchSpec
-from tests.fixtures import contract_document
+from tests.fixtures import FakeClock, contract_document
 from tests.unit.test_issue_360_ready_for_merge_correction import NOW
 from tests.unit.test_issue_424_proposed_tasks import ORCHESTRATOR, _api, _store
 
@@ -347,3 +348,72 @@ def test_judging_the_checks_launches_no_review() -> None:
         assert outcomes[GateName.INTERNAL_REVIEW_RECORDED].result is GateResult.SKIPPED
         assert pre_pr_verdict(outcomes, advisory_gates({})) is not PrePrVerdict.REVIEW
     assert not app_gates.internal_review_required({}, contract, SimpleNamespace())  # type: ignore[arg-type]
+
+
+# ----- Findings: acceptance criteria amendments include check -------------------------
+
+
+def test_amend_rejects_check_added_on_amendment() -> None:
+    """Finding 01M4CS2Q69VXH953KB3X8F48MH: an amendment that adds a check to a criterion
+    in AWAITING_ACCEPTANCE is refused because the recorded acceptance_checks pass did not
+    run the new command."""
+    from crucible.application.corrections import amend_task  # noqa: PLC0415
+    from crucible.application.submit_task import submit_task  # noqa: PLC0415
+    from crucible.domain.lifecycle import TaskState  # noqa: PLC0415
+
+    store = _store()
+    clock = FakeClock(NOW)
+
+    # Submit version 1: AC1 has no check.
+    v1_doc = _contract()
+    v1_doc["acceptance_criteria"] = [
+        {"id": "AC1", "text": "Duplicate import fails with a 409."},
+        {"id": "AC2", "text": "The error page reads well."},
+    ]
+    task, _ = submit_task(
+        store.uow(),
+        clock,
+        principal=ORCHESTRATOR,
+        body=v1_doc,
+        proposed=True,
+    )
+    task_id = task.id
+
+    # Manually set the task to AWAITING_ACCEPTANCE so amend validation fires.
+    stored_task = store.tasks.rows[task_id]
+    stored_task.state = TaskState.AWAITING_ACCEPTANCE
+
+    # Amend: AC1 now has a check.
+    v2_doc = _contract()
+    check_dict = {"command": CHECK, "expect_exit": 0}
+    v2_doc["acceptance_criteria"] = [
+        {"id": "AC1", "text": "Duplicate import fails with a 409.", "check": check_dict},
+        {"id": "AC2", "text": "The error page reads well."},
+    ]
+    with pytest.raises(ContractValidationError):
+        amend_task(
+            store.uow(),
+            clock,
+            principal=ORCHESTRATOR,
+            task_id=task_id,
+            body=v2_doc,
+            reason="fix",
+        )
+
+
+def test_required_verification_reserved_namespace_collisions() -> None:
+    """Finding 01M4CS2Q6CD3D8QECEYKRQW503: a required verification id that starts with
+    'acceptance:' collides with the generated id for a criterion check."""
+    doc = contract_document()
+    doc["required_verification"] = [
+        {"id": "acceptance:AC1", "command": "make test", "expect_exit": 0},
+    ]
+    with pytest.raises(ValidationError) as exc:
+        TaskContractV1.model_validate(doc)
+    assert "acceptance:" in str(exc.value)
+
+
+def test_required_verification_ok_without_prefix() -> None:
+    """A required verification with a normal id coexists with a criterion check."""
+    contract = TaskContractV1.model_validate(_contract(command=CHECK, expect_exit=0))
+    assert all(not str(v.id).startswith("acceptance:") for v in contract.required_verification)

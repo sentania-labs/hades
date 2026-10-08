@@ -446,8 +446,14 @@ def amend_task(
         for field, before, after in (
             (
                 "acceptance_criteria",
-                [(c.id, c.text) for c in previous.acceptance_criteria],
-                [(c.id, c.text) for c in contract.acceptance_criteria],
+                [
+                    (c.id, c.text, c.check.model_dump(mode="json") if c.check is not None else None)
+                    for c in previous.acceptance_criteria
+                ],
+                [
+                    (c.id, c.text, c.check.model_dump(mode="json") if c.check is not None else None)
+                    for c in contract.acceptance_criteria
+                ],
             ),
             (
                 "required_verification",
