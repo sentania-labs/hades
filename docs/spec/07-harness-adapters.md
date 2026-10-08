@@ -421,6 +421,12 @@ Hades #354: the routing entry Codex launches with is read first. Its own
 gateway page's figures above, resolved once per attempt like the rest of
 `effective_settings` (hades #388) and reused on every later spec of that attempt. An
 entry that sets neither keeps reading the Local gateway page's defaults, unchanged.
+`context_length` and `max_output_tokens` are set independently, so the two can combine
+(one entry's own pair, or one figure against the other inherited from the Local
+gateway page) into a response reservation that consumes the whole window; that final
+pair is validated before the launch config is emitted, and the launch is refused,
+the same way an unknown harness or a missing credential is, rather than sent to fail
+at request time with no input budget.
 
 `--model` is the routing entry's `model` (the lane, for example `fast`) unless the
 entry carries `harness_model_name`, in which case that name is sent instead, for

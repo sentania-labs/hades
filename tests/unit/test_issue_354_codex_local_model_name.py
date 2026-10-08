@@ -30,7 +30,7 @@ from crucible.contracts.policy import RoutingModel
 from crucible.domain.entities import AttemptMetrics, Execution, ExecutionRole, RoutingPolicyRecord
 from crucible.domain.events import EventKind
 from crucible.domain.lifecycle import AttemptState
-from crucible.ports.execution import Workspace
+from crucible.ports.execution import LaunchRefusedError, Workspace
 from crucible.ports.harness import CredentialSource
 from tests.fixtures import FakeClock
 from tests.unit.test_codex_local import routing
@@ -165,6 +165,82 @@ async def test_codex_local_provider_config_reads_the_model_entry(
         "max_output_tokens": 50_000,
         "thinking": False,
     }
+
+
+def _codex_local_attempt_execution_task() -> tuple[Any, Any, Any]:
+    attempt: Any = SimpleNamespace(
+        id="attempt",
+        number=1,
+        selected_harness="codex",
+        selected_model="z-codex",
+        selected_image="image",
+        resume_from_remote=False,
+        routing_version=None,
+        effective_settings=None,
+    )
+    execution: Any = SimpleNamespace(
+        role=ExecutionRole.IMPLEMENT,
+        harness="codex",
+        model="z-codex",
+        image="image",
+        policy_snapshot={},
+        timeout_seconds=60,
+        effort=None,
+        provider="docker",
+    )
+    task: Any = SimpleNamespace(id="task", external_id="FDY-0515", principal_id="tests")
+    return attempt, execution, task
+
+
+@pytest.mark.asyncio
+async def test_codex_local_own_pair_exhausting_the_window_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review 01M4CCMCM2AWB85MFRQ53Y2GDB: a route whose own `max_output_tokens`
+    consumes its own `context_length` would leave no input budget; the saved Hermes
+    settings reject this pair (`hermes_limit_problems`), and so does this launch."""
+    route = routing()
+    route.models[1].context_length = 20_000
+    route.models[1].max_output_tokens = 20_000
+    monkeypatch.setattr("crucible.application.supervisor.load_attempt_routing", lambda *_: route)
+
+    def setting(name: str) -> Any:
+        return SimpleNamespace(document={"context_length": 96000, "max_output_tokens": 16000})
+
+    uow: Any = SimpleNamespace(provider_settings=SimpleNamespace(get=setting))
+    supervisor = object.__new__(Supervisor)
+    supervisor._uow_factory = lambda: nullcontext(uow)  # type: ignore[assignment]
+    supervisor._harnesses = default_registry()
+    (tmp_path / "api-key").write_text("test-key")
+    supervisor._credential_sources = {"hermes": CredentialSource(str(tmp_path))}
+    attempt, execution, task = _codex_local_attempt_execution_task()
+    with pytest.raises(LaunchRefusedError):
+        await supervisor._build_spec(attempt, execution, task, {})
+
+
+@pytest.mark.asyncio
+async def test_codex_local_context_length_below_inherited_allowance_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review 01M4CCMCM2AWB85MFRQ53Y2GDB: a route that only overrides
+    `context_length`, to a value its own inherited Hermes `max_output_tokens`
+    already consumes, is refused too; the two overrides are independent."""
+    route = routing()
+    route.models[1].context_length = 10_000
+    monkeypatch.setattr("crucible.application.supervisor.load_attempt_routing", lambda *_: route)
+
+    def setting(name: str) -> Any:
+        return SimpleNamespace(document={"context_length": 96000, "max_output_tokens": 16000})
+
+    uow: Any = SimpleNamespace(provider_settings=SimpleNamespace(get=setting))
+    supervisor = object.__new__(Supervisor)
+    supervisor._uow_factory = lambda: nullcontext(uow)  # type: ignore[assignment]
+    supervisor._harnesses = default_registry()
+    (tmp_path / "api-key").write_text("test-key")
+    supervisor._credential_sources = {"hermes": CredentialSource(str(tmp_path))}
+    attempt, execution, task = _codex_local_attempt_execution_task()
+    with pytest.raises(LaunchRefusedError):
+        await supervisor._build_spec(attempt, execution, task, {})
 
 
 @pytest.mark.asyncio

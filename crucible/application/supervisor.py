@@ -2195,6 +2195,19 @@ class Supervisor:
                         effective["context_length"] = route.context_length
                     if route.max_output_tokens:
                         effective["max_output_tokens"] = route.max_output_tokens
+                    # Review of #354: `context_length` and `max_output_tokens` are
+                    # independent overrides, so a route can carry a pair the saved
+                    # Hermes settings would reject (`hermes_limit_problems`) without
+                    # either value alone looking wrong. A response reservation that
+                    # consumes the whole window leaves no input budget, so the launch
+                    # is refused rather than sent to fail at request time.
+                    window = effective["context_length"]
+                    allowance = effective["max_output_tokens"]
+                    if window and allowance >= window:
+                        raise LaunchRefusedError(
+                            f"model {route.model!r} max_output_tokens {allowance} leaves no "
+                            f"input budget in its {window}-token context window"
+                        )
         if selected_harness == "qwen_code":
             effective = attempt.effective_settings or {
                 "context_length": route.context_length

@@ -531,3 +531,10 @@ defaults on the Local gateway page; an entry that sets neither is unaffected, an
 keeps reading the Hermes defaults it reads today. Changing a gateway alias or a
 routing entry's thinking setting is lab-admin's call, not this mechanism's; #354 does
 not touch either.
+
+`context_length` and `max_output_tokens` are independent overrides, so one entry can
+set a value that, against the other figure (its own, or inherited from the Local
+gateway page), leaves no input budget once the response reservation is taken out of
+the window. The saved Hermes settings already reject that pair at save time
+(`hermes_limit_problems`); a local Codex launch validates the same final pair and is
+refused rather than sent to fail at request time.
