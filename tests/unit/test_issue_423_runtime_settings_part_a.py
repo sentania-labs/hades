@@ -62,7 +62,8 @@ async def test_saved_mode_changes_policy_validation_and_is_audited(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "crucible.application.admin.harness_test.test_harness", AsyncMock(return_value={"ok": True})
+        "crucible.application.admin.harness_test.test_harness_claimed",
+        AsyncMock(return_value={"ok": True}),
     )
     ctx, uow = _context()
     saved = await set_mount_mode(
