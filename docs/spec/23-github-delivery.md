@@ -16,9 +16,15 @@ delivery half of the task lifecycle (09).
   preparation step also gets one, read-only (`contents: read`), for the
   length of that step only (ADR 0019, 12).
 - App permissions: Metadata read, Contents read/write, Pull requests
-  read/write, Checks read, Actions read, Issues read (for
+  read/write, Checks read, Actions read/write, Issues read (for
   `GET /issues/{n}/reactions` only, S12 rerun). Nothing else, and no
-  Issues write. Repository
+  Issues write. Actions write is there so a `ci-decision` `rerun` re-runs
+  the failed jobs itself (`POST /actions/runs/{id}/rerun-failed-jobs`,
+  hades #435); the App manifest asks for it, so a newly created App holds
+  it. An installation created before #435 holds Actions read until the
+  operator grants write on GitHub, and Hades never assumes the grant: it
+  reads the installation's permissions (`GET /app/installations/{id}`)
+  on every rerun decision. Repository
   registration (`PUT /repositories/{name}`) records the installation ID
   the App has for that repository; the key never appears in the record.
   The Repositories page's repository picker fills it (25): it lists what each
@@ -186,34 +192,58 @@ After publication Crucible watches the PR until the task is terminal.
 Polling is the complete observation path; webhooks only shorten latency.
 
 Every poll records GitHub's `mergeable` result and `mergeable_state` on the pull
-request row. A conflicting pull request (`mergeable` false or `mergeable_state` `dirty`)
-does not wait in CI certification. When its head is one Crucible pushed or adopted and
+request row. A pull request that conflicts (`mergeable` false or `mergeable_state`
+`dirty`) or is merely `behind` does not advance on that stale base. When its head is one
+Crucible pushed or adopted and
 the task is in `awaiting_external_review`, `external_feedback_received`,
 `awaiting_ci_certification`, `ci_certification_failed` or `ready_for_merge`, Crucible
-raises one `pull_request_conflicting` wake per head, whose summary names the next
-action, and asks the publisher to merge main itself: `merge_main` on the publisher port
+asks the publisher to merge the base itself: `merge_main` on the publisher port
 runs the publisher's container (Docker) or Job (Kubernetes) with the same token handling
 and egress, fetches the remote work branch, refuses unless it is still at the known tip,
 and runs `git merge origin/<base_ref>` with no conflict resolution. A clean merge is
 committed as Crucible and pushed with `--force-with-lease` against the known tip; the
 coordinator records `branch_pushed` (reason `merge_main`) and the new head as pushed by
-Crucible, and the task waits for that head's own checks (`awaiting_ci_certification`).
+Crucible, and the task waits for that head's own checks (`awaiting_ci_certification`). A
+clean mechanical merge is silent. Delivery work is advanced oldest first within a tick
+(hades #319): due polls and ready merges form one queue ordered by the task's creation
+time, a task due a poll is polled before its merge is tried, and a rate limit met part
+way stops the queue, so a newer delivery's poll never costs an older one its merge.
 When git stops on conflicts, the publisher reports the conflicting paths and leaves the
-branch untouched; the coordinator then attaches a correction under the task's policy
+branch untouched; the coordinator raises a `pull_request_conflicting` wake naming those
+paths and then attaches a correction under the task's policy
 whose instruction is to merge `origin/<base_ref>`, resolve every conflict keeping both
 behaviours, run the required checks, commit, and report, naming the conflicting files.
 That correction starts from the remote branch tip (`resume_from_work_branch`), never
 from the previous attempt's bundle, so the head it publishes fast-forwards the one on the
 pull request. Only a failed correction reaches the orchestrator.
 
+The coordinator performs this check at every delivery step where a push to the branch
+lasts (hades #319): external review, CI certification and `ready_for_merge` as above,
+and a correction attached to an open pull request that has not launched yet
+(`scheduled`, `awaiting_quota`). Such a correction starts from the remote branch tip, so
+the base merged there is the base its worker starts on; its accepted head stays unset
+until it is collected. It is merged into only when its contract resumes from
+`remote_branch` and its execution has no attempt yet (a retried attempt resumes the
+interrupted attempt's bundle), not when it is itself the merge-main correction, and
+once per head: a failed merge leaves only the wake naming the files, since the
+correction is already scheduled. Once a correction has run (`reported` through
+`publish_failed`) nothing is merged: its collected head replaces Crucible's own tip at
+publication (issue 403), which would discard the merge, and the pre-PR gates do not need
+the base because `scope_contained` excludes commits reachable from it (11). The first
+poll after that publication merges the base. The coordinator never starts merge-main
+while an execution for the task is active; the worker owns the branch until that
+attempt ends.
+
 A dirty head someone else pushed is not acted on: the same poll moves the task to
 `head_diverged`, and nothing is merged into that head or launched against it until the
 head decision. `adopt` (legacy name `recollect`) re-runs the task from the remote branch
 tip; once that run publishes, the head is Crucible's and is certified and merged as any.
 
-A `ready_for_merge` task merges as soon as GitHub says it is mergeable and every check
-run on its accepted head passed. It does not re-test that head against current main: a
-head that is only behind main is merged. After Crucible merges it, the merge commit is
+A `ready_for_merge` task first brings a behind head up to date and certifies the new
+head. It merges only when GitHub says that head is current and mergeable and every check
+run on it passed. If GitHub's live read just before the merge says `behind`, the merge
+is not attempted and not recorded as a refusal: the row is marked `behind` and polled
+on the next tick, which merges the base in. After Crucible merges it, the merge commit is
 added to the watch list of the `release.main_ci_hold` setting and the supervisor judges
 its checks on main once they complete. Red main opens one fix-main task, on a branch of
 its own, carrying the failed jobs, the failing job's log tail, and the pull request
@@ -278,6 +308,23 @@ newer red one set.
   Re-entering at `reported` would put the new head in front of gates with
   no claim behind it (09).
 
+  **Exception: the images-digest commit is Hades's own head move (FDY-0310 /
+  #443)**. When the poll sees that the remote branch moved to a new SHA and
+  the only commit between the old and new SHA is by `github-actions[bot]`
+  with the message prefix `Record the CI-built digest` and the diff touches
+  only `*_DIGEST` lines of `images/manifest.env`, Hades records a
+  `digest_commit_observed` event, carries the previous head_sha's acceptance
+  and dispositions to the new head, and does **not** enter `head_diverged`.
+  If the previous head was `awaiting_ci_certification` the task moves to
+  `awaiting_ci_certification` with the new head; if it was
+  `ready_for_merge` it stays there with the new head. Hades then observes CI
+  on the new head: if every required CI job passed, the task is mergeable
+  without a head decision (no recollect). If CI is missing or failed, Hades
+  observes and records but cannot advance the task; the operator may still
+  decide. The publisher (12) treats a remote branch ahead only by such
+  commits as owned: it pushes the worker's commits on top using the
+  existing lease, rebasing if necessary, instead of failing non-fast-forward.
+
 Foundry is not required to remain connected for any of this.
 
 ## Triggering the external reviewer
@@ -304,6 +351,36 @@ identity after the pull request is recorded when required rounds remain and
 recorded in `external_review_requested`. Republish checks the pull request's
 issue comments and the event before posting, so the request is once per pull
 request. A correction never posts another trigger.
+
+Crucible never posts that trigger when `external_review.automatic` is false,
+or when a refusal was already observed on the repository for the `codex`
+provider specifically (`repositories.codex_review_refused_at`, hades #343:
+the marker records only a Codex connector failure, so it never silences
+another provider a repository has since moved to): either way the provider
+only refuses the App's comment again, the same way it refused the first
+one. Publication wakes the orchestrator instead, with reason
+`external_review_trigger_needed`, asking a person to request the round
+under their own account; the pull request is still opened or updated, and
+the task still waits in `awaiting_external_review` for whatever round
+follows. `external_review.automatic` absent reads as `true`. Like the
+App-authored trigger, this wake is owed only while a round is actually
+outstanding: if the pull request already carries the required completed
+rounds (round counting is per PR, across heads), publication proceeds
+straight to `awaiting_ci_certification` and nothing is asked of anyone. On a
+correction specifically, the wake additionally follows
+`external_review.retrigger_after_correction`: with the default (`false`), a
+correction never causes a second round (above), so an outstanding round from
+before the correction is not this publish's to ask a person for either; set
+it `true` to have every corrected head wake the orchestrator for a fresh,
+person-requested round the same way the first publish would.
+
+A repository's remembered refusal is a fact about that repository, not
+about any one registration call: re-registering it (`PUT
+/repositories/{name}`, including an administrative update of its URL,
+policy, installation, or attestation) leaves `codex_review_refused_at`
+exactly as it was. There is no operation yet that clears it; an operator
+who has resolved the connector refusal reaches for one directly against the
+record rather than through registration.
 
 **Crucible authors the trigger phrase only as the configured issue comment.** The
 provider's trigger is an at-mention of its own name, and the provider acts
@@ -434,9 +511,21 @@ cycle opens on that head.
   the PR would make a correction on a three-day-old PR overdue on its first
   poll.
 
-The connector reply beginning "To use Codex here, create a Codex account" is a terminal
-failed round, not a review result. Crucible raises an informational wake immediately so
-the task cannot wait silently (hades #343).
+A chatgpt-codex-connector issue comment beginning "To use Codex here" is a terminal
+failed round, not a review result, whichever wording follows: "...create a Codex
+account and connect to github" (no Codex account behind the App) and "...create an
+environment for this repo" (no environment configured for it) are both seen on
+sentania-labs/hades#343, and the match is by that shared prefix so a wording neither
+Hades nor the issue has seen is still caught. The round ends refused on the spot:
+`record_comments` (23's observation half, shared by the publication-triggered request
+and `maybe_request_trigger`'s re-request) marks it and never turns it into a signal, so
+it is never a comment a disposition is owed for. Crucible raises a wake immediately,
+reason `external_review_trigger_needed`, naming the pull request and saying the round
+must be requested by a person, so the task cannot wait silently for a round the
+provider never starts (hades #343). The same observation records the refusal on the
+repository (`repositories.codex_review_refused_at`), which is what stops a later
+publication from posting the App's trigger there at all (see "Triggering the external
+reviewer" above).
 
 ## CI certification
 
@@ -480,9 +569,7 @@ the task cannot wait silently (hades #343).
   `false_pre_pr_evidence`, `wrong_sha_checked`, `correction_without_checks`,
   `environment_drift`, `flaky_test`, `crucible_verification_defect`,
   `implementation_defect`, `missing_worker_tooling`, `ci_infrastructure`,
-  `other`, and the action: `rerun` (Crucible records the intent and wakes
-  the operator to re-run it on GitHub, because re-running needs Actions
-  write, which the App does not hold; 22), `correct` (a correction
+  `other`, and the action: `rerun`, `correct` (a correction
   follows), `reject`, `cancel`. A `correct` action requires a cause other
   than `ci_infrastructure` and `flaky_test`; a `rerun` requires one of
   those two; any other combination is refused with 422 (hades #356). After
@@ -492,6 +579,22 @@ the task cannot wait silently (hades #343).
   detail that says so, and the task waits for a fresh result. Any other
   failure, including a re-run of a workflow that fails again under the
   same id, is a new failure.
+- A `rerun` (hades #435): when the installation grants Actions write,
+  Hades re-runs the failed jobs of each failed workflow run on the decided
+  head itself (a failed check run from Actions is a job, resolved to its
+  run through `GET /actions/jobs/{id}`), reads the run back for its
+  `run_attempt`, and records that attempt on the certification. Each
+  decision re-runs once: a second failure of the same job is a new
+  failure, `ci_certification_failed` again, and only a new decision
+  re-runs it. When the installation lacks Actions write, or GitHub
+  refuses the re-run, the decision is recorded and the `ci_rerun_needed`
+  wake is the hand-off to the operator, who re-runs it on GitHub (22).
+  Either way the task waits in `awaiting_ci_certification` and the wake
+  carries the line the Board shows: "waiting on a re-run" until an
+  attempt runs, then "re-run requested, attempt N running", which the
+  certification's detail (shown on the task page) and the Board both say
+  for as long as GitHub reports that attempt running. The attempt's
+  result is judged like any other: green certifies, a failure is new.
 - A task in `ci_certification_failed` that observes a green (or skipped)
   certification on its accepted head goes back to
   `awaiting_ci_certification` and on to `ready_for_merge`: someone re-ran
@@ -502,6 +605,48 @@ the task cannot wait silently (hades #343).
   path until Foundry decides.
 - `wait_timeout_hours` without a conclusion produces a wake with reason
   `ci_certification_overdue`.
+- **Scoped CI (hades #476, the operator's design of 2026-10-06).** `.github/workflows/
+  ci.yml` decides a change class once per run, from the paths it touches, with a
+  classify job whose outputs gate the non-core jobs (`tools/ci/changes.py`, wrapping
+  the single definition, `crucible.domain.change_class.classify`): core (`crucible/`,
+  `tests/unit`, `tests/integration`, `pyproject.toml`, `uv.lock`, `docs`) always runs
+  lint, scan, test, e2e, manifests and compose-smoke; a path under `images/` or
+  `tools/images/` adds images, registry and the kind tier; a path under `tools/kind/`,
+  `deploy/`, or the kind test file adds the kind tier on its own; a path under
+  `.github/`, or any path matching no class, runs every job, with no exceptions. A job
+  the classifier's `if:` skipped reports conclusion `skipped` and is excluded from the
+  counted set exactly as any other skipped run (above): **it is not a missing job**,
+  the same rule this section already stated for a path filter before #476 formalized
+  the classifier that decides it. `.github/workflows/images-digest.yml` only proceeds
+  past its existing `may-commit` check when the triggering run's `images` job actually
+  ran, since a core-only or kind-only change leaves nothing for it to do.
+  `crucible.domain.certification.certify` accepts the decided class as `change_class`
+  and records it on the `Certification` it returns, unchanged by anything about the
+  decision itself (it never affects which runs count or which state results);
+  `ci_green_for_head` (`crucible.domain.gates`) carries it on `DeliveryInput` and
+  names it in the gate's own detail text when known, so a reader of that gate's
+  outcome sees which classification explains what ran. Both are proven directly at
+  `tests/unit/test_issue_476_scoped_ci_classes.py`; changing what the jobs test, and
+  the per-harness promotion flow (Images), are explicitly out of scope for this.
+  Live wiring (corrected per finding 01M4CG0K1Z72QKBVMXJRHWK5KK): `certify_head`
+  (`crucible.application.observation`) reads the polled attempt's own collected
+  `diff_paths` evidence (the same evidence `scope_contained` reads) through
+  `change_class_for_attempt`, classifies it, and passes the label into `certify`;
+  `evaluate_delivery_gates` carries the stored `CICertification.change_class` onto
+  `DeliveryInput` for `ci_green_for_head`. The class is persisted on
+  `ci_certifications.change_class` (migration `0052_cert_change_class`) and exposed
+  on `CICertificationView`, empty for a certification computed before #476 or for an
+  attempt that collected no diff.
+- **A no-cache dispatch forces the images tier on (finding
+  01M4CG0K22MC0760ZZ3JVFJHEC).** `github.event.before` is absent on a
+  `workflow_dispatch`, so the classify job's diff range falls back to
+  `origin/main..$SHA`; dispatching the escape hatch (above) from `main`, or from a
+  core-only branch, would otherwise classify as core-only and skip the very `images`
+  job `no_cache=true` exists to force from scratch. The classify job's `images` and
+  `kind` outputs are therefore forced to `true` whenever the dispatch set
+  `no_cache=true`, regardless of what the path diff says; the recorded `class` output
+  still names the diff's own classification, since this is an operational override of
+  which jobs run, not a reclassification of the change.
 
 ## Merge
 
@@ -527,6 +672,28 @@ before a refusal is recorded. A refusal wakes Foundry naming its cause. Persiste
 refusals retry after 60 seconds, doubling to a maximum of 30 minutes. A changed observed
 head, base or mergeability state allows an earlier retry; only a changed refusal cause
 produces another wake. These are failure retries, not a hold on newly ready heads.
+
+Two steps precede the squash merge of a pull request whose branch adds migrations
+(hades #447). The publisher records, from the files the branch adds under
+`crucible/adapters/persistence/migrations/versions/`, the tables and columns their
+alembic operations touch and whether `crucible/adapters/persistence/models.py` changed,
+on the pull request (`schema_tables`, `schema_columns`, `schema_models`); merge-main
+refreshes the record from the branch it pushed. First, the record is compared with every
+other open pull request of the repository: when their migrations touch the same table,
+the lower-numbered pull request merges first and the later one is held in
+`ready_for_merge` with one `schema_overlap` wake per pair naming the pull request it
+waits for and the shared tables, which the Board shows as what the task waits on. Once
+the first has merged it is no longer open, so the next merge tick finds no overlap.
+Second, Hades runs the merge-main script of #411 on the branch: it merges the base in,
+renumbers the branch's new migrations to follow the base's highest number, points the
+first at the base's head (and its `Revision ID` and `Revises` lines with it), commits
+that as Crucible's own commit and pushes it with a lease. A migration already on the base
+is never edited. The new head goes to CI certification like any merge-main head and the
+merge comes back to it; a branch that already contains the base is merged as it is. A
+merge-main that fails or stops on conflicts is recorded as a merge refusal with its
+cause, and GitHub's own word on mergeability then takes the conflict down the #411 path.
+A worker's new migration therefore carries a provisional number and `down_revision`
+(06); Hades assigns the final ones at merge.
 
 `delivery.auto_merge: false` leaves the task ready for an operator. Administrators can
 also disable automatic merges globally through `GET` or `POST

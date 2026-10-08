@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% macro card(item, lane) -%}
 <article class="board-card">
-  <a class="board-card-main" href="/ui/tasks/{{ item.id }}">
+  <a class="board-card-main" href="/ui/board/{{ item.id }}">
     <span class="board-card-id">{{ safe_value("external id", item.external_id) }}</span>
     <strong>{{ safe_value("title", item.title) }}</strong>
   </a>
@@ -20,7 +20,7 @@
 </article>
 {%- endmacro %}
 {% block content %}
-<div class="admin-title"><div><h1>Board</h1><p>Read-only view of work, grouped by what happens next.</p></div></div>
+<div class="admin-title"><div><h1>Board</h1><p>Work grouped by what happens next. Open a card for the contract, where it is stuck, its notes and the phase actions.</p></div></div>
 <div class="board-lanes">
 {% for lane in lanes %}
   {% if lane.collapsed %}<details class="board-lane" data-lane="{{ lane.key }}"><summary><span><b>{{ lane.name }}</b> <span class="board-count">{% if lane.key == "wins" %}{{ lane.count_today }} today · {{ lane.count_all_time }} all time{% else %}{{ lane.count }}{% endif %}</span></span><small>{{ lane.meaning }}</small></summary>

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from crucible.application.transitions import record_event
@@ -16,6 +17,7 @@ from crucible.contracts.evidence import (
     REVIEW_DIFF_NAME,
     REVIEW_DIFF_TYPE,
     ROLE_COMPLETION_CLAIM,
+    ROLE_COMPLETION_RECORD,
     ROLE_REVIEW_DIFF,
     ROLE_RUN_EVIDENCE,
     ROLE_WORKER_CLAIM,
@@ -79,18 +81,12 @@ def _changes_payload(changes: tuple[PathChange, ...]) -> list[dict[str, str]]:
 
 
 def _commit_changes_payload(bundle: BranchBundle) -> dict[str, Any]:
-    """hades #369: the commits' status records for injected-name paths, the only ones
-    `no_injected_files` reads, so a long branch does not carry every path of every
-    commit twice. Absent when the collector recorded none, which the gate judges as
-    before #369."""
+    """hades #369/#377: commit changes for every path (shim content check on all)
+    plus injected-name paths. The gate needs every path to check shim blob ids, but
+    only injected-name status records matter for add/detect (#369)."""
     if bundle.commit_changes is None:
         return {}
-    kept = tuple(
-        c
-        for c in bundle.commit_changes
-        if injected_name(c.path) or c.classification.startswith("error:")
-    )
-    return {"commit_changes": _changes_payload(kept)}
+    return {"commit_changes": _changes_payload(bundle.commit_changes)}
 
 
 def _commit_policy_payload(bundle: BranchBundle) -> dict[str, Any]:
@@ -336,6 +332,8 @@ def record_collection_evidence(
     parsed_report: ParsedReport | None = None,
     completed: CompletedClaim | None = None,
     unparsed_errors: list[dict[str, Any]] | None = None,
+    record: dict[str, Any] | None = None,
+    advisory: Sequence[str] = (),
 ) -> str | None:
     """Write the artifacts and evidence a pre-PR gate consumes. Returns the collected head.
 
@@ -343,7 +341,10 @@ def record_collection_evidence(
     Crucible's own facts in place (hades #215), which is what the stored report and the
     gates read. The worker's own values are kept as the worker's claim.
     `unparsed_errors` says a report file was there and was not a YAML mapping: it is
-    recorded as a present report that did not parse, not as no report (ADR 0024)."""
+    recorded as a present report that did not parse, not as no report (ADR 0024).
+    `record` is the completion record Hades composed (hades #498), stored as its own
+    artifact; `advisory` is what Hades noticed about the worker's report that is for
+    the reviewer and never a failure, carried on the completion_claim row."""
     findings = _scanner_findings(outputs, claim)
     _add(
         uow,
@@ -377,6 +378,38 @@ def record_collection_evidence(
             claim_artifact_id = artifact.id
         except SecretInArtifactError as exc:
             findings.append({"where": "report/completion-claim.json", "pattern": exc.pattern})
+    if record is not None and not record.get("redacted"):
+        # hades #498: the record Hades composed, beside the worker's claim. Its worker
+        # text is the claim's, already scanned above; the store scans it again.
+        try:
+            artifact = store_artifact(
+                uow,
+                clock,
+                store,
+                attempt=attempt,
+                name="report/completion-record.json",
+                artifact_type=ROLE_COMPLETION_RECORD,
+                content=json.dumps(record, sort_keys=True, indent=2).encode("utf-8"),
+                content_type="application/json",
+            )
+            composed = record.get("composed") or {}
+            _add(
+                uow,
+                clock,
+                attempt=attempt,
+                kind=EvidenceKind.ARTIFACT_PRESENT,
+                source=EvidenceSource.CRUCIBLE,
+                payload={
+                    "role": ROLE_COMPLETION_RECORD,
+                    "composed_by": composed.get("by"),
+                    "worker_report": (composed.get("worker_report") or {}).get("status"),
+                    "checks_passed": composed.get("checks_passed"),
+                    "findings": len(composed.get("findings") or []),
+                },
+                artifact_id=artifact.id,
+            )
+        except SecretInArtifactError as exc:
+            findings.append({"where": "report/completion-record.json", "pattern": exc.pattern})
     if claim is not None and report is not None:
         # The head and commit count the worker itself wrote, if any: commits_present
         # compares them with the collected branch (hades #187).
@@ -390,6 +423,8 @@ def record_collection_evidence(
             "self_review_checked": claim_parsed_ok and isinstance(report.get("self_review"), dict),
             "parse_errors": parse_errors,
             "redacted": redacted,
+            # hades #498: for the reviewer, never a failure.
+            "advisory": list(advisory),
         }
         if not redacted:
             mapping = report.get("acceptance_mapping")
@@ -444,6 +479,7 @@ def record_collection_evidence(
                 "parsed_ok": False,
                 "parse_errors": [] if redacted else [_scrubbed(e) for e in unparsed_errors],
                 "redacted": redacted,
+                "advisory": list(advisory),
             },
         )
     if parsed_report is not None and parsed_report.run_evidence_error is not None:
@@ -499,13 +535,10 @@ def record_collection_evidence(
     if outputs.diff_paths or outputs.bundle is not None:
         diff_payload: dict[str, Any] = {"paths": list(outputs.diff_paths)}
         if outputs.diff_changes is not None:
-            # Only the injected-name records the gate reads, as for the commits (#369).
-            kept = tuple(
-                c
-                for c in outputs.diff_changes
-                if injected_name(c.path) or c.classification.startswith("error:")
-            )
-            diff_payload["changes"] = _changes_payload(kept)
+            # hades #377: preserve every path so the gate can check shim content
+            # on all added / modified paths, not just injected names.  The gate
+            # itself still only reports injected-name hits (or shim hits).
+            diff_payload["changes"] = _changes_payload(outputs.diff_changes)
         if outputs.base_paths is not None:
             diff_payload["base_paths"] = [p for p in outputs.base_paths if injected_name(p)]
         if outputs.over_limit:

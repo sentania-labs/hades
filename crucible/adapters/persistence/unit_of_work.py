@@ -59,6 +59,7 @@ from crucible.adapters.persistence.records import (
     ProviderSettings,
     ReviewReports,
     RoutingPolicies,
+    TaskNotes,
     Wakes,
 )
 from crucible.domain.entities import (
@@ -127,6 +128,7 @@ from crucible.ports.repository import (
     ReviewReportRepository,
     RoutingPolicyRepository,
     SupervisorStatusRepository,
+    TaskNoteRepository,
     TaskRepository,
     UiSessionRepository,
     UnitOfWork,
@@ -300,6 +302,9 @@ class Repositories:
             attested_by=row.attested_by,
             attested_at=ensure_utc(row.attested_at) if row.attested_at else None,
             private=row.private,
+            codex_review_refused_at=(
+                ensure_utc(row.codex_review_refused_at) if row.codex_review_refused_at else None
+            ),
         )
 
     def get_by_name(self, name: str) -> Repository | None:
@@ -346,6 +351,13 @@ class Repositories:
         row.attested_by = repository.attested_by
         row.attested_at = repository.attested_at
         row.private = repository.private
+        # hades #343: the marker is the provider's own repository configuration, not any
+        # one registration's; `register_repository` builds a fresh `Repository` that
+        # never carries it forward, so a routine PUT must not clear a stored refusal.
+        # There is no explicit-clear operation yet, so a `None` here is never "clear" —
+        # only a non-`None` value (recorded by `mark_codex_refusal_seen`) is applied.
+        if repository.codex_review_refused_at is not None:
+            row.codex_review_refused_at = repository.codex_review_refused_at
         self._s.flush()
         return self._to_entity(row)
 
@@ -1555,6 +1567,7 @@ class SqlUnitOfWork:
     gate_results: GateResultRepository
     acceptance: AcceptanceRepository
     decisions: DecisionRepository
+    task_notes: TaskNoteRepository
     escalations: EscalationRepository
     dispositions: DispositionRepository
     wakes: WakeRepository
@@ -1611,6 +1624,7 @@ class SqlUnitOfWork:
         self.gate_results = GateResults(s)
         self.acceptance = Acceptances(s)
         self.decisions = Decisions(s)
+        self.task_notes = TaskNotes(s)
         self.escalations = Escalations(s)
         self.dispositions = Dispositions(s)
         self.wakes = Wakes(s)

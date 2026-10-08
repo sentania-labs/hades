@@ -154,6 +154,9 @@ class LaunchSpec:
     resume_bundle_head: str | None = None
     resume_bundle_sha256: str | None = None
     resume_bundle_ancestor: str | None = None
+    # hades #489: the operator's notes on the task, newest first, each `author`,
+    # `created_at`, `text` and `verbatim`; rendered at the top of IDENTITY.md (06).
+    operator_notes: tuple[dict[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         validate_endpoint(self.endpoint, self.endpoint_url)
@@ -284,6 +287,9 @@ class BranchBundle:
     # finish it; otherwise the commits whose author email is not the policy's, as
     # (sha, email). Information for the reviewer, not a refusal (FDY-0143).
     commit_policy: CommitPolicyCheck | None = None
+    # Paths touched only by commits after the preparer's trusted head. Branch-wide
+    # paths include earlier attempts and cannot establish correction coverage (#498).
+    attempt_commit_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -539,6 +545,14 @@ class ProviderUnavailableError(ProviderError):
     than failing the attempt."""
 
 
+class PrepareJobPodsTimeoutError(ProviderError):
+    """hades #503: the preparer Job's Pods were still present when the provider's
+    bounded, backed-off deletion wait ran out. The message says what the Job had done
+    when the wait gave up (completed with an exit code, not finished in time, or still
+    running). The supervisor prepares the same attempt again a bounded number of times,
+    charging the task no attempt, before it classes the failure as the environment."""
+
+
 class CollectionPendingError(ProviderUnavailableError):
     """Collection is waiting for backend cleanup. Retry on the next supervisor tick,
     up to the configured collection retry limit, while keeping the workspace intact."""
@@ -556,6 +570,30 @@ class LaunchWaitError(ProviderError):
     probe, the preparer or the worker. The supervisor puts the attempt back to pending
     with this message as the reason and launches it on a later tick; the attempt is
     not consumed and no exit class is recorded."""
+
+
+class PrepareFailedError(ProviderError):
+    """The preparer ran and could not build the checkout (hades #370). The message is
+    the environment detail and the wake's summary, so it carries the preparer's last
+    output lines; `output` is the preparer's whole stdout and stderr tail, verbatim,
+    which the supervisor keeps as attempt evidence; `exit_code` is the preparer's own
+    exit, or the provider's sentinel for a wait that ran out or a stall; and
+    `resume_source` names what a correction was resuming from (the remote work branch
+    or the preceding attempt's sealed bundle), None for an attempt that starts from the
+    base ref."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        output: str = "",
+        exit_code: int | None = None,
+        resume_source: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.output = output
+        self.exit_code = exit_code
+        self.resume_source = resume_source
 
 
 class WorkerStartError(ProviderError):

@@ -292,7 +292,8 @@ _COLLECTOR_OUTPUTS = (
     "base.txt head.txt branch.txt diffstat.txt diff.patch changed.txt log.txt "
     "diff-raw.txt commit-raw.txt base-injected.txt injected-blobs "
     "injected-blob-ids.txt injected-blob-ids.sorted injected-error.txt "
-    "commit-paths.txt work_branch.bundle bundle.log commits.txt commit-policy tree "
+    "commit-paths.txt attempt-commit-paths.txt work_branch.bundle bundle.log commits.txt "
+    "commit-policy tree "
     "clone.log report copy-rejections.tsv collection-failed.txt checkpoint-refusal.txt "
     "leftover-committed.txt leftover-refusal.txt collector.ok attr-text.patch "
     f"{CHANGED_BLOBS_DIR} changed-blob-ids.txt {REVIEW_DIFF_DIR}"
@@ -506,8 +507,11 @@ mkdir -p "$OUT"
 rm -rf "$REPO"
 {credential}REFERENCE=""
 {refresh}
+# hades #370: `--progress` makes the clone report its transfer without a terminal, so
+# the provider's stall bound on the preparer's log sees a large clone moving and ends
+# only one that is not.
 # shellcheck disable=SC2086
-{GIT} clone --no-hardlinks --no-checkout $REFERENCE -- "$CLONE_URL" "$REPO"
+{GIT} clone --progress --no-hardlinks --no-checkout $REFERENCE -- "$CLONE_URL" "$REPO"
 {drop}cd "$REPO"
 # Record the trusted base before the worker can move refs. Output is mounted only
 # into Crucible-owned containers, never into the worker.
@@ -518,13 +522,20 @@ if ! PREPARED_BASE=$({GIT} rev-parse --verify --quiet "refs/remotes/origin/$BASE
 fi
 printf '%s\\n' "$PREPARED_BASE" > "$OUT/prepared-base.txt"
 STARTED=""
+# hades #230: the commit_policy range's start, resolved to a commit id now, while this
+# is still the only writer. POLICY_FROM_SHA is never a ref read again later from the
+# checkout, so a worker that moves refs/remotes/origin/$WORK_BRANCH afterward cannot
+# change what commit_policy_check sees.
+POLICY_FROM_SHA=""
 if [ -n {_quote(resume_bundle or "")} ]; then
   :
   {bundle_resume}
+  POLICY_FROM_SHA="$ACTUAL_HEAD"
 elif [ "{resume}" = "1" ] \
-  && {GIT} rev-parse --verify --quiet "refs/remotes/origin/$WORK_BRANCH" >/dev/null; then
+  && REMOTE_WORK_HEAD=$({GIT} rev-parse --verify --quiet "refs/remotes/origin/$WORK_BRANCH"); then
   {GIT} checkout -B "$WORK_BRANCH" "origin/$WORK_BRANCH" --
   STARTED="origin/$WORK_BRANCH"
+  POLICY_FROM_SHA="$REMOTE_WORK_HEAD"
 else
   if {GIT} rev-parse --verify --quiet "refs/remotes/origin/$BASE_REF" >/dev/null; then
     TARGET="refs/remotes/origin/$BASE_REF"
@@ -536,6 +547,7 @@ else
   fi
   {GIT} checkout -B "$WORK_BRANCH" "$TARGET" --
   STARTED="$BASE_REF"
+  POLICY_FROM_SHA="$PREPARED_BASE"
 fi
 {GIT} remote set-url origin "$ORIGIN_PLACEHOLDER"
 {GIT} remote set-url --push origin "$ORIGIN_PLACEHOLDER"
@@ -580,6 +592,7 @@ mkdir -p {WORK_MOUNT}/{PACKAGE_CACHE_LEAF} {WORK_MOUNT}/{VERIFIER_CACHE_LEAF}
 mkdir -p "$OUT"
 {GIT} rev-parse HEAD > "$OUT/prepared-head.txt"
 printf '%s\n' "$STARTED" > "$OUT/started-from.txt"
+printf '%s\n' "$POLICY_FROM_SHA" > "$OUT/prepared-policy-from.txt"
 """
 
 
@@ -821,6 +834,18 @@ fi
 printf '%s\\n' "$BASE" > "$OUT/base.txt"
 {GIT} -C "$REPO" rev-parse HEAD > "$OUT/head.txt"
 {GIT} -C "$REPO" rev-parse --abbrev-ref HEAD > "$OUT/branch.txt"
+# Finding coverage is about this attempt, not the whole branch. The preparer records
+# HEAD after resuming a bundle or remote branch, outside the worker's writable tree.
+# Missing or invalid evidence must not fall back to the original branch changes.
+: > "$OUT/attempt-commit-paths.txt"
+ATTEMPT_BASE=$(cat "$OUT/prepared-head.txt" 2>/dev/null || true)
+if printf '%s\\n' "$ATTEMPT_BASE" | grep -Eq '^([0-9a-f]{{40}}|[0-9a-f]{{64}})$' \\
+  && {GIT} -C "$REPO" merge-base --is-ancestor "$ATTEMPT_BASE" HEAD 2>/dev/null; then
+  if ! {GIT} -C "$REPO" log {_DIFF_FLAGS} --no-renames --diff-merges=separate \\
+    --name-only -z --format='' "$ATTEMPT_BASE"..HEAD > "$OUT/attempt-commit-paths.txt"; then
+    : > "$OUT/attempt-commit-paths.txt"
+  fi
+fi
 if [ -n "$BASE" ]; then
   if ! MB=$({GIT} -C "$REPO" merge-base "$BASE" HEAD); then
     printf '%s\\n' "collection failed: cannot resolve merge base between $BASE and HEAD" \
@@ -856,15 +881,18 @@ if [ -n "$BASE" ]; then
     "$BASE..$WORK_BRANCH" > "$OUT/bundle.log" 2>&1 || true
   {GIT} -C "$REPO" rev-list --count "$BASE"..HEAD > "$OUT/commits.txt" \
     || echo 0 > "$OUT/commits.txt"
-  if {GIT} -C "$REPO" rev-parse --verify --quiet "refs/remotes/origin/$WORK_BRANCH" \
-      >/dev/null; then
-    POLICY_FROM="refs/remotes/origin/$WORK_BRANCH"
-  else
-    POLICY_FROM="$BASE"
-  fi
+  # hades #230: never resolve the commit_policy start from a ref in the worker-writable
+  # checkout. refs/remotes/origin/$WORK_BRANCH lives there, and a worker that moved it
+  # to HEAD would otherwise empty the range this checks. POLICY_FROM comes only from
+  # prepared-policy-from.txt, the preparer's own record in the output mount the worker
+  # never gets, resolved to a commit id before the worker ran.
+  POLICY_FROM=$(cat "$OUT/prepared-policy-from.txt" 2>/dev/null || true)
   mkdir -p "$OUT/commit-policy"
-  if commit_policy_check "$POLICY_FROM..HEAD" "$OUT/commit-policy"; then
-    echo done > "$OUT/commit-policy/checked"
+  if printf '%s\\n' "$POLICY_FROM" | grep -Eq '^([0-9a-f]{{40}}|[0-9a-f]{{64}})$' \
+      && [ "$({GIT} -C "$REPO" cat-file -t "$POLICY_FROM" 2>/dev/null || true)" = "commit" ]; then
+    if commit_policy_check "$POLICY_FROM..HEAD" "$OUT/commit-policy"; then
+      echo done > "$OUT/commit-policy/checked"
+    fi
   fi
 else
   REVIEW_DIFF_ERROR="the base ref could not be resolved"
@@ -1135,6 +1163,144 @@ export GIT_CONFIG_GLOBAL=/tmp/gitconfig
 )
 
 
+# hades #447: what a work branch does to the schema, and the renumbering of its new
+# migrations. Both the publisher and merge-main write this program into their output
+# directory and run it there: it reads the migrations the branch adds under
+# `migrations/versions/`, records the tables and columns their alembic operations touch
+# and whether `models.py` changed (schema.json), and, when RUN_RENUMBER is 1 (merge-main
+# only), renumbers the added migrations to follow the base's highest number, points the
+# first at the base's head, and commits that as Crucible's own commit. A plain string,
+# not an f-string: its braces and backslashes are its own.
+SCHEMA_SCRIPT = r"""import ast
+import json
+import os
+import re
+import subprocess
+
+VERSIONS = 'crucible/adapters/persistence/migrations/versions/'
+MODELS = 'crucible/adapters/persistence/models.py'
+NUMBERED = re.compile(r'^_?(\d+)_(.*)\.py$')
+TABLE_OPS = ('add_column', 'drop_column', 'alter_column', 'create_table', 'drop_table')
+INDEX_OPS = ('create_index', 'drop_index')
+COLUMN_OPS = ('add_column', 'drop_column', 'alter_column')
+COMMIT_MESSAGE = 'Crucible: renumber migrations to follow main'
+base = 'refs/remotes/origin/' + os.environ['BASE_REF']
+out_dir = os.environ['OUT']
+tables = set()
+columns = set()
+
+
+def cmd(args):
+    return subprocess.check_output(args).decode('utf-8').strip()
+
+
+def changed(*flags):
+    try:
+        return cmd(['git', 'diff', '--name-only', *flags, base + '...HEAD']).splitlines()
+    except subprocess.CalledProcessError:
+        return []
+
+
+def is_migration(path):
+    return path.startswith(VERSIONS) and path.endswith('.py') and '__init__' not in path
+
+
+def constant(node):
+    return node.value if isinstance(node, ast.Constant) else None
+
+
+def column_name(node):
+    if constant(node) is not None:
+        return constant(node)
+    is_column = isinstance(node, ast.Call) and getattr(node.func, 'attr', None) == 'Column'
+    if is_column and node.args:
+        return constant(node.args[0])
+    return None
+
+
+class Visitor(ast.NodeVisitor):
+    def visit_Call(self, node):
+        func = node.func
+        if isinstance(func, ast.Attribute) and getattr(func.value, 'id', None) == 'op':
+            args = node.args
+            if func.attr in TABLE_OPS and args and constant(args[0]) is not None:
+                tables.add(constant(args[0]))
+            if func.attr in INDEX_OPS and len(args) >= 2 and constant(args[1]) is not None:
+                tables.add(constant(args[1]))
+            if func.attr in COLUMN_OPS and len(args) >= 2 and column_name(args[1]) is not None:
+                columns.add(column_name(args[1]))
+        self.generic_visit(node)
+
+
+def number(path):
+    match = NUMBERED.match(os.path.basename(path))
+    return int(match.group(1)) if match else 999999
+
+
+def slug(path):
+    match = NUMBERED.match(os.path.basename(path))
+    return match.group(2) if match else os.path.basename(path)[:-3]
+
+
+def rewrite(source, revision, down):
+    source = re.sub(r'(?m)^revision\s*=.*$', 'revision = "%s"' % revision, source)
+    source = re.sub(r'(?m)^down_revision\s*=.*$', 'down_revision = "%s"' % down, source)
+    source = re.sub(r'Revision ID:\s*.*', 'Revision ID: ' + revision, source)
+    return re.sub(r'Revises:\s*.*', 'Revises: ' + down, source)
+
+
+def renumber(added):
+    try:
+        on_base = cmd(['git', 'ls-tree', '-r', '--name-only', base, VERSIONS]).splitlines()
+    except subprocess.CalledProcessError:
+        on_base = []
+    highest = 0
+    head = ''
+    for path in on_base:
+        match = NUMBERED.match(os.path.basename(path))
+        if match and int(match.group(1)) >= highest:
+            highest = int(match.group(1))
+            head = os.path.basename(path)[:-3].lstrip('_')
+    renumbered = False
+    for path in sorted(added, key=number):
+        highest += 1
+        revision = '%04d_%s' % (highest, slug(path))
+        new_path = os.path.join(os.path.dirname(path), '_' + revision + '.py')
+        with open(path) as handle:
+            source = handle.read()
+        updated = rewrite(source, revision, head)
+        if new_path != path:
+            subprocess.check_call(['git', 'mv', path, new_path])
+        if updated != source or new_path != path:
+            with open(new_path, 'w') as handle:
+                handle.write(updated)
+            subprocess.check_call(['git', 'add', new_path])
+            renumbered = True
+        head = revision
+    if renumbered:
+        subprocess.check_call(['git', 'commit', '--quiet', '-m', COMMIT_MESSAGE])
+
+
+added = [p for p in changed('--diff-filter=A') if is_migration(p)]
+for path in added:
+    if not os.path.exists(path):
+        continue
+    with open(path) as handle:
+        source = handle.read()
+    try:
+        Visitor().visit(ast.parse(source))
+    except SyntaxError:
+        pass
+
+if os.environ.get('RUN_RENUMBER') == '1' and added:
+    renumber(added)
+
+models = [p for p in changed() if p == MODELS]
+with open(os.path.join(out_dir, 'schema.json'), 'w') as handle:
+    json.dump({'tables': sorted(tables), 'columns': sorted(columns), 'models': models}, handle)
+"""
+
+
 def publisher_script(
     *,
     clone_url: str,
@@ -1187,6 +1353,9 @@ EXPECTED={_quote(expected_head)}
 CLONE_URL={_quote(clone_url)}
 SEAL={_quote(bundle_sha256)}
 OWNED_HEADS={_quote(" ".join(owned_remote_heads))}
+# hades #443: digest-commit author and message prefix for remote-branch checks.
+DIGEST_AUTHOR={_quote(DIGEST_AUTHOR_LOGIN)}
+DIGEST_MSG_PREFIX={_quote(DIGEST_MESSAGE_PREFIX)}
 drop_token() {{ {drop}; }}
 mkdir -p "$OUT"
 # A retried publication of the same attempt writes into the same directory; nothing a
@@ -1265,6 +1434,30 @@ if [ -n "$REMOTE" ]; then
       | grep -q '[^[:space:]]'; then
     OWNED=yes
   fi
+  # hades #443: if the remote is ahead only by digest commits, treat it as owned.
+  if [ "$OWNED" != yes ]; then
+    # Only check if the remote tip is an ancestor of EXPECTED (REMOTE behind or equal)
+    # or if it's ahead of EXPECTED. Digest commits only matter when the remote is ahead.
+    SPOOLS=$(git log --oneline --no-merges "$EXPECTED".."$REMOTE" 2>/dev/null || echo "")
+    if [ -n "$SPOOLS" ]; then
+      # Remote is ahead: check that every ahead commit is a digest commit.
+      DIGEST_OK=yes
+      for COMMIT in $SPOOLS; do
+        COMMIT_SHA=${{COMMIT%% *}}
+        AUTHOR=$(git show -s --format='%an' "$COMMIT_SHA" 2>/dev/null || echo "")
+        MSG=$(git show -s --format='%s' "$COMMIT_SHA" 2>/dev/null || echo "")
+        if [ "$AUTHOR" != "$DIGEST_AUTHOR" ] || \
+           ! printf '%s' "$MSG" | grep -q "^${{DIGEST_MSG_PREFIX}}"; then
+          DIGEST_OK=no
+          break
+        fi
+      done
+      if [ "$DIGEST_OK" = yes ]; then
+        OWNED=yes
+        REMOTE="$REMOTE"
+      fi
+    fi
+  fi
   if [ "$OWNED" != yes ]; then
     AUTHOR=$(git show -s --format='%an <%ae>' "$REMOTE")
     printf 'foreign remote commit %s by %s; no Hades push record or attempt trailer\n' \
@@ -1272,6 +1465,15 @@ if [ -n "$REMOTE" ]; then
     drop_token; exit 5
   fi
 fi
+
+# crucible: parse and renumber migrations
+export BASE_REF="{base_ref}"
+export OUT
+export RUN_RENUMBER=0
+cat << 'PYEOF' > "$OUT/schema.py"
+{SCHEMA_SCRIPT}PYEOF
+python3 "$OUT/schema.py" >> "$OUT/publisher.log" 2>&1 || true
+
 echo push > "$OUT/step.txt"
 # Hades owns its work branches (issue 403): a tip it pushed, such as a quota checkpoint
 # of ungated partial work, is replaced by the accepted head whether or not the head
@@ -1302,6 +1504,9 @@ MERGE_MAIN_MARKER = "# crucible: merge the base into the remote work branch"
 # and git stopped on conflicts (6). Neither pushed anything.
 MERGE_MAIN_HEAD_MOVED = 4
 MERGE_MAIN_CONFLICT = 6
+# hades #443: the author login that the images-digest workflow uses for digest commits.
+DIGEST_AUTHOR_LOGIN = "github-actions[bot]"
+DIGEST_MESSAGE_PREFIX = "Record the CI-built digest"
 
 
 def merge_main_script(
@@ -1362,6 +1567,9 @@ export CRUCIBLE_AUTHOR_NAME={_quote(author_name)}
 export CRUCIBLE_AUTHOR_EMAIL={_quote(author_email)}
 {_CRED_HELPER}
 echo credential > "$OUT/step.txt"
+# hades #443: digest commit author and message prefix for ownership check.
+DIGEST_AUTHOR={_quote(DIGEST_AUTHOR_LOGIN)}
+DIGEST_MSG_PREFIX={_quote(DIGEST_MESSAGE_PREFIX)}
 if ! printf 'protocol=https\\nhost=%s\\n\\n' "$CRUCIBLE_CREDENTIAL_HOST" \\
     | git credential fill 2>> "$OUT/publisher.log" | grep -q '^password=.'; then
   echo "the credential helper could not read the token" > "$OUT/error.txt"; drop_token; exit 3
@@ -1382,8 +1590,30 @@ fi
 REMOTE=$(git rev-parse "refs/remotes/origin/$WORK_BRANCH")
 printf '%s\\n' "$REMOTE" > "$OUT/remote-head-before.txt"
 if [ "$REMOTE" != "$EXPECTED" ]; then
-  echo "the remote work branch is at $REMOTE, not the known tip $EXPECTED" > "$OUT/error.txt"
-  echo head-moved > "$OUT/step.txt"; drop_token; exit {MERGE_MAIN_HEAD_MOVED}
+  # hades #443: if the remote is ahead only by digest commits, accept it.
+  # Check all commits between EXPECTED and REMOTE are digest commits, but only when
+  # the remote tip is ahead of (not behind) the expected tip.
+  DIGEST_OK=no
+  SPOOLS=$(git log --oneline --no-merges "$EXPECTED".."$REMOTE" 2>/dev/null || echo "")
+  if [ -n "$SPOOLS" ]; then
+    DIGEST_OK=yes
+    for COMMIT in $SPOOLS; do
+      COMMIT_SHA=${{COMMIT%% *}}
+      AUTHOR=$(git show -s --format='%an' "$COMMIT_SHA" 2>/dev/null || echo "")
+      MSG=$(git show -s --format='%s' "$COMMIT_SHA" 2>/dev/null || echo "")
+      if [ "$AUTHOR" != "$DIGEST_AUTHOR" ] || \
+         ! printf '%s' "$MSG" | grep -q "^${{DIGEST_MSG_PREFIX}}"; then
+        DIGEST_OK=no
+        break
+      fi
+    done
+  fi
+  if [ "$DIGEST_OK" = no ]; then
+    echo "the remote work branch is at $REMOTE, not the known tip $EXPECTED" > "$OUT/error.txt"
+    echo head-moved > "$OUT/step.txt"; drop_token; exit {MERGE_MAIN_HEAD_MOVED}
+  fi
+  # Accept: the remote tip now becomes the new expected head.
+  EXPECTED="$REMOTE"
 fi
 git checkout --quiet -B crucible-merge-main "$REMOTE" >> "$OUT/publisher.log" 2>&1
 if git merge-base --is-ancestor "refs/remotes/origin/$BASE_REF" HEAD; then
@@ -1402,6 +1632,15 @@ if ! git merge --no-ff --no-edit -m "Merge origin/$BASE_REF into $WORK_BRANCH" \
   chmod 0644 "$OUT"/* 2>/dev/null || true
   exit {MERGE_MAIN_CONFLICT}
 fi
+
+# crucible: parse and renumber migrations
+export BASE_REF="{base_ref}"
+export OUT
+export RUN_RENUMBER=1
+cat << 'PYEOF' > "$OUT/schema.py"
+{SCHEMA_SCRIPT}PYEOF
+python3 "$OUT/schema.py" >> "$OUT/publisher.log" 2>&1 || true
+
 git rev-parse HEAD > "$OUT/merge-head.txt"
 echo push > "$OUT/step.txt"
 if git push --quiet --force-with-lease="refs/heads/$WORK_BRANCH:$EXPECTED" origin \\

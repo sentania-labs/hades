@@ -27,7 +27,8 @@ from crucible.application.publish import (
     reopen_or_cancel,
 )
 from crucible.application.transitions import move_task, record_event
-from crucible.application.wakes import create_wake
+from crucible.application.wakes import create_wake, repeat_allowed
+from crucible.contracts.evidence import EvidenceKind
 from crucible.contracts.task_contract import contract_sha256
 from crucible.contracts.wake import WakeReason
 from crucible.domain.certification import (
@@ -38,6 +39,7 @@ from crucible.domain.certification import (
     required_checks_from_policy,
     wait_timeout_hours,
 )
+from crucible.domain.change_class import classify as classify_change
 from crucible.domain.entities import (
     CIAction,
     CICertification,
@@ -67,6 +69,7 @@ from crucible.domain.external_review import (
     final_sha_satisfied,
     head_at,
     is_accepted,
+    is_codex_refusal,
     required_rounds,
     reviewer_logins,
 )
@@ -89,7 +92,7 @@ from crucible.domain.waivers import (
     waiver_words,
 )
 from crucible.ports.clock import Clock
-from crucible.ports.github import Observation
+from crucible.ports.github import CommitDiffRecord, Observation
 from crucible.ports.repository import UnitOfWork
 
 log = logging.getLogger("crucible.observation")
@@ -145,9 +148,6 @@ class ObservationResult:
     state: str = ""
     notes: list[str] = field(default_factory=list)
     review_refusal: bool = False
-
-
-CODEX_ACCOUNT_REFUSAL = "to use codex here, create a codex account"
 
 
 def policy_for(uow: UnitOfWork, task: Task) -> dict[str, Any]:
@@ -241,6 +241,72 @@ def task_waivers(uow: UnitOfWork, task: Task) -> dict[str, Decision]:
 
 # ----- heads and divergence ---------------------------------------------
 
+# Constants for the digest-commit head-move rule (hades #443).
+DIGEST_AUTHOR = "github-actions[bot]"
+DIGEST_MESSAGE_PREFIX = "Record the CI-built digest"
+DIGEST_FILE = "images/manifest.env"
+
+
+def _is_digest_commit(commit_diff: tuple[CommitDiffRecord, ...]) -> bool:
+    """Return True when *commit_diff* describes a pure digest commit.
+
+    A pure digest commit changes only ``*_DIGEST`` lines of
+    ``images/manifest.env`` and touches no other lines.
+    """
+    if not commit_diff:
+        return False
+    # Every changed file must be the manifest.
+    return all(d.path == DIGEST_FILE for d in commit_diff)
+
+
+def _is_digest_move(
+    *,
+    previous: str,
+    observed_sha: str,
+    author: str,
+    message: str,
+    diff: tuple[CommitDiffRecord, ...],
+) -> bool:
+    """Return True when the head move from *previous* → *observed_sha* is a digest move."""
+    if previous == observed_sha:
+        return False
+    if author != DIGEST_AUTHOR:
+        return False
+    if not message.startswith(DIGEST_MESSAGE_PREFIX):
+        return False
+    return _is_digest_commit(diff)
+
+
+def _record_digest_commit(
+    uow: UnitOfWork,
+    clock: Clock,
+    *,
+    task: Task,
+    pull_request: PullRequest,
+    observed_sha: str,
+    result: ObservationResult,
+) -> None:
+    """Record a digest commit: no divergence, carry dispositions forward, certify CI."""
+    record_event(
+        uow,
+        clock,
+        EventKind.DIGEST_COMMIT_OBSERVED,
+        principal=PRINCIPAL_CRUCIBLE,
+        task_id=task.id,
+        payload={
+            "pull_request": pull_request.number,
+            "old_head": task.head_sha,  # the head_sha on the task was already updated
+            "new_head": observed_sha,
+            "message": (
+                "images-digest workflow moved the head; acceptance and dispositions carry forward"
+            ),
+        },
+    )
+    # Update the task's head_sha to the new observed SHA.
+    task.head_sha = observed_sha
+    uow.tasks.save(task)
+    result.changed = True
+
 
 def observe_head(
     uow: UnitOfWork,
@@ -250,8 +316,17 @@ def observe_head(
     pull_request: PullRequest,
     observed_sha: str,
     result: ObservationResult,
+    observation: Observation | None = None,
 ) -> None:
-    """A head Crucible did not push moves the task to `head_diverged` (09, 23)."""
+    """A head Crucible did not push moves the task to `head_diverged` (09, 23).
+
+    Hades #443: if the head moved from the accepted head to *observed_sha* because
+    the images-digest workflow committed a *digest commit* (author ``github-actions[bot]``,
+    message prefix ``Record the CI-built digest``, diff touches only ``*_DIGEST`` lines of
+    ``images/manifest.env``), the move is treated as **Hades's own head move** — the task
+    stays in its current state, acceptance and dispositions carry forward, and CI on the
+    new head is recorded without a new head decision.
+    """
     if not observed_sha or observed_sha == pull_request.head_sha:
         return
     known = {
@@ -287,6 +362,23 @@ def observe_head(
     )
     result.changed = True
     if ours or task.state not in DIVERGENCE_STATES:
+        return
+    # hades #443: check for digest commit before diverging.
+    if observation is not None and _is_digest_move(
+        previous=previous,
+        observed_sha=observed_sha,
+        author=observation.head_commit_author,
+        message=observation.head_commit_message,
+        diff=observation.head_commit_diff,
+    ):
+        _record_digest_commit(
+            uow,
+            clock,
+            task=task,
+            pull_request=pull_request,
+            observed_sha=observed_sha,
+            result=result,
+        )
         return
     supersede_for_head(uow, clock, task=task, reason="head_diverged", new_head=observed_sha)
     move_task(
@@ -515,6 +607,18 @@ def record_reviews(
     return signals
 
 
+def mark_codex_refusal_seen(uow: UnitOfWork, clock: Clock, *, pull_request: PullRequest) -> None:
+    """hades #343: the refusal is the provider's repository configuration, not this
+    task's, so it is remembered on the repository, which stops the App's trigger there
+    until an operator clears it. Idempotent: the first refusal records the time, every
+    later one on the same repository is a no-op."""
+    repository = uow.repositories.get(pull_request.repository_id)
+    if repository is None or repository.codex_review_refused_at is not None:
+        return
+    repository.codex_review_refused_at = clock.now()
+    uow.repositories.upsert(repository)
+
+
 def record_comments(
     uow: UnitOfWork,
     clock: Clock,
@@ -557,7 +661,7 @@ def record_comments(
         connector_refusal = (
             comment.kind == "issue_comment"
             and comment.login in allowlist
-            and CODEX_ACCOUNT_REFUSAL in comment.body.lower()
+            and is_codex_refusal(comment.body)
         )
         existing = uow.review_comments.get_by_github(
             pull_request.id, comment.kind, comment.github_id
@@ -657,7 +761,11 @@ def record_comments(
         result.changed = True
         if connector_refusal:
             result.review_refusal = True
-            result.notes.append("the Codex connector refused the review because no account exists")
+            result.notes.append(
+                "the Codex connector's reply was not a review; the round is refused, "
+                "not a comment to disposition"
+            )
+            mark_codex_refusal_seen(uow, clock, pull_request=pull_request)
             continue
         if (
             comment.kind == "review_comment"
@@ -903,6 +1011,47 @@ def pending_rerun(
     return None
 
 
+def rerun_attempt(
+    uow: UnitOfWork,
+    task: Task,
+    observation: Observation,
+    *,
+    head_sha: str,
+    previous: CICertification | None,
+) -> tuple[str, int] | None:
+    """The rerun decision on this head and the workflow run attempt it is judged on.
+
+    Issue 435: GitHub numbers each re-run of a workflow run with `run_attempt`. The
+    newest attempt above 1 still running on the head is the one being judged; when none
+    is running, the attempt already recorded for the same decision is kept (the one
+    Hades started itself with Actions write, or one seen running before it concluded).
+    An attempt recorded for an earlier decision is not this decision's."""
+    event = uow.events.latest_for_task_kind(task.id, EventKind.CI_DECISION_RECORDED.value)
+    if event is None:
+        return None
+    payload = event.payload
+    if payload.get("action") != CIAction.RERUN.value or payload.get("head_sha") != head_sha:
+        return None
+    decision_id = str(payload.get("ci_decision_id", ""))
+    running = [
+        check.run_attempt
+        for check in observation.checks
+        if check.head_sha == head_sha
+        and check.source == CheckSource.WORKFLOW_RUN.value
+        and check.status != "completed"
+        and check.run_attempt is not None
+        and check.run_attempt > 1
+    ]
+    if running:
+        return decision_id, max(running)
+    if previous is None or previous.failure.get("rerun_decision") != decision_id:
+        return None
+    kept = previous.failure.get("rerun_attempt")
+    if isinstance(kept, int) and not isinstance(kept, bool):
+        return decision_id, kept
+    return None
+
+
 def certification_failures(certification: CICertification) -> list[FailedRun]:
     """The failed runs a stored certification recorded."""
     rows = certification.failure.get("all")
@@ -915,6 +1064,19 @@ def certification_failures(certification: CICertification) -> list[FailedRun]:
     ]
 
 
+def change_class_for_attempt(uow: UnitOfWork, attempt_id: str) -> str:
+    """hades #476: the classifier's label for the paths this attempt's diff touched,
+    read from the same `diff_paths` evidence `scope_contained` reads (11). Empty when
+    the attempt collected no diff (an attempt from before #476, or none yet)."""
+    paths: list[str] | None = None
+    for record in uow.evidence.list_for_attempt(attempt_id):
+        if record.kind == EvidenceKind.DIFF_PATHS.value and record.verified:
+            paths = [str(p) for p in record.payload.get("paths", [])]
+    if paths is None:
+        return ""
+    return classify_change(paths).label
+
+
 def certify_head(
     uow: UnitOfWork,
     clock: Clock,
@@ -924,6 +1086,7 @@ def certify_head(
     observation: Observation,
     policy: dict[str, Any],
     head_sha: str,
+    attempt_id: str = "",
     log_excerpt: str = "",
     log_fetched: bool = False,
 ) -> CICertification:
@@ -934,10 +1097,12 @@ def certify_head(
     `rerun` decision keeps the failure it was about from being counted again until a
     fresh result arrives."""
     checks = observed_checks(observation)
+    change_class = change_class_for_attempt(uow, attempt_id) if attempt_id else ""
     outcome = certify(
         policy,
         head_sha=head_sha,
         observed=checks,
+        change_class=change_class,
     )
     state = outcome.state
     detail = outcome.detail
@@ -960,6 +1125,7 @@ def certify_head(
                     "conclusion": c.conclusion,
                     "url": c.url,
                     "run_id": c.external_id,
+                    "source": c.source.value,
                     "completed_at": _iso(c.completed_at),
                 }
                 for c in outcome.failures
@@ -985,9 +1151,9 @@ def certify_head(
             state = CertificationState.PENDING
             names = ", ".join(sorted({c.name for c in outcome.failures}))
             detail = (
-                f"a CI re-run was decided (ci decision {rerun}); the failure it was about "
-                f"({names}) is not counted again. Waiting for a result on {head_sha} that "
-                "is not the one the decision was about"
+                f"waiting on a re-run: a CI re-run was decided (ci decision {rerun}); "
+                f"the failure it was about ({names}) is not counted again. Waiting for a "
+                f"result on {head_sha} that is not the one the decision was about"
             )
             failure["stale_after_rerun"] = rerun
     elif state is CertificationState.PENDING:
@@ -1009,6 +1175,13 @@ def certify_head(
                 f"the operator accepted that this repository has no CI for this task "
                 f"({waiver_words(waiver)})"
             )
+    # Issue 435: once a rerun has been decided for this head, the certification keeps
+    # the attempt that is being judged, and while it runs the detail says so.
+    judged = rerun_attempt(uow, task, observation, head_sha=head_sha, previous=previous)
+    if judged is not None:
+        failure["rerun_decision"], failure["rerun_attempt"] = judged
+        if state is CertificationState.PENDING:
+            detail = f"re-run requested, attempt {judged[1]} running"
     certification = CICertification(
         id=new_id(),
         pull_request_id=pull_request.id,
@@ -1031,6 +1204,7 @@ def certify_head(
         failure=failure,
         detail=detail,
         evaluated_at=clock.now(),
+        change_class=outcome.change_class,
     )
     stored = uow.ci_certifications.put(certification)
     if previous is None or previous.state != stored.state or previous.detail != stored.detail:
@@ -1457,6 +1631,7 @@ def evaluate_delivery_gates(
         comment_count=len(needing),
         certification_state=certification.state if certification else "",
         certification_detail=certification.detail if certification else "",
+        change_class=certification.change_class if certification else "",
         final_sha=final_sha,
     )
     names: list[str] = []
@@ -1647,10 +1822,10 @@ def advance_delivery(
             uow,
             clock,
             principal_id=task.principal_id,
-            reason=WakeReason.EXTERNAL_FEEDBACK_RECEIVED,
+            reason=WakeReason.EXTERNAL_REVIEW_TRIGGER_NEEDED,
             summary=(
-                f"external review failed on #{pull_request.number}: the Codex connector "
-                "refused the round because the repository has no Codex account"
+                f"external review failed on {pull_request.url}: the Codex connector's "
+                "reply was not a review; the round must be requested by a person"
             ),
             task=task,
             extra_links={"pull_request": f"/v1/tasks/{task.id}/pull-request"},
@@ -2034,7 +2209,13 @@ def repeat_overdue_wakes(
     The clock starts when the task entered the state it is waiting in, not when the pull
     request was opened: a correction on a three-day-old pull request enters certification
     with nothing outstanding yet, and measuring from `opened_at` would call it overdue on
-    its first poll."""
+    its first poll.
+
+    hades #502: exactly one open wake per task per cause. While the last one is unacked
+    no copy is raised, however long the condition persists; once it is acked the notice
+    comes back only when the condition still holds a full `wait_timeout_hours` after
+    the ack. A wake about a pull request that has since merged or closed is acked by
+    the system in the supervisor's sweep (`close_wakes_for_finished_pull_requests`)."""
     now = clock.now()
     if task.state is TaskState.AWAITING_EXTERNAL_REVIEW:
         hours = wait_timeout_hours(policy, "external_review", DEFAULT_EXTERNAL_TIMEOUT_HOURS)
@@ -2056,11 +2237,12 @@ def repeat_overdue_wakes(
         )
     else:
         return False
+    interval = timedelta(hours=hours)
     since = waiting_since(uow, task, entered, fallback=pull_request.opened_at)
-    if now - since < timedelta(hours=hours):
+    if now - since < interval:
         return False
-    latest = _latest_wake_at(uow, task, reason.value)
-    if latest is not None and now - latest < timedelta(hours=hours):
+    previous = uow.wakes.list_for_task(task.id, reason=reason.value)
+    if not repeat_allowed(previous, now=now, interval=interval):
         return False
     create_wake(
         uow,
@@ -2082,20 +2264,6 @@ def waiting_since(uow: UnitOfWork, task: Task, kind: EventKind, *, fallback: dat
     in the same transaction as the state change (09), so the event is the record."""
     event = uow.events.latest_for_task_kind(task.id, kind.value)
     return event.ts if event is not None else fallback
-
-
-def _latest_wake_at(uow: UnitOfWork, task: Task, reason: str) -> datetime | None:
-    latest: datetime | None = None
-    for wake in uow.wakes.list_for_principal(
-        task.principal_id, since=None, include_acked=True, limit=200
-    ):
-        if (
-            wake.task_id == task.id
-            and wake.reason == reason
-            and (latest is None or wake.created_at > latest)
-        ):
-            latest = wake.created_at
-    return latest
 
 
 def poll_due(
@@ -2222,6 +2390,7 @@ def apply_observation(
         pull_request=pull_request,
         observed_sha=observation.pull_request.head_sha,
         result=result,
+        observation=observation,
     )
     certification: CICertification | None = None
     head = accepted_head(uow, task)
@@ -2234,6 +2403,7 @@ def apply_observation(
             observation=observation,
             policy=policy,
             head_sha=head,
+            attempt_id=attempt_id,
             log_excerpt=log_excerpt,
             log_fetched=log_fetched,
         )

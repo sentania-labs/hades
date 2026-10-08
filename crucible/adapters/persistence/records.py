@@ -28,6 +28,7 @@ from crucible.adapters.persistence.models import (
     ReviewDispositionRow,
     ReviewReportRow,
     RoutingPolicyRow,
+    TaskNoteRow,
     TaskRow,
     WakeRow,
 )
@@ -51,6 +52,7 @@ from crucible.domain.entities import (
     ReviewDisposition,
     ReviewReportRecord,
     RoutingPolicyRecord,
+    TaskNote,
     Wake,
 )
 from crucible.domain.time import ensure_utc
@@ -482,6 +484,47 @@ class Decisions:
         return [self._to_entity(r) for r in rows]
 
 
+class TaskNotes:
+    """Operator notes on a task (hades #489), newest first."""
+
+    def __init__(self, session: Session) -> None:
+        self._s = session
+
+    @staticmethod
+    def _to_entity(row: TaskNoteRow) -> TaskNote:
+        return TaskNote(
+            id=row.id,
+            task_id=row.task_id,
+            principal_id=row.principal_id,
+            author=row.author,
+            text=row.text,
+            verbatim=bool(row.verbatim),
+            created_at=ensure_utc(row.created_at),
+        )
+
+    def add(self, note: TaskNote) -> None:
+        self._s.add(
+            TaskNoteRow(
+                id=note.id,
+                task_id=note.task_id,
+                principal_id=note.principal_id,
+                author=note.author,
+                text=note.text,
+                verbatim=note.verbatim,
+                created_at=note.created_at,
+            )
+        )
+        self._s.flush()
+
+    def list_for_task(self, task_id: str) -> Sequence[TaskNote]:
+        rows = self._s.scalars(
+            select(TaskNoteRow)
+            .where(TaskNoteRow.task_id == task_id)
+            .order_by(TaskNoteRow.created_at.desc(), TaskNoteRow.id.desc())
+        ).all()
+        return [self._to_entity(row) for row in rows]
+
+
 class Escalations:
     def __init__(self, session: Session) -> None:
         self._s = session
@@ -700,14 +743,43 @@ class Wakes:
         )
 
     def list_for_principal(
-        self, principal_id: str, *, since: datetime | None, include_acked: bool, limit: int
+        self,
+        principal_id: str,
+        *,
+        since: datetime | None,
+        include_acked: bool,
+        limit: int,
+        after_id: str | None = None,
     ) -> Sequence[Wake]:
         stmt = select(WakeRow).where(WakeRow.principal_id == principal_id)
         if not include_acked:
             stmt = stmt.where(WakeRow.acked_at.is_(None))
+        if after_id is not None:
+            # hades #502: the page is keyed by the id, which is unique, so a run of wakes
+            # sharing one created_at cannot make the next page repeat the last.
+            stmt = stmt.where(WakeRow.id > after_id)
         if since is not None:
             stmt = stmt.where(WakeRow.created_at >= since)
         rows = self._s.scalars(stmt.order_by(WakeRow.id).limit(limit)).all()
+        return [self._to_entity(r) for r in rows]
+
+    def list_for_task(
+        self, task_id: str, *, reason: str, include_acked: bool = True
+    ) -> Sequence[Wake]:
+        stmt = select(WakeRow).where(WakeRow.task_id == task_id, WakeRow.reason == reason)
+        if not include_acked:
+            stmt = stmt.where(WakeRow.acked_at.is_(None))
+        rows = self._s.scalars(stmt.order_by(WakeRow.id)).all()
+        return [self._to_entity(r) for r in rows]
+
+    def list_unacked_for_reasons(self, reasons: Sequence[str]) -> Sequence[Wake]:
+        if not reasons:
+            return []
+        rows = self._s.scalars(
+            select(WakeRow)
+            .where(WakeRow.acked_at.is_(None), WakeRow.reason.in_(list(reasons)))
+            .order_by(WakeRow.id)
+        ).all()
         return [self._to_entity(r) for r in rows]
 
     def list_undelivered(self, now: datetime) -> Sequence[Wake]:

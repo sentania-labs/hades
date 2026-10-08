@@ -197,6 +197,10 @@ class _Repositories:
     def get_by_name(self, name: str) -> Repository | None:
         return self.repository if name == self.repository.name else None
 
+    def upsert(self, repository: Repository) -> Repository:
+        self.repository = repository
+        return self.repository
+
 
 class _Policies:
     def __init__(self, policy: Policy) -> None:
@@ -234,6 +238,9 @@ class _PullRequests:
 
     def save(self, pull_request: PullRequest) -> None:
         self.rows[pull_request.id] = pull_request
+
+    def list_in_states(self, states: Sequence[PullRequestState]) -> list[PullRequest]:
+        return [p for p in self.rows.values() if p.state in states]
 
 
 class _ReviewCycles:

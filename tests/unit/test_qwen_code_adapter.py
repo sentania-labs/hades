@@ -79,6 +79,11 @@ def test_launch_and_shared_read_only_credential() -> None:
     assert launch.env["OPENAI_BASE_URL"] == "https://gateway.example/v1"
     assert launch.env["OPENAI_MODEL"] == "qwen-lane"
     assert launch.env["CRUCIBLE_QWEN_CONTEXT_LENGTH"] == "131072"
+    # hades #498, Hermes parity: the output cap, thinking off, and where the wrapper
+    # looks for the report after the run.
+    assert launch.env["CRUCIBLE_QWEN_MAX_OUTPUT_TOKENS"] == "32000"
+    assert launch.env["CRUCIBLE_QWEN_THINKING"] == "false"
+    assert launch.env["CRUCIBLE_QWEN_REPORT_DIR"] == "/crucible/report"
     assert launch.env_from_files == {"OPENAI_API_KEY": "/home/worker/.hermes-auth/api-key"}
     assert launch.workdir == "/crucible/repo"
     assert launch.transcript_path == "/crucible/report/transcript.jsonl"
@@ -118,21 +123,33 @@ def test_settings_and_identity_are_written_before_exec(
     monkeypatch.setattr(module.sys, "argv", ["wrapper", *ADAPTER.build_launch(context()).argv[1:]])
     called = []
 
-    def execute(binary: str, argv: list[str]) -> None:
+    def execute(argv: list[str], log: Any) -> int:
         settings = json.loads((tmp_path / ".qwen/settings.json").read_text())
         assert settings["model"] == {
             "maxToolCallsPerTurn": 0,
-            "generationConfig": {"contextWindowSize": 65536},
+            "generationConfig": {
+                "contextWindowSize": 65536,
+                "enable_thinking": False,
+                "samplingParams": {"max_tokens": 32000},
+            },
         }
         assert not settings["tools"]["shell"]["enableInteractiveShell"]
-        assert binary == "/usr/local/bin/qwen"
+        assert argv[0] == "/usr/local/bin/qwen"
         assert argv[-1].startswith(identity.read_text())
         assert argv[-1].endswith(base.POINTER_PROMPT)
-        called.append(binary)
+        called.append(argv[0])
+        return 0
 
-    monkeypatch.setattr(module.os, "execv", execute)
-    module.main()
+    monkeypatch.setenv("CRUCIBLE_QWEN_MAX_OUTPUT_TOKENS", "32000")
+    monkeypatch.setenv("CRUCIBLE_QWEN_REPORT_DIR", str(tmp_path / "report"))
+    (tmp_path / "report").mkdir()
+    (tmp_path / "report" / "report.yaml").write_text("summary: the model wrote this\n")
+    monkeypatch.setattr(module, "run", execute)
+    monkeypatch.setattr(module, "git_head", lambda repo: None)
+    assert module.main() == 0
     assert called == ["/usr/local/bin/qwen"]
+    # The model's own report is left alone.
+    assert (tmp_path / "report" / "report.yaml").read_text() == "summary: the model wrote this\n"
 
 
 def events() -> list[dict[str, Any]]:
@@ -306,8 +323,14 @@ async def test_supervisor_passes_and_freezes_routing_context(
     route = _routing([model_entry(context_length=limit, model_name="qwen-lane").model_dump()])
     monkeypatch.setattr("crucible.application.supervisor.load_attempt_routing", lambda *_: route)
     launched = await supervisor._build_spec(attempt, _EXECUTION, _TASK, {})
-    assert launched.effective_settings == {"context_length": limit or 131072}
+    assert launched.effective_settings == {
+        "context_length": limit or 131072,
+        "max_output_tokens": 32000,
+        "thinking": False,
+    }
     assert launched.env["CRUCIBLE_QWEN_CONTEXT_LENGTH"] == str(limit or 131072)
+    assert launched.env["CRUCIBLE_QWEN_MAX_OUTPUT_TOKENS"] == "32000"
+    assert launched.env["CRUCIBLE_QWEN_THINKING"] == "false"
     assert launched.env["OPENAI_MODEL"] == "qwen-lane"
     assert launched.env_from_files == {"OPENAI_API_KEY": "/home/worker/.hermes-auth/api-key"}
     attempt.effective_settings = {"context_length": 98304}
@@ -390,7 +413,8 @@ def test_worker_node_and_qwen_pins_are_checksum_verified() -> None:
     builder = (root / "images/build.sh").read_text()
     for name in ("NODE_VERSION", "NODE_SHA256"):
         assert f"ARG {name}={pins[name]}" in dockerfile
-        assert f'--build-arg "{name}=${name}"' in builder
+        # hades #475: one `arg_names` list feeds both builders' --build-arg flags.
+        assert name in builder.split("arg_names=(", 1)[1].split(")", 1)[0].split()
     assert pins["NODE_VERSION"].startswith("22.")
     assert "ARG HARNESS_QWEN_CODE_VERSION=0.25.0" in dockerfile
     assert "ADD --checksum=sha256:${NODE_SHA256}" in dockerfile

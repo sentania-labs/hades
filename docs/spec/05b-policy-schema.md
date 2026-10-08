@@ -92,7 +92,7 @@ gates:
     - feedback_dispositions_complete
     - ci_green_for_head
   skipped: []                          # release gates live on the release contract (24)
-                                       # commit_policy is never listed: it always runs, always advisory (11)
+                                       # commit_policy and report_present are never listed: they always run, always advisory (11, hades #498)
   advisory:                            # ADR 0024: a failure of these goes to the internal reviewer instead of stopping the task
     - criteria_mapped                  # absent (every version written before 2026-09-29): this default set
     - report_present
@@ -130,6 +130,7 @@ external_review:
   components: ["code"]                 # review components in one cycle; ["code", "security"] where the repo runs both
   round_counting: "completed_cycles"   # a round is one completed cycle (all components terminal) on a published head
   wait_timeout_hours: 24               # then wake Foundry with reason external_review_overdue
+  automatic: true                      # false: Crucible never posts the App's trigger comment; it wakes Foundry to ask a person instead (hades #343)
 
 ci_certification:
   require_green_on_final_sha: true
@@ -169,6 +170,13 @@ retention:
 - Every field present with the listed types; unknown fields rejected.
 - `gates.pre_pr`, `publication`, `post_pr`, and `skipped` partition the gate
   set defined in 11 and 23; a gate in none of them is an error.
+- `image_checks_required` is an optional pre-PR gate added by hades #475, after
+  versions became immutable: a policy version that omits it keeps its stored gate
+  list and a contract admitted under it is never judged by the gate retroactively;
+  a new version may list it. The shipped `hades-self-hosting` version 2 lists it: a
+  collected diff under `images/`, `tools/images/` or `tools/harness/` fails unless the
+  contract names both `make images-check` and `make registry-check` in
+  `required_verification`, and the message names the missing ones.
 - `retry.eligible_classes` is a subset of the `ExitClass` enum (07).
 - `concurrency.per_harness` may exceed 1 for read-only adapters or adapters declaring
   `parallel_attempts_safe`. Writable adapters without that declaration are refused
@@ -208,6 +216,19 @@ retention:
 - `external_review.components` lists the components one cycle expects and
   defaults to `["code"]`. The cycle logic depends on it being present, so
   a repository running code and security review sets both.
+- `external_review.automatic` (hades #343) is whether this repository's
+  provider review starts on its own once the App's trigger is posted.
+  Absent reads as `true`, which is what every policy before hades #343
+  assumed. `false`, or a refusal already observed on the repository (the
+  connector's reply began "To use Codex here", which GitHub exposes no
+  other way to predict), stops Crucible from posting the trigger comment
+  at publication: the provider only refuses the App's comment again, so
+  Crucible wakes the orchestrator with reason
+  `external_review_trigger_needed` instead, asking a person to request
+  the round under their own account. The refusal is remembered on the
+  repository (`repositories.codex_review_refused_at`), not the task, so
+  every later task against that repository skips the App's trigger too,
+  until an operator clears it.
 - `ci_certification.allow_no_ci: true` and `deliverables.allow_branch_only:
   true` may only be set by an `operator` or `admin` principal and are
   recorded as decisions.
@@ -350,8 +371,13 @@ the pool's fact. Because a mark is shared by every task, it is written only
 when the harness's own provider-error event (07) says the provider refused
 for quota, never from quota-shaped text elsewhere in a transcript; text
 alone may still classify that one attempt `quota_exhausted` and reroute it,
-without a mark. Marks are rows, survive a restart, expire on
-their own, and can be cleared by the administrator with a reason (25). A
+without a mark. A refusal about one model rather than the account (hades
+#373; 07, Claude Code) marks no pool: it writes a mark for the model, keyed
+`model:<harness>:<model>` in the same table, until the refusal's reset or the pool's
+`default_cooldown_seconds`, and selection turns that model away ("model
+excluded until ...") while its pool stays open. Marks are rows, survive a
+restart, expire on their own, and can be cleared by the administrator with
+a reason (25), a model's mark by its `model:<harness>:<model>` key. A
 launch-time reservation that finds the pool over its soft limit does not
 create a mark; the soft limit is Crucible's own count, the mark is the
 provider's word. A harness that is
@@ -429,12 +455,13 @@ other effective settings. Runtime edits create later immutable versions through
 the admin surface. The database value is authoritative over the environment after the
 migration.
 
-The `model` field is exactly what the harness sends to the endpoint. A routing entry is
-unique on `(harness, model)`, so Hermes, Qwen Code and Codex may all use `coder`.
-Local models are references to the gateway's authenticated `/models` listing at publish
-time; an unknown reference is refused with 422 and the checked listing. Subscription
-models are references known by their adapter. Which routing version a deployment
-uses is the policy's own choice. `default-software` version 2, seeded by
+The `model` field is what routing, pools and evidence call the entry; by default it is
+also exactly what the harness is sent. A routing entry is unique on `(harness, model)`,
+so Hermes, Qwen Code and Codex may all use `coder`. Local models are references to the
+gateway's authenticated `/models` listing at publish time; an unknown reference is
+refused with 422 and the checked listing. Subscription models are references known by
+their adapter. Which routing version a deployment uses is the policy's own choice.
+`default-software` version 2, seeded by
 migration 0009 (C5b), is version 1's document naming `default-routing`
 version 2, and it is the version the shipped example policy, the example
 contract, the compose smoke, the fixtures, and the tiers all reference, so
@@ -509,3 +536,31 @@ the form does not edit that preference. It never presents an internal routing ke
 a model. A scheduled
 gateway listing disables every `(harness, model)` entry for a vanished model, records
 when it vanished, and wakes the orchestrator with the model and stranded harnesses.
+
+### Codex on a local lane is sent a model name it knows (hades #354)
+
+Codex logged `Model metadata for 'fast' not found` on a local lane: Hades sent the lane
+name, which Codex's own model catalog does not recognise, so it fell back to generic
+tool, prompt, output-token and compaction defaults. A routing entry may now carry
+`harness_model_name`, the name its harness is actually launched with, for example
+`gpt-5.4`, the gateway alias Codex's catalog does recognise for the same backing
+model, while `model` keeps the lane name (`fast`) that routing, pools and evidence
+always read. Absent, the harness is sent `model` unchanged (every entry before #354,
+and every entry that sets no override, behaves exactly as before). The launch event
+(`attempt_launching`) records both: `model`, the lane, and `sent_model_name`, the name
+actually passed to the harness.
+
+A local Codex entry's own `context_length` and `max_output_tokens` (the same fields
+#448 added for Qwen Code) feed Codex's per-attempt provider config,
+`model_context_window` and `model_max_output_tokens`, ahead of the Hermes-administered
+defaults on the Local gateway page; an entry that sets neither is unaffected, and Codex
+keeps reading the Hermes defaults it reads today. Changing a gateway alias or a
+routing entry's thinking setting is lab-admin's call, not this mechanism's; #354 does
+not touch either.
+
+`context_length` and `max_output_tokens` are independent overrides, so one entry can
+set a value that, against the other figure (its own, or inherited from the Local
+gateway page), leaves no input budget once the response reservation is taken out of
+the window. The saved Hermes settings already reject that pair at save time
+(`hermes_limit_problems`); a local Codex launch validates the same final pair and is
+refused rather than sent to fail at request time.

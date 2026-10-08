@@ -66,6 +66,11 @@ class Repository:
     # ADR 0019: cloned with a read-only GitHub App installation token rather than with no
     # credential. The picker takes it from GitHub; the registration form states it.
     private: bool = False
+    # hades #343: when the connector last refused a round here. Set the first time a
+    # refusal is observed on any task against this repository; cleared only by an
+    # operator. While set, Crucible stops posting the App's trigger comment on this
+    # repository and wakes the orchestrator instead.
+    codex_review_refused_at: datetime | None = None
 
 
 @dataclass(slots=True)
@@ -386,6 +391,21 @@ class Decision:
 
 
 @dataclass(slots=True)
+class TaskNote:
+    """An operator's note on a task (hades #489): who wrote it, when, and the words as
+    typed. `verbatim` says the text is the operator's own words rather than a summary
+    Hades wrote; a note an action applies is the verbatim of that decision in the audit."""
+
+    id: str
+    task_id: str
+    principal_id: str
+    author: str
+    text: str
+    created_at: datetime
+    verbatim: bool = True
+
+
+@dataclass(slots=True)
 class Escalation:
     id: str
     task_id: str
@@ -668,6 +688,9 @@ class PullRequest:
     last_polled_at: datetime | None = None
     last_reactions_polled_at: datetime | None = None
     reactions_observable: bool = True
+    schema_tables: list[str] | None = None
+    schema_columns: list[str] | None = None
+    schema_models: list[str] | None = None
     cancelled_at: datetime | None = None
     observed_head_sha: str = ""
     observed_base_ref: str = ""
@@ -765,6 +788,11 @@ class CICertification:
     failure: dict[str, Any]
     detail: str
     evaluated_at: datetime
+    # hades #476: the class `crucible.domain.change_class.classify` assigned this head's
+    # changed paths, carried from `Certification.change_class` (domain/certification.py)
+    # into storage. Empty for a certification computed before #476 or when the attempt's
+    # diff was never collected.
+    change_class: str = ""
 
 
 @dataclass(slots=True)

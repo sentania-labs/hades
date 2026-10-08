@@ -183,6 +183,18 @@ class CheckRecord:
     # When the run concluded, as GitHub reports it. A failure that concluded before a
     # re-run decision is the one the decision was about (hades FDY-0139).
     completed_at: datetime | None = None
+    # A workflow run's attempt number: 1 for the first run, then one more per re-run
+    # (issue 435). None for anything that is not a workflow run.
+    run_attempt: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CommitDiffRecord:
+    """A single changed-file summary from ``git diff`` (hades #443)."""
+
+    path: str
+    additions: int = 0
+    deletions: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +210,9 @@ class Observation:
     reactions_detail: str = ""
     checks: tuple[CheckRecord, ...] = ()
     required_checks: tuple[str, ...] = ()
+    head_commit_author: str = ""
+    head_commit_message: str = ""
+    head_commit_diff: tuple[CommitDiffRecord, ...] = ()
     observed_at: datetime | None = None
     rate_limit_remaining: int | None = None
     notes: tuple[str, ...] = field(default=())
@@ -346,6 +361,55 @@ class GitHubClient(Protocol):
     def checks_for_commit(
         self, token: InstallationToken, *, repository: str, head_sha: str
     ) -> Sequence[CheckRecord]: ...
+
+    def rerun_failed_jobs(
+        self, token: InstallationToken, *, repository: str, run_id: int
+    ) -> dict[str, Any]:
+        """Re-run all failed jobs of a workflow run (Actions write, issue 435).
+
+        GitHub answers 201 with no body; the new attempt number is read afterwards
+        with ``get_workflow_run``.
+        """
+
+    def get_installation_permissions(self, *, installation_id: int) -> dict[str, str]:
+        """The permissions the installation grants (`GET /app/installations/{id}`).
+
+        Read on every rerun decision to decide whether Hades can act, never assumed.
+        Returns ``{"actions": "write", ...}`` when the installation grants Actions write,
+        and an empty mapping when the grant cannot be read.
+        """
+
+    def workflow_run_for_job(
+        self, token: InstallationToken, *, repository: str, job_id: int
+    ) -> int | None:
+        """The id of the workflow run an Actions job belongs to, or None when the
+        check run is not an Actions job (issue 435)."""
+
+    def get_workflow_run(
+        self, token: InstallationToken, *, repository: str, run_id: int
+    ) -> dict[str, Any]:
+        """GET /repos/{owner}/{repo}/actions/runs/{run_id} (issue 435).
+
+        Returns the workflow run object which carries the current ``run_attempt``
+        after a rerun.
+        """
+
+    def diff_commits(
+        self,
+        token: InstallationToken,
+        *,
+        repository: str,
+        base_sha: str,
+        head_sha: str,
+    ) -> Sequence[CommitDiffRecord]:
+        """The diff stats between ``base_sha`` and ``head_sha`` (contents read).
+
+        Returns a list of changed-file summaries so the observer can verify that only
+        the expected lines in a file changed (hades #443).  Returns an empty list when
+        the two SHAs are identical.
+        """
+
+        ...
 
 
 # ----- the App credential the service owns (ADR 0017) ----------------------------------

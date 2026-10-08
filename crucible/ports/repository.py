@@ -50,6 +50,7 @@ from crucible.domain.entities import (
     SupervisorStatus,
     Task,
     TaskContract,
+    TaskNote,
     UiSession,
     Wake,
 )
@@ -393,6 +394,14 @@ class DecisionRepository(Protocol):
     def list_for_task(self, task_id: str) -> Sequence[Decision]: ...
 
 
+class TaskNoteRepository(Protocol):
+    """Operator notes on a task (hades #489), newest first when listed."""
+
+    def add(self, note: TaskNote) -> None: ...
+
+    def list_for_task(self, task_id: str) -> Sequence[TaskNote]: ...
+
+
 class EscalationRepository(Protocol):
     def add(self, escalation: Escalation) -> None: ...
 
@@ -524,8 +533,31 @@ class WakeRepository(Protocol):
     def save(self, wake: Wake) -> None: ...
 
     def list_for_principal(
-        self, principal_id: str, *, since: datetime | None, include_acked: bool, limit: int
-    ) -> Sequence[Wake]: ...
+        self,
+        principal_id: str,
+        *,
+        since: datetime | None,
+        include_acked: bool,
+        limit: int,
+        after_id: str | None = None,
+    ) -> Sequence[Wake]:
+        """The principal's wakes in id order (ULIDs are unique and ordered). `after_id`
+        resumes strictly after that wake, which is what the API's opaque cursor decodes
+        to (hades #502); `since` is the older time filter and is still honoured."""
+        ...
+
+    def list_for_task(
+        self, task_id: str, *, reason: str, include_acked: bool = True
+    ) -> Sequence[Wake]:
+        """Every wake raised for one task with one reason, oldest first. A repeating
+        notice reads this to keep one open wake per task per cause (hades #502)."""
+        ...
+
+    def list_unacked_for_reasons(self, reasons: Sequence[str]) -> Sequence[Wake]:
+        """Every unacked wake whose reason is one of `reasons`, oldest first. The
+        supervisor closes the ones about a pull request that has since merged or
+        closed (hades #502)."""
+        ...
 
     def list_undelivered(self, now: datetime) -> Sequence[Wake]: ...
 
@@ -679,6 +711,7 @@ class UnitOfWork(Protocol):
     gate_results: GateResultRepository
     acceptance: AcceptanceRepository
     decisions: DecisionRepository
+    task_notes: TaskNoteRepository
     escalations: EscalationRepository
     dispositions: DispositionRepository
     wakes: WakeRepository

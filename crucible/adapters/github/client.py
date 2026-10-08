@@ -20,6 +20,7 @@ from crucible.domain.refs import check_ref
 from crucible.ports.github import (
     CheckRecord,
     CommentRecord,
+    CommitDiffRecord,
     GitHubError,
     InstallationToken,
     MergeResult,
@@ -341,6 +342,30 @@ class RestGitHubClient:
         required = tuple(
             self.list_required_checks(token, repository=repository, branch=base_ref or pr.base_ref)
         )
+        # hades #443: fetch the observed head's commit metadata for digest-move detection.
+        head_commit_author = ""
+        head_commit_message = ""
+        head_commit_diff: tuple[CommitDiffRecord, ...] = ()
+        try:
+            _status, commit_payload, _ = self._http.request(
+                "GET",
+                f"/repos/{repository}/commits/{pr.head_sha}",
+                bearer=token.reveal(),
+            )
+            if isinstance(commit_payload, dict):
+                author = commit_payload.get("author", {})
+                if isinstance(author, dict):
+                    head_commit_author = str(author.get("login", ""))
+                if not head_commit_author:
+                    author_data = commit_payload.get("commit", {})
+                    if isinstance(author_data, dict):
+                        author_data = author_data.get("author", {})
+                        if isinstance(author_data, dict):
+                            head_commit_author = str(author_data.get("name", ""))
+                head_commit_message = str(commit_payload.get("commit", {}).get("message", ""))
+        except GitHubError:
+            # If we can't read the commit metadata, proceed without it.
+            pass
         return Observation(
             pull_request=pr,
             reviews=reviews,
@@ -354,6 +379,10 @@ class RestGitHubClient:
             observed_at=datetime.now(UTC),
             rate_limit_remaining=self._http.rate_limit_remaining,
             notes=tuple(notes),
+            # hades #443: populate commit metadata for digest-move detection.
+            head_commit_author=head_commit_author,
+            head_commit_message=head_commit_message,
+            head_commit_diff=head_commit_diff,
         )
 
     def issue_comments(
@@ -464,6 +493,40 @@ class RestGitHubClient:
         if status >= 400 or not isinstance(payload, bytes):
             return b""
         return payload[-max(1, limit_bytes) :]
+
+    def diff_commits(
+        self,
+        token: InstallationToken,
+        *,
+        repository: str,
+        base_sha: str,
+        head_sha: str,
+    ) -> tuple[CommitDiffRecord, ...]:
+        """The diff between two commits (hades #443).
+
+        Uses ``git log`` for a lightweight summary (author, message, files changed)
+        rather than ``git diff`` to avoid large bodies.
+        """
+        if base_sha == head_sha:
+            return ()
+        payload: dict[str, Any]
+        status, payload, _ = self._http.request(
+            "GET",
+            f"/repos/{repository}/compare/{base_sha}...{head_sha}",
+            bearer=token.reveal(),
+        )
+        if status != 200 or not isinstance(payload, dict):
+            return ()
+        files = payload.get("files", [])
+        return tuple(
+            CommitDiffRecord(
+                path=f["filename"] if isinstance(f, dict) and "filename" in f else "",
+                additions=f.get("additions", 0) if isinstance(f, dict) else 0,
+                deletions=f.get("deletions", 0) if isinstance(f, dict) else 0,
+            )
+            for f in files
+            if isinstance(f, dict)
+        )
 
     # ----- mutations ----------------------------------------------------
 
@@ -585,6 +648,88 @@ class RestGitHubClient:
             body={"state": "closed"},
         )
 
+    def rerun_failed_jobs(
+        self, token: InstallationToken, *, repository: str, run_id: int
+    ) -> dict[str, Any]:
+        """POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs (Actions write,
+        issue 435).
+
+        Returns the raw GitHub response payload.
+        """
+        status, payload, _ = self._http.request(
+            "POST",
+            f"/repos/{repository}/actions/runs/{run_id}/rerun-failed-jobs",
+            bearer=token.reveal(),
+        )
+        if status >= 400:
+            message = _message(payload)
+            raise GitHubError(
+                status,
+                message,
+                path=f"/repos/{repository}/actions/runs/{run_id}/rerun-failed-jobs",
+            )
+        # GitHub returns 201 Created with an empty body for this endpoint.
+        # A successful response may be ``None``; treat it as success.
+        return payload if isinstance(payload, dict) else {}
+
+    def get_installation_permissions(self, *, installation_id: int) -> dict[str, str]:
+        """The permissions the installation grants, as GitHub reports them (issue 435).
+
+        `GET /app/installations/{installation_id}` with the App JWT: its `permissions`
+        object is what the installation holds right now, which is what decides whether
+        Hades can re-run failed jobs itself. Reading it needs no repository permission.
+        An answer that cannot be read is an empty grant, so the caller falls back to the
+        operator hand-off rather than assuming a permission.
+        """
+        try:
+            payload = self._http.get(
+                f"/app/installations/{int(installation_id)}", bearer=self._auth.app_jwt()
+            )
+        except GitHubError:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        granted = payload.get("permissions")
+        if not isinstance(granted, dict):
+            return {}
+        return {str(k): str(v) for k, v in granted.items()}
+
+    def workflow_run_for_job(
+        self, token: InstallationToken, *, repository: str, job_id: int
+    ) -> int | None:
+        """The workflow run a job belongs to (Actions read, issue 435).
+
+        A failed check run from Actions is a job, and its id is the job id; re-running
+        needs the run's id, which `GET /repos/{owner}/{repo}/actions/jobs/{job_id}`
+        carries. A check run that is not an Actions job answers 404: None."""
+        try:
+            payload = self._http.get(
+                f"/repos/{repository}/actions/jobs/{int(job_id)}", bearer=token.reveal()
+            )
+        except GitHubError as exc:
+            if exc.status == 404:
+                return None
+            raise
+        run_id = payload.get("run_id") if isinstance(payload, dict) else None
+        return run_id if isinstance(run_id, int) and not isinstance(run_id, bool) else None
+
+    def get_workflow_run(
+        self, token: InstallationToken, *, repository: str, run_id: int
+    ) -> dict[str, Any]:
+        """GET /repos/{owner}/{repo}/actions/runs/{run_id} (issue 435).
+
+        Returns the workflow run object including the current ``run_attempt``
+        after a rerun.
+        """
+        status, payload, _ = self._http.request(
+            "GET",
+            f"/repos/{repository}/actions/runs/{run_id}",
+            bearer=token.reveal(),
+        )
+        if status == 200 and isinstance(payload, dict):
+            return payload
+        return {}
+
 
 def _message(payload: Any) -> str:
     if isinstance(payload, dict) and "message" in payload:
@@ -595,6 +740,7 @@ def _message(payload: Any) -> str:
 __all__ = [
     "CheckRecord",
     "CommentRecord",
+    "CommitDiffRecord",
     "RestGitHubClient",
     "ReviewRecord",
 ]

@@ -15,11 +15,11 @@ Only when judgment is required or work has stopped needing it:
 | `published` | informational once per publication: `published, PR #N` for a pull request |
 | `publish_failed` | `publish_failed` |
 | `external_feedback_received` | informational once per completed review round; on the first Codex round with findings Crucible has already launched its bounded correction, while a later round remains a wake for Foundry |
-| `external_review_overdue` | repeat, no state change |
+| `external_review_overdue` | repeat, no state change; one open wake per task (see "Repeating notices") |
 | `external_review_trigger_needed` | `awaiting_external_review` on a head whose cycle needs the orchestrator's trigger under the operator's account (23) |
 | `ci_certification_failed` | `ci_certification_failed` |
-| `ci_certification_overdue` | repeat, no state change |
-| `ci_rerun_needed` | after a `ci-decision rerun`: Crucible records the intent, the operator re-runs it on GitHub (the App holds no Actions write) |
+| `ci_certification_overdue` | repeat, no state change; one open wake per task (see "Repeating notices") |
+| `ci_rerun_needed` | after a `ci-decision rerun`: without Actions write on the installation, the operator re-runs it on GitHub; with it, Hades has re-run the failed jobs and the wake names the attempt running (23, hades #435) |
 | `head_diverged` | `head_diverged` (decision required) |
 | conflicting pull request, head Crucible pushed or adopted | `pull_request_conflicting`, once per head; the summary names the next action: Crucible merges main itself, and when git reports conflicts launches a merge-main correction from the remote branch tip. A dirty head pushed out of band raises `head_diverged` instead |
 | `ready_for_merge` | `ready_for_merge` |
@@ -33,8 +33,9 @@ Only when judgment is required or work has stopped needing it:
 | `attempt_failed`, `timed_out`, `lost` with no retry remaining | `reported` |
 | `quota_exhausted`, `auth_failure` | any. A quota refusal raises one wake naming the pool, the reason and the reset time (16 step 2, hades #378): the `reported` or `awaiting_quota` wake when the task ends or waits, else a `quota_exhausted` wake of the pool's own, once per exhaustion, linking `/v1/routing/usage` |
 | `routing_changed` | any, no task: a routing publish enabled or disabled a model or changed a pool cap; the summary lists the models enabled and disabled, the pool cap and tier order changes, the projects that follow routing unpinned, who published it and the reason, which names the decision it supersedes (hades #437). One wake per publish, raised for the orchestrator principal, linking `/ui/routing` |
+| `schema_overlap` | `ready_for_merge`: the pull request's migrations touch a table that an older open pull request's migrations also touch; it waits for that one, the summary names the pull request waited for and the shared tables, and the Board shows it as what the task waits on. One wake per pair of pull requests; once the first merges, Hades merges the base into the held branch, renumbers its migrations and merges it (23, hades #447) |
 | `harness_unavailable` | launch refused: the harness is unknown, disabled by either gate (25), outside the adapter's tested version range, or has no credential. Terminal for the attempt; the retry rule skips it because the same refusal would come back |
-| `escalation_stale` | repeat |
+| `escalation_stale` | repeat; one open wake per task, naming every stale escalation (see "Repeating notices") |
 | `supervisor_takeover` | informational, once |
 | `bootstrap_import_verified` | awaiting commit |
 
@@ -81,10 +82,36 @@ chose, stay in the list. It is empty on every other wake.
 2. Webhook: POST to the principal's configured URL with an HMAC signature
    header; retries with exponential backoff for `wake.retry_hours`
    (default 24), then stops retrying but keeps the row.
-3. Poll: `GET /v1/wakes` returns unacked wakes for the caller. Foundry's
-   start-of-session procedure always polls, so webhook failure only delays.
+3. Poll: `GET /v1/wakes` returns unacked wakes for the caller, paged by wake
+   id: `next_cursor` is the opaque form of the last id returned and the next
+   page resumes strictly after it, so wakes sharing one `created_at` never
+   repeat a page (hades #502; `since` still narrows the page for a caller that
+   sends it). Foundry's start-of-session procedure always polls, so webhook
+   failure only delays.
 4. Ack: `POST /v1/wakes/{id}/ack` with what Foundry did. Unacked wakes are
    listed on `GET /supervisor` as a count.
+
+## Repeating notices
+
+A repeating notice (`external_review_overdue`, `ci_certification_overdue`,
+`escalation_stale`) is a reminder about a condition that persists, not a new
+fact, so it keeps exactly one open wake per task per cause (hades #502):
+
+- While that wake is unacked, no copy is raised, however long the condition
+  persists and however many supervisor passes see it. A task with several
+  stale escalations has one `escalation_stale` wake, whose summary names them.
+- Once Foundry acks it, the notice is raised again only when the condition
+  still holds a full repeat interval after the ack (`wait_timeout_hours` for
+  the two pull request notices, `limits.escalation_stale_hours` for a stale
+  escalation).
+- A pull request notice about a pull request that has since merged or closed is
+  about nothing. On the supervisor pass after the merge or close is observed,
+  Crucible acks it itself: the ack note names the pull request and the
+  outcome, and the `wake_acked` event is recorded under the `crucible`
+  principal, so the record shows the system closed it, not Foundry.
+
+The 24-hour digest of hades #489 is separate: it summarises; it does not change
+which wakes exist.
 
 For a Foundry running inside an interactive harness on a workstation, poll
 is sufficient and is the default. Moving Foundry into a persistent service

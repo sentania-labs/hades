@@ -36,6 +36,8 @@ async def test_supervisor_persists_effective_credential_command(
     monkeypatch.setattr("crucible.application.supervisor.load_attempt_routing", lambda *_: None)
     uow = Mock()
     uow.provider_settings.get.return_value = None
+    # hades #489: the spec carries the task's operator notes; this task has none.
+    uow.task_notes.list_for_task.return_value = []
     supervisor = object.__new__(Supervisor)
     supervisor._uow_factory = lambda: nullcontext(uow)  # type: ignore[assignment]
     supervisor._harnesses = default_registry()

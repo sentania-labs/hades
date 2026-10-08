@@ -129,6 +129,8 @@ from crucible.ports.execution import (
     LogOffset,
     Observation,
     ObservationState,
+    PrepareFailedError,
+    PrepareJobPodsTimeoutError,
     ProbeRequest,
     ProbeResult,
     ProviderCapabilities,
@@ -171,6 +173,31 @@ def _inside_declared_network(
 
 
 PROVIDER_NAME = "kubernetes"
+# Hades's own rootless BuildKit (hades #475): the namespace, pod labels and port that
+# deploy/kubernetes/base/buildkit creates, and the Service address a worker or a
+# verifier is told when its contract requires both image checks. The egress rule for
+# that attempt selects the Service's pods, and HTTPS to the hosts `make registry-check`
+# resolves: GHCR, which redirects config and blob reads to a second host (as
+# docs/deployment.md records for the control plane's own crane).
+BUILDKIT_NAMESPACE = "crucible-buildkit"
+BUILDKIT_POD_LABELS: Mapping[str, str] = {"app.kubernetes.io/name": "crucible-buildkit"}
+BUILDKIT_PORT = 1234
+BUILDKIT_HOST = f"tcp://crucible-buildkit.{BUILDKIT_NAMESPACE}.svc:{BUILDKIT_PORT}"
+IMAGE_CHECK_COMMANDS = frozenset({"make images-check", "make registry-check"})
+IMAGE_CHECK_HOSTS = ("ghcr.io", "pkg-containers.githubusercontent.com")
+
+
+def requires_image_checks(contract: Mapping[str, Any]) -> bool:
+    """Whether the contract names both image checks in `required_verification` (hades
+    #475). One without the other gets nothing: the gate that requires image changes to
+    list both is what decides, and the builder is never opened for a partial list."""
+    commands = {
+        str(check.get("command"))
+        for check in contract.get("required_verification", [])
+        if str(check.get("kind", "command")) == "command"
+    }
+    return commands >= IMAGE_CHECK_COMMANDS
+
 
 # A name to the addresses a NetworkPolicy may name.
 Resolver = Callable[[str], list[str]]
@@ -200,6 +227,9 @@ ANNOTATION_IDENTITY_PATHS = "crucible.io/identity-paths"
 # two sentinels, with the same values, because the callers are the same code).
 JOB_API_ERROR = -1
 JOB_TIMED_OUT = -2
+# hades #370: the role's Pod ran and wrote nothing for the stall bound, so Crucible ended
+# it before its timeout. Only a Job run with `stall_seconds` (the preparer) ends this way.
+JOB_STALLED = -3
 
 # One attempt may create a gate-probe, preparer, worker, collector, bundle-verifier
 # and verifier Job. The probe is deleted before preparation and never overlaps this
@@ -216,6 +246,8 @@ LAUNCH_POD_POLLS = 5
 
 POD_DELETION_MARGIN_SECONDS = 5
 DEFAULT_POD_GRACE_SECONDS = 30
+# hades #503: the first pause of the preparer's pod-gone wait; each later pause doubles.
+PREPARE_POD_WAIT_BACKOFF_SECONDS = 2.0
 COLLECTION_ROLES = (k8sspec.ROLE_COLLECTOR, k8sspec.ROLE_BUNDLE, k8sspec.ROLE_VERIFIER)
 
 # Deleting a Pod is the only way to signal one. Kubernetes sends SIGTERM, waits the
@@ -365,6 +397,17 @@ class KubernetesConfig:
     # as the detail (image pull, no schedulable node, PVC unbound), never a stall.
     launch_timeout_seconds: int = 300
     prepare_timeout_seconds: int = 900
+    # hades #370: how long the preparer's Pod may run without writing a log line before
+    # it is ended as a stall, with that as the detail, instead of waiting the whole
+    # `prepare_timeout_seconds` for a clone that makes no progress. The clone prints its
+    # progress, so a large repository that is still transferring is not a stall. Well
+    # below the prepare timeout; 0 turns the bound off.
+    preparer_stall_seconds: int = 300
+    # hades #503: the whole wait, in seconds, for a preparer Job's Pods to disappear
+    # after the Job is deleted; the provider polls with backoff (2 s, 4 s, 8 s, ...),
+    # each pause clipped to what is left of it, and clips the setting itself to
+    # `prepare_timeout_seconds`. Seeded by `[kubernetes] prepare_pod_deletion_wait_seconds`.
+    prepare_pod_deletion_wait_seconds: float = 15.0
     collector_timeout_seconds: int = 900
     verifier_timeout_seconds: int = 3600
     # The short roles' own time, counted from when their Pod is Running (the image pull
@@ -656,6 +699,17 @@ class _CacheGate:
                 self._condition.notify_all()
 
 
+def _pod_words(pod: Mapping[str, Any]) -> str:
+    """hades #503: one lingering Pod as the pod-gone wait's message names it: its name,
+    its phase, and whether its deletion was already under way."""
+    metadata = pod.get("metadata") or {}
+    status = pod.get("status") or {}
+    name = str(metadata.get("name") or "?")
+    phase = str(status.get("phase") or "unknown phase")
+    terminating = ", deletion under way" if metadata.get("deletionTimestamp") else ""
+    return f"Pod {name} was {phase}{terminating}"
+
+
 class KubernetesProvider:
     """The provider of 08 on Jobs and Pods, as 26 specifies it."""
 
@@ -707,6 +761,9 @@ class KubernetesProvider:
         # Why `_await_job` ended a wait early, by Job name (a quota refusal, a Pod that
         # never started); `_run_role_job` moves it into `last_error`.
         self._job_refusals: dict[str, str] = {}
+        # hades #370: why `_await_job` ended a wait for a stall, by Job name: the Pod ran
+        # and wrote nothing for the stall bound. `_run_role_job` adds the last output.
+        self._job_stalls: dict[str, str] = {}
         # Jobs whose wait ran out while the API server was not answering (PR 237 review):
         # that is an outage to retry, not a role that took too long.
         self._job_unanswered: set[str] = set()
@@ -1483,6 +1540,30 @@ class KubernetesProvider:
         checkout_token: InstallationToken | None = None,
         cancelled: CancelCheck | None = None,
     ) -> Workspace:
+        try:
+            return await self._prepare_attempt(spec, checkout_token, cancelled)
+        except LaunchWaitError:
+            raise
+        except KubernetesApiError as exc:
+            if _quota_refused(exc):
+                # hades #370: every create the preparation makes (the workspace claim,
+                # the identity ConfigMap, the credential and checkout Secrets, the
+                # preparer's NetworkPolicy and Job) counts against some quota resource,
+                # and a 403 naming the quota on any of them is a wait for room, never
+                # the attempt's failure. hades #423 made the claim and the preparer Job
+                # wait; this is every other quota resource. The API server's words are
+                # the reason the supervisor records.
+                raise LaunchWaitError(
+                    f"the namespace quota has no room for the attempt's objects: {exc}"
+                ) from exc
+            raise
+
+    async def _prepare_attempt(
+        self,
+        spec: LaunchSpec,
+        checkout_token: InstallationToken | None,
+        cancelled: CancelCheck | None,
+    ) -> Workspace:
         await _stop_if_cancelled(cancelled, "before the prepare")
         self._refuse_dead_codex(spec)
         # 26: the preparer renders its own egress policy (the DNS selector included),
@@ -1769,7 +1850,18 @@ class KubernetesProvider:
                 }
             )
         git_policy = spec.policy.get("git", {})
+        from_remote_branch = spec.role == "correct" or bool(
+            repository.get("resume_from_work_branch")
+        )
+        # hades #370: what a correction resumes from, so a preparer that cannot fetch it
+        # names the source. The mounted bundle wins, as it does in the script.
+        resume_source: str | None = None
+        if resume_bundle is not None:
+            resume_source = f"the sealed bundle of attempt {spec.resume_bundle_attempt_id}"
+        elif from_remote_branch:
+            resume_source = f"the remote work branch {work_branch!r}"
         await _stop_if_cancelled(cancelled, "before the preparer")
+        preparer_log: list[str] = []
         async with gate.reading() if gate is not None else contextlib.nullcontext():
             exit_code = await self._run_role_job(
                 spec,
@@ -1780,8 +1872,7 @@ class KubernetesProvider:
                     url=url,
                     base_ref=base_ref,
                     work_branch=work_branch,
-                    from_remote_branch=spec.role == "correct"
-                    or bool(repository.get("resume_from_work_branch")),
+                    from_remote_branch=from_remote_branch,
                     cache_name=cache_name,
                     author_name=str(git_policy.get("author_name", "crucible-worker")),
                     author_email=str(
@@ -1815,15 +1906,19 @@ class KubernetesProvider:
                 timeout=self.config.prepare_timeout_seconds,
                 plan=self._checkout_plan(spec, k8sspec.ROLE_PREPARER, token is not None),
                 cancelled=cancelled,
+                stall_seconds=self.config.preparer_stall_seconds,
+                keep_log=preparer_log,
             )
         if exit_code != 0:
             detail = redact(self.last_error.get(k8sspec.ROLE_PREPARER, ""))
             if exit_code == JOB_API_ERROR and _names_quota(detail):
                 # hades #423: the preparer is a separate Pod the quota counts; one it
-                # refused waits for room, as the probe and the worker do.
+                # refused waits for room, as the probe and the worker do. The refusal
+                # itself (the Job's FailedCreate event, or the API server's 403) is the
+                # detail the supervisor records (hades #370).
                 raise LaunchWaitError(f"the namespace quota has no room for the preparer: {detail}")
-            raise ProviderError(
-                f"the preparer Job could not build the checkout (exit {exit_code}): {detail}"
+            raise self._prepare_failed(
+                exit_code, detail, resume_source, redact("".join(preparer_log))
             )
         prepared = await self._read_files(
             spec,
@@ -1847,6 +1942,44 @@ class KubernetesProvider:
             started_from=(prepared.get("output/started-from.txt") or b"")
             .decode("utf-8", "replace")
             .strip(),
+        )
+
+    def _prepare_failed(
+        self, exit_code: int, detail: str, resume_source: str | None, log: str = ""
+    ) -> PrepareFailedError:
+        """hades #370: the error a preparer that ran and failed raises. The message
+        carries the preparer's last lines, so the attempt's environment detail and the
+        wake say what the clone said; the Pod's whole log (`log`, read uncut before the
+        Job was deleted) rides as `output` for the attempt's evidence; and a correction
+        names the source it was resuming from, so a bundle that is gone or a remote
+        branch that could not be fetched is told apart from a clone of the base that
+        failed.
+
+        Every form begins with the words the message had before hades #370, "the
+        preparer Job could not build the checkout", and names the cause in the
+        parenthesis that used to hold only the exit code: a stall, a timeout and a Pod
+        that never ran are told apart there, and what reads the message for those
+        words (the kind tier's hades #191 test, an operator's search) still finds
+        them."""
+        if exit_code == JOB_STALLED:
+            cause = "stalled"
+        elif exit_code == JOB_TIMED_OUT:
+            cause = "timed out"
+        elif exit_code == JOB_API_ERROR:
+            cause = "its Pod never ran"
+        else:
+            cause = f"exit {exit_code}"
+        what = f"the preparer Job could not build the checkout ({cause})"
+        if resume_source is not None:
+            what = f"the correction resumes from {resume_source}, and {what}"
+        return PrepareFailedError(
+            f"{what}: {_last_lines(detail)}",
+            # Only a preparer that ran has output to keep: an API error is Crucible's own
+            # words, which the detail already carries. The whole log is kept when it
+            # could be read; a ran-and-failed Pod whose log read failed keeps its tail.
+            output=log or (detail if exit_code >= 0 or exit_code == JOB_STALLED else ""),
+            exit_code=exit_code,
+            resume_source=resume_source,
         )
 
     def _cache_gate(self, cache_name: str) -> _CacheGate:
@@ -2805,7 +2938,8 @@ class KubernetesProvider:
     async def cleanup(
         self, ws: Workspace, policy: CleanupPolicy, spec: LaunchSpec | None = None
     ) -> None:
-        """08, 26: only ever called for an attempt that recorded `logs_drained`.
+        """08, 26: only ever called for an attempt that recorded `logs_drained`, or
+        for one that ended before its worker launched (hades #394), under `delete`.
 
         Jobs and the NetworkPolicy go; the per-attempt Secret goes under every policy,
         `keep` included (12, 16); the claim is kept or deleted per policy, and a kept
@@ -3922,6 +4056,8 @@ class KubernetesProvider:
             **spec.env,
             **launch_env,
         }
+        if requires_image_checks(spec.contract):
+            env["BUILDKIT_HOST"] = BUILDKIT_HOST
         mounts = [
             *k8sspec.base_mounts(),
             # 26's mount layout, with the paths the identity bundle names (06): the
@@ -4224,6 +4360,17 @@ class KubernetesProvider:
         hosts = tuple(h for h in wanted if ":" not in h)
         endpoints = tuple(h for h in wanted if ":" in h)
         plan = EgressPlan(hosts=hosts, endpoints=endpoints)
+        if role in (k8sspec.ROLE_WORKER, k8sspec.ROLE_VERIFIER) and requires_image_checks(
+            spec.contract
+        ):
+            # hades #475: the builder's pods and the registry (with its redirect host),
+            # for the two roles that run the repository's image checks and no other.
+            plan = replace(
+                plan,
+                hosts=tuple(dict.fromkeys((*plan.hosts, *IMAGE_CHECK_HOSTS))),
+                buildkit_selector=PeerSelector.of(BUILDKIT_NAMESPACE, BUILDKIT_POD_LABELS),
+                buildkit_port=BUILDKIT_PORT,
+            )
         if role == k8sspec.ROLE_WORKER:
             plan = self._local_endpoint_plan(plan, spec.endpoint_url)
         return plan
@@ -4673,39 +4820,81 @@ class KubernetesProvider:
             return CredentialFileSync(
                 auth.name, True, True, True, False, "changed; the copy carries no issued-at"
             )
+
+        def secret_older(secret_body: Mapping[str, Any]) -> datetime | None:
+            raw = (secret_body.get("data") or {}).get(_secret_key(auth.name))
+            if not raw:
+                return None
+            doc: Any = None
+            with contextlib.suppress(UnicodeDecodeError, ValueError):
+                doc = json.loads(base64.b64decode(str(raw)).decode("utf-8"))
+            return _issued_at(doc, auth.issued_at)
+
         try:
             source = await self._call(self.client.get, "secrets", copy.source_secret)
         except KubernetesApiError as exc:
             return CredentialFileSync(
                 auth.name, True, True, True, False, f"changed; source unreadable: {exc.status}"
             )
-        raw = (source.get("data") or {}).get(_secret_key(auth.name))
-        old_document: Any = None
-        if raw:
-            with contextlib.suppress(UnicodeDecodeError, ValueError):
-                old_document = json.loads(base64.b64decode(str(raw)).decode("utf-8"))
-        older = _issued_at(old_document, auth.issued_at)
+        older = secret_older(source)
         if older is not None and newer <= older:
             return CredentialFileSync(
                 auth.name, True, True, True, False, "changed; not newer than the source"
             )
-        try:
-            await self._call(
-                self.client.patch,
-                "secrets",
-                copy.source_secret,
-                {
-                    "metadata": {"labels": _owned_labels(copy.spec.harness)},
-                    "data": {_secret_key(auth.name): base64.b64encode(data).decode("ascii")},
-                },
-            )
-        except KubernetesApiError as exc:
-            return CredentialFileSync(
-                auth.name, True, True, True, False, f"changed; write back failed: {exc.status}"
-            )
-        return CredentialFileSync(
-            auth.name, True, True, True, True, "changed; newer issued-at, written back"
-        )
+        # hades #315: the patch carries the Secret's resourceVersion from the read
+        # above, so the API server itself does the compare-and-swap (339) and answers
+        # 409 when another attempt already wrote the Secret since this read. No shared
+        # pathname is ever involved; this is the whole replace, atomically.
+        # On conflict (409), re-read the Secret and retry the compare-and-swap when
+        # this candidate is still newer rather than treating every 409 as proof that
+        # the source moved past it.
+        while True:
+            resource_version = (source.get("metadata") or {}).get("resourceVersion")
+            try:
+                await self._call(
+                    self.client.patch,
+                    "secrets",
+                    copy.source_secret,
+                    {
+                        "metadata": {"labels": _owned_labels(copy.spec.harness)},
+                        "data": {_secret_key(auth.name): base64.b64encode(data).decode("ascii")},
+                    },
+                    resource_version=resource_version,
+                )
+                return CredentialFileSync(
+                    auth.name, True, True, True, True, "changed; newer issued-at, written back"
+                )
+            except KubernetesApiError as exc:
+                if exc.status != 409:
+                    return CredentialFileSync(
+                        auth.name,
+                        True,
+                        True,
+                        True,
+                        False,
+                        f"changed; write back failed: {exc.status}",
+                    )
+                try:
+                    source = await self._call(self.client.get, "secrets", copy.source_secret)
+                except KubernetesApiError as read_exc:
+                    return CredentialFileSync(
+                        auth.name,
+                        True,
+                        True,
+                        True,
+                        False,
+                        f"changed; source unreadable: {read_exc.status}",
+                    )
+                older = secret_older(source)
+                if older is not None and newer <= older:
+                    return CredentialFileSync(
+                        auth.name,
+                        True,
+                        True,
+                        True,
+                        False,
+                        "changed; source moved past the candidate, skipped",
+                    )
 
     async def _remove_credential(self, spec: LaunchSpec, copy: _CredentialCopy) -> bool:
         removed = await self._delete_credential_secret(spec.attempt_id)
@@ -4748,6 +4937,8 @@ class KubernetesProvider:
         adopt_existing: bool = False,
         preserve_on_cancel: bool = False,
         init_containers: Sequence[Mapping[str, Any]] = (),
+        stall_seconds: int = 0,
+        keep_log: list[str] | None = None,
     ) -> int:
         """Run one single-purpose Job to completion and delete it. With `cancelled`, a
         cancel ends the wait (hades #189): the Job and its policy are deleted on the way
@@ -4757,7 +4948,16 @@ class KubernetesProvider:
         replaced by an error about garbage collection. With `wait_for_quota`, a Job whose
         Pod the namespace quota refuses waits for room until its deadline rather than
         ending at once: the publisher's Jobs, where giving up is a failed publication an
-        operator has to retry, not a collection the supervisor tries again."""
+        operator has to retry, not a collection the supervisor tries again.
+
+        With `stall_seconds` (hades #370), a Pod that has been Running that long without
+        writing a log line is ended as a stall, JOB_STALLED, with the bound and its last
+        output as the role's error, instead of waiting for the role's timeout.
+
+        With `keep_log` (hades #370), a Job that exits non-zero, stalls or times out has
+        its Pod's whole log, uncut, appended before the Job is deleted, so the caller
+        keeps it as evidence; the role's error carries only the bounded tail. A timed-out
+        Pod's last output is added to the timeout reason too."""
         key = (role, spec.attempt_id)
         name = k8sspec.object_name(OBJECT_PREFIX.get(role, role), spec.attempt_id)
         collection = role in COLLECTION_ROLES
@@ -4825,11 +5025,44 @@ class KubernetesProvider:
                     await self._call(self.client.delete, "networkpolicies", policy_name)
             return JOB_API_ERROR
         self.role_errors.pop((role, spec.attempt_id), None)
+        # hades #503: what the Job had done by the time it is deleted, for the preparer's
+        # pod-gone wait to report. Set before the wait so that a cancel or an API error
+        # raised while the Job ran still reaches the `finally` with an answer: the Job
+        # was still running when the wait for it ended.
+        job_outcome = "the Job was still running when the wait for it ended"
         try:
             code = await self._await_job(
-                name, timeout=timeout, cancelled=cancelled, wait_for_quota=wait_for_quota
+                name,
+                timeout=timeout,
+                cancelled=cancelled,
+                wait_for_quota=wait_for_quota,
+                stall_seconds=stall_seconds,
             )
             refusal = self._job_refusals.pop(name, None)
+            stall = self._job_stalls.pop(name, None)
+            if stall is not None:
+                # hades #370: the Pod ran and wrote nothing for the stall bound. Its
+                # last lines, if it wrote any, go with the reason; the Job is deleted
+                # on the way out as on every other path.
+                tail = (await self._job_tail(name)).strip()
+                if keep_log is not None:
+                    keep_log.append(await self._job_log(name))
+                self._role_error(
+                    role,
+                    spec.attempt_id,
+                    f"{stall}; its last output: {tail}" if tail else f"{stall}; it wrote nothing",
+                )
+                log.warning("%s Job stalled: %s", role, stall)
+                # hades #503's pod-gone wait names what the Job had done: it was still
+                # running, ended by Crucible for the stall.
+                job_outcome = f"the Job was still running, ended for a stall ({stall})"
+                return JOB_STALLED
+            if code is None:
+                job_outcome = f"the Job had not finished within {timeout}s of running"
+            elif code >= 0:
+                job_outcome = f"the Job had completed with exit {code}"
+            else:
+                job_outcome = "the Job had ended without an exit code (its Pod failed)"
             if code is None:
                 if name in self._job_unanswered:
                     self._job_unanswered.discard(name)
@@ -4842,11 +5075,15 @@ class KubernetesProvider:
                     # An API error, not a timeout, so every collection step's
                     # unavailable check sees it and the attempt is collected again later.
                     return JOB_API_ERROR
-                self._role_error(
-                    role,
-                    spec.attempt_id,
-                    refusal or f"the {role} Job did not finish within {timeout}s of running",
-                )
+                reason = refusal or f"the {role} Job did not finish within {timeout}s of running"
+                if keep_log is not None and refusal is None:
+                    # A Pod that ran to the timeout may have said why (a clone still
+                    # reporting progress); it is read before the Job is deleted.
+                    whole = await self._job_log(name)
+                    keep_log.append(whole)
+                    if whole.strip():
+                        reason = f"{reason}; its last output: {whole.strip()[-4000:]}"
+                self._role_error(role, spec.attempt_id, reason)
                 return JOB_TIMED_OUT
             if code == JOB_API_ERROR and refusal is not None:
                 # A full namespace is a wait, not a verdict on the attempt.
@@ -4870,6 +5107,8 @@ class KubernetesProvider:
                     checkout_tail = await self._job_tail(name, container="checkout")
                     if checkout_tail and checkout_tail != tail:
                         tail = "\n".join(part for part in (checkout_tail, tail) if part)
+                if keep_log is not None:
+                    keep_log.append(await self._job_log(name))
                 self._role_error(role, spec.attempt_id, tail)
                 log.warning("%s Job exited %s: %s", role, code, tail[-1000:])
             if collection and code >= 0:
@@ -4891,9 +5130,15 @@ class KubernetesProvider:
                         grace_period_seconds=0 if role == k8sspec.ROLE_VERIFIER else None,
                     )
                 try:
-                    await self._await_job_pods_gone(
-                        name, force=role == k8sspec.ROLE_VERIFIER, collection=collection
-                    )
+                    # hades #503: the preparer's Pods get a bounded wait with backoff, and
+                    # running out of it is `PrepareJobPodsTimeoutError`, which the
+                    # supervisor retries without charging the attempt.
+                    if role == k8sspec.ROLE_PREPARER:
+                        await self._await_preparer_job_pods_gone(name, job_outcome=job_outcome)
+                    else:
+                        await self._await_job_pods_gone(
+                            name, force=role == k8sspec.ROLE_VERIFIER, collection=collection
+                        )
                 except (ProviderError, KubernetesApiError) as exc:
                     # An error already in flight is the one to report, not the Pod.
                     if not (tolerate_lingering_pod or failed):
@@ -4931,7 +5176,12 @@ class KubernetesProvider:
             ],
             volumes=[self._claim_volume(spec.attempt_id)],
             limits=limits,
-            env=PACKAGE_CACHE_ENV,
+            env={
+                **PACKAGE_CACHE_ENV,
+                **(
+                    {"BUILDKIT_HOST": BUILDKIT_HOST} if requires_image_checks(spec.contract) else {}
+                ),
+            },
             timeout=self.config.verifier_timeout_seconds,
             plan=self._egress_plan(spec, k8sspec.ROLE_VERIFIER),
         )
@@ -5146,6 +5396,7 @@ class KubernetesProvider:
         cancelled: CancelCheck | None = None,
         start_timeout: int | None = None,
         wait_for_quota: bool = False,
+        stall_seconds: int = 0,
     ) -> int | None:
         """Wait for a Job's Pod to terminate and return the container's exit code. A
         cancel raises LaunchCancelledError (hades #189).
@@ -5156,13 +5407,21 @@ class KubernetesProvider:
         (lab findings of 2026-09-29). None is returned when either runs out. A Job the
         API server refused to create a Pod for because of the namespace quota ends the
         wait at once with JOB_API_ERROR, and `_job_refusals` says why; with
-        `wait_for_quota` it waits for room instead, and a timeout names the quota."""
+        `wait_for_quota` it waits for room instead, and a timeout names the quota.
+
+        With `stall_seconds` (hades #370), the Pod's last log line is read on every poll
+        once it is Running; a Pod whose last line has not changed for that long is a
+        stall, the wait ends with None, and `_job_stalls` says why. A log read that
+        fails is neither progress nor its absence."""
         start_wait = self.config.launch_timeout_seconds if start_timeout is None else start_timeout
         started = time.monotonic()
         deadline = started + start_wait + timeout
         running = False
         unanswered = False
+        progress_at = started
+        last_line: bytes | None = None
         self._job_refusals.pop(name, None)
+        self._job_stalls.pop(name, None)
         self._job_unanswered.discard(name)
         while time.monotonic() < deadline:
             await _stop_if_cancelled(cancelled, f"while {name} ran")
@@ -5184,12 +5443,24 @@ class KubernetesProvider:
                 if phase == "Running" and not running:
                     running = True
                     deadline = time.monotonic() + timeout
+                    progress_at = time.monotonic()
                 elif not running and time.monotonic() - started > start_wait:
                     self._job_refusals[name] = (
                         f"the {name} Pod did not start within {start_wait}s: "
                         f"{self._pending_failure(pod).detail}"
                     )
                     return None
+                if running and stall_seconds > 0:
+                    line = await self._last_log_line(pod)
+                    if line is not None and line != last_line:
+                        last_line = line
+                        progress_at = time.monotonic()
+                    elif line is not None and time.monotonic() - progress_at >= stall_seconds:
+                        self._job_stalls[name] = (
+                            f"the {name} Pod wrote no log output for {stall_seconds}s while "
+                            f"it ran (the stall bound, below its {timeout}s timeout)"
+                        )
+                        return None
             else:
                 try:
                     job = await self._call(self.client.get, "jobs", name)
@@ -5209,6 +5480,24 @@ class KubernetesProvider:
         if unanswered:
             self._job_unanswered.add(name)
         return None
+
+    async def _last_log_line(self, pod: Mapping[str, Any]) -> bytes | None:
+        """The last line of a Pod's log with the API server's timestamp, or None when it
+        could not be read: what `_await_job` compares between polls to see whether the
+        Pod is making progress (hades #370). One line, so the read costs the same for a
+        clone that has printed for ten minutes as for one that has just begun."""
+        name = str((pod.get("metadata") or {}).get("name") or "")
+        try:
+            frames = await self._call(
+                self.client.pod_log,
+                name,
+                container=k8sspec.CONTAINER_NAME,
+                timestamps=True,
+                tail_lines=1,
+            )
+        except KubernetesApiError:
+            return None
+        return b"".join(frame.payload for frame in frames)
 
     async def _quota_refusal(self, job_name: str, job: Mapping[str, Any]) -> str | None:
         """Why the Job controller could not create this Job's Pod, when the namespace
@@ -5397,6 +5686,63 @@ class KubernetesProvider:
             + POD_DELETION_MARGIN_SECONDS
         )
 
+    async def _await_preparer_job_pods_gone(self, job_name: str, *, job_outcome: str) -> None:
+        """hades #503: wait for a deleted preparer Job's Pods to go, with backoff.
+
+        The whole wait is `prepare_pod_deletion_wait_seconds`, clipped to
+        `prepare_timeout_seconds`. The Pods are listed, and while any remains the wait
+        pauses 2 s, then 4 s, then 8 s and so on, every pause clipped to what is left of
+        the wait, so the total never exceeds the setting. Running out raises
+        `PrepareJobPodsTimeoutError`, whose message says how long the wait was, how many
+        times it tried again, what the Job had done when the wait gave up (`job_outcome`:
+        completed with an exit code, still running, or not finished in time) and what the
+        lingering Pod looked like. An API server that cannot answer a listing is tried
+        again on the next pause, not treated as an answer."""
+        total = min(
+            float(self.config.prepare_pod_deletion_wait_seconds),
+            float(self.config.prepare_timeout_seconds),
+        )
+        started = time.monotonic()
+        deadline = started + total
+        backoff = PREPARE_POD_WAIT_BACKOFF_SECONDS
+        retries = 0
+        unavailable = False
+        rows: list[dict[str, Any]] = []
+        while True:
+            try:
+                rows = await self._call(
+                    self.client.list_objects, "pods", label_selector=f"job-name={job_name}"
+                )
+                unavailable = False
+                if not rows:
+                    return
+            except KubernetesUnavailableError:
+                unavailable = True
+            # Measured again right before every pause: the listing took time too, and
+            # the pause is never longer than what is left of the wait.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            pause = min(backoff, remaining)
+            retries += 1
+            log.info(
+                "preparer Job %s Pods still present (%s); trying again in %.1f s (retry %d)",
+                job_name,
+                "the API was unavailable" if unavailable else f"{len(rows)} Pod(s)",
+                pause,
+                retries,
+            )
+            await asyncio.sleep(pause)
+            backoff *= 2
+        if unavailable:
+            seen = "the API was unavailable for the last look"
+        else:
+            seen = "; ".join(_pod_words(row) for row in rows) or "no Pod was listed"
+        raise PrepareJobPodsTimeoutError(
+            f"Pods for Job {job_name!r} were still present after {total:g} seconds "
+            f"({retries} retries with backoff): {job_outcome}; {seen}"
+        )
+
     async def _await_pod_gone(
         self, name: str, *, timeout: float = 15, collection: bool = False
     ) -> None:
@@ -5472,6 +5818,24 @@ class KubernetesProvider:
             f"Pods for Job {job_name!r} deletion was not confirmed "
             f"after {timeout:g} seconds: {reason}"
         )
+
+    async def _job_log(self, job_name: str) -> str:
+        """hades #370: the whole log of a Job's Pod, with no line or byte bound, for the
+        evidence a caller keeps; `_job_tail` is the bounded end for a message. A Pod or a
+        read that is gone is an empty log, never an error over the one in flight."""
+        try:
+            pod = await self._pod_of(job_name)
+            if pod is None:
+                return ""
+            frames = await self._call(
+                self.client.pod_log,
+                str((pod.get("metadata") or {}).get("name") or ""),
+                container=k8sspec.CONTAINER_NAME,
+                timestamps=False,
+            )
+        except KubernetesApiError:
+            return ""
+        return b"".join(f.payload for f in frames).decode("utf-8", "replace")
 
     async def _job_tail(
         self, job_name: str, limit: int = 4000, container: str = k8sspec.CONTAINER_NAME
@@ -5716,6 +6080,14 @@ def _names_quota(text: str) -> bool:
     return "exceeded quota" in lowered or "failed quota" in lowered
 
 
+def _last_lines(text: str, *, lines: int = 12, limit: int = 800) -> str:
+    """The end of a role's output, for a message that has to fit an attempt's detail and
+    a wake (hades #370): the last `lines` lines and no more than `limit` characters of
+    them, cut from the front, so what the role said last is what the reader sees."""
+    kept = "\n".join(text.strip().splitlines()[-lines:])
+    return kept if len(kept) <= limit else "..." + kept[-limit:]
+
+
 def _quota_refused(exc: BaseException) -> bool:
     """hades #423: whether the API server itself refused a create for the namespace
     quota (a 403 Forbidden whose message names it), as it does for a bare Pod, a claim
@@ -5927,6 +6299,7 @@ def _render_identity(
             work_branch=work_branch,
             network_mode=spec.network,
             report_schema=CompletionClaimV1.model_json_schema(),
+            operator_notes=spec.operator_notes,
         )
         data: dict[str, str] = {}
         paths: dict[str, str] = {}
@@ -6565,4 +6938,5 @@ __all__ = [
     "KubernetesConfig",
     "KubernetesProvider",
     "NamespaceProbe",
+    "PrepareJobPodsTimeoutError",
 ]

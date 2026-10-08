@@ -11,6 +11,7 @@ from crucible.domain.gates import (
     COLLECTOR_MARKER,
     DEFERRED_TO_C3,
     ENFORCED_PRE_PR_GATES,
+    OPTIONAL_PRE_PR_GATES,
     PRE_PR_EVALUATORS,
     PRE_PR_GATES,
     EvidenceItem,
@@ -125,7 +126,9 @@ def _gi(evidence: list[EvidenceItem], **kw: Any) -> GateInput:
 
 
 def test_every_pre_pr_gate_has_an_evaluator() -> None:
-    assert set(PRE_PR_EVALUATORS) == set(PRE_PR_GATES) | set(ENFORCED_PRE_PR_GATES)
+    assert set(PRE_PR_EVALUATORS) == (
+        set(PRE_PR_GATES) | set(ENFORCED_PRE_PR_GATES) | set(OPTIONAL_PRE_PR_GATES)
+    )
 
 
 def test_all_pass_on_a_clean_run() -> None:
@@ -271,6 +274,9 @@ def test_scope_contained_fails_outside_allowed_paths() -> None:
     evidence[3] = _ev(
         "diff_paths", {"paths": ["src/ledger/a.py", "infrastructure/out.txt"]}, ident=4
     )
+    payload = dict(evidence[2].payload)
+    payload["commit_paths"] = ["src/ledger/a.py", "infrastructure/out.txt"]
+    evidence[2] = _ev("bundle_head", payload, ident=3)
     outcome = evaluate_gate(GateName.SCOPE_CONTAINED, _gi(evidence))
     assert outcome.result is GateResult.FAIL and "infrastructure/out.txt" in outcome.detail
 
@@ -281,6 +287,9 @@ def test_scope_contained_fails_on_a_prohibited_path() -> None:
     contract["scope"]["prohibited_paths"] = [".github/**"]
     evidence = _passing_evidence()
     evidence[3] = _ev("diff_paths", {"paths": [".github/workflows/ci.yml"]}, ident=4)
+    payload = dict(evidence[2].payload)
+    payload["commit_paths"] = [".github/workflows/ci.yml"]
+    evidence[2] = _ev("bundle_head", payload, ident=3)
     outcome = evaluate_gate(GateName.SCOPE_CONTAINED, _gi(evidence, contract=contract))
     assert outcome.result is GateResult.FAIL and "prohibited_paths" in outcome.detail
 
@@ -376,6 +385,9 @@ def test_a_single_star_does_not_cross_a_separator(pattern: str, path: str, match
     }
     evidence = _passing_evidence()
     evidence[3] = _ev("diff_paths", {"paths": [path]}, ident=4)
+    bundle = dict(evidence[2].payload)
+    bundle["commit_paths"] = [path]
+    evidence[2] = _ev("bundle_head", bundle, ident=3)
     outcome = evaluate_gate(GateName.SCOPE_CONTAINED, _gi(evidence, contract=contract))
     assert (outcome.result is GateResult.PASS) is matches
 

@@ -10,6 +10,7 @@ from typing import Annotated
 from fastapi import Depends, Header, Request
 from sqlalchemy import Engine
 
+from crucible.adapters.github.client import RestGitHubClient
 from crucible.application.admin.context import AdminContext
 from crucible.application.admin.login import LoginRegistry
 from crucible.application.auth import authenticate
@@ -38,6 +39,9 @@ class AppContext:
     # reads, never a configuration value.
     github_webhook_enabled: bool = False
     github_webhook_secret_path: str | None = None
+    # The GitHub REST client wired in wiring.py; used by ci-decision to
+    # re-run failed jobs when the installation grants Actions write (issue 435).
+    github_client: RestGitHubClient | None = None
     # 07 and 25: the adapters, the operator's configuration gates, and where each
     # harness's credential directory is. Paths and flags only, never a value.
     harnesses: HarnessRegistry | None = None

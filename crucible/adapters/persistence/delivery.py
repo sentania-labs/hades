@@ -73,6 +73,9 @@ class PullRequests:
             last_polled_at=_dt(row.last_polled_at),
             last_reactions_polled_at=_dt(row.last_reactions_polled_at),
             reactions_observable=row.reactions_observable,
+            schema_tables=row.schema_tables,
+            schema_columns=row.schema_columns,
+            schema_models=row.schema_models,
             cancelled_at=_dt(row.cancelled_at),
             observed_head_sha=row.observed_head_sha,
             observed_base_ref=row.observed_base_ref,
@@ -109,6 +112,9 @@ class PullRequests:
                 last_polled_at=pull_request.last_polled_at,
                 last_reactions_polled_at=pull_request.last_reactions_polled_at,
                 reactions_observable=pull_request.reactions_observable,
+                schema_tables=pull_request.schema_tables,
+                schema_columns=pull_request.schema_columns,
+                schema_models=pull_request.schema_models,
                 cancelled_at=pull_request.cancelled_at,
                 observed_head_sha=pull_request.observed_head_sha,
                 observed_base_ref=pull_request.observed_base_ref,
@@ -157,6 +163,9 @@ class PullRequests:
         row.last_polled_at = pull_request.last_polled_at
         row.last_reactions_polled_at = pull_request.last_reactions_polled_at
         row.reactions_observable = pull_request.reactions_observable
+        row.schema_tables = pull_request.schema_tables
+        row.schema_columns = pull_request.schema_columns
+        row.schema_models = pull_request.schema_models
         row.cancelled_at = pull_request.cancelled_at
         row.observed_head_sha = pull_request.observed_head_sha
         row.observed_base_ref = pull_request.observed_base_ref
@@ -507,6 +516,7 @@ class CICertifications:
             failure=dict(row.failure),
             detail=row.detail,
             evaluated_at=ensure_utc(row.evaluated_at),
+            change_class=row.change_class,
         )
 
     def put(self, certification: CICertification) -> CICertification:
@@ -534,6 +544,7 @@ class CICertifications:
                     failure=dict(certification.failure),
                     detail=certification.detail,
                     evaluated_at=certification.evaluated_at,
+                    change_class=certification.change_class,
                 )
                 .on_conflict_do_nothing(constraint="uq_ci_certifications_head")
                 .returning(CICertificationRow.id)
@@ -553,6 +564,7 @@ class CICertifications:
         row.failure = dict(certification.failure)
         row.detail = certification.detail
         row.evaluated_at = certification.evaluated_at
+        row.change_class = certification.change_class
         self._s.flush()
         return self._to_entity(row)
 

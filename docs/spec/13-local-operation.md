@@ -150,6 +150,30 @@ publishes only a build that reproduces it. Project-specific toolchains come from
 image the task contract names, built `FROM` the worker image; the
 provider's image allowlist controls what may run.
 
+A worker has no Docker daemon, so a task that changes the image build inputs needs a
+builder of its own to run `make images-check` (hades #475). A Kubernetes deployment
+of Hades therefore carries one as its own dependency: a rootless BuildKit,
+`crucible-buildkit.crucible-buildkit.svc:1234`, in a namespace of its own
+(`deploy/kubernetes/base/buildkit`, docs/deployment.md "Hades's image builder"). It is
+not a shared CI builder. Its image is `BUILDKIT_ROOTLESS_IMAGE` in `images/pins.env`,
+the `-rootless` variant of the release the worker's `buildctl` is pinned to;
+`BUILDKIT_IMAGE` stays the plain daemon CI's docker-container builder runs. The Pod
+is non-root and never privileged; seccomp and AppArmor are unconfined on that one Pod,
+which is why it lives alone under a `privileged` admission label while `crucible`
+stays `restricted`. Its layer cache is a claim with a documented default of 50 GiB;
+a deployer may size it or replace the component. TLS is deliberately off inside the
+cluster: the namespace's ingress policy admits only `crucible-workers`, and the
+per-attempt egress rule is the only way a worker reaches it. The worker image carries
+`buildctl` and `crane`, each pinned by release version and SHA256 beside gitleaks.
+With `BUILDKIT_HOST` set, `images/build.sh` builds through buildctl with the same
+context, Dockerfile, build arguments, labels and rewritten-timestamp OCI and Docker
+outputs as the docker-container path, so the tag and the digest are the same; unset,
+CI keeps that path. A contract whose `required_verification` names both `make
+images-check` and `make registry-check` is told the address and given egress to the
+builder's pods, to `ghcr.io` and to `pkg-containers.githubusercontent.com` (GHCR's
+blob redirect host); any other contract gets none of it. The `image_checks_required`
+pre-PR gate (11, 05b) is what requires the two checks of an image-input change.
+
 Rules:
 
 - Harness CLIs never update themselves inside a running worker. The image
@@ -244,6 +268,17 @@ Rules:
   refuses unless the result differs in digest values alone. The branch
   checkout is data, never imported or run. The push is not forced and is
   skipped when the branch has moved past the commit CI built.
+- **Digest commits are Hades's own head moves (FDY-0310 / #443)**: when the
+  remote branch tip moves to a SHA reachable by a commit from the known
+  expected tip and that commit is by `github-actions[bot]` with the message
+  prefix `Record the CI-built digest` touching only `*_DIGEST` lines of
+  `images/manifest.env`, Hades records a `digest_commit_observed` event,
+  carries the previous acceptance and dispositions forward, and does not
+  enter `head_diverged`. The task stays in its current delivery state
+  (e.g. `ready_for_merge`) with the new head SHA. If CI is green on the new
+  head, the task proceeds to merge without a head decision. The publisher
+  (12) treats a remote branch ahead only by digest commits as owned, pushing
+  the worker's commits on top using the existing lease.
 - The release publishes both to `ghcr.io/sentania-labs/crucible-worker`
   with `docker push`, the way the service image and every ScarGuard service
   are pushed (the operator's decision, 2026-09-23; 24): it builds from

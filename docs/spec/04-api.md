@@ -50,7 +50,8 @@ also carries a signed-session CSRF value. Sign-out clears the cookie.
 | POST | `/tasks/{id}/send-back` | Operator or admin only, in `proposed`. Body: `reason` and `note` (both required). Moves the task to `sent_back` (event `task_sent_back`) and wakes the task's orchestrator with reason `sent_back`, whose summary is the note verbatim. An `amend` in `sent_back` proposes the task again. |
 | POST | `/tasks/{id}/reject` | Operator or admin only, in `proposed`. Body: `reason`. Moves the task to `rejected` (event `task_proposal_rejected`) and wakes the orchestrator with reason `proposal_rejected`. A task anywhere else is not rejected through this endpoint. |
 | GET | `/tasks` | List with filters: `state`, `project`, `repository`, `external_id`, `updated_since`. |
-| GET | `/tasks/{id}` | Full task view: contract versions, executions, latest attempt summary, gate summary, PR summary, open escalations, and `delivery`, the task's paper trail: the work branch, the head Crucible pushed and when, the PR number, link and state, and once merged the merge commit SHA, who merged and when (hades FDY-0143). |
+| GET | `/tasks/{id}` | Full task view: contract versions, executions, latest attempt summary, gate summary, PR summary, open escalations, `notes` (the operator's notes, newest first, hades #489), and `delivery`, the task's paper trail: the work branch, the head Crucible pushed and when, the PR number, link and state, and once merged the merge commit SHA, who merged and when (hades FDY-0143). |
+| POST | `/tasks/{id}/notes` | Operator or admin only (hades #489). Body: `text` (the operator's words, as typed) and `verbatim` (default true). Stores a note with the author and time, records `task_note_recorded` with the text as its reason, and returns the task view with `notes`. The next attempt's or correction's `IDENTITY.md` opens with the task's notes (06). |
 | POST | `/tasks/{id}/start` | Move to `scheduled`; body names harness, model, image, provider, policy version, and optional overrides. This is Foundry's dispatch decision. Overrides create an amendment (05); until the amendment path exists (C2) the body must agree with the contract. |
 | POST | `/tasks/{id}/cancel` | Request cancellation; body carries reason and the deciding principal's verbatim words. The API writes the task state and enqueues termination for the supervisor. |
 | POST | `/tasks/{id}/amend` | Attach a new contract version; allowed only in `proposed`, `sent_back`, `submitted`, `blocked`, or `awaiting_acceptance`. An amendment in `sent_back` moves the task back to `proposed` (hades #424). |
@@ -61,7 +62,7 @@ also carries a signed-session CSRF value. Sign-out clears the cookie.
 | POST | `/tasks/{id}/dispositions` | Record `ReviewDisposition` rows for received external review comments. Orchestrator role. |
 | POST | `/tasks/{id}/head-decision` | In `head_diverged`: `recollect` (the task re-enters `scheduled` with a `correct` execution against the remote work branch, so the new head gets a claim of its own before any gate reads it), `reject`, or `cancel`, with reasoning. |
 | POST | `/tasks/{id}/ci-decision` | In `ci_certification_failed`: record the cause Foundry determined (enum in 23) and the action: `rerun` (recorded; the operator re-runs on GitHub, 23), `correct` (followed by a correction), `reject`, or `cancel`. |
-| POST | `/tasks/{id}/decisions` | Record a `Decision` (verbatim text, who, what it resolves). |
+| POST | `/tasks/{id}/decisions` | Record a `Decision` (verbatim text, who, what it resolves). The `kind` field is validated against a closed list (FDY-0509): `accept`, `accept_no_ci`, `escalation_answer`, `recollect`, `release_authorization`, `scope_clarified`, `waive_external_review`. An unknown kind returns 422 with the accepted list in the problem detail body. `verbatim` and `resolves` each have a two-character minimum, so a one-character response cannot stand in for an operator's recorded reasoning. `escalation_answer` is the kind Foundry's client sends to answer an escalation. `scope_clarified` is used by the blocked-task flow to clarify scope before rescheduling. Internal closure kinds (`task_cancelled`, `task_closed`) are not exposed through this endpoint; they are used only by `cancel_task` and `close_task`. |
 | POST | `/tasks/{id}/close` | Orchestrator closes an `accepted`, `merged`, or `released` task. |
 | GET | `/tasks/{id}/events` | Ordered events for the task and its children. |
 | GET | `/tasks/{id}/pull-request` | The PR record with head history, the external review cycles and their completed components, external reviews, comments, dispositions, the observed reactions, whether reactions are observable at all, and CI certifications. |
@@ -109,8 +110,8 @@ endpoint's existing role requirements.
 | GET | `/ready` | Readiness of this API process, no auth (compose healthchecks, the Kubernetes readiness probe and Foundry's probe need it). True only when both hold: database reachable; migrations at head **and** the live schema matches the ORM metadata (schema drift is not-ready, naming the first difference). The response also carries a `supervisor` check (the lease is held and the holder's last tick within the lease window succeeded, or the last error summary), which is reported and does not decide readiness: a supervisor in trouble must not take the API and the admin UI offline. `/supervisor` and a red banner on every admin UI page are where supervisor health shows (hades #190, 2026-09-28). |
 | GET | `/supervisor` | Lease holder, last tick, tick duration, queue depths, provider status, GitHub observation status (last poll, webhook deliveries pending), and `github.publishing_waiting`: each task in `publishing` whose publication cannot start, with the reason the supervisor recorded, since when, and the escalation it opened, if any (23). |
 | POST | `/supervisor/reconcile` | Force a reconciliation pass now. Admin. |
-| GET | `/wakes` | Pending wakes for the caller's principal; `?since=`. |
-| POST | `/wakes/{id}/ack` | Mark handled, with what was done. |
+| GET | `/wakes` | Pending wakes for the caller's principal, in wake id order; `?limit=&cursor=&include_acked=&since=`. The page is keyed by the wake id (ULIDs are unique and ordered): `next_cursor` is the opaque form of the last id returned and the next page resumes strictly after it, so any number of wakes sharing one `created_at` page through without a repeat (hades #502). `since` is the older time filter, still honoured for a caller that sends it: it narrows the page to wakes created at or after that time and is not the pagination key. |
+| POST | `/wakes/{id}/ack` | Mark handled, with what was done. The system acks its own `external_review_overdue` and `ci_certification_overdue` wake once the pull request has merged or closed, with the reason as the ack note (17). |
 
 ### Policies, repositories, harnesses, images, providers
 
@@ -158,7 +159,9 @@ the reference; what binds the API is this:
   API's response, never reworded), `next`, `warnings`, and on failure `error`
   carrying the problem document above whole. Exit 0, 1 on a refusal or failure,
   2 on usage. `crucible schema` prints the envelope's schema and each `kind`'s,
-  the orchestrator ones generated from the response models here.
+  the orchestrator ones generated from the response models here. It also
+  carries `decision_kinds`, the sorted list of accepted decision kinds that
+  the same constant the validator uses (FDY-0509).
 - `next` is the actions valid from the record's state for the principal in use,
   each as an argv with what it needs. It follows the lifecycle table (09) and
   each endpoint's state guard; a verb this section marks orchestrator-only is
@@ -177,7 +180,9 @@ the reference; what binds the API is this:
 
 Wakes are rows first. Delivery is best-effort POST to the configured webhook
 with retry and backoff; `/wakes` is the durable fallback that Foundry polls on
-every start-of-session. Detail in 17.
+every start-of-session. A repeating notice (`external_review_overdue`,
+`ci_certification_overdue`, `escalation_stale`) keeps exactly one open wake per
+task per cause, so the poll never floods (hades #502). Detail in 17.
 
 ## Versioning of contracts inside the API
 

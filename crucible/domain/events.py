@@ -91,6 +91,10 @@ class EventKind(StrEnum):
     TASK_CORRECTION_ATTACHED = "task_correction_attached"
     TASK_CLOSED = "task_closed"
     DECISION_RECORDED = "decision_recorded"
+    # hades #489: an operator's note on a task, and a phase action applied from the
+    # board card with that note as the decision's verbatim.
+    TASK_NOTE_RECORDED = "task_note_recorded"
+    TASK_PHASE_ACTION_APPLIED = "task_phase_action_applied"
     DISPOSITION_RECORDED = "disposition_recorded"
     DISPOSITION_INVALIDATED = "disposition_invalidated"
     ESCALATION_OPENED = "escalation_opened"
@@ -162,6 +166,9 @@ class EventKind(StrEnum):
     GITHUB_DELIVERY_RECEIVED = "github_delivery_received"
     GITHUB_DELIVERY_REJECTED = "github_delivery_rejected"
     GITHUB_RATE_LIMITED = "github_rate_limited"
+    # hades #443: the images-digest workflow's own commit on the work branch is Hades's
+    # head move, not divergence; the publisher builds on it.
+    DIGEST_COMMIT_OBSERVED = "digest_commit_observed"
     # harness administration and credentials (07, 12, 25)
     HARNESS_REFUSED = "harness_refused"
     HARNESS_LAUNCH_DEFERRED = "harness_launch_deferred"

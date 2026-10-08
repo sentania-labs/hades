@@ -65,6 +65,7 @@ class RepositoryRow(Base):
     attested_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     attested_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
     private: Mapped[bool] = mapped_column(Boolean, default=False)
+    codex_review_refused_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
 
 
 class PolicyRow(Base):
@@ -432,6 +433,21 @@ class DecisionRow(Base):
     created_at: Mapped[datetime] = mapped_column(TZ)
 
 
+class TaskNoteRow(Base):
+    """An operator's note on a task (hades #489, 0051_task_notes)."""
+
+    __tablename__ = "task_notes"
+    __table_args__ = (Index("ix_task_notes_task_created", "task_id", "created_at"),)
+    id: Mapped[str] = mapped_column(ID, primary_key=True)
+    task_id: Mapped[str] = mapped_column(ID, ForeignKey("tasks.id"))
+    principal_id: Mapped[str] = mapped_column(ID, ForeignKey("principals.id"))
+    author: Mapped[str] = mapped_column(String(128))
+    # Declared before `text`, whose name shadows SQLAlchemy's `text()` in this body.
+    verbatim: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TZ)
+
+
 class ReviewDispositionRow(Base):
     __tablename__ = "review_dispositions"
     __table_args__ = (
@@ -528,6 +544,9 @@ class PullRequestRow(Base):
     closed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     last_polled_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
     last_reactions_polled_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    schema_tables: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    schema_columns: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    schema_models: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     reactions_observable: Mapped[bool] = mapped_column(Boolean, default=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
     observed_head_sha: Mapped[str] = mapped_column(String(64), default="")
@@ -659,6 +678,9 @@ class CICertificationRow(Base):
     failure: Mapped[dict[str, Any]] = mapped_column(JSONB)
     detail: Mapped[str] = mapped_column(Text)
     evaluated_at: Mapped[datetime] = mapped_column(TZ)
+    # hades #476: the change class recorded for this head; empty for a row written
+    # before this column existed.
+    change_class: Mapped[str] = mapped_column(String(16), server_default="", nullable=False)
 
 
 class CIDecisionRow(Base):

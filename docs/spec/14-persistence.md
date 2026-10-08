@@ -4,9 +4,11 @@ The worker self-review is the internal review. The required `self_review` sectio
 names where documentation was updated (or why no update was needed), maps every
 acceptance criterion with evidence, and lists anything knowingly left out and why.
 
-A missing or incomplete section fails `report_present`, naming `self_review`.
-When every blocking gate passes and the report is complete, Hades records acceptance
-and publishes without an orchestrator review or acceptance call, for first attempts
+A missing or incomplete section is listed for the reviewer under `report_present`,
+naming `self_review`; it never fails the attempt (hades #498: the gates judge the
+work, not the paperwork, and Hades composes the completion record itself).
+When every blocking gate passes and nothing is listed for the reviewer, Hades records
+acceptance and publishes without an orchestrator review or acceptance call, for first attempts
 and corrections alike. Publication sends one informational `published, PR #N` wake.
 An advisory gate failure still requires an orchestrator review before automatic acceptance.
 The orchestrator can still cancel or attach a correction after publication. The
@@ -35,6 +37,7 @@ the PR; a correction can be attached on the operator's word. It is not a gate.
 | `acceptance_results` | id, task_id, head_sha, principal_id, verdict, reasoning, superseded_at, created_at |
 | `decisions` | id, task_id, escalation_id, principal_id, verbatim TEXT, resolves, created_at |
 | `escalations` | id, task_id, attempt_id, state, question, opened_at, closed_at, decision_id, last_wake_at, reason (hades #393: the `blocked.md` reason, when the worker named one) |
+| `task_notes` | id, task_id, principal_id, author, text TEXT, verbatim, created_at (hades #489: the operator's notes on a task, newest first on the card and at the top of the next IDENTITY.md) |
 | `wakes` | id, principal_id, task_id, reason, payload JSONB, created_at, delivered_at, acked_at, attempts |
 | `supervisor_status` | singleton: holder, last_tick_at, last_success_at, last_error, consecutive_failures, tick_ms, counts JSONB |
 | `idempotency_keys` | (principal_id, key) PK, request_sha256, response JSONB, created_at |

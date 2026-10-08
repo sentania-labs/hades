@@ -100,13 +100,13 @@ Per attempt the provider creates, in `crucible-workers`, all labelled
 
 | Object | Role | Lifetime |
 |---|---|---|
-| PersistentVolumeClaim `ws-<attempt>` | the workspace: `repo/`, `report/`, `output/`, and `publish/` (the publisher's outcome, made before a push) | attempt, then per cleanup policy; a kept claim is deleted by the retention step once nothing needs it (16) |
+| PersistentVolumeClaim `ws-<attempt>` | the workspace: `repo/`, `report/`, `output/`, and `publish/` (the publisher's outcome, made before a push) | attempt, then per cleanup policy; a kept claim is deleted by the retention step once nothing needs it (16); the claim of an attempt that never launched is deleted, unless it is a resume source (hades #394, below) |
 | ConfigMap `identity-<attempt>` (or a projected volume from an object store above the ConfigMap size cap, 08) | the identity bundle, read-only | attempt |
 | Secret `cred-<attempt>` | the per-attempt copy of one harness credential directory, seeded from the harness's dedicated Secret in `crucible-workers`, `rw-narrow` where the adapter declares it (12) | attempt, deleted under every cleanup policy |
 | Secret `checkout-<attempt>` | a private repository's read-only installation token (ADR 0019), key `token`, mounted mode 0400 at `/run/crucible-token` into the refresher and the preparer Jobs and nothing else | created just before the refresher, deleted once the preparer's Pod is gone, on every path; a deletion that fails fails the prepare, and `discard`, `cleanup` and the retention sweep retry it |
 | Job `refresh-cache-<attempt>` | the reference cache's only writer: fetches the repository's bare mirror on the cache PVC (or clones it when absent), with git egress only and no workspace or identity bundle; for a private repository it also mounts `checkout-<attempt>` and fetches with it. It gives the remote 20 seconds to answer a ref listing and otherwise leaves the mirror as it is, so a refresh that cannot connect costs seconds, not the kernel's two-minute connect timeout (hades #191) | until complete, then deleted, before the preparer starts |
-| Job `prepare-<attempt>` | the preparer: clone into the PVC from the reference cache, mounted read-only, then branch, shims, author identity, `origin` placeholder (08) | until complete, then deleted |
-| Job `worker-<attempt>` | the worker, one Pod, `backoffLimit: 0`, `restartPolicy: Never` | until terminal, then deleted after `logs_drained` |
+| Job `prepare-<attempt>` | the preparer: clone into the PVC from the reference cache, mounted read-only, then branch, shims, author identity, `origin` placeholder (08). Its stdout and stderr are read before it is deleted; when it failed they are kept as the attempt's `crucible/preparer.log` artifact (hades #370) | until complete, then deleted |
+| Job `worker-<attempt>` | the worker, one Pod, `backoffLimit: 0`, `restartPolicy: Never` | until terminal, then deleted after `logs_drained` (or, for an attempt that never launched, by its pre-launch cleanup, hades #394) |
 | Job `collect-<attempt>` | the collector, no network, repo and report read-only, output read-write (08) | until complete |
 | Job `verify-bundle-<attempt>` | `git bundle verify`, no network | until complete |
 | Job `verifier-<attempt>` | re-runs `required_verification` on an independent clone from the bundle (10, 11) | until complete |
@@ -139,6 +139,41 @@ push), and whose timeout then names the quota. For the gate probe and the
 preparer that end is a `LaunchWaitError` the supervisor answers by launching
 the attempt again later; for a collection role it is the unavailable path the
 supervisor collects again from (hades #423).
+
+The preparer alone has a stall bound beside its timeout (hades #370):
+`kubernetes.preparer_stall_seconds` in the settings file, 300 by default and
+0 to turn it off, well below `prepare_timeout_seconds` (900). Once its Pod is
+Running the provider reads the Pod log's last line on every poll; a preparer
+whose last line has not changed for the bound is ended there, its Job
+deleted, and the attempt ends `environment` with a detail that names the
+stall ("wrote no log output for 300s while it ran"), the bound and the
+preparer's last output, instead of waiting out the whole prepare timeout to
+say only that it did not finish. The clone runs with `--progress`, so a large
+repository still transferring writes a line and is not a stall; a log read
+that fails is neither progress nor its absence. Before hades #370 (the cases
+of 2026-10-02) a preparer stuck behind a full claim quota waited the full
+fifteen minutes and left nothing but the exit class.
+
+When the preparer exits non-zero, times out or stalls, the provider raises
+`PrepareFailedError` (08's `ProviderError`, hades #370): its message begins
+"the preparer Job could not build the checkout (<cause>)", the words it had
+before hades #370 with the cause in the parenthesis ("exit 128", "stalled",
+"timed out", or "its Pod never ran" for a Job whose Pod the API server never
+ran for a reason other than the quota), so the kind tier's hades #191 test
+and an operator's search still find them; it ends
+with the preparer's last output lines (the last twelve, capped), which become
+the attempt's `termination_detail` ("prepare: ...") and the wake's summary;
+its `output` is the Pod's whole log, read with no line or byte bound before
+the Job is deleted (the detail's tail is bounded, the evidence is not; a
+timed-out preparer's log is read too, and its timeout reason ends with that
+log's last output), which the supervisor keeps as the `crucible/preparer.log` artifact (type `preparer_log`) with an
+`artifact_present` evidence row of role `preparer_log`, redacted first if a
+secret pattern matches; and for a correction its `resume_source` names what
+the correction was resuming from, the remote work branch or the preceding
+attempt's sealed bundle, so the detail and the wake read "the correction
+resumes from the sealed bundle of attempt <id>, and the preparer Job could
+not build the checkout (exit 4): previous attempt bundle is gone". An
+implementing attempt names no source.
 
 ## Pod shape (every role)
 
@@ -551,6 +586,29 @@ the namespace. A deployment therefore names one exact, pullable reference in
   what 08's Docker `prepare` performs. `prepare` returns
   when the Job completes; a failed Job is a prepare failure with the Job's
   log excerpt as detail.
+
+  After the preparer Job ends (completed, failed, timed out or cancelled) the
+  provider deletes it in the background and waits for its Pod to disappear.
+  The wait is `prepare_pod_deletion_wait_seconds` in `[kubernetes]` (15 s by
+  default), clipped to `prepare_timeout_seconds`: the Pods are listed, and
+  while any remains the provider pauses 2 s, then 4 s, then 8 s and so on,
+  every pause clipped to what is left of the wait, so the whole wait never
+  exceeds the setting (the default is four tries: 2, 4, 8 and 1 s). An API
+  server that cannot answer a listing is asked again after the next pause.
+  Pods that clear during the wait let `prepare` go on and the attempt
+  launches. Pods still present when the wait runs out are
+  `PrepareJobPodsTimeoutError`, whose message says how long it waited and how
+  many times it tried again, what the Job had done when the wait gave up
+  (completed with its exit code, not finished within the prepare timeout,
+  still running because a cancel or an API error ended the wait for it, or
+  still running and ended for a stall, naming the stall bound), and
+  the lingering Pod's name, phase and whether its deletion was under way
+  (hades #503; recording the preparer's own output as evidence is hades #370).
+  The supervisor prepares the same attempt again for that error up to three
+  times, after 30 s, 60 s and 120 s, charging the task no attempt, and
+  classes the fourth as `environment` (16). A cancel or an API error raised
+  while the Job ran is the error reported, and a Pod lingering behind it is
+  only logged, as for every other role.
 - `launch`: resolve the worker image to a digest through the image registry
   (11, 25) and record it; refuse an unsupported harness version; create the
   NetworkPolicy and the worker Job; return the Job name as the handle. The
@@ -572,7 +630,8 @@ the namespace. A deployment therefore names one exact, pullable reference in
   running is killed, and tags not resolved in time are left out of that listing.
   Tags starting `ci-` are CI proof pushes, never promotable, and are skipped before
   anything is resolved, so their number does not add to the listing's cost (111);
-  the Images page says so. Nothing on the registry is pruned.
+  the Images page says so. This provider prunes nothing itself: a daily scheduled
+  workflow deletes the accumulated `ci-*` versions instead (140, 24).
 - `observe`: read the Job and its Pod. First, for a running worker (launched
   by this process or adopted), look its allowlisted names up again when the
   resolve interval has passed and patch its NetworkPolicy to follow them (hades #205, above); a
@@ -624,7 +683,10 @@ the namespace. A deployment therefore names one exact, pullable reference in
   claim, which still holds the work, rather than failing the attempt (10); a
   credential copy already synced is not synced twice. A failed status look
   while a Pod starts is asked again until the deadline, never taken as the
-  answer.
+  answer. The bounded retry counts and unavailable-provider retry window are
+  supervisor memory, not attempt state: after a supervisor restart collection
+  begins a fresh window and receives its full retry count. The workspace stays
+  in place, so this can extend, but cannot discard, a pending collection.
 - `terminate`: `drain` deletes the Pod with the policy grace period, read
   off the Pod itself (SIGTERM, then SIGKILL by the kubelet); `kill` deletes
   with grace zero.
@@ -635,6 +697,23 @@ the namespace. A deployment therefore names one exact, pullable reference in
   anything else still labelled for its attempt once the retention step
   decided nothing needs it (16), and reports a claim still there so the step
   tries again.
+- An attempt that ended before its worker launched (`started_at` null: an
+  environment failure at prepare or launch, a cancel during launch, a
+  `quota_exhausted` refusal at reserve, a worker that never started) never
+  records `logs_drained`, so the cleanup above never visited it and its
+  `ws-<attempt>` claim stayed in the namespace, counted against the claim
+  quota, forever (hades #394). The supervisor now calls `cleanup` for it under
+  `delete`, since no gate consumed the claim and no worker wrote on it, and
+  records it cleaned; an `infrastructure` exit waits the attempt lease first,
+  as the cleanup above does. The one exception is a claim the correction
+  resume of 08 could pick, an attempt with a verified bundle head: it is
+  cleaned under `keep`, so it carries the retention label and is released by
+  the retention step of 16. No attempt that never launched has one today
+  (only collection records a bundle head), so in practice every such claim
+  is deleted. The retention sweep likewise no longer holds back the objects
+  of a finished attempt that never launched, so an unlabelled claim leaked
+  before this fix is removed on its own; a claim with the retention label is
+  still honoured, and a running attempt's claim is never touched.
 - `reconcile`: list Jobs by label; a Job with no live attempt row is
   orphaned and deleted; a live attempt with no Job is `lost`. A Job still
   waiting on its Pod is adopted like a running one (103), its launch time
@@ -683,6 +762,10 @@ back from there through the reader Pod and writes it into the harness Secret
 whenever the attempt reaches collection, whether the worker exited successfully
 or not. This matches the Docker provider: a valid newer refresh is durable state
 even when the task itself fails.
+That credential read-back deliberately uses the collection reader wait, rather
+than the preparer's short wait: a reader Pod that is still terminating can hold
+the only newly rotated credential, and the supervisor must retry collection
+instead of treating that state as a launch failure.
 (Made concrete 2026-09-21 during C8a.)
 The per-attempt Secret is deleted under every cleanup policy. The admin
 login flow (25) runs the harness's login in a login Job and captures the device
@@ -799,7 +882,16 @@ the quota's words as the reason, the attempt unconsumed and without an exit
 class. The gate probe and the preparer raise the same when the quota refuses
 their Pod, and a `persistentvolumeclaims` quota refusing the workspace claim
 does too; a refused gate probe is therefore retried on a later tick rather
-than recorded as `check_cannot_run`. A refusal `observe` sees after the launch
+than recorded as `check_cannot_run`. Since hades #370 this holds for every
+quota resource the preparation touches, not only the claim and the Jobs: a
+403 naming the quota on the identity ConfigMap, the credential or checkout
+Secret, or the preparer's NetworkPolicy (a `count/configmaps`,
+`count/secrets` or `count/networkpolicies` limit) is the same
+`LaunchWaitError`. The refusal is recorded as the API server or the Job
+controller said it: the 403 body, or the `FailedCreate` event's message, is
+the `detail` of the `harness_launch_deferred` event on the attempt, uncut,
+and the attempt itself carries no exit class, no end time and no
+termination detail from it. A refusal `observe` sees after the launch
 window keeps the attempt running while the controller retries the Pod, and
 the launch timeout counts from the last refusal. Any other create refusal (a
 webhook that denied the Pod, a policy that rejected the spec) ends the
@@ -818,8 +910,12 @@ Recorded here so the prerequisite is a checklist, not folklore; each item
 is verified by the namespace readiness probe or the e2e tier and shown on
 the status page.
 
-1. The two namespaces exist; `crucible-workers` has Pod Security admission
-   at `restricted` and a default-deny NetworkPolicy.
+1. The namespaces exist; `crucible-workers` has Pod Security admission
+   at `restricted` and a default-deny NetworkPolicy. `crucible-buildkit` (hades
+   #475) holds Hades's own rootless BuildKit alone, at `privileged` because its
+   documented Pod is unconfined, with an ingress policy that admits only
+   `crucible-workers`; a worker reaches it through the per-attempt rule below
+   only when its contract requires both image checks.
 2. The CNI enforces egress NetworkPolicy (the canary must fail to reach the
    API server), and the worker rules match on it: the canary must resolve a
    cluster name and reach the enabled local endpoint. On a CNI that translates

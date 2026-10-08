@@ -19,6 +19,10 @@ deploy/kubernetes/
   base/crucible/         the api and supervisor Deployments, PostgreSQL, the settings
                          ConfigMap, the artifact claim, the migration Job, the Service
                          and the Ingress
+  base/buildkit/         the crucible-buildkit namespace (hades #475): Hades's own
+                         rootless BuildKit Deployment, its ClusterIP Service, its
+                         layer-cache claim and the NetworkPolicy that admits only the
+                         workers namespace to it
   base/workers/          the crucible-workers namespace: Pod Security admission at
                          restricted, the default-deny NetworkPolicy, the worker account,
                          the supervisor Role and RoleBinding, the ResourceQuota and the
@@ -53,15 +57,54 @@ Spec 26's checklist, made concrete. Each row is either a placeholder in
 
 | # | What | Where it lands |
 |---|---|---|
-| 1 | Nothing: the two namespaces, the `restricted` admission labels and the default-deny NetworkPolicy are in `base/workers` and are applied by this Application | - |
+| 1 | Nothing: the three namespaces (`crucible`, `crucible-workers`, `crucible-buildkit`), their Pod Security admission labels and the default-deny NetworkPolicy are in the base and are applied by this Application | - |
 | 2 | A CNI that enforces egress NetworkPolicy, on which the worker DNS and local endpoint rules match | verified by the readiness canary, shown on the status page; on Cilium with kube-proxy replacement, see "Cilium and an in-cluster LiteLLM" below |
 | 3 | A `ReadWriteOnce` storage class for PostgreSQL, the reference cache and the attempt workspaces | `REPLACE_ME_STORAGE_CLASS_RWO` |
+| 3a | A `ReadWriteOnce` claim for Hades's own BuildKit layer cache (hades #475, "Hades's image builder" below). The base requests 50 GiB; size it in the overlay the way `storage.yaml` sizes the others. The node pulls `moby/buildkit:<version>-rootless` from Docker Hub (images/pins.env `BUILDKIT_ROOTLESS_IMAGE`); a cluster without that route mirrors it | `base/buildkit/buildkit.yaml` |
 | 3b | A `ReadWriteMany` storage class for the artifact root | `REPLACE_ME_STORAGE_CLASS_RWX` |
 | 4 | A pod PID limit configured on every node that can run a `crucible-workers` Pod (the kubelet's `podPidsLimit`; Kubernetes has no per-pod PID field, issue 60) | reported on the status page when the canary can see it; the provider refuses to launch without a confirmed one (95: on a runtime that isolates the pod's cgroup from the container, the canary cannot see it at all, and lab-admin attests to it with `kubernetes.pod_pid_limit_override` instead) |
 | 5 | The cluster can pull `ghcr.io/sentania-labs/crucible` and `ghcr.io/sentania-labs/crucible-worker` (the release publishes both); a pull secret if the packages are private. The api and supervisor Pods also read the worker registry themselves, to resolve a tag to a digest and its harness labels before a launch and to list images for promotion: they run `crane`, which the service image ships, with the same pull Secret, so nothing else is configured. They need HTTPS egress to the registry and to the host it redirects blob downloads to (for GHCR, `pkg-containers.githubusercontent.com`). A registry must be named by a host name it serves HTTPS on: one named by a private IP address is refused, because crane would read it over plain HTTP | `REPLACE_ME_IMAGE_PULL_SECRET` |
 | 6 | Egress from `crucible-workers` to the model providers, the package registries, GitHub and the Spark is possible at the network edge | the per-attempt NetworkPolicy narrows it; the edge must not block it |
 | 7 | The Argo Application | `argocd/application.yaml`, with `REPLACE_ME_ARGOCD_PROJECT`, `REPLACE_ME_MANIFEST_REPO_URL`, `REPLACE_ME_MANIFEST_REVISION` |
 | 8 | Nothing: public DNS is the operator's alone (below) | - |
+
+### Hades's image builder
+
+Hades deploys its own BuildKit (hades #475), `crucible-buildkit` in the
+`crucible-buildkit` namespace, as its own dependency: it is not the lab's shared CI
+builder, and nothing outside Hades is expected to use it. A worker or a verifier whose
+contract requires `make images-check` is told
+`BUILDKIT_HOST=tcp://crucible-buildkit.crucible-buildkit.svc:1234` and builds the
+worker images through it with the `buildctl` the worker image carries, so the
+reproducibility check runs inside Hades.
+
+- **What runs.** `moby/buildkit:<version>-rootless`, the release the worker's
+  `buildctl` is pinned to (images/pins.env `BUILDKIT_ROOTLESS_IMAGE`, beside
+  `BUILDKIT_IMAGE`, which is the plain daemon CI's docker-container builder runs).
+  RootlessKit starts buildkitd as uid 1000; the Pod is never `privileged`, has no
+  hostPath and no host namespace, and keeps its layers in a 50 GiB `ReadWriteOnce`
+  claim, the documented default a deployer sizes in the overlay.
+- **Why its own namespace.** The security context rootless BuildKit documents sets
+  seccomp and AppArmor to `Unconfined` on that one Pod (it unshares user and mount
+  namespaces), which the Baseline standard does not permit, so the Pod cannot be
+  admitted under `crucible`'s `restricted` label. Pod Security admission is per
+  namespace: `crucible-buildkit` enforces `privileged` with `warn` and `audit` at
+  `baseline`, holds only this Pod, and `crucible` stays `restricted`. Privilege
+  escalation stays allowed on the container because `newuidmap` is setuid; that is
+  how a build creates files owned by other users.
+- **Who reaches it.** TLS is off on the cluster-only port 1234. The namespace's own
+  NetworkPolicy admits ingress from `crucible-workers` and nothing else, and a worker
+  reaches it only through the per-attempt egress rule the provider writes for a
+  contract whose `required_verification` names both `make images-check` and `make
+  registry-check`; that rule also opens HTTPS to `ghcr.io` and to
+  `pkg-containers.githubusercontent.com`, the host GHCR redirects blob reads to, which
+  `make registry-check` needs. Any other contract gets neither. BuildKit's own egress
+  is not restricted: it fetches the pinned base image, the Debian snapshot and the
+  release archives the Dockerfile names, as CI's builder does.
+- **Replacing it.** A deployer may size the claim, set the resources, or replace the
+  component with another BuildKit reachable at that Service name, as long as the
+  provider's rule still selects its pods by the `app.kubernetes.io/name:
+  crucible-buildkit` label in that namespace.
 
 ### Every placeholder, and what goes in it
 
@@ -430,7 +473,12 @@ checks are `make lint`, `make test-unit` and `make scan`, which run in the worke
 with no Docker daemon and no Postgres; `make test-integration` and the e2e tiers need
 both, so branch CI on the pushed head stays their full proof of record (the operator's
 decision, 2026-09-28). The worker and the verifier fetch the hash-locked dependencies
-from PyPI, which the policy's egress allowlist keeps.
+from PyPI, which the policy's egress allowlist keeps. Since version 2 (hades #475) the
+policy also lists the `image_checks_required` gate: a contract whose diff touches the
+image build inputs (`images/`, `tools/images/`, the harness wrappers) must also require
+`make images-check` and `make registry-check`, which the worker runs against Hades's
+own BuildKit ("Hades's image builder" above); a version uploaded before the gate
+existed keeps its stored gate list and never judges a contract by it retroactively.
 
 The policy names a routing policy version. Upload it naming the one the default-software
 in force names, so it routes to the same models (the gateway's Hermes models included):
@@ -448,11 +496,14 @@ document["routing"] = {"policy": json.loads(sys.argv[1])}
 print(json.dumps(document))' "$routing" > /tmp/hades-self-hosting.json
 curl -fsS -X PUT -H @<(auth) \
   -H 'Content-Type: application/json' --data @/tmp/hades-self-hosting.json \
-  "$CRUCIBLE_URL/v1/policies/hades-self-hosting/1"
+  "$CRUCIBLE_URL/v1/policies/hades-self-hosting/2"
 ```
 
-Contracts then name `{"name": "hades-self-hosting", "version": 1}`, and their
-`required_verification` lists `make lint`, `make test-unit` and `make scan`. A contract
+Contracts then name `{"name": "hades-self-hosting", "version": 2}`, and their
+`required_verification` lists `make lint`, `make test-unit` and `make scan`. The path's
+number is the document's `version`; an installation that has already uploaded later
+versions of its own (a routing change needs a new one each time) sets both to its next
+free number instead, because a version a task has referenced is immutable. A contract
 that lacks `make test-unit` is refused at submission; one that also lists `make test` is
 accepted and then fails `verification_ran`, because the verifier has no Docker and no
 Postgres for the integration tier. A version is

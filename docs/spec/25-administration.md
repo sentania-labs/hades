@@ -63,6 +63,54 @@ The quality log covers tasks whose pull request opened in the last 14 days. It
 shows pre-PR gate failures, Codex finding severities and dispositions,
 corrections, outcome, and submit-to-merge time, with totals by harness and model.
 
+### The card (hades #489)
+
+Each board card opens at `/ui/board/{task_id}`. The card shows, in words: where the
+task is and what it is stuck on (its lane and state, the latest attempt and how it
+ended, the failing gates with their detail, the CI failure, a failed publication, and
+the open escalation as the first sentence of its question); the head and CI state
+(the collected head, the pushed head and branch, the latest CI certification, the gate
+results on the head); the cost so far (attempts, worker minutes, Codex rounds); the
+contract as text (objective, scope, acceptance criteria, required checks, dispatch
+tier and rationale, expected deliverable); the attempt timeline (each attempt's role
+and number, start and end, harness and model, exit class, and one line on how it
+ended); the correction history (each correction version, what it corrects, its
+reason, where it resumed from, and its instructions); the operator notes, newest
+first; and the phase actions. It links to the issue, the pull request, the full task
+page and the board. The panels flow into one column at phone width.
+
+**Operator notes.** A note is the operator's words on one task: author, time, text
+as typed, and a verbatim flag. Operators and admins post one from the card or with
+`POST /v1/tasks/{id}/notes`; the task read lists them newest first. Every note is an
+audit event (`task_note_recorded`) whose reason is the text. The next attempt's or
+correction's `IDENTITY.md` opens with the notes under "Operator notes", before the
+contract (06), so the worker reads them first.
+
+**Phase actions.** A pull-down offers only the moves the task's state allows, each
+mapped to an existing operation:
+
+| Move | Operation | Offered when |
+|---|---|---|
+| Approve and queue | `approve` | `proposed` |
+| Start now | `start` | `submitted` |
+| Correction, resume from the PR branch | `corrections` with `resume_from: remote_branch` | a correctable state with a pull request |
+| Correction, resume from the last attempt | `corrections` with `resume_from: last_attempt` | a correctable state |
+| Accept the collected head | `accept` with verdict `accepted` | `awaiting_acceptance` |
+| Answer the open escalation | `decisions` on the escalation (rescheduling a blocked task) | an open escalation |
+| Cancel with reason | `cancel` | any state the lifecycle lets cancel |
+
+The operator's words are required. **Go** stores them as a note and applies the
+chosen move with them: the cancel reason and verbatim, the correction instructions,
+the acceptance reasoning, the decision verbatim, the approval reason. **Next phase**
+applies the lane's default move, published on the card: Inbox to Holding pen
+(approve), Holding pen to In progress (start now), Stuck to In progress (correction,
+resume from the PR branch), Waiting on Scott to In progress (answer the escalation),
+In progress to Graveyard (cancel). Wins and Graveyard have no next phase. Every action
+records a `task_phase_action_applied` event with the move, the operation, the lane,
+and the note's text as `verbatim`, beside the operation's own event; both show on
+the Audit page with the words as the reason. The actions are open to operator and
+admin principals; an observer reads the card without the forms.
+
 ## Shape
 
 - **Versioned admin API** under `/v1/admin`, admin role only, generated
@@ -163,7 +211,7 @@ resource.
 | show or update the local endpoint entries | `GET`, `POST /admin/routing/local-endpoint` | `routing local-endpoint`, `routing set-local-endpoint` | edits the endpoint URL, enablement, thinking preference, and pool concurrency of local model entries that already exist, by creating new immutable routing and delivery policy versions; atomically regenerates and reloads the proxy configuration. The Local gateway page is the UI for it |
 | show or update the routing order and demotion | `GET`, `POST /admin/routing/preference` | `routing preference`, `routing set-preference` | ADR 0028, per tier of the routing policy in force: the pools routing tries first, in order (`tiers: {tier: [pool, ...]}`, or null for the default: the local pools first for `trivial` and `standard`), and the demotion settings (`rotation`: `quality_feedback`, `quality_window`, `demote_failure_percent`, `demote_min_sample`, `probe_after_minutes`). A save writes a new routing version and a delivery policy version naming it; a tier or setting left out keeps its value, and an unknown pool or tier, a value that is not a JSON integer or boolean, one out of range (05b), or a save that changes nothing is refused. The view says which tiers read the default. The Routing page shows the order and demotion in force and edits both |
 | show or update the per-command timeout | `GET`, `POST /admin/limits/command-timeout` | `limits command-timeout`, `limits set-command-timeout` | 05b `limits.command_timeout_ms` of the policy in force: min, max and default in milliseconds. A save writes a new policy version with only that limit changed; a bound left out keeps its value, and one that is not a JSON integer, or bounds out of order, are refused. Tasks whose contracts name the new version launch with it (issue 128) |
-| show or update the advisory gates | `GET`, `POST /admin/gates/advisory` | `gates advisory`, `gates set-advisory --gate NAME ...` | ADR 0024, 05b `gates.advisory` of the policy in force: which pre-PR gates are advisory (a failure goes to the reviewer) and which block. A save states the whole advisory set and writes a new policy version with only that list changed, audited as `policy_uploaded` with the reason; a gate that is not pre-PR, or `internal_review_recorded` or `no_secrets` (always blocking), is refused. `commit_policy` is always advisory (FDY-0143): the view lists it as advisory and names it under `always_advisory`, and a save that includes it drops it rather than storing it, so the view's own list saves back. Making a gate outside the default set advisory is recorded as an operator decision (from the local CLI, on the upload event only). On the Routing page under Advisory gates |
+| show or update the advisory gates | `GET`, `POST /admin/gates/advisory` | `gates advisory`, `gates set-advisory --gate NAME ...` | ADR 0024, 05b `gates.advisory` of the policy in force: which pre-PR gates are advisory (a failure goes to the reviewer) and which block. A save states the whole advisory set and writes a new policy version with only that list changed, audited as `policy_uploaded` with the reason; a gate that is not pre-PR, or `internal_review_recorded` or `no_secrets` (always blocking), is refused. `commit_policy` (FDY-0143) and `report_present` (hades #498) are always advisory: the view lists them as advisory and names them under `always_advisory`, and a save that includes either drops it rather than storing it, so the view's own list saves back. Making a gate outside the default set advisory is recorded as an operator decision (from the local CLI, on the upload event only). On the Routing page under Advisory gates |
 | show or update the Kubernetes egress selectors | `GET`, `POST /admin/kubernetes/egress` | `kubernetes egress`, `kubernetes set-egress` | 26: the `kubernetes.egress` setting, the cluster resolver's and an in-cluster local endpoint's namespace, pod labels and port. The settings file seeds it and a save wins over the file; the response says which (`source`). Refused naming the field when a selector is empty, malformed, or names the workers or Crucible namespace. A save states both halves (`dns` and `local_endpoint`); a missing one is refused rather than read as off. The supervisor reads a save back within 15 seconds without a restart, and the readiness canary runs again before a launch uses it (crucible#91) |
 | show or update the Kubernetes short-role timeout | `GET`, `POST /admin/kubernetes/timeouts` | `kubernetes timeouts`, `kubernetes set-timeouts --role-seconds N [--api-retry-seconds N]` | 26: the `kubernetes.timeouts` setting, `role_timeout_seconds`, how long the bundle verifier, the cleaner and the Job that readies a claim for the publisher may run once their Pod is Running (the image pull and scheduling count against the launch timeout instead). A whole number from 10 to 3600; anything else is refused naming the field. The settings file's `kubernetes.role_timeout_seconds` (120) seeds it and a save wins; the response says which (`source`). The Routing page shows it and edits it. Every process reads a save back within 15 seconds (the lab findings of 2026-09-29) |
 

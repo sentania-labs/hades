@@ -1,0 +1,52 @@
+# hades #196: a job that fails on attempt 1 and passes on a later attempt at the same
+# commit is a flake. ci.yml keeps the test, e2e and e2e-kind jobs' JUnit XML as
+# artifacts; this scans the last 100 runs of that workflow, finds every job that flaked,
+# reads the failing tests from its attempt-1 artifact, and opens or updates one issue
+# per flaky test (tools/ci/flakes.py, labelled `flaky`), plus a weekly summary issue
+# with the overall flake rate.
+#
+# Read-only except for issues: it lists workflow runs and jobs, downloads JUnit
+# artifacts (actions: read), and files or updates issues (issues: write). It never
+# needs contents, and the repository is public, so the checkout below still succeeds
+# with no contents permission granted at all.
+name: flakes
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "file or update the flaky-test issues and the weekly summary (otherwise only print the report)"
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c # v7.0.0
+        with:
+          enable-cache: true
+      - name: scan recent CI runs for flaky tests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          # The schedule trigger always files or updates issues; a manual dispatch
+          # defaults to a dry run so trying this out does not spam the tracker.
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply == true }}
+        run: |
+          set -euo pipefail
+          uv sync --frozen --quiet
+          args=(--repo "$REPOSITORY")
+          if [ "$APPLY" = "true" ]; then args+=(--apply); fi
+          uv run python tools/ci/flakes.py scan "${args[@]}"

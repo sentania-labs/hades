@@ -40,6 +40,8 @@ class EvidenceSource(StrEnum):
 # Roles that narrow `artifact_present`, so the fixed kind list of 11 stays fixed.
 ROLE_COMPLETION_CLAIM = "completion_claim"
 ROLE_WORKER_CLAIM = "worker_claim"
+# hades #498: the completion record Hades composed from its own evidence.
+ROLE_COMPLETION_RECORD = "completion_record"
 ROLE_RUN_EVIDENCE = "run_evidence"
 ROLE_REVIEW_REPORT = "review_report"
 # hades #344: the collector's `git diff <base>...HEAD` for the internal review. Its own
@@ -48,6 +50,11 @@ ROLE_REVIEW_REPORT = "review_report"
 ROLE_REVIEW_DIFF = "review_diff"
 REVIEW_DIFF_NAME = "crucible/diff.patch"
 REVIEW_DIFF_TYPE = "diff"
+# hades #370: the preparer's stdout and stderr, kept when the attempt died before its
+# worker ran, so a failed clone or resume says why without a cluster to look at.
+ROLE_PREPARER_LOG = "preparer_log"
+PREPARER_LOG_NAME = "crucible/preparer.log"
+PREPARER_LOG_TYPE = "preparer_log"
 
 
 class EvidenceV1(StrictModel):

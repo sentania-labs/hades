@@ -19,7 +19,7 @@ API server, with a short resolve interval and a short window so real time passes
 
 from __future__ import annotations
 
-import asyncio
+import time
 from typing import Any
 
 import pytest
@@ -36,6 +36,7 @@ from crucible.domain.cluster_egress import (
 from crucible.ports.execution import Handle, ObservationState
 from crucible.settings import Settings
 from tests.unit.kubernetes_fixtures import ATTEMPT, HOST_ADDRESSES, build, spec
+from tests.wait import async_wait_until
 
 OLD = "140.82.121.4/32"  # what the fixtures' resolver answers for github.com
 NEW = "140.82.114.4/32"
@@ -194,8 +195,26 @@ def _policy(api: FakeKubernetesApi) -> dict[str, Any]:
     return api.get("networkpolicies", f"np-worker-{ATTEMPT.lower()}")
 
 
+async def _wait_for_resolve_interval(provider: KubernetesProvider) -> None:
+    deadline = provider._launched[ATTEMPT].egress_refreshed_at + provider.config.resolve_ttl_seconds
+    await async_wait_until(
+        lambda: time.monotonic() >= deadline, describe="worker resolve interval to expire"
+    )
+
+
+async def _wait_for_overlap_expiry(provider: KubernetesProvider) -> None:
+    allowed = provider._launched[ATTEMPT].allowed
+    assert allowed is not None and allowed.retiring
+    deadline = max(since for _address, since in allowed.retiring)
+    deadline += provider.config.address_overlap_window_seconds
+    await async_wait_until(
+        lambda: time.monotonic() >= deadline,
+        describe="retiring addresses' overlap window to expire",
+    )
+
+
 async def _observe_after_the_interval(provider: KubernetesProvider, handle: Handle) -> None:
-    await asyncio.sleep(0.02)
+    await _wait_for_resolve_interval(provider)
     observation = await provider.observe(handle)
     assert observation.state is ObservationState.RUNNING
 
@@ -234,7 +253,7 @@ async def test_ac2_after_the_window_the_old_address_is_removed() -> None:
     # Inside the window the address that left the answer is still allowed.
     assert _https_cidrs(api) == {OLD, NEW, NEWER, PYPI}
 
-    await asyncio.sleep(0.6)
+    await _wait_for_overlap_expiry(provider)
     observation = await provider.observe(handle)
     assert observation.state is ObservationState.RUNNING
     # After it, the old address is gone and the current one stays. The launch address
@@ -331,7 +350,7 @@ async def test_an_ended_worker_is_not_refreshed() -> None:
             break
     assert observation.state is ObservationState.EXITED
     answers.by_host["github.com"] = [NEW]
-    await asyncio.sleep(0.02)
+    await _wait_for_resolve_interval(provider)
     await provider.observe(handle)
     assert _https_cidrs(api) == {OLD, PYPI}
 
@@ -380,7 +399,7 @@ async def test_an_adopted_worker_keeps_its_pinned_addresses_and_retires_the_rest
     # NEW was a previous process's refresh: it gets the overlap window, not a cut.
     assert _https_cidrs(api) == {OLD, NEW, NEWER, PYPI}
 
-    await asyncio.sleep(0.6)
+    await _wait_for_overlap_expiry(provider)
     await provider.observe(handle)
     # OLD is what hostAliases pins the Pod to and stays; NEW is gone after the window.
     assert _https_cidrs(api) == {OLD, NEWER, PYPI}

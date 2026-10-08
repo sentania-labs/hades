@@ -59,6 +59,8 @@ class WakeReason(StrEnum):
     PROPOSAL_REJECTED = "proposal_rejected"
     # hades #437: a routing version enabled or disabled a model or changed a pool cap.
     ROUTING_CHANGED = "routing_changed"
+    # hades #447: schema changes from two open pull requests touch the same tables.
+    SCHEMA_OVERLAP = "schema_overlap"
 
 
 class WakeTask(StrictModel):

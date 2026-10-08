@@ -8,9 +8,13 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
 from crucible.adapters.threaded_router import ThreadedAPIRouter
-from crucible.adapters.ui.render import _base, _state_words, templates
-from crucible.adapters.ui.session import _require
+from crucible.adapters.ui.render import _base, _localize, _redirect, _state_words, templates
+from crucible.adapters.ui.session import _csrf, _form, _require
+from crucible.application.admin.board_card import board_card_view
 from crucible.application.admin.board_lanes import board_lanes_view
+from crucible.application.board_actions import CorrectionDeps, apply_move, next_phase
+from crucible.application.errors import ApplicationError, NotFoundError
+from crucible.application.task_notes import OPERATOR_ROLES, add_note
 
 router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
 
@@ -302,3 +306,101 @@ def board_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             "lanes": document["lanes"],
         },
     )
+
+
+def _timezone(request: Request) -> str:
+    settings = getattr(getattr(request.app.state, "ctx", None), "settings", None)
+    return str(settings.service.render_timezone) if settings is not None else "America/Chicago"
+
+
+@router.get("/board/{task_id}", response_class=HTMLResponse)
+def board_card_page(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Response:
+    """hades #489: the opened card. Operators get the note and the phase actions;
+    observers read the same card without the forms."""
+    found = _require(request, ctx, uow)
+    if isinstance(found, RedirectResponse):
+        return found
+    principal, csrf = found
+    try:
+        document = board_card_view(uow, task_id, ctx.clock.now())
+    except NotFoundError:
+        return RedirectResponse(
+            f"/ui/board?kind=bad&message={quote(f'No task {task_id}.')}", status_code=303
+        )
+    card = _localize(document, _timezone(request))
+    return templates.TemplateResponse(
+        request=request,
+        name="card.html",
+        context={
+            **_base(
+                request,
+                principal,
+                csrf,
+                title=f"Card {document['external_id']}",
+                active="/ui/board",
+            ),
+            "card": card,
+            "can_act": principal.role in OPERATOR_ROLES,
+            "return_to": f"/ui/board/{quote(task_id)}",
+        },
+    )
+
+
+@router.post("/board/{task_id}/notes")
+async def board_card_note(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Response:
+    """An operator's note on the card, stored as typed (hades #489)."""
+    found = _require(request, ctx, uow)
+    if isinstance(found, RedirectResponse):
+        return found
+    principal, csrf = found
+    form = await _form(request)
+    form["return_to"] = f"/ui/board/{quote(task_id)}"
+    try:
+        _csrf(form, csrf)
+        add_note(uow, ctx.clock, principal=principal, task_id=task_id, text=form.get("note", ""))
+        uow.commit()
+        return _redirect(form, "Note recorded.")
+    except ApplicationError as exc:
+        return _redirect(form, exc.detail, kind="bad")
+
+
+@router.post("/board/{task_id}/actions")
+async def board_card_action(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Response:
+    """Go applies the chosen move with the note; Next phase applies the lane's default
+    move with the note. Either records the note's words as the decision's verbatim."""
+    found = _require(request, ctx, uow)
+    if isinstance(found, RedirectResponse):
+        return found
+    principal, csrf = found
+    form = await _form(request)
+    form["return_to"] = f"/ui/board/{quote(task_id)}"
+    try:
+        _csrf(form, csrf)
+        deps = CorrectionDeps(
+            harnesses=getattr(ctx, "harnesses", None),
+            harness_gates=dict(getattr(ctx, "harness_gates", {}) or {}),
+            credential_sources=dict(getattr(ctx, "credential_sources", {}) or {}),
+            secret_providers=getattr(ctx, "secret_providers", frozenset()),
+            wired_providers=frozenset(
+                provider.name for provider in getattr(ctx, "providers", []) or []
+            ),
+        )
+        note = form.get("note", "")
+        if form.get("apply") == "next":
+            result = next_phase(
+                uow, ctx.clock, principal=principal, task_id=task_id, note_text=note, deps=deps
+            )
+        else:
+            result = apply_move(
+                uow,
+                ctx.clock,
+                principal=principal,
+                task_id=task_id,
+                move=form.get("move", ""),
+                note_text=note,
+                deps=deps,
+            )
+        uow.commit()
+        return _redirect(form, f"{result.move.label}: {result.message}")
+    except ApplicationError as exc:
+        return _redirect(form, exc.detail, kind="bad")

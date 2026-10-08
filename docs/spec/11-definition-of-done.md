@@ -4,9 +4,11 @@ The worker self-review is the internal review. The required `self_review` sectio
 names where documentation was updated (or why no update was needed), maps every
 acceptance criterion with evidence, and lists anything knowingly left out and why.
 
-A missing or incomplete section fails `report_present`, naming `self_review`.
-When every blocking gate passes and the report is complete, Hades records acceptance
-and publishes without an orchestrator review or acceptance call, for first attempts
+A missing or incomplete section is listed for the reviewer under `report_present`,
+naming `self_review`; it never fails the attempt (hades #498: the gates judge the
+work, not the paperwork, and Hades composes the completion record itself).
+When every blocking gate passes and nothing is listed for the reviewer, Hades records
+acceptance and publishes without an orchestrator review or acceptance call, for first attempts
 and corrections alike. Publication sends one informational `published, PR #N` wake.
 An advisory gate failure still requires an orchestrator review before automatic acceptance.
 The orchestrator can still cancel or attach a correction after publication. The
@@ -101,10 +103,34 @@ acceptance criterion has an entry. IDENTITY.md tells the worker to run it and
 fix every problem before exiting 0. A unit test holds the checker and the
 schema in agreement.
 
-All paths are relative to `/crucible/report`. Missing, incomplete or unparsable
-reports fail the blocking `report_present` gate. Parse errors name the problem and
-position, and missing sections are named. A policy cannot omit this gate or make it
-advisory.
+All paths are relative to `/crucible/report`. A missing, incomplete or unparsable
+report is listed for the reviewer under `report_present`, which is always advisory
+(hades #498): parse errors name the problem and position, missing sections are
+named, and a correction report's missing or doubled `finding_dispositions` entries
+are named by review comment id. None of it fails the attempt. A policy cannot omit
+this gate, so its gaps always reach the reviewer, and cannot make it blocking.
+
+## The completion record (hades #498)
+
+The operator's rule of 2026-10-06: the pre-PR gates judge whether the worker returned
+work and whether it passes, never whether the paperwork is complete. So Hades composes
+the completion record itself, from evidence it already holds: the commits on the
+collected branch, the `required_verification` commands it re-ran in the verifier
+container with their exit codes, and the diff against each review comment's path the
+correction addresses, as the default disposition `addressed` with the collected head
+or `not addressed` when no commit in this attempt touches it. Coverage uses only
+commits after the trusted `prepared-head.txt`, recorded after the preparer resumes
+the prior bundle or remote branch. Earlier attempts' changes remain in the branch
+summary but cannot mark a correction finding addressed. Missing attempt coverage
+never falls back to the branch-wide diff. The worker's report, when there is one,
+adds its judgement fields (summary, self-review, acceptance mapping, proposed pull
+request, limitations, risks, blockers, follow-ups, dispositions) beside Hades's own
+`composed` section and never gates the record. The record is the attempt's stored
+report (`GET /v1/attempts/{id}/report`, the artifact `report/completion-record.json`
+and the `completion_record` evidence row), the one the reviewer reads, and the one the
+PR body carries under "Completion record". A disposition the worker wrote is recorded
+as the finding's disposition; one Hades read from the diff is shown and not recorded,
+so no public reply is made on Hades's reading alone.
 
 ## ReviewReportV1 (operator out-of-band adversarial review)
 
@@ -147,14 +173,14 @@ listed "for the reviewer" in the task view, the gate list, the admin UI's
 Tasks page and the wake. The task waits for an orchestrator review before automatic
 acceptance and publication. The policy's
 `gates.advisory` decides (05b); the default is below, and
-`report_present` and `no_secrets` always block, and `commit_policy`
-is always advisory.
+`no_secrets` always blocks, and `commit_policy` and `report_present`
+are always advisory (hades #498).
 `error` counts as `fail` in both classes.
 
 | Gate | Default | Passes when | Evidence consumed |
 |---|---|---|---|
-| `report_present` | always blocking and always evaluated | report parsed once Crucible filled its facts, every judgement field including the complete self-review present; the detail names the facts Crucible filled and any the worker wrote differently (hades #215) | CompletionClaim artifact |
-| `exit_clean` | blocking | exit code 0 and exit class `completed` or `completed_without_report` (an `incomplete` attempt exits 0 too, issue 128) | attempt exit info |
+| `report_present` | always advisory and always evaluated (hades #498) | the worker's report parsed once Crucible filled its facts, every judgement field including the complete self-review present; the detail names the facts Crucible filled and any the worker wrote differently (hades #215). No report, a report that does not parse, a missing self-review and a correction finding without a disposition are each listed for the reviewer in plain words and never fail the attempt | CompletionClaim artifact |
+| `exit_clean` | blocking | exit code 0 and exit class `completed` or `completed_without_report` (an `incomplete` attempt exits 0 too, issue 128), or exit class `ended_by_budget` whatever the code (hades #498) | attempt exit info |
 | `commits_present` | blocking | the collected `work_branch` has at least one commit beyond `base_ref`, the bundle verifies, and the bundle names its head. The head is the bundle's; a reported `head_sha` that differs is noted in the gate's detail and does not fail it (hades #187, 2026-09-28) | branch bundle from `collect` |
 | `scope_contained` | advisory, except a prohibited path | every changed path matches `allowed_paths` and none matches `prohibited_paths`. A path matching `prohibited_paths` stops the task even when the gate is advisory; a path merely outside `allowed_paths` is for the reviewer | diff path list from `collect` |
 | `no_injected_files` | blocking | no instruction additions, harness paths or normalized shim content in the diff or any commit on `work_branch`; unclassifiable evidence fails closed (details below) | normalized path records, base paths and blob classifications from the collector |
