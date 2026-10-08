@@ -139,32 +139,44 @@ async def get_attempt_logs(
 
     async def events() -> AsyncIterator[str]:
         cursor = offset
-        while True:
-            with ctx.uow_factory() as fresh:
-                current = fresh.attempts.get(attempt_id)
-                if current is None:
+        try:
+            while True:
+                with ctx.uow_factory() as fresh:
+                    current = fresh.attempts.get(attempt_id)
+                    if current is None:
+                        return
+                    chunks = list(
+                        fresh.logs.list_from_offset(attempt_id, offset=cursor, stream=stream)
+                    )
+                    drained = current.logs_drained_at is not None
+                for chunk in chunks:
+                    start = max(cursor, chunk.offset_start)
+                    content = chunk.content[start - chunk.offset_start :].decode("utf-8", "replace")
+                    cursor = max(cursor, chunk.offset_end)
+                    data = json.dumps(
+                        {
+                            "offset_start": start,
+                            "offset_end": chunk.offset_end,
+                            "content": content,
+                        },
+                        separators=(",", ":"),
+                    )
+                    yield f"id: {cursor}\nevent: {chunk.stream}\ndata: {data}\n\n"
+                if drained and not chunks:
+                    yield f'id: {cursor}\nevent: end\ndata: {{"offset":{cursor}}}\n\n'
                     return
-                chunks = list(fresh.logs.list_from_offset(attempt_id, offset=cursor, stream=stream))
-                drained = current.logs_drained_at is not None
-            for chunk in chunks:
-                start = max(cursor, chunk.offset_start)
-                content = chunk.content[start - chunk.offset_start :].decode("utf-8", "replace")
-                cursor = max(cursor, chunk.offset_end)
-                data = json.dumps(
-                    {
-                        "offset_start": start,
-                        "offset_end": chunk.offset_end,
-                        "content": content,
-                    },
-                    separators=(",", ":"),
-                )
-                yield f"id: {cursor}\nevent: {chunk.stream}\ndata: {data}\n\n"
-            if drained and not chunks:
-                yield f'id: {cursor}\nevent: end\ndata: {{"offset":{cursor}}}\n\n'
-                return
-            if await request.is_disconnected():
-                return
-            await asyncio.sleep(0.25)
+                if await request.is_disconnected():
+                    return
+                await asyncio.sleep(0.25)
+        except BaseException:
+            # Cancellation (asyncio.CancelledError), generator exit (GeneratorExit),
+            # or a disconnect that Starlette surfaces as an exception must not
+            # escape into the StreamingResponse's internal TaskGroup, because
+            # Starlette treats any unhandled sub-exception as a stream error and
+            # propagates it to the client as an ExceptionGroup (E2E test failure).
+            # The permit is already tied to the response lifecycle via the
+            # BackgroundTask above, so this is a clean shutdown.
+            return
 
     # The permit is released by a BackgroundTask, not a try/finally in events(),
     # because the pinned Uvicorn stack advertises ASGI 2.3: Starlette races
