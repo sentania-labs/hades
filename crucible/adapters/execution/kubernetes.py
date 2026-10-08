@@ -408,6 +408,10 @@ class KubernetesConfig:
     broad_egress: bool = False
     # How long a resolved address stays in a policy before it is looked up again.
     resolve_ttl_seconds: float = 300.0
+    # How long old addresses are kept in a running attempt's NetworkPolicy after a
+    # re-resolution produces new addresses, giving an overlap window so connections
+    # on both the old and new addresses stay valid while the Pod migrates (205).
+    address_overlap_window_seconds: float = 60.0
     extra_image_allowlist: tuple[str, ...] = ()
     # The harness credential Secrets in the workers namespace, by harness name (12, 26).
     # The service creates and owns them (ADR 0015); this only names them, and a harness
@@ -554,6 +558,12 @@ class _Launched:
     # launch, `template` for an attempt adopted before its Pod existed, `pod` once the
     # live Pod has been read.
     limits_source: Literal["policy", "template", "pod"] = "policy"
+    # The allowlisted hostnames for this attempt's egress plan, stored so that
+    # a running attempt's addresses can be re-resolved when the TTL expires (205).
+    egress_hosts: tuple[str, ...] = ()
+    # When the egress plan's addresses were last resolved (monotonic), so that
+    # a running attempt can be re-resolved on the interval (205).
+    egress_resolved_at: float = 0.0
 
 
 # What an adopted attempt's `_Launched` carries before the supervisor hands the real
@@ -722,6 +732,10 @@ class KubernetesProvider:
         self._policy: dict[str, Any] = {}
         self._pull_auths_loaded = False
         self._resolved: dict[str, tuple[float, tuple[str, ...]]] = {}
+        # Per (attempt_id, role) the old addresses still allowed by the NetworkPolicy
+        # after a re-resolution, with the monotonic time they first became stale.
+        # The addresses are removed after `address_overlap_window_seconds`.
+        self._stale_addresses: dict[tuple[str, str], tuple[tuple[str, ...], float]] = {}
         # Registry reads run crane and wait on another host; they get threads of their
         # own so a slow registry cannot take the ones Kubernetes API calls need (108).
         self._registry_pool = ThreadPoolExecutor(
@@ -2023,6 +2037,8 @@ class KubernetesProvider:
             network_policy=policy_name,
             credential=copy,
             launched_at=time.monotonic(),
+            egress_hosts=plan.hosts,
+            egress_resolved_at=time.monotonic(),
         )
         return Handle(
             provider=self.name,
@@ -2054,6 +2070,9 @@ class KubernetesProvider:
         return None
 
     async def observe(self, h: Handle) -> Observation:
+        # Re-resolve allowlisted addresses for running attempts (205).
+        with contextlib.suppress(Exception):
+            await self._refresh_addresses(h)
         launched = self._launched.get(h.attempt_id)
         try:
             job = await self._call(self.client.get, "jobs", h.ref)
@@ -2159,6 +2178,164 @@ class KubernetesProvider:
         if phase in _PENDING_PHASES and self._pending_too_long(launched):
             return self._pending_failure(pod)
         return Observation(ObservationState.RUNNING, detail=phase or "Pending")
+
+    async def _refresh_addresses(self, h: Handle) -> None:
+        """Re-resolve an allowlisted host for a running attempt and patch its
+        NetworkPolicy when addresses have changed (205).
+
+        If the name now resolves to different addresses, the policy is patched to
+        allow both old and new addresses for `address_overlap_window_seconds`,
+        after which the old addresses are dropped. This prevents a Pod that has
+        been running for a long time from losing connectivity when DNS changes.
+        """
+        launched = self._launched.get(h.attempt_id)
+        if launched is None or not launched.network_policy:
+            return
+        # Only for the worker role: egress policy refresh is for the worker.
+        if launched.spec.role != k8sspec.ROLE_WORKER:
+            return
+        now = time.monotonic()
+        hosts = launched.egress_hosts
+        if not hosts:
+            return
+        # Check if we need to re-resolve: TTL expired or first time.
+        elapsed = now - launched.egress_resolved_at
+        if elapsed < self.config.resolve_ttl_seconds:
+            return
+        # Re-resolve each host.
+        old_addresses: list[str] = []
+        new_addresses: list[str] = []
+        for host in hosts:
+            cached = self._resolved.get(host)
+            if cached is not None and now - cached[0] < self.config.resolve_ttl_seconds:
+                continue
+            # Resolve it
+            try:
+                addrs = await self._call(self.resolve, host)
+            except OSError:
+                addrs = []
+            self._resolved[host] = (now, tuple(addrs))
+            if not addrs:
+                continue
+            for cidr in addrs:
+                denied = k8sspec.denied_by(cidr, self.config.denied_cidrs)
+                if denied is not None:
+                    continue
+                new_addresses.append(cidr)
+
+        if not new_addresses:
+            return
+
+        # Collect old addresses for comparison.
+        key = (h.attempt_id, k8sspec.ROLE_WORKER)
+        stale_entry = self._stale_addresses.get(key)
+        if stale_entry is not None:
+            old_addrs, stale_time = stale_entry
+            old_addresses = list(old_addrs)
+            # Check if overlap window expired: drop old addresses.
+            if now - stale_time >= self.config.address_overlap_window_seconds:
+                # Old addresses expired. Remove them from the policy.
+                if old_addresses:
+                    await self._update_policy_cidrs(
+                        launched.network_policy,
+                        new_addresses,
+                        [],  # no pending
+                        launched.spec.attempt_id,
+                    )
+                self._stale_addresses.pop(key, None)
+                # Update the resolved time
+                launched.egress_resolved_at = now
+            # else: overlap window still active; policy already has old+new.
+            return
+
+        # This is the first time we see a change. Store old addresses and patch
+        # the policy to include both old and new.
+        policy_obj = self.client.get("networkpolicies", launched.network_policy)
+        rules = policy_obj.get("spec", {}).get("egress", [])
+        for rule in rules:
+            ports = rule.get("ports", [])
+            is_worker_rule = any(
+                p.get("port") == 443 and p.get("protocol") == "TCP" for p in ports
+            )
+            if not is_worker_rule:
+                continue
+            for dest in rule.get("to", []):
+                block = dest.get("ipBlock")
+                if block:
+                    for raw_cidr in block.get("cidr", "").split(","):
+                        stripped = raw_cidr.strip()
+                        if stripped and stripped not in ("0.0.0.0/0",):
+                            old_addresses.append(stripped)
+
+        if not old_addresses:
+            # No old addresses to track; just update.
+            await self._update_policy_cidrs(
+                launched.network_policy,
+                new_addresses,
+                [],
+                launched.spec.attempt_id,
+            )
+            launched.egress_resolved_at = now
+            return
+
+        # Store old addresses and patch with both old and new.
+        self._stale_addresses[key] = (tuple(old_addresses), now)
+        await self._update_policy_cidrs(
+            launched.network_policy,
+            new_addresses,
+            old_addresses,  # pending (overlap)
+            launched.spec.attempt_id,
+        )
+        # Reset TTL so we don't re-check for another cycle.
+        launched.egress_resolved_at = now
+
+    async def _update_policy_cidrs(
+        self,
+        policy_name: str,
+        new_cidrs: list[str],
+        pending_cidrs: list[str],
+        attempt_id: str,
+    ) -> None:
+        """Patch a NetworkPolicy's CIDRs in-place (205).
+
+        Re-reads the policy, merges the new `pending_cidrs` (addresses still in the
+        overlap window) alongside `new_cidrs` (the primary resolved addresses),
+        and writes back the merged egress rules via merge patch.
+        """
+        try:
+            policy_obj = self.client.get("networkpolicies", policy_name)
+        except KubernetesApiError:
+            return
+        rules: list[dict[str, Any]] = list(policy_obj.get("spec", {}).get("egress", []))
+        new_rules: list[dict[str, Any]] = []
+        for rule in rules:
+            to: list[dict[str, Any]] = list(rule.get("to", []))
+            updated_to: list[dict[str, Any]] = []
+            ports = rule.get("ports", [])
+            is_worker_rule = any(
+                p.get("port") == 443 and p.get("protocol") == "TCP" for p in ports
+            )
+            for dest in to:
+                block = dest.get("ipBlock")
+                if block is not None and is_worker_rule:
+                    cidr_list = block.get("cidr", "")
+                    cidrs = [c.strip() for c in cidr_list.split(",") if c.strip()]
+                    all_cidrs = list(set(new_cidrs + pending_cidrs + cidrs))
+                    updated_block = dict(block)
+                    updated_block["cidr"] = ",".join(sorted(set(all_cidrs)))
+                    updated_to.append({"ipBlock": updated_block})
+                elif block is not None:
+                    # Non-worker ipBlock (e.g. DNS); leave alone.
+                    updated_to.append(dest)
+                else:
+                    updated_to.append(dest)
+            new_rules.append({"to": updated_to, "ports": rule.get("ports", [])})
+        patch_body = {
+            "spec": {"egress": new_rules},
+            "metadata": {"resourceVersion": policy_obj.get("metadata", {}).get("resourceVersion")},
+        }
+        with contextlib.suppress(KubernetesApiError):
+            self.client.patch("networkpolicies", policy_name, patch_body)
 
     async def _start_failure_observation(
         self, pod: Mapping[str, Any], code: int, reason: str, message: str

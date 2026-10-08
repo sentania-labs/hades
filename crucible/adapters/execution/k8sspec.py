@@ -687,6 +687,10 @@ class EgressPlan:
     # connects to is what the policy permits even when the name's answer has since
     # changed (hades #191).
     host_addresses: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    # CIDRs that have been allowed by the policy beyond the primary resolution,
+    # for an overlap window during address migration (205). These are not used for
+    # host_aliases: the Pod connects to the primary addresses only.
+    pending_cidrs: tuple[str, ...] = ()
 
     @property
     def empty(self) -> bool:
@@ -816,11 +820,14 @@ def egress_policy(
         # The resolved addresses of the allowlist. Every one of them has already been
         # checked against `denied_cidrs` by the caller and refused if it fell inside
         # one, so nothing here can name a denied destination; the broad form keeps the
-        # denials as its `except`.
+        # denials as its `except`. `pending_cidrs` carries old addresses still in the
+        # overlap window (205): they sit beside the primary addresses so both old and
+        # new hosts stay reachable while the Pod migrates.
+        all_cidrs: list[str] = list(plan.cidrs) + list(plan.pending_cidrs)
         destinations: list[dict[str, Any]] = (
             [{"ipBlock": {"cidr": "0.0.0.0/0", "except": list(denied_cidrs)}}]
             if plan.broad
-            else [{"ipBlock": {"cidr": cidr}} for cidr in plan.cidrs]
+            else [{"ipBlock": {"cidr": cidr}} for cidr in all_cidrs]
         )
         if destinations:
             rules.append(
