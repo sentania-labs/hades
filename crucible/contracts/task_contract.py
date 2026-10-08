@@ -53,10 +53,12 @@ class RepositoryRef(StrictModel):
 
     @field_validator("base_ref", "work_branch")
     @classmethod
-    def _usable_ref(cls, value: str) -> str:
+    def _usable_ref(cls, value: str | None) -> str | None:
         """A ref reaches a command line in the preparer, the collector and the
         publisher. It is quoted everywhere it is used, and it is also refused here if
         it is not a plain ref: defence in depth, not either one alone."""
+        if value is None:
+            return None
         problem = ref_problem(value)
         if problem is not None:
             raise ValueError(problem)

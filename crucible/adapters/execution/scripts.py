@@ -1339,6 +1339,7 @@ def publisher_script(
     repo_owner: str = "",
     repo_name: str = "",
     own_pr_number: int | None = None,
+    attempt_id: str = "",
 ) -> str:
     """Fetch the base from the remote and the branch from the bundle, then push (23).
 
@@ -1408,6 +1409,7 @@ stat -L -c '%a' "$TOKDIR/token" > "$OUT/token-mode.txt"
 unset GIT_TRACE GIT_TRACE_CURL GIT_CURL_VERBOSE GIT_TRACE_PACKET GIT_TRACE2 || true
 export GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
 export HOME=/home/worker LC_ALL=C
+export CRUCIBLE_ATTEMPT_ID={_quote(attempt_id)}
 export CRUCIBLE_TOKEN_FILE="$TOKDIR/token"
 export CRUCIBLE_CREDENTIAL_HOST={_quote(credential_host)}
 export CRUCIBLE_AUTHOR_NAME={_quote(author_name)}
@@ -1461,13 +1463,34 @@ if [ -s "$OUT/ls-remote-before.txt" ]; then
     >> "$OUT/publisher.log" 2>&1
   REMOTE=$(git rev-parse FETCH_HEAD)
 fi
-printf '%s\n' "$REMOTE" > "$OUT/remote-head-before.txt"
+OWNED_HEADS={_quote_owned_remote_heads()}
+# hades #564: determine own_pr_number from the PR list if OWNED_HEADS already
+# includes EXPECTED_HEAD (the expected head is our own branch tip).
+OWN_PR_NUMBER=0
+if [ -n "$EXPECTED_HEAD" ] && echo "$OWNED_HEADS" | grep -q "^$EXPECTED_HEAD$"; then
+  OWN_PR_NUMBER=$(curl -s -f --max-time 10 \
+    -H "Authorization: token ***" \
+    "https://api.github.com/repos/${REPO_OWNER:-}/pulls?state=open&head=${REPO_OWNER:-}:${WORK_BRANCH}" \
+    2>/dev/null | python3 -c "
+import json,sys
+prs=json.loads(sys.stdin.read())
+for p in prs:
+    head_sha=p.get('head',{{}}).get('sha')
+    if head_sha=='${{EXPECTED_HEAD}}':
+        print(p['number'])
+        sys.exit(0)
+sys.exit(1)
+" 2>/dev/null) || OWN_PR_NUMBER=0
+fi
 if [ -n "$REMOTE" ]; then
   echo remote-ownership > "$OUT/step.txt"
   OWNED=no
   case " $OWNED_HEADS " in *" $REMOTE "*) OWNED=yes ;; esac
-  if git show -s --format='%(trailers:key=Crucible-Attempt,valueonly)' "$REMOTE" \
-      | grep -q '[^[:space:]]'; then
+  # hades #564: the Crucible-Attempt trailer must match our own attempt; a trailer
+  # from another task's attempt no longer counts as ownership.
+  REMOTE_ATTEMPT=$(git show -s --format='%(trailers:key=Crucible-Attempt,valueonly)' "$REMOTE" \
+      2>/dev/null | head -1 | tr -d '[:space:]') || REMOTE_ATTEMPT=""
+  if [ -n "$CRUCIBLE_ATTEMPT_ID" ] && [ "$REMOTE_ATTEMPT" = "$CRUCIBLE_ATTEMPT_ID" ]; then
     OWNED=yes
   fi
   # hades #564: refuse when the remote branch is the head of an open pull request
@@ -1477,8 +1500,14 @@ if [ -n "$REMOTE" ]; then
     _AUTH_TOKEN=$(cat "$CRUCIBLE_TOKEN_FILE")
     PR_URL="https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/pulls?state=open&head=$REPO_OWNER:$WORK_BRANCH"
     PR_RESP=$(curl -s -f --max-time 10 \
-      -H "Authorization: token $_AUTH_TOKEN" \
-      "$PR_URL" 2>> "$OUT/publisher.log") || PR_RESP=""
+      -H "Authorization: token ***" \
+      "$PR_URL" 2>> "$OUT/publisher.log") || {{
+      # hades #564: the PR lookup failed (network error, rate-limit, auth failure);
+      # we cannot prove branch ownership, so refuse publication (fail closed).
+      printf 'remote ownership PR lookup failed for %s on branch %s\\n' \
+        "$REPO_OWNER/$REPO_NAME" "$WORK_BRANCH" > "$OUT/error.txt"
+      drop_token; exit 5
+    }}
     if [ -n "$PR_RESP" ] && [ "$PR_RESP" != "[]" ]; then
       # Check if any open PR on this branch is NOT our own.
       FELLOW=$(echo "$PR_RESP" | python3 -c "

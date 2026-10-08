@@ -65,6 +65,54 @@ def require_operator_for_pin(principal: Principal, contract: TaskContractV1) -> 
         )
 
 
+def _derive_work_branch(contract: TaskContractV1) -> TaskContractV1:
+    """hades #564: derive the work branch when omitted.
+
+    The contract model has ``work_branch: str | None = None``; when the
+    contract omits it, assign ``crucible/<external_id>`` here so the
+    rest of submit_task never sees ``None`` and so that every stored
+    contract has a complete branch value.
+    """
+    if contract.repository.work_branch is None:
+        contract = TaskContractV1(
+            **{
+                **contract.model_dump(),
+                "repository": {
+                    **contract.repository.model_dump(),
+                    "work_branch": f"crucible/{contract.external_id}",
+                },
+            },
+        )
+    return contract
+
+
+def _check_branch_ownership(uow: UnitOfWork, repository_id: str, work_branch: str) -> list[Problem]:
+    """hades #564: refuse when *work_branch* is already the work branch of another
+    task on the same repository.
+
+    The check applies to every task state (submitted, proposed, publishing,
+    accepted, ready_for_merge, head_diverged, publish_failed, reported,
+    cancelled, merged) so the branch cannot be recycled while a task row
+    still exists.
+    """
+    problems: list[Problem] = []
+    for task in uow.tasks.list_for_repository(repository_id):
+        stored = uow.contracts.get(task.id, task.contract_version)
+        if stored is None:
+            continue
+        branch = stored.document.get("repository", {}).get("work_branch")
+        if branch == work_branch:
+            problems.append(
+                _problem(
+                    "repository.work_branch",
+                    f"branch {work_branch!r} is already the "
+                    f"work branch of task {task.external_id!r}",
+                )
+            )
+            break
+    return problems
+
+
 def _glob_reaches_harness(pattern: str, prefix: str) -> bool:
     """Return whether a scope glob can select an entry below *prefix*.
 
@@ -428,6 +476,12 @@ def submit_task(
     approves it."""
     contract = parse_contract(body)
     require_operator_for_pin(principal, contract)
+    # hades #564: derive the work branch when omitted before any registry check;
+    # `assert wb is not None` below relies on this assignment always happening.
+    contract = _derive_work_branch(contract)
+    # Derivation guarantees this is not None now.
+    wb = contract.repository.work_branch
+    assert wb is not None
     repository = uow.repositories.get_by_name(contract.repository.name)
     eligible_harnesses = eligible_harness_names(
         uow,
@@ -466,6 +520,21 @@ def submit_task(
             "task contract failed validation", errors=problems, event=rejection
         )
     assert repository is not None
+    # hades #564: refuse when the resolved work branch is already owned by another
+    # task on this repository (any state, including merged and cancelled).
+    branch_problems = _check_branch_ownership(uow, repository.id, wb)
+    if branch_problems:
+        rejection = Event(
+            seq=None,
+            ts=clock.now(),
+            kind=EventKind.CONTRACT_REJECTED.value,
+            principal=principal.name,
+            verified=True,
+            payload={"external_id": contract.external_id, "problems": branch_problems},
+        )
+        raise ContractValidationError(
+            "task contract failed validation", errors=branch_problems, event=rejection
+        )
     if uow.tasks.get_by_external_id(principal.id, contract.external_id) is not None:
         raise DuplicateExternalIdError(
             f"external_id {contract.external_id!r} already exists for principal {principal.name}"
