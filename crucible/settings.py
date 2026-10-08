@@ -15,6 +15,7 @@ from pydantic_settings import (
     TomlConfigSettingsSource,
 )
 
+from crucible.domain.cluster_egress import DEFAULT_ADDRESS_OVERLAP_SECONDS
 from crucible.domain.endpoints import validate_endpoint
 
 
@@ -168,6 +169,12 @@ class KubernetesSettings(BaseModel):
     # How long a resolved allowlist address stays in a policy before the name is looked
     # up again (issue 61). `gt=0`: zero would resolve every name on every policy write.
     resolve_ttl_seconds: float = Field(default=300.0, gt=0)
+    # hades #205: a running attempt's names are looked up again every
+    # `resolve_ttl_seconds`; when one answers a new address, the attempt's NetworkPolicy
+    # allows the old and the new together for this long before the old one is dropped.
+    # The addresses the policy was written with (the Pod's `hostAliases`) are never
+    # dropped. `ge=0`: zero drops an address the moment it leaves the answer.
+    address_overlap_window_seconds: float = Field(default=DEFAULT_ADDRESS_OVERLAP_SECONDS, ge=0)
     # The worker image repositories `GET /admin/images` reports the promoted tags of.
     # Bare repositories: the provider appends each tag the registry lists.
     image_repositories: list[str] = Field(default_factory=list)

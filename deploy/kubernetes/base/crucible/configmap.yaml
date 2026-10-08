@@ -88,6 +88,10 @@ data:
   # off unless a deployment deliberately turns it on (issue 61).
   CRUCIBLE_KUBERNETES__BROAD_EGRESS: "false"
   CRUCIBLE_KUBERNETES__RESOLVE_TTL_SECONDS: "300"
+  # hades #205: a running worker's names are looked up again on that interval; a new
+  # address joins its NetworkPolicy and the old one stays beside it for this many
+  # seconds before it is dropped. The addresses the Pod's hostAliases pin are kept.
+  CRUCIBLE_KUBERNETES__ADDRESS_OVERLAP_WINDOW_SECONDS: "120"
   # An in-cluster local endpoint as the pods that take its connections, their namespace
   # and their port (0: the endpoint URL's port). Empty namespace: the endpoint is outside
   # the cluster and keeps its resolved-address rule above. Seeds of `kubernetes.egress`.
