@@ -4623,6 +4623,8 @@ class KubernetesProvider:
                 name, timeout=timeout, cancelled=cancelled, wait_for_quota=wait_for_quota
             )
             refusal = self._job_refusals.pop(name, None)
+            job_completed: bool = False
+            job_completed_reason: str | None = None
             if code is None:
                 if name in self._job_unanswered:
                     self._job_unanswered.discard(name)
@@ -4645,9 +4647,9 @@ class KubernetesProvider:
                 # A full namespace is a wait, not a verdict on the attempt.
                 self._role_error(role, spec.attempt_id, refusal, True)
                 return JOB_API_ERROR
-            job_completed = code is not None and code >= 0
-            job_completed_reason: str | None = None
-            if code is not None and code < 0:
+            if code is not None and code >= 0:
+                job_completed = True
+            elif code is not None and code < 0:
                 # Derive the reason from the Job's conditions so the error message
                 # at prepare can say whether the Job had completed or was still running.
                 reason = await self._job_termination_reason(name)

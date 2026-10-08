@@ -505,6 +505,24 @@ the namespace. A deployment therefore names one exact, pullable reference in
   what 08's Docker `prepare` performs. `prepare` returns
   when the Job completes; a failed Job is a prepare failure with the Job's
   log excerpt as detail.
+
+  After the preparer Job completes (whether successfully or not), the provider
+  deletes it in the background and then waits up to
+  `prepare_pod_deletion_wait_seconds` (15 s by default, a setting on the
+  provider config) for the Pod to disappear. If the Pod is still present after
+  the initial wait, the provider retries the wait up to three more times with
+  exponential backoff (2 s, 4 s, 8 s), bounded so the total wait does not
+  exceed `prepare_timeout_seconds`. The backoff is clipped at the remaining
+  time before the overall prepare timeout. If the Pod is still present when
+  the total backoff budget is exhausted, `prepare` raises
+  `PrepareJobPodsTimeoutError`. The error message states whether the Job had
+  completed or was still running when the wait gave up, and (when still
+  running) the reason (for example, ``OOMKilled`` or the node affinity that
+  kept the Pod from scheduling). This condition is classified as an
+  environment failure (see 16): the attempt is moved back to ``PENDING``
+  without consuming an attempt (hades #503), the previous attempt's bundle
+  is preserved so a correction can resume from it, and the failure stays
+  correctable.
 - `launch`: resolve the worker image to a digest through the image registry
   (11, 25) and record it; refuse an unsupported harness version; create the
   NetworkPolicy and the worker Job; return the Job name as the handle. The

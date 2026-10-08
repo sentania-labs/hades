@@ -43,7 +43,7 @@ from crucible.domain.entities import (
 )
 from crucible.domain.events import EventKind
 from crucible.domain.ids import new_id
-from crucible.domain.lifecycle import TaskState
+from crucible.domain.lifecycle import AttemptState, TaskState
 from crucible.ports.clock import Clock
 from crucible.ports.harness import CredentialSource, HarnessGate
 from crucible.ports.repository import UnitOfWork
@@ -95,21 +95,6 @@ def _unpublished_bundle_problem(
     if work is None:
         return {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
     attempt, execution = work
-    # hades #503: a prepare failure leaves workspace_path as None; skip it and use the
-    # preceding attempt's bundle (same pattern as the never_started check below).
-    if attempt.workspace_path is None:
-        prev_attempts = [
-            a for a in uow.attempts.list_for_execution(execution.id) if a.workspace_path is not None
-        ]
-        if prev_attempts:
-            attempt = max(prev_attempts, key=lambda a: a.id)
-            source_execution = uow.executions.get(attempt.execution_id)
-            if source_execution is not None:
-                execution = source_execution
-            else:
-                return {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
-        else:
-            return {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
     exited = uow.events.latest_for_task_kind(task.id, EventKind.ATTEMPT_EXITED.value)
     if (
         exited is not None
@@ -140,6 +125,26 @@ def _unpublished_bundle_problem(
         if source_execution is None:
             return {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
         execution = source_execution
+    # hades #503: a prepare failure (pod-gone wait exhausted) moves the attempt
+    # back to PENDING with workspace_path=None; skip it and use the preceding
+    # attempt's bundle (the same pattern as the never_started check above).
+    if attempt.workspace_path is None and attempt.state in (
+        AttemptState.PENDING,
+        AttemptState.PREPARING,
+        AttemptState.LAUNCHING,
+    ):
+        prev_attempts = [
+            a for a in uow.attempts.list_for_execution(execution.id) if a.workspace_path is not None
+        ]
+        if prev_attempts:
+            attempt = max(prev_attempts, key=lambda a: a.id)
+            source_execution = uow.executions.get(attempt.execution_id)
+            if source_execution is not None:
+                execution = source_execution
+            else:
+                return {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
+        else:
+            return {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
     if execution.provider != provider:
         return {"path": "execution_request.provider", "message": PREVIOUS_BUNDLE_OTHER_PROVIDER}
     evidence = next(
