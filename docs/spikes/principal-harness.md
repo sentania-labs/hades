@@ -1,9 +1,9 @@
 # Principal harness spike: Claude Code headless and Codex app-server
 
-Hades #208, accepted first increment, work item 1 (FDY-0581). Run 2026-10-08, 2:28 to
+Hades #208, accepted first increment, work item 1 (FDY-0581). Original run 2026-10-08, 2:28 to
 2:36 PM CT, inside a Hades worker Pod on the lab (Kubernetes provider, NFS checkout)
 with the worker image's own binaries: Claude Code 2.1.280, Codex CLI 0.156.0, Node
-22.16.0. Every number below comes from commands run in that container by
+22.16.0. The original measurements below were recorded by the first attempt using
 `tools/spikes/principal_harness.py`; the raw transcripts were under
 `/tmp/spike/out` in the Pod and are quoted here. The script runs again with
 `python3 tools/spikes/principal_harness.py all` in any worker that has the mounts.
@@ -18,9 +18,9 @@ same flags. Codex app-server is the second path: its JSON-RPC surface does what 
 spike asked (thread resume from its rollout file, approval policy and sandbox at
 `thread/start`, clean SIGTERM exit) but no Codex credential is mounted in a worker
 that was not launched as a Codex worker, the ChatGPT backend is outside this Pod's
-egress allowlist, and an unauthenticated turn hangs in a reconnect loop instead of
-failing; so no authenticated Codex turn was proven here, and that is the first
-unsupported capability on that path.
+egress allowlist in that original Pod. The correction run below authenticated Codex
+in memory, but its requested model was refused. Neither run proves a successful
+Codex model turn. The recommendation remains provisional on that limitation.
 
 ## What the worker had
 
@@ -191,27 +191,23 @@ proven here that removes the shell tool the way `--tools ""` does for Claude.
 
 ## (e) Killed mid-turn and restarted
 
-Claude: in the long-lived process a third turn ("count from 1 to 40 in words, then
-say the codeword") was sent and the process got SIGKILL after its first `assistant`
-event (`events_seen_before_kill: ["system", "assistant"]`, exit -9). The session file
-afterwards ended `..., user, attachment, assistant, queue-operation, queue-operation,
-user, attachment` with the interrupted request as the last `user` line and no
-assistant line after it; the partial assistant text was not recorded. A new process
-with `--resume <session>` answered the question "what was my last request, did you
-finish it, what is the codeword" with:
+Claude: the original run killed after the first complete `assistant` event for
+"count from 1 to 40". It did **not** prove a kill during generation. The reported
+unanswered user line and the resumed model's claim that it had not finished are
+observations about the interval before result/session finalization; they do not
+establish what happens to partial output. The earlier conclusion about lost partial
+assistant text is withdrawn.
 
-```
-Last request: Count from 1 to 40 in words, one per line, then say the codeword.
-Finished: No, I did not complete it.
-Codeword: ORCHID-42
-```
-
-So the CLI neither replays the interrupted turn nor loses the conversation: the
-unanswered user line is the marker of an interrupted generation, and the next prompt
-decides what happens. Side effects a tool had already done before the kill would
-stand (none here: no tools). Hades's `principal_turns` row, not the session file,
-must say the turn was interrupted; the session file only shows a user line without an
-answer, which a resume alone does not surface.
+The corrected command adds `--include-partial-messages`. It asks for 400 lines and
+kills immediately on `stream_event.event.type = content_block_delta` with
+`delta.type = text_delta`, before a complete `assistant` or `result` event. It records
+the triggering delta and whether either completion event was consumed. If no delta
+arrives, it reports `no_delta_observed`, not a successful mid-generation experiment.
+A regression test verifies both a delta and an early complete assistant event.
+The correction worker has no Claude credential: its live attempt returned
+`Not logged in · Please run /login`, so actual mid-generation recovery remains
+**not exercised**. No login was attempted. Hades must track interruption in its own
+turn record; this spike does not prove safe replay of side effects.
 
 Codex: SIGTERM exited 0, SIGKILL -9, and the thread with its unanswered input
 resumed from the rollout in the next process (table in (b)). What `thread/resume` does
@@ -261,10 +257,10 @@ Claude Code headless, per-turn process:
 4. On restart with a turn `running`, treat an unanswered user line as interrupted;
    never resend the same prompt as if new.
 
-Why not Codex first: no credential is mounted in a worker today unless the attempt
-is a Codex attempt, the ChatGPT backend is not in the Pod's allowlist, an
-unauthenticated turn hangs rather than fails, the host has no resume, and the sandbox
-that would scope tools cannot run in the worker (S2). Everything else on that path
+Why not Codex first: the original worker lacked a Codex credential and backend
+egress; the correction worker authenticated but its model was refused. No successful
+model turn or enforced tool restriction was proven. The host has no resume, and S2
+reported the sandbox could not run in its worker. Everything else on that path
 (resume from the rollout, approval policy at `thread/start`, clean SIGTERM, small
 idle footprint of 86 MB) looked usable.
 
@@ -280,16 +276,18 @@ Claude Code headless (2.1.280):
   resume until compaction (`--system-prompt-snapshot`, from `--help`, not exercised).
 - Tool scoping: no per-host network limit in the CLI; egress is the Pod's. `--bare`
   is unavailable with the subscription token. The Hades client must be an MCP server.
-- Mid-turn kill: the partial assistant output is not in the session file; only the
-  unanswered user line is. An in-process interrupt of a running turn over stdin was not
-  exercised.
+- Mid-turn kill: genuine interruption during generation and persistence of partial
+  output remain unproven. The original test killed after a complete assistant event;
+  the corrected delta-triggered test could not authenticate in the correction worker.
+  An in-process interrupt over stdin was not exercised.
 - Credential refresh: none; the token is long-lived and expiry means a new login.
   Concurrent use by a worker was fine in this run.
 
 Codex app-server (0.156.0):
 
-- Subscription auth: no credential in a non-Codex worker; chatgpt.com and
-  api.openai.com not in this Pod's allowlist; no authenticated turn proven. An
+- Subscription auth: absent in the original non-Codex worker. The correction worker
+  authenticated with its mounted token over stdin, but `gpt-5-codex` was rejected
+  for the ChatGPT account; no successful model turn proven. In the original Pod, an
   unauthenticated or unreachable turn retries ("Reconnecting... n/5") instead of
   failing within 20 s.
 - Resume: rollout file only; wiped store is `-32600 no rollout found`; no import;
@@ -302,3 +300,124 @@ Codex app-server (0.156.0):
   exercised.
 - Credential refresh: by the host answering `account/chatgptAuthTokens/refresh` from
   the projected file; not exercised here.
+
+
+## Correction run: credential handling, kill trigger and deadlines
+
+Run 2026-10-08, approximately 6:38 to 6:44 PM CT, in the correction worker while
+its existing Codex operator process was running. Read issue #208 and both comments;
+this correction stays within work item 1. Binaries remain Claude 2.1.280 and
+Codex 0.156.0. Original measurements above are retained as historical evidence,
+except the invalid Claude mid-generation inference explicitly withdrawn in (e).
+
+Commands actually run:
+
+```sh
+python3 tools/spikes/principal_harness.py --out /tmp/principal-correction credentials
+python3 tools/spikes/principal_harness.py --out /tmp/principal-correction claude-long-lived
+python3 tools/spikes/principal_harness.py --out /tmp/principal-correction codex-probe
+python3 tools/spikes/principal_harness.py --out /tmp/principal-correction-final codex-probe
+python3 tools/spikes/principal_harness.py --out /tmp/principal-correction-after credentials
+uv run pytest tests/unit/test_spike_principal_harness.py -q
+```
+
+Claude has no `/home/worker/.claude` mount. The long-lived command accepted the
+partial-message flag, emitted system init in 0.31 s, then `is_error: true` with
+`Not logged in · Please run /login`; `kill_probe` says
+`not exercised: first turn failed or timed out`. No new Claude generation or
+recovery measurements can be claimed from this worker.
+
+Codex has `auth.json` on its mounted credential directory, but no
+`access-token.json`. The script now uses an empty scratch `CODEX_HOME` and reads
+only the access token and account id into memory, preferring the projected
+`access-token.json` and otherwise reading `auth.json.tokens`. Neither credential
+file nor `config.toml` is copied. After `initialize` with `experimentalApi: true`
+and `initialized`, each process receives this request over its stdin pipe (values
+below are placeholders, and outbound requests are never logged):
+
+```json
+{"id":2,"method":"account/login/start","params":{"type":"chatgptAuthTokens","accessToken":"<mounted access token>","chatgptAccountId":"<mounted account id>"}}
+```
+
+This supplies existing tokens; it does not initiate a browser/device login or use
+refresh tokens. The [official app-server authentication documentation](https://developers.openai.com/codex/app-server)
+describes external token authentication; the local implementation follows
+`crucible-codex-host.py`. The probe redacts supplied token/account values from
+responses before logging, discards stderr, and never logs outgoing auth requests.
+The scratch directory remains a conversation store, not a credential store.
+
+The first rerun exposed missing `experimentalApi` on process 2 and 3, which refused
+authentication. This was fixed before the final rerun. Final observations:
+
+| measurement or request | observed result |
+|---|---|
+| initialize, process 1 / process 2 | 0.05 s / 0.03 s |
+| external auth, all three processes | `result: {"type":"chatgptAuthTokens"}`, accepted |
+| idle RSS / peak RSS, first process | 96432 kB / 170360 kB |
+| `thread/start`, approval `never`, sandbox `read-only` | accepted |
+| model `gpt-5-codex`, first turn | `turn/completed`, status `failed`, after 2084 ms |
+| backend error | `The 'gpt-5-codex' model is not supported when using Codex with a ChatGPT account.` |
+| resume in process 2 | same thread, preview `The codeword is ORCHID-42.` |
+| resume after deleting sessions in process 3 | `-32600 no rollout found for thread id ...` |
+| SIGTERM / SIGKILL | 0 / -9 |
+
+No successful model turn, same-process second answer, genuine Codex mid-generation
+kill, or sandbox enforcement was measured. These remain unsupported or unproven
+capabilities for this spike, not claims that every Codex model refuses subscription
+auth. The final SIGKILL was after a failed resume, not during generation.
+
+A read-only check of the final scratch tree found no `auth.json`,
+`access-token.json` or `config.toml`, and an in-memory comparison found no mounted
+access token in any scratch file (`False`; the token was never printed).
+The credential's mtime stayed `2026-10-08T23:38:10Z` (6:38:10 PM CT), size 4131,
+mode 0600, between the before/after observations. This Codex mount is writable NFS,
+unlike the original Claude mount. No refresh request or token-file change was
+observed while the operator and probe used the same credential. This does not prove
+expiry/refresh safety. The spike does not implement the production host's refresh
+callback; it reports the bounded turn outcome if refresh is needed.
+
+Both RPC response waits and notification drains now read via a selectable descriptor
+and an explicit byte buffer, so a silent peer or an unterminated JSON line cannot
+block past the deadline. App-server stderr is discarded to prevent pipe backpressure.
+An `ExitStack` guarantees child teardown on exceptions; stop waits for the killed
+child and closes pipes. Tests exercise silent and partial-line peers for both call
+and drain, with 0.1 s deadlines, plus a peer writing 100000 stderr bytes. They verify
+return within 2 s and that the child and RSS polling thread stop. Other regressions
+exercise both mounted credential formats, deliberately echo secrets in replies to
+verify redaction, and verify the Claude delta trigger. These are synthetic protocol
+tests, not authenticated-generation evidence.
+
+## Review findings and disposition
+
+The following findings are preserved verbatim. All three are fixed; the live Claude
+mid-generation result is explicitly left unproven because this worker has no token.
+
+Finding 01M4EY1ZW5F9T7VHXS6XJHFXVF
+Path: tools/spikes/principal_harness.py
+Line: 635
+Body:
+**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Keep Codex credentials out of the scratch directory**
+
+When this probe is rerun in a Codex worker, this block copies `auth.json` and `access-token.json`—including reusable subscription secrets—into the user-selectable `--out` tree, where they remain after the experiment and may reside on persistent or shared storage. This directly defeats the spike's requirement to read but never copy credentials; authenticate app-server from the mounted token in memory, as `images/worker/crucible-codex-host.py` does, instead of cloning credential files.
+
+Useful? React with 👍 / 👎.
+
+Finding 01M4EY1ZW8CM7Z70XDV4H510XG
+Path: tools/spikes/principal_harness.py
+Line: 388
+Body:
+**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Kill before the complete assistant message arrives**
+
+This does not exercise a kill during generation: the command does not enable partial messages, whose default is false according to the [official Agent SDK reference](https://docs.claude.com/it/api/agent-sdk/python), and ordinary stream-JSON emits an `assistant` Message before the final `result`. Because tools are disabled here, the first `assistant` event is the completed counting response, so SIGKILL only tests the gap between the completed answer and result/session finalization; the document's conclusions about partial output and genuine mid-turn recovery are therefore unsupported. Enable partial-message events and kill on an actual streaming delta, or kill on a timer after the turn starts.
+
+Useful? React with 👍 / 👎.
+
+Finding 01M4EY1ZWA9DDYF04K57TRBKKX
+Path: tools/spikes/principal_harness.py
+Line: 569
+Body:
+**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Enforce timeouts around blocking JSON-RPC reads**
+
+If app-server becomes silent before replying or completing a turn—especially in the unreachable or unauthenticated scenario this probe intentionally exercises—`readline()` blocks indefinitely, so the deadline is never rechecked and the advertised 20/30/60-second timeouts cannot terminate the experiment. Use a selectable descriptor, reader thread/queue, or another bounded-read mechanism so `codex-probe` and `all` can reliably time out and clean up the child.
+
+Useful? React with 👍 / 👎.

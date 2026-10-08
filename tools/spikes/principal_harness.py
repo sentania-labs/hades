@@ -7,8 +7,9 @@ worker image carries and prints a JSON summary; raw transcripts go under --out.
 
 Credentials: the Claude token is read from the mounted file into the CLI's documented
 variable for the child process only, the way the worker launch does it. It is never
-copied to disk or printed. The Codex credential is whatever the worker mount holds
-(on 2026-10-08 it held nothing, which is a finding of its own).
+copied to disk or printed. Codex reads the mounted access-token.json (or auth.json
+tokens) into memory and passes only access_token/account_id over app-server stdin.
+No credential or mounted config file is copied into --out; no login flow is started.
 
     python3 tools/spikes/principal_harness.py claude-resume
     python3 tools/spikes/principal_harness.py claude-long-lived
@@ -23,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import select
 import shutil
 import signal
 import subprocess
@@ -31,6 +33,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator, Sequence
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import IO, Any
@@ -93,6 +96,28 @@ class RssPoller:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=1)
+
+
+class BoundedLines:
+    """Read complete pipe lines by deadline, including partial-line and silent peers."""
+
+    def __init__(self, stream: IO[str]) -> None:
+        self.fd = stream.fileno()
+        self.pending = b""
+
+    def readline(self, deadline: float) -> str:
+        while True:
+            if b"\n" in self.pending:
+                line, self.pending = self.pending.split(b"\n", 1)
+                return (line + b"\n").decode("utf-8", errors="replace")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([self.fd], [], [], remaining)[0]:
+                return ""
+            chunk = os.read(self.fd, 65536)
+            if not chunk:
+                line, self.pending = self.pending, b""
+                return line.decode("utf-8", errors="replace")
+            self.pending += chunk
 
 
 def claude_env(config_dir: Path, token_file: Path) -> dict[str, str]:
@@ -302,7 +327,7 @@ class StreamJsonProcess:
         self.poller = RssPoller(self.process.pid).start()
         self.log = log.open("w", encoding="utf-8")
         assert self.process.stdout is not None
-        self.stdout: IO[str] = self.process.stdout
+        self.stdout = BoundedLines(self.process.stdout)
 
     def send(self, text: str) -> None:
         assert self.process.stdin is not None
@@ -316,7 +341,7 @@ class StreamJsonProcess:
     def events(self, timeout: float) -> Iterator[dict[str, Any]]:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            line = self.stdout.readline()
+            line = self.stdout.readline(deadline)
             if not line:
                 return
             self.log.write(line)
@@ -357,7 +382,13 @@ def claude_long_lived(args: argparse.Namespace) -> dict[str, Any]:
     env = claude_env(config_dir, args.token_file)
     session = str(uuid.uuid4())
     argv = claude_argv(
-        args.model, *SCOPE_FLAGS, "--input-format", "stream-json", "--session-id", session
+        args.model,
+        *SCOPE_FLAGS,
+        "--include-partial-messages",
+        "--input-format",
+        "stream-json",
+        "--session-id",
+        session,
     )
     report: dict[str, Any] = {"session_id": session, "argv": [a if a else '""' for a in argv]}
     host = StreamJsonProcess(argv, env, workdir, args.out / "claude-long-lived" / "stream.jsonl")
@@ -369,6 +400,10 @@ def claude_long_lived(args: argparse.Namespace) -> dict[str, Any]:
     more, turn_seconds = host.wait_for("result")
     events += more
     report["turn1"] = {"seconds": turn_seconds, **result_summary(events)}
+    if report["turn1"]["is_error"] or not events:
+        host.kill()
+        report["kill_probe"] = "not exercised: first turn failed or timed out"
+        return report
     time.sleep(2)
     report["rss_kb_idle_after_turn1"] = host.poller.sample()
     host.send("What is the codeword? Reply with the codeword only.")
@@ -382,12 +417,29 @@ def claude_long_lived(args: argparse.Namespace) -> dict[str, Any]:
     report["rss_kb_idle_after_turn2"] = host.poller.sample()
     report["peak_rss_kb"] = host.poller.peak_kb
 
-    # (e) kill -9 mid-turn: send a turn, wait for the first assistant event, kill.
-    host.send("Count from 1 to 40 in words, one per line, then say the codeword.")
-    events, _ = host.wait_for("assistant", timeout=90)
+    # Kill on a genuine text delta, never on the completed assistant message.
+    host.send("Count from 1 to 400 in words, one per line, then say the codeword.")
+    events = []
+    delta = None
+    for event in host.events(timeout=90):
+        events.append(event)
+        partial = event.get("event", {})
+        if (
+            event.get("type") == "stream_event"
+            and partial.get("type") == "content_block_delta"
+            and partial.get("delta", {}).get("type") == "text_delta"
+        ):
+            delta = partial["delta"]
+            break
+        if event.get("type") in ("assistant", "result"):
+            break
     host.kill()
     report["killed_mid_turn"] = {
+        "trigger": "text_delta" if delta else "no_delta_observed",
+        "delta": delta,
         "events_seen_before_kill": [str(e.get("type")) for e in events],
+        "complete_assistant_seen": any(e.get("type") == "assistant" for e in events),
+        "result_seen": any(e.get("type") == "result" for e in events),
         "exit_code": host.process.returncode,
     }
     log = config_dir / "projects"
@@ -546,13 +598,56 @@ class AppServer:
             env={**claude_env(cwd, Path("/nonexistent")), "CODEX_HOME": str(codex_home)},
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
             bufsize=1,
         )
         self.poller = RssPoller(self.process.pid).start()
         self.log = log.open("a", encoding="utf-8")
         self.next_id = 1
+        assert self.process.stdout is not None
+        self.stdout = BoundedLines(self.process.stdout)
+        self.secrets: list[str] = []
+
+    def __enter__(self) -> AppServer:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.stop()
+
+    def authenticate(self, token_file: Path) -> dict[str, Any]:
+        """External auth via stdin only; never persist mounted credentials or config."""
+        source = token_file if token_file.is_file() else token_file.with_name("auth.json")
+        if not source.is_file():
+            return {"status": "mounted access token absent; no external auth supplied"}
+        try:
+            document = json.loads(source.read_text(encoding="utf-8"))
+            token = document if source == token_file else document.get("tokens")
+            if not isinstance(token, dict) or not all(
+                isinstance(token.get(key), str) and token[key]
+                for key in ("access_token", "account_id")
+            ):
+                return {"status": "invalid mounted access token"}
+        except (OSError, ValueError, AttributeError):
+            return {"status": "unreadable or invalid mounted access token"}
+        self.secrets = [token["access_token"], token["account_id"]]
+        result = self.call(
+            "account/login/start",
+            {
+                "type": "chatgptAuthTokens",
+                "accessToken": token["access_token"],
+                "chatgptAccountId": token["account_id"],
+            },
+        )
+        return {"status": "accepted" if "result" in result else "failed", "reply": result}
+
+    def read_line(self, deadline: float) -> str:
+        line = self.stdout.readline(deadline)
+        for secret in self.secrets:
+            line = line.replace(secret, "[REDACTED]")
+        self.log.write(line)
+        self.log.flush()
+        return line
 
     def call(self, method: str, params: dict[str, Any], timeout: float = 30) -> dict[str, Any]:
         assert self.process.stdin is not None
@@ -566,10 +661,9 @@ class AppServer:
         deadline = time.monotonic() + timeout
         notifications: list[str] = []
         while time.monotonic() < deadline:
-            line = self.process.stdout.readline()
+            line = self.read_line(deadline)
             if not line:
                 break
-            self.log.write(line)
             document = json_object(line)
             if document is None:
                 continue
@@ -578,8 +672,6 @@ class AppServer:
                 return document
             if "method" in document:
                 notifications.append(str(document["method"]))
-                if document["method"] in ("turn/completed", "turn/failed"):
-                    return {"id": request_id, "ended_by": document}
         return {"id": request_id, "timeout": True, "notifications_before": notifications}
 
     def drain(self, until: tuple[str, ...], timeout: float) -> dict[str, Any]:
@@ -589,10 +681,9 @@ class AppServer:
         deadline = time.monotonic() + timeout
         seen: list[str] = []
         while time.monotonic() < deadline:
-            line = self.process.stdout.readline()
+            line = self.read_line(deadline)
             if not line:
                 break
-            self.log.write(line)
             document = json_object(line)
             if document is None or "method" not in document:
                 continue
@@ -607,11 +698,17 @@ class AppServer:
         self.process.stdin.flush()
 
     def stop(self, sig: int = signal.SIGTERM) -> int | None:
+        if self.log.closed:
+            return self.process.returncode
         self.process.send_signal(sig)
         try:
             self.process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             self.process.kill()
+            self.process.wait(timeout=10)
+        for stream in (self.process.stdin, self.process.stdout):
+            if stream is not None:
+                stream.close()
         self.poller.stop()
         self.log.close()
         return self.process.returncode
@@ -628,11 +725,6 @@ def codex_probe(args: argparse.Namespace) -> dict[str, Any]:
     shutil.rmtree(args.out / "codex-probe", ignore_errors=True)
     codex_home.mkdir(parents=True)
     workdir.mkdir(parents=True)
-    if args.codex_home.is_dir():
-        for name in ("auth.json", "access-token.json", "config.toml"):
-            source = args.codex_home / name
-            if source.is_file():
-                shutil.copy(source, codex_home / name)
     report: dict[str, Any] = {
         "credential_files_in_mount": sorted(
             p.name for p in args.codex_home.iterdir() if p.is_file()
@@ -640,76 +732,98 @@ def codex_probe(args: argparse.Namespace) -> dict[str, Any]:
         if args.codex_home.is_dir()
         else "mount absent",
     }
-    log = args.out / "codex-probe" / "rpc.jsonl"
-    server = AppServer(codex_home, workdir, log)
-    init = server.call(
-        "initialize",
-        {
-            "clientInfo": {"name": "principal-spike", "version": "1"},
-            "capabilities": {"experimentalApi": True},
-        },
-    )
-    report["seconds_to_initialize"] = round(time.monotonic() - server.started, 2)
-    report["initialize"] = _brief(init)
-    server.notify("initialized", {})
-    time.sleep(1)
-    report["rss_kb_idle"] = server.poller.sample()
-    report["account_read"] = _brief(server.call("account/read", {}))
-    thread_params = {
-        "cwd": str(workdir),
-        "approvalPolicy": "never",
-        "sandbox": "read-only",
-        "model": args.codex_model,
-    }
-    started = server.call("thread/start", thread_params)
-    report["thread_start"] = _brief(started)
-    thread = ((started.get("result") or {}).get("thread") or {}) if "result" in started else {}
-    thread_id = str(thread.get("id") or "")
-    report["thread_id"] = thread_id
-    if thread_id:
-        turn = server.call(
-            "turn/start",
+    with ExitStack() as stack:
+        log = args.out / "codex-probe" / "rpc.jsonl"
+        server = stack.enter_context(AppServer(codex_home, workdir, log))
+        init = server.call(
+            "initialize",
             {
-                "threadId": thread_id,
-                "input": [{"type": "text", "text": f"The codeword is {CODEWORD}."}],
+                "clientInfo": {"name": "principal-spike", "version": "1"},
+                "capabilities": {"experimentalApi": True},
             },
-            timeout=60,
         )
-        report["turn_start"] = _brief(turn)
-        report["turn_end"] = _brief(server.drain(("turn/completed", "turn/failed"), timeout=20))
-    report["thread_resume_bogus_id"] = _brief(
-        server.call("thread/resume", {"threadId": str(uuid.uuid4())})
-    )
-    report["peak_rss_kb_first_process"] = server.poller.peak_kb
-    report["rollout_files_after_start"] = sorted(
-        str(p.relative_to(codex_home)) for p in codex_home.rglob("*.jsonl")
-    )
-    report["exit_after_sigterm"] = server.stop()
+        report["seconds_to_initialize"] = round(time.monotonic() - server.started, 2)
+        report["initialize"] = _brief(init)
+        server.notify("initialized", {})
+        report.setdefault("external_auth", []).append(
+            server.authenticate(args.codex_home / "access-token.json")
+        )
+        time.sleep(1)
+        report["rss_kb_idle"] = server.poller.sample()
+        report["account_read"] = _brief(server.call("account/read", {}))
+        thread_params = {
+            "cwd": str(workdir),
+            "approvalPolicy": "never",
+            "sandbox": "read-only",
+            "model": args.codex_model,
+        }
+        started = server.call("thread/start", thread_params)
+        report["thread_start"] = _brief(started)
+        thread = ((started.get("result") or {}).get("thread") or {}) if "result" in started else {}
+        thread_id = str(thread.get("id") or "")
+        report["thread_id"] = thread_id
+        if thread_id:
+            turn = server.call(
+                "turn/start",
+                {
+                    "threadId": thread_id,
+                    "input": [{"type": "text", "text": f"The codeword is {CODEWORD}."}],
+                },
+                timeout=60,
+            )
+            report["turn_start"] = _brief(turn)
+            report["turn_end"] = _brief(server.drain(("turn/completed", "turn/failed"), timeout=20))
+        report["thread_resume_bogus_id"] = _brief(
+            server.call("thread/resume", {"threadId": str(uuid.uuid4())})
+        )
+        report["peak_rss_kb_first_process"] = server.poller.peak_kb
+        report["rollout_files_after_start"] = sorted(
+            str(p.relative_to(codex_home)) for p in codex_home.rglob("*.jsonl")
+        )
+        report["exit_after_sigterm"] = server.stop()
 
-    # Second process: resume the thread from CODEX_HOME storage.
-    server = AppServer(codex_home, workdir, log)
-    server.call("initialize", {"clientInfo": {"name": "principal-spike", "version": "1"}})
-    server.notify("initialized", {})
-    report["seconds_to_initialize_second_process"] = round(time.monotonic() - server.started, 2)
-    if thread_id:
-        report["thread_resume_second_process"] = _brief(
-            server.call("thread/resume", {"threadId": thread_id})
+        # Second process: resume the thread from CODEX_HOME storage.
+        server = stack.enter_context(AppServer(codex_home, workdir, log))
+        server.call(
+            "initialize",
+            {
+                "clientInfo": {"name": "principal-spike", "version": "1"},
+                "capabilities": {"experimentalApi": True},
+            },
         )
-        report["thread_list_second_process"] = _brief(server.call("thread/list", {}))
-    server.stop()
+        server.notify("initialized", {})
+        report.setdefault("external_auth", []).append(
+            server.authenticate(args.codex_home / "access-token.json")
+        )
+        report["seconds_to_initialize_second_process"] = round(time.monotonic() - server.started, 2)
+        if thread_id:
+            report["thread_resume_second_process"] = _brief(
+                server.call("thread/resume", {"threadId": thread_id})
+            )
+            report["thread_list_second_process"] = _brief(server.call("thread/list", {}))
+        server.stop()
 
-    # Third process: storage wiped, same thread id.
-    shutil.rmtree(codex_home / "sessions", ignore_errors=True)
-    shutil.rmtree(codex_home / "archived_sessions", ignore_errors=True)
-    server = AppServer(codex_home, workdir, log)
-    server.call("initialize", {"clientInfo": {"name": "principal-spike", "version": "1"}})
-    server.notify("initialized", {})
-    if thread_id:
-        report["thread_resume_after_wipe"] = _brief(
-            server.call("thread/resume", {"threadId": thread_id})
+        # Third process: storage wiped, same thread id.
+        shutil.rmtree(codex_home / "sessions", ignore_errors=True)
+        shutil.rmtree(codex_home / "archived_sessions", ignore_errors=True)
+        server = stack.enter_context(AppServer(codex_home, workdir, log))
+        server.call(
+            "initialize",
+            {
+                "clientInfo": {"name": "principal-spike", "version": "1"},
+                "capabilities": {"experimentalApi": True},
+            },
         )
-    report["exit_after_sigkill"] = server.stop(signal.SIGKILL)
-    return report
+        server.notify("initialized", {})
+        report.setdefault("external_auth", []).append(
+            server.authenticate(args.codex_home / "access-token.json")
+        )
+        if thread_id:
+            report["thread_resume_after_wipe"] = _brief(
+                server.call("thread/resume", {"threadId": thread_id})
+            )
+        report["exit_after_sigkill"] = server.stop(signal.SIGKILL)
+        return report
 
 
 # (f) credential files: mtimes before and after, never contents
