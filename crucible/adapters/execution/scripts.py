@@ -711,6 +711,8 @@ def collector_script(
 ) -> str:
     """Produce the full diff, the path list, the head, the log, the bundle, and a copy
     of the report directory (08). Never a push, never a network: `--network none`.
+    The bundle is written for a failed attempt with no commit too (hades #490), so a
+    correction can resume from the state the worker left and the tree can be read.
 
     With `attempt_id`, what the worker left uncommitted is committed first, as the
     policy's author with the trailer the worker's own commits get (`trailer_value`, the
@@ -877,8 +879,26 @@ if [ -n "$BASE" ]; then
   # Unicode. Read blobs by object id, including those in earlier commits.
   {_injected_collection_script()}
   {_changed_blobs_script()}
-  {GIT} -C "$REPO" bundle create "$OUT/work_branch.bundle" \
-    "$BASE..$WORK_BRANCH" > "$OUT/bundle.log" 2>&1 || true
+  # hades #490: a branch with no commit beyond the base is an empty range, which git
+  # refuses to bundle, so a failed attempt that committed nothing (a gateway drop before
+  # the model's first edit) left no bundle at all: the verifier said "no bundle was
+  # produced", no correction could resume from the attempt and nothing held the tree
+  # the worker left. The bundle then carries the branch tip itself, its one commit with
+  # the commit before it as the prerequisite (the base's own parent, which every clone of
+  # the base has), or the whole branch when the tip is a root commit. What the worker
+  # left uncommitted is already on the branch by now (the leftover commit above), so the
+  # bundle is the workspace state as the attempt ended, and `git bundle verify` and the
+  # preparer's resume read it as any other.
+  NEW_COMMITS=$({GIT} -C "$REPO" rev-list --count "$BASE..$WORK_BRANCH" 2>/dev/null || echo 0)
+  if [ "$NEW_COMMITS" = "0" ]; then
+    {GIT} -C "$REPO" bundle create "$OUT/work_branch.bundle" \
+      "$WORK_BRANCH~1..$WORK_BRANCH" > "$OUT/bundle.log" 2>&1 \
+      || {GIT} -C "$REPO" bundle create "$OUT/work_branch.bundle" \
+        "$WORK_BRANCH" > "$OUT/bundle.log" 2>&1 || true
+  else
+    {GIT} -C "$REPO" bundle create "$OUT/work_branch.bundle" \
+      "$BASE..$WORK_BRANCH" > "$OUT/bundle.log" 2>&1 || true
+  fi
   {GIT} -C "$REPO" rev-list --count "$BASE"..HEAD > "$OUT/commits.txt" \
     || echo 0 > "$OUT/commits.txt"
   # hades #230: never resolve the commit_policy start from a ref in the worker-writable
@@ -1023,6 +1043,9 @@ def parse_activity(stdout: bytes) -> tuple[int, int, int] | None:
     return newest, files, total
 
 
+# hades #490: the collector writes a bundle for every attempt it collects, a failed one
+# with no commit included (the branch tip alone), so a missing file here is the
+# collector's own failure, never the shape of the branch.
 BUNDLE_VERIFY_SCRIPT = f"""set -eu
 {GIT_ENV}
 if [ ! -s {OUTPUT_MOUNT}/work_branch.bundle ]; then

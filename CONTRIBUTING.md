@@ -165,6 +165,9 @@ so Qwen budgets output within the engine window. Mirroring Hermes (hades #498), 
 also restricts the tools to file and shell (no sub-agent, skill, memory, web or MCP
 tool), loads no context file as rules, sets thinking off and the response cap, and
 after the run writes a minimal `report.yaml` from the run log when the model left
-neither a report nor `blocked.md` (docs/spec/07-harness-adapters.md). Keep settings
+neither a report nor `blocked.md` (docs/spec/07-harness-adapters.md). Both local
+wrappers retry a transport-level API error up to three times with backoff before
+giving up (hades #490); the words they read for one are listed in each wrapper's
+`TRANSPORT_PATTERNS`. Keep settings
 and stream-json fixtures aligned with the pinned release. Image builds and version smoke checks
 run in CI; leave digest lines to CI and promote each harness separately on Images.

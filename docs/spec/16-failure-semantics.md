@@ -9,6 +9,7 @@
 | `environment` | exit 70, the provider failed before the harness ran, the kernel killed the worker out of memory (exit 137 with the daemon's OOM flag), or the harness was refused | retry if attempts remain; else `failed`. A harness refusal (07, 25) is the exception: it is never retried, because the same refusal would come back. A preparer Job whose Pods outlive the Kubernetes provider's deletion wait (26, hades #503) is not an environment failure yet: the attempt goes back to `pending` with the provider's message on `harness_launch_deferred` (`prepare_pod_wait`, the retry number and its delay), the task back to `scheduled` with a `resume_at` 30 s, then 60 s, then 120 s away, and the same attempt row is prepared again, so none of those retries counts against `max_attempts`. The fourth such failure ends the attempt `environment`, its detail saying whether the Job had completed or was still running when the wait gave up, and the rule above applies from there. The bundle the next correction resumes from survives every one of those failures (retention, below). An attempt that dies before launch records why (below, hades #370) |
 | `auth_failure` | harness reported auth problem (adapter classified) | retry per policy (`retry.auth_failure_max`, after `auth_retry_delay_seconds`); wake regardless |
 | `quota_exhausted` | harness reported rate or quota limit | reroute (below): mark the pool (or, for a model-only refusal, exclude the model and leave the pool open, hades #373), commit WIP, new attempt on the next candidate in the tier; if none, `awaiting_quota` until the earliest reset; caps exceeded or task pinned to the exhausted pool: task `reported` with the class visible, wake |
+| `provider_error` | the harness reported that the model provider or the endpoint failed (adapter classified): the gateway refused or dropped the connection past the launch wrapper's own retries (07, hades #490), or answered a 5xx that is not a gateway status (a 502, 503 or 504, or no answer at all read by an adapter that types it, is `infrastructure`, hades #353) | reroute as a model-only refusal does (below, hades #490): the route that failed is excluded for the next attempt, no pool mark of its own (ADR 0028 marks the pool on the second provider error in a row), a new attempt on the next eligible candidate in the tier resumes from this attempt's sealed bundle, counted against `reroute_max` and never against `max_attempts`; no candidate left, or the cap reached: task `reported` with the class visible, wake |
 | `timeout` | contract timeout with no commit on the branch; with commits the exit is `ended_by_budget` (hades #498) | no retry; gates run on what exists; wake |
 | `ended_by_budget` | the attempt's time limit or the harness's turn limit stopped the run with commits on the branch (hades #498) | a normal end, not a failure: the bundle is collected and the same gates run as for `completed`; passing gates publish, failing ones go to correction; no retry consumed, no wake for the stop itself |
 | `stalled` | Crucible ended the worker for a stall (below) | as `timeout`: no retry; gates run on what exists; wake (`timed_out`) |
@@ -153,6 +154,31 @@ a `reroute` event with source `reserve`. It counts toward `reroute_max`
 like any other reroute. (Amended 2026-09-20 after the C6b implementation:
 the original text sent this case to a wake, which with class-based
 selection is a round trip for a decision the rule already makes.)
+
+## Provider error reroute (hades #490)
+
+A `provider_error` exit of an attempt that ran takes step 3 of the quota
+reroute with the failed route excluded, as a model-only refusal does: the
+`(harness, model)` route the attempt ran on is carried on the `reroute`
+event as `excluded_model`, `excluded_harness` and `next_attempt_id`, with
+`why` "previous attempt ended provider_error on its route; rerouted to the
+next eligible candidate", and the next attempt's selection turns that route
+away for this task alone. Nothing is checkpointed or pushed and no `wip`
+commit is made: the next attempt resumes from this attempt's sealed bundle,
+which the collector writes for a failed attempt with no commit too (08). No
+pool mark is written here; ADR 0028's mark for a gateway that failed twice
+in a row is written before the reroute and raises the pool's own wake, and
+the reroute then leaves the marked pool for the tier's fallbacks. The
+reroute itself raises no wake. It counts toward `reroute_max` like any
+other reroute, never toward `lifecycle.max_attempts`, and the attempt is
+not an ordinary one for retry eligibility. With no eligible candidate, or
+past the cap, the execution fails and the task ends `reported` with the
+class visible and one wake saying so, which is what every provider error
+did before. The launch wrappers' own retries come first (07): Qwen Code's
+and Hermes's wrappers start the harness again, up to three times with 5,
+15 and 45 second pauses, when the run ended on a transport-level API error
+(the gateway gave no answer at all), so a blip never reaches the
+supervisor; an error the gateway answered is not retried there.
 
 Timed resumes from `awaiting_quota` count toward `reroute_max` together
 with reroutes, per contract version. Attempts created by a reroute or a

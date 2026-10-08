@@ -71,8 +71,12 @@ untouched. The Routing page marks a tier that reads the default as "(default)".
   subscriptions; the subscriptions carry it only when Hermes is unavailable or demoted.
 - A gateway that fails twice in a row moves routine work to subscriptions for the
   lab-local pool's cooldown (3600 seconds as seeded). Clearing the mark on the Routing
-  page brings it back at once. The task whose attempt failed is not rerouted: a
-  `provider_error` is not retryable, so it ends `reported` and Foundry resubmits it. A
+  page brings it back at once. The task whose attempt failed was not rerouted: a
+  `provider_error` was not retryable, so it ended `reported` and Foundry resubmitted
+  it. (Amended 2026-10-08, hades #490: the task now reroutes to the next eligible
+  candidate with the failed route excluded, as a model-only refusal does, under
+  `reroute_max`; it ends `reported` only when no candidate is left or the cap is
+  reached. The mark above is unchanged.) A
   task pinned to Hermes during the cooldown waits as a quota wait does.
 - A busy Hermes is not a fallback case: when the lab-local pool is at its
   `max_concurrency`, routine work waits for a Hermes slot rather than going to a
