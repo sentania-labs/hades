@@ -1,7 +1,7 @@
 """Record the schema a pull request's migrations touch (hades #447).
 
-Revision ID: 0054_pull_request_schema_overlap
-Revises: 0053_cert_change_class
+Revision ID: 0055_pull_request_schema_overlap
+Revises: 0054_digest_commit
 
 This revision was written as 0052 on 0051_routing_model_references, renumbered to 0054
 on 0053_cert_change_class when main was first merged into the branch, and renumbered
@@ -15,8 +15,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0054_pull_request_schema_overlap"
-down_revision = "0053_cert_change_class"
+revision = "0055_pull_request_schema_overlap"
+down_revision = "0054_digest_commit"
 branch_labels = None
 depends_on = None
 
