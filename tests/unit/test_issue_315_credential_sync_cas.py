@@ -255,3 +255,81 @@ def test_kubernetes_sync_refuses_a_source_that_moved_past_the_candidate() -> Non
     stored_raw = (stored.get("data") or {}).get("auth.json")
     stored_document = json.loads(base64.b64decode(str(stored_raw)).decode("utf-8"))
     assert stored_document["tokens"]["refresh_token"] == "already-won"
+
+
+def test_kubernetes_sync_retries_and_wins_when_candidate_is_still_newer() -> None:
+    """When a racing attempt patches the Secret with an older token between this attempt's
+    read and its patch, this attempt receives a 409 Conflict. On conflict, it re-reads the
+    Secret, finds that its candidate is still newer than what was just patched, and retries
+    the compare-and-swap, preserving the newest-issued-at invariant (hades #315)."""
+    api, _registry, provider = k8s_build()
+    secret_name = "crucible-harness-codex"
+    old_document = {
+        "auth_mode": "chatgpt",
+        "last_refresh": "2026-09-17T00:00:00Z",
+        "tokens": {"refresh_token": "original"},
+    }
+    api.create(
+        "secrets",
+        k8s_secret(
+            name=secret_name,
+            namespace=api.namespace,
+            object_labels={},
+            data={"auth.json": json.dumps(old_document).encode()},
+        ),
+    )
+
+    real_get = api.get
+    interim_document = {
+        "auth_mode": "chatgpt",
+        "last_refresh": "2026-09-17T01:00:00Z",
+        "tokens": {"refresh_token": "interim-racer"},
+    }
+    raced = False
+
+    def racing_get(kind: str, name: str) -> dict[str, Any]:
+        nonlocal raced
+        body: dict[str, Any] = json.loads(json.dumps(real_get(kind, name)))
+        if kind == "secrets" and name == secret_name and not raced:
+            raced = True
+            # An older attempt's sync-back lands between this attempt's first read
+            # and its patch, moving the Secret's resourceVersion past what was just read.
+            api.patch(
+                "secrets",
+                name,
+                {
+                    "data": {
+                        "auth.json": base64.b64encode(json.dumps(interim_document).encode()).decode(
+                            "ascii"
+                        )
+                    }
+                },
+            )
+        return body
+
+    api.get = racing_get  # type: ignore[method-assign]
+
+    copy = kubernetes_module._CredentialCopy(
+        spec=CodexAdapter().credential_spec(),
+        source_secret=secret_name,
+        mode=MountMode.RW_NARROW,
+        seeded={},
+    )
+    auth = copy.spec.auth_files[0]
+    this_attempt_data = json.dumps(
+        {
+            "auth_mode": "chatgpt",
+            "last_refresh": "2026-09-17T02:00:00Z",
+            "tokens": {"refresh_token": "newer-candidate"},
+        }
+    ).encode()
+
+    result = asyncio.run(provider._sync_file(copy, auth, this_attempt_data))
+
+    assert result.changed and result.synced
+    assert "newer issued-at, written back" in result.reason
+
+    stored = real_get("secrets", secret_name)
+    stored_raw = (stored.get("data") or {}).get("auth.json")
+    stored_document = json.loads(base64.b64decode(str(stored_raw)).decode("utf-8"))
+    assert stored_document["tokens"]["refresh_token"] == "newer-candidate"

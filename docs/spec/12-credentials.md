@@ -209,8 +209,10 @@ has no temporary pathname at all, shared or otherwise: it patches the harness's
 Secret directly, and the same compare-and-swap is the patch's own
 `metadata.resourceVersion`, read along with the Secret immediately before the
 patch, so the API server itself refuses the write with 409 when another
-attempt's write already moved the Secret past it; a refused patch is recorded
-the same way, never retried blind. Either way, whichever attempt's write lands
+attempt's write already moved the Secret past it; on a conflict, the provider
+re-reads the Secret and retries the compare-and-swap when this candidate is still
+newer rather than retrying blind or treating every conflict as proof that the
+source moved past it. Either way, whichever attempt's write lands
 last against a source that has not moved since its own read is the one that
 is kept, regardless of which attempt's harness process exited, or synced,
 first. Today only one Codex attempt runs at a time (`per_harness.codex: 1`,
