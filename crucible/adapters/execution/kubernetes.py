@@ -650,6 +650,70 @@ class _CacheGate:
                 self._condition.notify_all()
 
 
+async def _rehydrate_adopted(
+    launched: _Launched,
+    pod_spec: Mapping[str, Any],
+    attempt_id: str,
+    namespace: str,
+    call: Callable[..., Any],
+) -> None:
+    """hades #205: reconstruct egress state for an adopted worker from the live Pod/Job.
+
+    The provider that adopted this worker never saw the original launch, so
+    ``launched.egress_plan``, ``launched.allowed``, and ``launched.network_policy`` are
+    all ``None``.  This helper walks the Pod's ``hostAliases`` to rebuild the original
+    ``EgressPlan`` (hosts, host_addresses, cidrs, written), then reads the live
+    NetworkPolicy to confirm the policy name.  When successful the plan and allowed set
+    are attached so that ``_refresh_addresses`` can continue on the next observation.
+
+    If the policy cannot be read or the hostAliases are absent the attempt is left
+    unmodified and will simply not be refreshed.
+    """
+    host_aliases: list[Mapping[str, Any]] = pod_spec.get("hostAliases") or []
+    if not host_aliases:
+        return
+    # Reverse-engineer EgressPlan.host_addresses from hostAliases.
+    # hostAliases: [{"ip": "1.2.3.4", "hostnames": ["a.com", "b.com"]}, ...]
+    host_to_cidrs: dict[str, list[str]] = {}
+    for alias in host_aliases:
+        ip = alias.get("ip", "")
+        for host in alias.get("hostnames") or []:
+            host_to_cidrs.setdefault(host, [])
+            host_to_cidrs[host].append(f"{ip}/32")
+    if not host_to_cidrs:
+        return
+    # Build the host_addresses and collect all cidrs (written).
+    host_addresses: list[tuple[str, tuple[str, ...]]] = []
+    all_cidrs: list[str] = []
+    for host in sorted(host_to_cidrs):
+        cidrs = sorted(set(host_to_cidrs[host]))
+        host_addresses.append((host, tuple(cidrs)))
+        all_cidrs.extend(cidrs)
+    all_cidrs = list(dict.fromkeys(all_cidrs))  # deduplicate preserving order
+    written = tuple(all_cidrs)
+    plan = EgressPlan(
+        hosts=tuple(h for h, _ in host_addresses),
+        cidrs=written,
+        host_addresses=tuple(host_addresses),
+    )
+
+    # Find the NetworkPolicy name by reading the policy for this attempt in this namespace.
+    policy_name = k8sspec.object_name("np-worker", attempt_id)
+    try:
+        policy = await call("networkpolicies", policy_name)
+        if not policy:
+            return
+    except Exception:
+        # Policy unavailable; leave state None (refresh will skip).
+        return
+    launched.network_policy = policy_name
+    launched.allowed = AllowedAddresses(written=written, current=tuple(host_addresses))
+    launched.egress_plan = plan
+    # Start the refresh clock immediately so the first real lookup happens
+    # after one ``resolve_ttl_seconds`` interval rather than instantly.
+    launched.egress_refreshed_at = time.monotonic()
+
+
 class KubernetesProvider:
     """The provider of 08 on Jobs and Pods, as 26 specifies it."""
 
@@ -2213,7 +2277,6 @@ class KubernetesProvider:
         now = time.monotonic()
         answers: dict[str, tuple[str, ...]] = {}
         if now - launched.egress_refreshed_at >= self.config.resolve_ttl_seconds:
-            launched.egress_refreshed_at = now
             for host in allowed.hosts:
                 answer = await self._lookup(host, now)
                 if answer is None:
@@ -2268,6 +2331,7 @@ class KubernetesProvider:
             )
             return
         launched.allowed = refreshed
+        launched.egress_refreshed_at = now
         log.info(
             "attempt %s: %s now allows %s (was %s)",
             launched.spec.attempt_id,
@@ -2873,6 +2937,19 @@ class KubernetesProvider:
                     limits_source="pod" if pod_spec is live_spec else "template",
                 )
             launched = self._launched[attempt_id]
+            # hades #205: rehydrate egress state for adopted workers so their addresses
+            # continue to be followed after a supervisor restart. The plan, the allowed
+            # set, and the policy name are reconstructed from the Job's hostAliases and
+            # the live NetworkPolicy so `_refresh_addresses` can do its work on the next
+            # observation rather than permanently skipping adopted attempts.
+            if (
+                launched.egress_plan is None
+                and pod is not None
+                and self.config.resolve_ttl_seconds > 0
+            ):
+                await _rehydrate_adopted(
+                    launched, pod_spec, attempt_id, self.config.namespace, self._call
+                )
             if pod is not None and not launched.pod_name:
                 # So a Pod that vanishes between this reconcile and the first `observe`
                 # reads as lost, not as one the Job controller never created (103).
