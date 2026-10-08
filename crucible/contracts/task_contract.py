@@ -425,7 +425,8 @@ class TaskContractV1(StrictModel):
         # collected tree (01M4CS2Q6CD3D8QECEYKRQW503).
         if any(str(v.id).startswith(ACCEPTANCE_CHECK_PREFIX) for v in self.required_verification):
             raised = [
-                str(v.id) for v in self.required_verification
+                str(v.id)
+                for v in self.required_verification
                 if str(v.id).startswith(ACCEPTANCE_CHECK_PREFIX)
             ]
             raise ValueError(
