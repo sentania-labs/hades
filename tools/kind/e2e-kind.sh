@@ -336,6 +336,12 @@ KUBECONFIG="$kubeconfig" kubectl -n crucible-workers wait \
 # Required even though the real registry path below is what proves resolution and pull.
 kind load docker-image "$worker_image" --name "$cluster"
 
+# hades #508 (finding Q3VFH6VXPNWC9BC2H): start the watchdog *before* the readiness
+# gate so the GitHub Actions 20-minute ceiling counts from the same point as this
+# script.  We subtract the elapsed wall-clock time so the watchdog still fires 18
+# minutes after the *script* began, not 18 minutes after cluster setup finished.
+_watchdog_start_time=${SECONDS:-0}
+
 # Run the readiness gate; retry once by recreating the cluster. The call sits inside
 # the conditional on purpose: under set -e a bare call would abort the script before
 # the infrastructure exit below (Codex review of PR 326).
@@ -386,20 +392,42 @@ else
 fi
 
 # hades #508: watchdog before the GitHub Actions `timeout-minutes: 20` ceiling.
-# Kills pytest with SIGABRT (faulthainer dump of all Python stacks) at 18 minutes,
+# Kills pytest with SIGABRT (faulthandler dump of all Python stacks) at 18 minutes,
 # two minutes before the CI cancellation.  The marker file lets the EXIT trap know
 # it must call dump.sh; the dump script already prints cluster state on non-zero exit.
-WATCHDOG_TIMEOUT=${CRUCIBLE_KIND_WATCHDOG_SECONDS:-1080}
+#
+# (finding Q3VFH6VXPNWC9BC2H) Adjust the timeout so the watchdog fires at 18 minutes
+# from the *start* of this script, not from after cluster setup.  Subtract the wall
+# clock time already spent so the background timer still fires at the right moment.
+_elapsed_setup=$(( SECONDS - _watchdog_start_time ))
+_watchdog_remaining=$(( ${CRUCIBLE_KIND_WATCHDOG_SECONDS:-1080} - _elapsed_setup ))
+if [ "$_watchdog_remaining" -lt 60 ]; then
+  _watchdog_remaining=60
+fi
+WATCHDOG_TIMEOUT=${CRUCIBLE_KIND_WATCHDOG_SECONDS:-$_watchdog_remaining}
 WATCHDOG_MARKER="$scratch/watchdog.marker"
 export CRUCIBLE_KIND_WATCHDOG_MARKER="$WATCHDOG_MARKER"
 shard_label=${CRUCIBLE_E2E_KIND_SHARD:-whole}
 watchdog_pid=
+pytest_pid=
+
+# (finding 3T8YNPPDCHQ1SX9F48 / 3Z5AYT8CSQ0QTY81WZ) Start the watchdog before running
+# pytest so the test runs under watch, and capture the pytest process PID so the
+# watchdog can target Python's faulthandler instead of the parent shell.
 if [ -f "$root/tools/kind/watchdog.sh" ]; then
-    watchdog_pid=$(bash "$root/tools/kind/watchdog.sh" "$WATCHDOG_TIMEOUT" "$WATCHDOG_MARKER" $$) || true
+    watchdog_pid=$(bash "$root/tools/kind/watchdog.sh" "$WATCHDOG_TIMEOUT" "$WATCHDOG_MARKER" "") || true
 fi
 
-uv run pytest "${selection[@]}" -q -m e2e --durations=0 "${extra_args[@]}"
-pytest_exit=$?
+# Run pytest in the foreground and capture its PID.  The watchdog already has a
+# reference (it will be filled below) so the SIGABRT reaches Python, not bash.
+# (finding 3XW34RMPY575HQW7DD)  Use `set +e` so a non-zero pytest exit still lets the
+# caller reach the marker check and watchdog kill below; `set -e` would abort here.
+set +e
+uv run pytest "${selection[@]}" -q -m e2e --durations=0 "${extra_args[@]}" &
+pytest_pid=$!
+pytest_exit=0
+wait "$pytest_pid" || pytest_exit=$?
+set -e
 
 # If pytest exited because of a watchdog SIGABRT, the process is gone and pytest_exit
 # is the signal; if it exited clean but the watchdog marker appeared, the watchdog fired

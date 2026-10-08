@@ -301,3 +301,142 @@ class TestWatchdogInE2eKindScript:
             "default watchdog timeout must be 1080s (18 min) to fire "
             "before the 20-min GitHub Actions timeout"
         )
+
+
+class TestWatchdogTargetsPytestNotShell:
+    """Prove watchdog.sh targets pytest PID, not the parent shell PID.
+
+    Finding 3T8YNPPDCHQ1SX9F48 / 3Z5AYT8CSQ0QTY81WZ: the watchdog must
+    SIGABRT the pytest process (or its process group), not $$ (the shell).
+    Sending SIGABRT to bash does not trigger Python's faulthandler.
+    """
+
+    def test_watchdog_sh_accepts_pytest_pid(self) -> None:
+        """watchdog.sh's third arg is called pytest_pid, not caller_pid."""
+        content = _WATCHDOG_SH.read_text(encoding="utf-8")
+        assert "pytest_pid" in content, "watchdog.sh must use 'pytest_pid' for the third parameter"
+        assert "caller_pid" not in content, (
+            "watchdog.sh should not reference 'caller_pid' — the parameter is pytest_pid"
+        )
+
+    def test_watchdog_sh_sends_sigabrt_to_process_group(self) -> None:
+        """watchdog.sh tries process-group kill before single-PID kill."""
+        content = _WATCHDOG_SH.read_text(encoding="utf-8")
+        assert "SIGABRT" in content, "watchdog.sh must send SIGABRT"
+        # It should try the negative-PID (process group) first, then fall back.
+        assert "-${pytest_pid}" in content or "-$pytest_pid" in content, (
+            "watchdog.sh must attempt process-group kill (negative PID) to trigger "
+            "faulthandler in all pytest children"
+        )
+
+    def test_e2e_kind_sh_passes_blank_to_watchdog_initially(self) -> None:
+        """e2e-kind.sh does not pass $$ to watchdog.sh."""
+        content = _E2E_KIND_SH.read_text(encoding="utf-8")
+        # Before my fix, the line was:
+        #   watchdog_pid=$(bash ... watchdog.sh ... $$)
+        # After: the third arg is '' and pytest_pid is filled after bg-launch.
+        lines = content.splitlines()
+        watchdog_lines = [ln for ln in lines if "watchdog.sh" in ln and "bash" in ln]
+        assert len(watchdog_lines) >= 1, "expected at least one watchdog.sh invocation"
+        for line in watchdog_lines:
+            # The old buggy line passed "$$". The fix passes "" or pytest_pid.
+            assert '"$$"' not in line and "'$$'" not in line, (
+                "e2e-kind.sh must not pass $$ (shell PID) to watchdog.sh; "
+                "it must pass the pytest PID instead"
+            )
+
+    def test_e2e_kind_sh_captures_pytest_pid(self) -> None:
+        """e2e-kind.sh runs pytest in background and captures its PID."""
+        content = _E2E_KIND_SH.read_text(encoding="utf-8")
+        assert "pytest_pid=" in content or "pytest_pid =" in content, (
+            "e2e-kind.sh must capture the pytest PID in a variable"
+        )
+        assert "&" in content and "pytest" in content, (
+            "e2e-kind.sh must background the pytest process to capture its PID"
+        )
+
+
+class TestE2eKindHandlesExitCode:
+    """Prove e2e-kind.sh survives non-zero pytest exit codes (set +e).
+
+    Finding 3XW34RMPY575HQW7DD: with set -e, a non-zero pytest exit aborts
+    the script immediately, skipping the marker check and watchdog cleanup.
+    The fix wraps pytest in `set +e ... set -e`.
+    """
+
+    def test_set_plus_e_around_pytest(self) -> None:
+        """e2e-kind.sh disables errexit around pytest."""
+        content = _E2E_KIND_SH.read_text(encoding="utf-8")
+        # Find lines around pytest invocation.
+        lines = content.splitlines()
+        pytest_line_idx = None
+        for i, line in enumerate(lines):
+            if "uv run pytest" in line and "pytest_pid" not in line:
+                pytest_line_idx = i
+                break
+        assert pytest_line_idx is not None, "could not find 'uv run pytest' line"
+
+        # Look for set +e within a few lines before the pytest line.
+        found_plus_e = False
+        for i in range(max(0, pytest_line_idx - 5), pytest_line_idx + 1):
+            if "set +e" in lines[i]:
+                found_plus_e = True
+                break
+        assert found_plus_e, (
+            "e2e-kind.sh must run 'set +e' before uv run pytest to survive "
+            "non-zero exit codes under set -e"
+        )
+
+        # Look for set -e within a few lines after.
+        found_minus_e = False
+        for i in range(pytest_line_idx, min(len(lines), pytest_line_idx + 10)):
+            if "set -e" in lines[i] and "set +e" not in lines[i]:
+                found_minus_e = True
+                break
+        assert found_minus_e, "e2e-kind.sh must restore 'set -e' after the pytest block"
+
+
+class TestWatchdogStartsBeforeReadinessGate:
+    """Prove the watchdog is started before the readiness gate (AC1 / Q3VFH6VXPNWC9BC2H).
+
+    The watchdog timer must fire at 18 minutes from script start, not after
+    cluster setup completes.  The fix records _watchdog_start_time before
+    crucible_kind_wait_and_retry and adjusts the timeout by elapsed time.
+    """
+
+    def test_watchdog_start_time_recorded_before_readiness_gate(self) -> None:
+        """_watchdog_start_time is set before the readiness gate call."""
+        content = _E2E_KIND_SH.read_text(encoding="utf-8")
+        lines = content.splitlines()
+
+        # Find the assignment line (the one that _sets_ the variable)
+        start_time_idx = None
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("_watchdog_start_time=") or stripped.startswith(
+                "_watchdog_start_time +"
+            ):
+                start_time_idx = i
+                break
+
+        # Find the readiness gate conditional (not the function definition)
+        readiness_gate_idx = None
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("if ! crucible_kind_wait_and_retry"):
+                readiness_gate_idx = i
+                break
+
+        assert start_time_idx is not None, "_watchdog_start_time assignment not found"
+        assert readiness_gate_idx is not None, "crucible_kind_wait_and_retry call not found"
+        assert start_time_idx < readiness_gate_idx, (
+            "_watchdog_start_time must be set before the readiness gate call"
+        )
+
+    def test_elapsed_adjustment(self) -> None:
+        """The watchdog timeout is adjusted by elapsed setup time."""
+        content = _E2E_KIND_SH.read_text(encoding="utf-8")
+        assert "_elapsed_setup" in content, "e2e-kind.sh must compute elapsed setup time"
+        assert "_watchdog_remaining" in content or "WATCHDOG_TIMEOUT" in content, (
+            "e2e-kind.sh must adjust the watchdog timeout"
+        )
