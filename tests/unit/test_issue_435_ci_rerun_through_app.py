@@ -74,6 +74,8 @@ class FakeGitHubClient(GitHubClient):
     def __init__(self, actions_write: bool) -> None:
         self.actions_write = actions_write
         self.rerun_calls: list[dict[str, Any]] = []
+        self.get_installation_permissions_calls: list[dict[str, Any]] = []
+        self.get_workflow_run_calls: list[dict[str, Any]] = []
         self._call_count = 0
 
     # -- the methods the ci-decision path exercises ------------------------
@@ -306,9 +308,24 @@ class FakeGitHubClient(GitHubClient):
     def get_installation_permissions(
         self, token: InstallationToken, *, repository: str
     ) -> dict[str, str]:
+        self.get_installation_permissions_calls.append({"repository": repository})
         # For the real client this calls /app/installations/self; the fake
         # returns whatever the test author configured.
         return {"actions": "write" if self.actions_write else "read"}
+
+    def get_workflow_run(
+        self, token: InstallationToken, *, repository: str, run_id: int
+    ) -> dict[str, Any]:
+        self.get_workflow_run_calls.append({"repository": repository, "run_id": run_id})
+        # Simulate the workflow run after a rerun: the run_attempt increments.
+        return {
+            "id": run_id,
+            "name": "CI",
+            "run_attempt": 2,
+            "status": "in_progress",
+            "conclusion": None,
+            "html_url": f"https://github.com/{repository}/actions/runs/{run_id}",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -575,9 +592,10 @@ def _decision_request(**overrides: Any) -> CIDecisionRequest:
 
 
 def test_ac1_rerun_via_actions_write_records_attempt_and_moves_state() -> None:
-    """AC1: With Actions write the app calls rerun-failed-jobs, records the new
-    attempt number on the certification, and sets the task to
-    AWAITING_CI_CERTIFICATION."""
+    """AC1: With Actions write the app calls get_installation_permissions first,
+    then rerun-failed-jobs, fetches the workflow run to get the attempt number,
+    records the new attempt on the certification, raises a wake, and moves the task
+    to AWAITING_CI_CERTIFICATION."""
     task = _build_task()
     uow = FakeUnitOfWork(task)
     cert = _cert(TASK_ID)
@@ -600,15 +618,26 @@ def test_ac1_rerun_via_actions_write_records_attempt_and_moves_state() -> None:
         github_client=gh,
     )
 
-    # The GitHub client was called once to mint a token and once for rerun-failed-jobs.
+    # get_installation_permissions was called first (finding 1).
+    assert len(gh.get_installation_permissions_calls) == 1
+
+    # The GitHub client was called once for rerun-failed-jobs.
     assert gh.rerun_calls == [{"repository": TASK_REPOSITORY, "run_id": 5150}]
 
-    # The certification records the new attempt number.
+    # get_workflow_run was called to derive the actual attempt number (finding 3).
+    assert len(gh.get_workflow_run_calls) == 1
+
+    # The certification records the new attempt number from the workflow run.
     latest_cert = uow.ci_certifications.last
     assert latest_cert is not None
-    assert latest_cert.failure["rerun_attempt"] == 1
+    assert latest_cert.failure["rerun_attempt"] == 2
 
-    # The task remains in AWAITING_CI_CERTIFICATION (the re-run is in progress).
+    # A wake was raised in the Actions-write path (finding 4).
+    assert len(uow.wakes._wakes) >= 1
+    wake_reasons = [w.reason for w in uow.wakes._wakes]
+    assert WakeReason.CI_RERUN_NEEDED.value in wake_reasons
+
+    # The task is in AWAITING_CI_CERTIFICATION (the re-run is in progress).
     assert task.state == TaskState.AWAITING_CI_CERTIFICATION
 
 
@@ -618,8 +647,9 @@ def test_ac1_rerun_via_actions_write_records_attempt_and_moves_state() -> None:
 
 
 def test_ac2_actions_read_only_raises_handoff_wake() -> None:
-    """AC2: Without Actions write the decision is recorded, a wake is raised, and
-    the task remains in AWAITING_CI_CERTIFICATION waiting on the operator."""
+    """AC2: Without Actions write the app calls get_installation_permissions first,
+    sees only read, skips the rerun path, records the decision, raises a wake,
+    and leaves the task in AWAITING_CI_CERTIFICATION waiting on the operator."""
     task = _build_task()
     uow = FakeUnitOfWork(task)
     uow.ci_certifications.put(_cert(TASK_ID))
@@ -641,7 +671,10 @@ def test_ac2_actions_read_only_raises_handoff_wake() -> None:
         github_client=gh,
     )
 
-    # No rerun call was made.
+    # get_installation_permissions was called first (finding 1).
+    assert len(gh.get_installation_permissions_calls) == 1
+
+    # No rerun call was made because the installation lacks Actions write.
     assert gh.rerun_calls == []
 
     # A wake was raised so the operator knows to perform the re-run manually.
@@ -660,10 +693,13 @@ def test_ac2_actions_read_only_raises_handoff_wake() -> None:
 
 def test_ac3_second_failure_requires_new_decision() -> None:
     """AC3: After a rerun attempt has been recorded, a second failure of the same
-    job does not trigger another auto-rerun; it requires a new ci-decision."""
+    job does not trigger another auto-rerun; it requires a new ci-decision.
+    The app still calls get_installation_permissions (finding 1) and raises a
+    wake so the Board shows the existing running rerun (finding 4), but it never
+    calls rerun-failed-jobs or get_workflow_run."""
     task = _build_task()  # state=CI_CERTIFICATION_FAILED by default
     cert_obj = _cert(TASK_ID)
-    cert_obj.failure["rerun_attempt"] = 1  # already had one rerun
+    cert_obj.failure["rerun_attempt"] = 2  # already had one rerun
     uow = FakeUnitOfWork(task)
     uow.ci_certifications.put(cert_obj)
     clock = FakeClock()
@@ -684,12 +720,19 @@ def test_ac3_second_failure_requires_new_decision() -> None:
         github_client=gh,
     )
 
+    # get_installation_permissions was still called first (finding 1).
+    assert len(gh.get_installation_permissions_calls) == 1
+
     # Even with Actions write, a second rerun of the same job after one
     # rerun was already attempted is rejected (one rerun per decision).
-    # The task stays in its current state and no new rerun is triggered.
     assert gh.rerun_calls == []
+    assert gh.get_workflow_run_calls == []
+
     # The decision was recorded (the ci_decisions repo tracks it).
     assert len(uow.ci_decisions._decisions) == 1
+
+    # A wake was raised so the Board shows the existing running rerun.
+    assert len(uow.wakes._wakes) >= 1
 
 
 # ---------------------------------------------------------------------------

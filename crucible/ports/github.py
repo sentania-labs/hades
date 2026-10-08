@@ -366,6 +366,15 @@ class GitHubClient(Protocol):
         ``{"actions": "write"}`` when the installation grants Actions write.
         """
 
+    def get_workflow_run(
+        self, token: InstallationToken, *, repository: str, run_id: int
+    ) -> dict[str, Any]:
+        """GET /repos/{owner}/{repo}/actions/runs/{run_id} (issue 435).
+
+        Returns the workflow run object which carries the current ``run_attempt``
+        after a rerun.
+        """
+
 
 # ----- the App credential the service owns (ADR 0017) ----------------------------------
 

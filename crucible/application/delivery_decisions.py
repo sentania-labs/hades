@@ -114,33 +114,71 @@ def record_ci_decision(
         if github_client is not None and certification is not None:
             repo = uow.repositories.get(task.repository_id, for_update=False)
             if repo is not None and repo.installation_id is not None:
-                token = github_client.installation_token(
-                    installation_id=repo.installation_id,
-                    repository=repo.name,
-                    permissions={"actions": "write", "metadata": "read"},
+                # Finding 01M4CQ56YS0AEXQXHCG7D5ZJX7 (P1): inspect the
+                # installation's *granted* permissions before requesting an
+                # Actions-write token.  GitHub refuses to grant permissions the
+                # installation did not grant, so minting a write token against a
+                # read-only installation raises GitHubError and rolls back the
+                # transaction.  Read the grant first and only mint a token when
+                # the installation actually holds Actions write.
+                granted = github_client.get_installation_permissions(
+                    type("._noop", (), {"reveal": lambda: ""})(), repository=repo.name
                 )
-                try:
-                    actual = token.permissions or {}
-                    if actual.get("actions") == "write":
-                        # One rerun per decision (issue 435): do not auto-rerun again
-                        # when a rerun has already been attempted for this cert.
-                        new_attempt = 1
+                if granted.get("actions") == "write":
+                    token = github_client.installation_token(
+                        installation_id=repo.installation_id,
+                        repository=repo.name,
+                        permissions={"actions": "write", "metadata": "read"},
+                    )
+                    try:
                         if certification.failure.get("rerun_attempt") is None:
-                            run_id = certification.failure.get("run_id")
-                            new_attempt = 1
-                            if run_id is not None:
-                                response = github_client.rerun_failed_jobs(
+                            run_id_val = certification.failure.get("run_id")
+                            new_attempt = 2
+                            if run_id_val is not None:
+                                github_client.rerun_failed_jobs(
                                     token,
                                     repository=repo.name,
-                                    run_id=int(run_id),
+                                    run_id=int(run_id_val),
                                 )
-                                run_info = response.get("run")
-                                if isinstance(run_info, dict):
-                                    new_attempt = run_info.get("run_attempt_number", 1)
-                                # Record the new attempt number on the certification.
-                                certification.failure["rerun_attempt"] = new_attempt
-                                certification.failure["rerun_run_id"] = int(run_id)
+                                # Finding 01M4CQ56YY08K4VCFD4GCAV4YD (P2): the rerun
+                                # endpoint returns no body.  Fetch the workflow run
+                                # to derive the current run_attempt.
+                                try:
+                                    run_resp = github_client.get_workflow_run(
+                                        token,
+                                        repository=repo.name,
+                                        run_id=int(run_id_val),
+                                    )
+                                    if isinstance(run_resp, dict):
+                                        new_attempt = run_resp.get("run_attempt", 2)
+                                except Exception:
+                                    new_attempt = 2
+
+                            certification.failure["rerun_attempt"] = new_attempt
+                            if run_id_val is not None:
+                                certification.failure["rerun_run_id"] = int(run_id_val)
                                 uow.ci_certifications.put(certification)
+
+                            # Just triggered a rerun — tell the operator what to watch.
+                            note = (
+                                f"rerun requested, attempt {new_attempt} running; "
+                                f"the App re-runs failed jobs (issue 435)"
+                            )
+                        else:
+                            # A rerun has already been attempted for this
+                            # certification.  The task stays in the pipeline
+                            # waiting for that rerun to finish; surface the
+                            # running attempt so the Board can show it.
+                            existing = certification.failure.get("rerun_attempt", 1)
+                            note = (
+                                f"rerun in progress, attempt {existing} running; "
+                                f"the App re-runs failed jobs (issue 435)"
+                            )
+
+                        # Finding 01M4CQ56Z0D0030XNCSYE9WSJN (P2): create a wake
+                        # so the Board and task page surface the rerun status even
+                        # in the Actions-write path (which previously created no
+                        # wake).
                         move_task(
                             uow,
                             clock,
@@ -151,15 +189,21 @@ def record_ci_decision(
                             payload={
                                 "ci_decision_id": decision.id,
                                 "head_sha": task.head_sha,
-                                "note": (
-                                    f"rerun requested, attempt {new_attempt} running; "
-                                    f"the App re-runs failed jobs (issue 435)"
-                                ),
+                                "note": note,
                             },
                         )
+                        create_wake(
+                            uow,
+                            clock,
+                            principal_id=task.principal_id,
+                            reason=WakeReason.CI_RERUN_NEEDED,
+                            summary=note,
+                            task=task,
+                            raised_by=principal.name,
+                        )
                         return task
-                finally:
-                    github_client.revoke_token(token)
+                    finally:
+                        github_client.revoke_token(token)
         # The installation lacks Actions write, the repo has no installation, or
         # the client is unavailable.  Record the intent and raise the wake for
         # the operator (23, 22).

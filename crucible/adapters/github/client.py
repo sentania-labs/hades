@@ -598,14 +598,16 @@ class RestGitHubClient:
             f"/repos/{repository}/actions/runs/{run_id}/rerun-failed-jobs",
             bearer=token.reveal(),
         )
-        if status >= 400 or not isinstance(payload, dict):
-            message = payload.get("message") if isinstance(payload, dict) else "rerun failed"
+        if status >= 400:
+            message = _message(payload)
             raise GitHubError(
                 status,
-                str(message),
+                message,
                 path=f"/repos/{repository}/actions/runs/{run_id}/rerun-failed-jobs",
             )
-        return payload
+        # GitHub returns 201 Created with an empty body for this endpoint.
+        # A successful response may be ``None``; treat it as success.
+        return payload if isinstance(payload, dict) else {}
 
     def get_installation_permissions(
         self, token: InstallationToken, *, repository: str
@@ -630,6 +632,23 @@ class RestGitHubClient:
             return {}
         accepted = payload.get("permissions") or {}
         return {str(k): str(v) for k, v in accepted.items()}
+
+    def get_workflow_run(
+        self, token: InstallationToken, *, repository: str, run_id: int
+    ) -> dict[str, Any]:
+        """GET /repos/{owner}/{repo}/actions/runs/{run_id} (issue 435).
+
+        Returns the workflow run object including the current ``run_attempt``
+        after a rerun.
+        """
+        status, payload, _ = self._http.request(
+            "GET",
+            f"/repos/{repository}/actions/runs/{run_id}",
+            bearer=token.reveal(),
+        )
+        if status == 200 and isinstance(payload, dict):
+            return payload
+        return {}
 
 
 def _message(payload: Any) -> str:
