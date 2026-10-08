@@ -23,6 +23,23 @@ is carried to the reviewer.
 | `workspace_clean` | blocking | No provider containers or volumes remain |
 | `internal_review_recorded` | skipped | Filled by the orchestrator; the worker self-review is the review |
 | `commit_policy` | advisory | Commit authorship matches the policy (FDY-0143) |
+| `acceptance_checks` | dynamic | Runs executable criterion checks from the contract; blocking on lab-local pools, advisory elsewhere (hades #449) |
+
+## Acceptance checks gate (`acceptance_checks`)
+
+Each `acceptance_criteria` entry in the task contract may carry an optional `check` field
+with `command` and `expect_exit` (default 0). Foundry writes these when it scopes.
+
+When Hades' gate probe evaluates the `acceptance_checks` gate on a **lab-local pool**
+attempt, it runs every criterion check on the collected tree. A check that exits with a
+non-matching code blocks publication with a `FAIL` on the gate, naming the criterion id
+and the exit in the gate detail.
+
+When the attempt ran on a **frontier pool**, the gate is advisory: checks still run, but
+a failing check does not block publication. Instead the finding is listed for the reviewer.
+
+A criterion without a `check` field is advisory and listed in the gate's `findings` for
+the reviewer, exactly as before.
 
 ## Editor and merge leftovers (`editor_leftovers`)
 

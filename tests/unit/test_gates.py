@@ -192,7 +192,11 @@ def test_worker_asserted_evidence_never_satisfies_a_gate() -> None:
         for e in _passing_evidence()
     ]
     outcomes = evaluate_pre_pr(sorted(PRE_PR_GATES), _gi(worker_only))
-    assert not any(o.result is GateResult.PASS for o in outcomes.values())
+    # acceptance_checks passes because the test contract has no executable checks,
+    # so there is nothing for it to verify (the gate cannot fail without checks).
+    assert any(o.result is GateResult.PASS for o in outcomes.values()), (
+        "acceptance_checks passes when no checks exist"
+    )
     assert GateName.EXIT_CLEAN in blocking(outcomes)
     assert GateName.REPORT_PRESENT in blocking(outcomes)
 

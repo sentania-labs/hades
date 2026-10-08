@@ -147,7 +147,18 @@ def render_identity_md(
         sections.append(f"## Read first\n\n{_bullets(context)}")
     sections.append(
         "## Acceptance criteria\n\n"
-        + _bullets([f"`{c.get('id')}`: {c.get('text', '')}" for c in criteria])
+        + _bullets(
+            [
+                f"`{c.get('id')}`: {c.get('text', '')}"
+                + (
+                    f"\n  check: `{c.get('check', {}).get('command', '')}` "
+                    f"(expect exit {c.get('check', {}).get('expect_exit', 0)})"
+                    if isinstance(c.get("check"), dict) and c["check"].get("command")
+                    else ""
+                )
+                for c in criteria
+            ]
+        )
     )
     sections.append(
         "## Checks\n\nRun these from the checkout and fix what fails:\n\n"

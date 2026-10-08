@@ -100,9 +100,31 @@ class ProjectInstruction(StrictModel):
     ref: str = Field(min_length=1)
 
 
+class AcceptanceCriterionCheck(StrictModel):
+    """An executable check attached to an acceptance criterion.
+
+    Foundry writes these when it scopes. Hades runs them on the collected tree
+    in the gate probe before publication (issue #449).
+    """
+
+    command: str = Field(min_length=1)
+    expect_exit: int = 0
+
+    @model_validator(mode="after")
+    def _runs_in_a_worker(self) -> AcceptanceCriterionCheck:
+        program = worker_absent_program(self.command)
+        if program is not None:
+            raise ValueError(
+                f"check runs `{self.command}`, which needs {program}: no worker image has "
+                "docker, kind or kubectl (ADR 0020)."
+            )
+        return self
+
+
 class AcceptanceCriterion(StrictModel):
     id: str = Field(min_length=1)
     text: str = Field(min_length=1)
+    check: AcceptanceCriterionCheck | None = None
 
 
 # hades #429: the programs no worker image has and never will (ADR 0020: the worker

@@ -43,6 +43,7 @@ class GateName(StrEnum):
     VERIFICATION_RAN = "verification_ran"
     RUN_EVIDENCE_PRESENT = "run_evidence_present"
     CRITERIA_MAPPED = "criteria_mapped"
+    ACCEPTANCE_CHECKS = "acceptance_checks"
     DEPENDENCIES_UNCHANGED = "dependencies_unchanged"
     CI_UNCHANGED = "ci_unchanged"
     WORKSPACE_CLEAN = "workspace_clean"
@@ -78,6 +79,7 @@ PRE_PR_GATES: frozenset[str] = frozenset(
         GateName.VERIFICATION_RAN,
         GateName.RUN_EVIDENCE_PRESENT,
         GateName.CRITERIA_MAPPED,
+        GateName.ACCEPTANCE_CHECKS,
         GateName.DEPENDENCIES_UNCHANGED,
         GateName.CI_UNCHANGED,
         GateName.WORKSPACE_CLEAN,
@@ -188,6 +190,7 @@ class GateInput:
     head_sha: str | None
     evidence: tuple[EvidenceItem, ...]
     internal_review_required: bool = True
+    selected_pool: str | None = None
 
     def of_kind(self, kind: str, *, role: str | None = None) -> list[EvidenceItem]:
         out = [e for e in self.evidence if e.admissible and e.kind == kind]
@@ -966,6 +969,160 @@ def commit_policy(gi: GateInput) -> GateOutcome:
     return GateOutcome(GateResult.PASS, f"every commit is authored as {author}", ids)
 
 
+# --- acceptance_checks gate (hades #449) ------------------------------------------
+
+
+def _check_from_contract(criterion: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the check payload for a criterion, or None."""
+    check = criterion.get("check")
+    if check is None:
+        return None
+    if not isinstance(check, dict):
+        return None
+    return check
+
+
+def acceptance_checks(gi: GateInput) -> GateOutcome:
+    """Run executable acceptance-check criteria on the collected tree (hades #449).
+
+    For a lab-local pool the gate is blocking: a failing check stops publication.
+    For a frontier pool the gate is advisory: findings are listed for the reviewer.
+    A criterion without a check is advisory and listed as-is.
+    """
+    selected_pool = (gi.selected_pool or "").lower()
+    is_local = _is_pool_local(selected_pool, gi.policy)
+
+    # Gather criterion checks from the contract.
+    criteria = [c for c in gi.contract.get("acceptance_criteria", []) if isinstance(c, dict)]
+    findings: list[str] = []
+    check_results: list[dict[str, Any]] = []
+
+    for criterion in criteria:
+        check = _check_from_contract(criterion)
+        if check is None:
+            ac_id = criterion.get("id", "unknown")
+            findings.append(f"criterion {ac_id}: no executable check (advisory)")
+            continue
+        command = check.get("command", "")
+        expect = check.get("expect_exit", 0)
+        ac_id = criterion.get("id", "unknown")
+        check_results.append(
+            {
+                "id": ac_id,
+                "command": command,
+                "expected_exit": expect,
+                "actual_exit": None,
+                "passed": False,
+            }
+        )
+
+    if not check_results:
+        # No criterion carries an executable check; nothing to run.
+        return GateOutcome(
+            GateResult.PASS,
+            "no criteria carry executable checks",
+            (),
+        )
+
+    # The probe runs checks and records them as evidence. Look for acceptance_check evidence.
+    check_evidence = [e for e in gi.evidence if e.kind == "acceptance_check" and e.admissible]
+
+    # Build a map: criterion_id -> (actual_exit, passed)
+    check_map: dict[str, dict[str, Any]] = {}
+    for ev in check_evidence:
+        payload = ev.payload or {}
+        ac_id = payload.get("criterion_id", "")
+        actual_exit = payload.get("exit_code")
+        expected = payload.get("expected_exit")
+        if ac_id and actual_exit is not None:
+            if expected is None:
+                # Look up expected from contract.
+                for cr in check_results:
+                    if cr["id"] == ac_id:
+                        expected = cr["expected_exit"]
+                        break
+                if expected is None:
+                    expected = 0
+            passed = actual_exit == expected
+            check_map[ac_id] = {
+                "actual_exit": actual_exit,
+                "passed": passed,
+                "expected_exit": expected,
+            }
+            # Update check_results.
+            for cr in check_results:
+                if cr["id"] == ac_id:
+                    cr["actual_exit"] = actual_exit
+                    cr["passed"] = passed
+
+    if check_evidence:
+        # We have evidence from the probe. Determine pass/fail.
+        failed_criteria = []
+        for cr in check_results:
+            if not cr.get("passed", False):
+                ac_id = cr.get("id", "unknown")
+                actual = cr.get("actual_exit")
+                expected = cr.get("expected_exit", 0)
+                failed_criteria.append(
+                    f"criterion {ac_id}: check `{cr.get('command', '')}` exited {actual} "
+                    f"(expected {expected})"
+                )
+
+        if failed_criteria:
+            detail = "; ".join(failed_criteria[:10])
+            all_findings = tuple(failed_criteria + list(findings) if findings else failed_criteria)
+            if is_local:
+                return GateOutcome(
+                    GateResult.FAIL,
+                    f"{len(failed_criteria)} criterion check(s) failed: {detail}",
+                    tuple(ev.id for ev in check_evidence),
+                )
+            # Advisory: pass the gate but record findings.
+            return GateOutcome(
+                GateResult.PASS,
+                f"{len(failed_criteria)} criterion check(s) failed but gate is advisory",
+                tuple(ev.id for ev in check_evidence),
+                findings=all_findings,
+            )
+
+        return GateOutcome(
+            GateResult.PASS,
+            "all criterion checks passed",
+            tuple(ev.id for ev in check_evidence),
+            findings=tuple(findings),
+        )
+
+    # No evidence yet: the probe hasn't run these checks.
+    for cr in check_results:
+        findings.append(
+            f"check `{cr['command']}` for criterion {cr['id']} "
+            f"(expect exit {cr.get('expected_exit', 0)})"
+        )
+    return GateOutcome(
+        GateResult.PASS,
+        "checks not yet run on the collected tree; listed for the reviewer",
+        (),
+        findings=tuple(findings),
+    )
+
+
+def _is_pool_local(selected_pool: str, policy: dict[str, Any]) -> bool:
+    """Return True when the pool is a lab-local pool (hades #449).
+
+    Local pools are those that hold a model on a local endpoint (Hermes on the gateway).
+    If no pool is set, default to local for backward compatibility.
+    """
+    if selected_pool == "":
+        return True
+    local_pool_names: set[str] = set()
+    for m in policy.get("routing", {}).get("models", []):
+        if isinstance(m, dict) and m.get("endpoint") == "local":
+            pool_name = str(m.get("pool", "")).lower()
+            if pool_name:
+                local_pool_names.add(pool_name)
+    return selected_pool in local_pool_names
+
+
 PRE_PR_EVALUATORS: dict[str, Callable[[GateInput], GateOutcome]] = {
     GateName.REPORT_PRESENT: report_present,
     GateName.EXIT_CLEAN: exit_clean,
@@ -977,6 +1134,7 @@ PRE_PR_EVALUATORS: dict[str, Callable[[GateInput], GateOutcome]] = {
     GateName.VERIFICATION_RAN: verification_ran,
     GateName.RUN_EVIDENCE_PRESENT: run_evidence_present,
     GateName.CRITERIA_MAPPED: criteria_mapped,
+    GateName.ACCEPTANCE_CHECKS: acceptance_checks,
     GateName.DEPENDENCIES_UNCHANGED: dependencies_unchanged,
     GateName.CI_UNCHANGED: ci_unchanged,
     GateName.WORKSPACE_CLEAN: workspace_clean,

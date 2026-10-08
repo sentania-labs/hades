@@ -89,6 +89,7 @@ def gate_input(uow: UnitOfWork, *, task: Task, attempt: Attempt, execution: Exec
         head_sha=task.head_sha,
         evidence=evidence_items(uow, attempt.id, task.id),
         internal_review_required=internal_review_required(policy, stored.document, execution.role),
+        selected_pool=getattr(attempt, "selected_pool", None),
     )
 
 
