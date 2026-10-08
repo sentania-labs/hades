@@ -319,10 +319,3 @@ def workspace(attempt_id: str) -> Workspace:
         identity_path="k8s://ws/identity",
         report_path="k8s://ws/report",
     )
-
-
-def _spec_returning(value: Any) -> Any:
-    async def _spec_for(_attempt: Attempt) -> Any:
-        return value
-
-    return _spec_for
