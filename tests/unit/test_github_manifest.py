@@ -32,7 +32,7 @@ def test_the_manifest_asks_for_spec_23s_permissions_no_events_and_no_webhook() -
         "contents": "write",
         "pull_requests": "write",
         "checks": "read",
-        "actions": "read",
+        "actions": "write",
         "issues": "read",
     }
     assert manifest["default_permissions"] == PERMISSIONS

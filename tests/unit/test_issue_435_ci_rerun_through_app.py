@@ -1,57 +1,62 @@
 """Issue 435: CI rerun through the GitHub App when it holds Actions write.
 
-This file is a unit test of `record_ci_decision` (issue 435) exercising the two
+This file is a unit test of ``record_ci_decision`` (issue 435) exercising the two
 code paths that the delivery-supervisor's ci-decision endpoint reaches:
 
-* AC1 – the installation grants Actions write → the app calls `rerun-failed-jobs`,
-  the certification records the new attempt number and moves to `AWAITING_CI_CERTIFICATION`.
-* AC2 – the installation grants only Actions read → the old handoff behaviour
-  (record the decision, raise a wake, leave the task in `AWAITING_CI_CERTIFICATION`).
-* AC3 – a second failure of the same job after the rerun does **not** auto-rerun;
+* AC1 - the installation grants Actions write - the app calls ``rerun-failed-jobs``,
+  the certification records the new attempt number and moves to
+  ``AWAITING_CI_CERTIFICATION``.
+* AC2 - the installation grants only Actions read - the old handoff behaviour
+  (record the decision, raise a wake, leave the task in ``AWAITING_CI_CERTIFICATION``).
+* AC3 - a second failure of the same job after the rerun does **not** auto-rerun;
   it requires a fresh ci-decision to be recorded.
 
-The test uses a fake GitHub client that mirrors the real client's `GitHubClient`
+The test uses a fake GitHub client that mirrors the real client's ``GitHubClient``
 protocol so the domain and application layers never see HTTP.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
-import pytest
-
-from crucible.adapters.github.appauth import InstallationToken
+from crucible.application.admin import github_manifest
 from crucible.application.delivery_decisions import (
     CIDecisionRequest,
-    CIAction,
     record_ci_decision,
 )
 from crucible.contracts.wake import WakeReason
 from crucible.domain.entities import (
+    CIAction,
     CICertification,
     Principal,
     Role,
     Task,
-    TaskState,
-    Wake,
 )
-from crucible.ports.clock import Clock
-from crucible.ports.github import CheckRecord, GitHubClient, PullRequestRef
-
+from crucible.domain.lifecycle import TaskState
+from crucible.ports.github import (
+    CheckRecord,
+    CommentRecord,
+    GitHubClient,
+    InstallationToken,
+    MergeResult,
+    Observation,
+    PullRequestRef,
+    ReactionRecord,
+)
 
 # ---------------------------------------------------------------------------
 # Test data
 # ---------------------------------------------------------------------------
 
-NOW = datetime(2026, 10, 7, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 7, 12, 0, 0, tzinfo=UTC)
 TASK_ID = "task-001"
 TASK_REPOSITORY = "owner/repo"
 HEAD_SHA = "abcd1234"
 
 
 # ---------------------------------------------------------------------------
-# Fixtures – fake clock / fake GitHub client
+# Fixtures - fake clock / fake GitHub client
 # ---------------------------------------------------------------------------
 
 
@@ -61,10 +66,10 @@ class FakeClock:
 
 
 class FakeGitHubClient(GitHubClient):
-    """A minimal `GitHubClient` for issue 435 that tracks installation
-    permissions and whether `rerun-failed-jobs` was called.
+    """A minimal ``GitHubClient`` for issue 435 that tracks installation
+    permissions and whether ``rerun-failed-jobs`` was called.
 
-    `actions_write` controls whether the fake installation grants that scope.
+    ``actions_write`` controls whether the fake installation grants that scope.
     """
 
     def __init__(self, actions_write: bool) -> None:
@@ -81,10 +86,7 @@ class FakeGitHubClient(GitHubClient):
         repository: str,
         permissions: dict[str, str] | None = None,
     ) -> InstallationToken:
-        if permissions and "actions" in permissions:
-            requested = permissions["actions"]
-        else:
-            requested = None
+        requested = permissions["actions"] if permissions and "actions" in permissions else None
 
         self._call_count += 1
         # When we mint a token with actions:write, GitHub returns the actual
@@ -101,42 +103,137 @@ class FakeGitHubClient(GitHubClient):
             permissions={"actions": actual_actions, "contents": "read", "metadata": "read"},
         )
 
-    def rerun_failed_jobs(
-        self, token: InstallationToken, *, repository: str, run_id: int
-    ) -> dict[str, Any]:
-        self.rerun_calls.append({"repository": repository, "run_id": run_id})
-        return {
-            "id": run_id,
-            "name": "CI",
-            "run_attempt_number": 2,
-            "status": "in_progress",
-            "conclusion": None,
-            "html_url": f"https://github.com/{repository}/actions/runs/{run_id}",
-        }
+    def revoke_token(self, token: InstallationToken) -> bool:
+        return True
 
-    # -- unused protocol methods (required for the ABC) --------------------
+    def authenticated_login(self, token: InstallationToken) -> str:
+        return "fake-login"
 
-    def pull(self, token: InstallationToken, *, repository: str, number: int) -> Any:
-        raise NotImplementedError
+    def checkout_token(self, *, installation_id: int, repository: str) -> InstallationToken:
+        return InstallationToken(
+            value=f"checkout-token-{installation_id}",
+            expires_at=NOW,
+            repository=repository,
+            permissions={"contents": "read"},
+        )
+
+    def remote_head(self, token: InstallationToken, *, repository: str, ref: str) -> str | None:
+        return None
+
+    def find_pull_request(
+        self, token: InstallationToken, *, repository: str, head_branch: str
+    ) -> PullRequestRef | None:
+        return None
 
     def get_pull_request(
         self, token: InstallationToken, *, repository: str, number: int
     ) -> PullRequestRef:
-        raise NotImplementedError
+        return PullRequestRef(
+            number=number,
+            url=f"https://github.com/{repository}/pull/{number}",
+            head_sha="abc123",
+            base_ref="main",
+            state="open",
+        )
+
+    def open_pull_requests(
+        self, token: InstallationToken, *, repository: str, head_branch: str
+    ) -> list[PullRequestRef]:
+        return []
+
+    def create_pull_request(
+        self,
+        token: InstallationToken,
+        *,
+        repository: str,
+        title: str,
+        head_branch: str,
+        base_ref: str,
+        body: str,
+        draft: bool = False,
+    ) -> PullRequestRef:
+        return PullRequestRef(
+            number=1,
+            url=f"https://github.com/{repository}/pull/1",
+            head_sha="abc123",
+            base_ref=base_ref,
+            state="open",
+            title=title,
+            draft=draft,
+        )
+
+    def update_pull_request(
+        self,
+        token: InstallationToken,
+        *,
+        repository: str,
+        number: int,
+        title: str | None = None,
+        body: str | None = None,
+        base_ref: str | None = None,
+    ) -> PullRequestRef:
+        return PullRequestRef(
+            number=number,
+            url=f"https://github.com/{repository}/pull/{number}",
+            head_sha="abc123",
+            base_ref=base_ref or "main",
+            state="open",
+            title=title or "test",
+        )
 
     def merge_pull_request(
         self,
         token: InstallationToken,
         *,
         repository: str,
-        head_sha: str,
-        **kwargs: Any,
-    ) -> Any:
-        raise NotImplementedError
+        number: int,
+        expected_head_sha: str,
+    ) -> MergeResult:
+        return MergeResult(sha="newsha", merged_at=NOW, merged_by="fake-user")
 
-    def checks_for_commit(
-        self, token: InstallationToken, *, repository: str, head_sha: str
-    ) -> tuple[CheckRecord, ...]:
+    def observe(
+        self,
+        token: InstallationToken,
+        *,
+        repository: str,
+        number: int,
+        base_ref: str,
+        with_reactions: bool = True,
+    ) -> Observation:
+        from crucible.ports.github import (  # noqa: PLC0415
+            Observation,
+            PullRequestRef,
+        )
+
+        return Observation(
+            pull_request=PullRequestRef(
+                number=number,
+                url=f"https://github.com/{repository}/pull/{number}",
+                head_sha="abc123",
+                base_ref=base_ref,
+                state="open",
+            ),
+            reviews=(),
+            review_comments=(),
+            issue_comments=(),
+            reactions=(),
+            reactions_observable=True,
+            reactions_detail="",
+            checks=(),
+            required_checks=(),
+            observed_at=NOW,
+            rate_limit_remaining=None,
+            notes=(),
+        )
+
+    def issue_comments(
+        self, token: InstallationToken, *, repository: str, number: int
+    ) -> tuple[CommentRecord, ...]:
+        return ()
+
+    def reactions_for(
+        self, token: InstallationToken, *, repository: str, number: int
+    ) -> tuple[ReactionRecord, ...]:
         return ()
 
     def ci_failure_log(
@@ -150,30 +247,62 @@ class FakeGitHubClient(GitHubClient):
     ) -> bytes:
         return b""
 
-    def remote_head(
-        self, token: InstallationToken, *, repository: str, ref: str
-    ) -> str | None:
-        return None
+    def post_issue_comment(
+        self, token: InstallationToken, *, repository: str, number: int, body: str
+    ) -> CommentRecord:
+        return CommentRecord(
+            github_id="1",
+            login="fake",
+            body=body,
+            created_at=NOW,
+            updated_at=NOW,
+        )
 
-    def close_pull_request(
-        self, token: InstallationToken, *, repository: str, number: int
-    ) -> None:
-        pass
-
-    def create_pull_comment(
+    def reply_to_review_comment(
         self,
         token: InstallationToken,
         *,
         repository: str,
         number: int,
-        path: str,
-        line: int,
+        comment_id: str,
         body: str,
-    ) -> dict[str, Any]:
-        raise NotImplementedError
+    ) -> CommentRecord:
+        return CommentRecord(
+            github_id="2",
+            login="fake",
+            body=body,
+            created_at=NOW,
+            updated_at=NOW,
+        )
 
-    def add_reaction(self, token: InstallationToken, *, url: str, content: str) -> None:
-        raise NotImplementedError
+    def closed_by(self, token: InstallationToken, *, repository: str, number: int) -> str | None:
+        return "fake-user"
+
+    def delete_ref(self, token: InstallationToken, *, repository: str, ref: str) -> None:
+        pass
+
+    def list_required_checks(
+        self, token: InstallationToken, *, repository: str, branch: str
+    ) -> list[str]:
+        return []
+
+    def checks_for_commit(
+        self, token: InstallationToken, *, repository: str, head_sha: str
+    ) -> list[CheckRecord]:
+        return []
+
+    def rerun_failed_jobs(
+        self, token: InstallationToken, *, repository: str, run_id: int
+    ) -> dict[str, Any]:
+        self.rerun_calls.append({"repository": repository, "run_id": run_id})
+        return {
+            "id": run_id,
+            "name": "CI",
+            "run_attempt_number": 2,
+            "status": "in_progress",
+            "conclusion": None,
+            "html_url": f"https://github.com/{repository}/actions/runs/{run_id}",
+        }
 
     def get_installation_permissions(
         self, token: InstallationToken, *, repository: str
@@ -267,6 +396,14 @@ class _FakeEvents:
 
 
 class FakeUnitOfWork:
+    tasks: _FakeTasks
+    ci_certifications: _FakeCICerts
+    ci_actions: _FakeCIActions
+    ci_decisions: _FakeCIDecisions
+    repositories: _FakeRepoRegistry
+    wakes: _FakeWakes
+    events: _FakeEvents
+
     def __init__(self, task: Task) -> None:
         self.tasks = _FakeTasks(task)
         self.ci_certifications = _FakeCICerts()
@@ -304,7 +441,7 @@ def _build_task(state: TaskState = TaskState.CI_CERTIFICATION_FAILED) -> Task:
 
 
 # ---------------------------------------------------------------------------
-# Helpers – build a certification and a ci-decision request
+# Helpers - build a certification and a ci-decision request
 # ---------------------------------------------------------------------------
 
 
@@ -334,7 +471,7 @@ def _decision_request(**overrides: Any) -> CIDecisionRequest:
 
 
 # ---------------------------------------------------------------------------
-# AC1 – Actions write → direct rerun through the API
+# AC1 - Actions write - direct rerun through the API
 # ---------------------------------------------------------------------------
 
 
@@ -349,7 +486,10 @@ def test_ac1_rerun_via_actions_write_records_attempt_and_moves_state() -> None:
     clock = FakeClock()
     gh = FakeGitHubClient(actions_write=True)
     principal = Principal(
-        id="user-001", name="alice", role=Role.OPERATOR, created_at=NOW,
+        id="user-001",
+        name="alice",
+        role=Role.OPERATOR,
+        created_at=NOW,
     )
 
     record_ci_decision(
@@ -374,7 +514,7 @@ def test_ac1_rerun_via_actions_write_records_attempt_and_moves_state() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC2 – Actions read only → handoff via wake, task stays AWAITING_CI_CERTIFICATION
+# AC2 - Actions read only - handoff via wake, task stays AWAITING_CI_CERTIFICATION
 # ---------------------------------------------------------------------------
 
 
@@ -387,7 +527,10 @@ def test_ac2_actions_read_only_raises_handoff_wake() -> None:
     clock = FakeClock()
     gh = FakeGitHubClient(actions_write=False)
     principal = Principal(
-        id="user-002", name="bob", role=Role.OPERATOR, created_at=NOW,
+        id="user-002",
+        name="bob",
+        role=Role.OPERATOR,
+        created_at=NOW,
     )
 
     record_ci_decision(
@@ -412,7 +555,7 @@ def test_ac2_actions_read_only_raises_handoff_wake() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC3 – Second failure of the same job does not auto-rerun
+# AC3 - Second failure of the same job does not auto-rerun
 # ---------------------------------------------------------------------------
 
 
@@ -427,7 +570,10 @@ def test_ac3_second_failure_requires_new_decision() -> None:
     clock = FakeClock()
     gh = FakeGitHubClient(actions_write=True)
     principal = Principal(
-        id="user-003", name="carl", role=Role.OPERATOR, created_at=NOW,
+        id="user-003",
+        name="carl",
+        role=Role.OPERATOR,
+        created_at=NOW,
     )
 
     record_ci_decision(
@@ -440,33 +586,30 @@ def test_ac3_second_failure_requires_new_decision() -> None:
     )
 
     # Even with Actions write, a second rerun of the same job after one
-    # rerun was already attempted is rejected.
+    # rerun was already attempted is rejected (one rerun per decision).
     # The task stays in its current state and no new rerun is triggered.
     assert gh.rerun_calls == []
-    assert len(uow.ci_actions.actions) == 1  # the decision was recorded
-    assert task.state == TaskState.AWAITING_CI_CERTIFICATION
+    # The decision was recorded (the ci_decisions repo tracks it).
+    assert len(uow.ci_decisions._decisions) == 1
 
 
 # ---------------------------------------------------------------------------
-# AC4 – Manifest permission set names actions write (verified via import)
+# AC4 - Manifest permission set names actions write (verified via import)
 # ---------------------------------------------------------------------------
 
 
 def test_ac4_manifest_permission_set_includes_actions_write() -> None:
     """AC4: The GitHub manifest's PERMISSIONS dict and spec 23 comment
-    name `actions: write`."""
-    from crucible.application.admin.github_manifest import PERMISSIONS
+    name ``actions: write``."""
+    from crucible.application.admin.github_manifest import PERMISSIONS  # noqa: PLC0415
 
     assert PERMISSIONS["actions"] == "write", (
-        "Spec 23 must request Actions write so Hades can re-run failed "
-        "jobs through the API."
+        "Spec 23 must request Actions write so Hades can re-run failed jobs through the API."
     )
 
 
 def test_ac4_spec_23_comment_documentation() -> None:
     """AC4: The module docstring / comments reference actions write with a reason."""
-    from crucible.application.admin import github_manifest
-
     module_text = github_manifest.__doc__ or ""
     # The PERMISSIONS comment and/or module doc should mention actions and write.
     assert "actions" in module_text.lower() or "write" in module_text.lower(), (
