@@ -335,7 +335,7 @@ def apply_move(
             principal=principal,
             task_id=task.id,
             request=DecisionRequest(
-                kind="operator_answer",
+                kind="escalation_answer",
                 verbatim=note.text,
                 resolves=escalation.question,
                 escalation_id=escalation.id,

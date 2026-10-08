@@ -10,10 +10,12 @@ card renders a stuck task in words, read-only for an observer.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from fastapi import FastAPI
@@ -23,6 +25,7 @@ from crucible.adapters.api.deps import app_context, current_principal, unit_of_w
 from crucible.adapters.api.problems import install_problem_handlers
 from crucible.adapters.api.routers import tasks as tasks_router
 from crucible.adapters.execution.identity import render_identity_md, write_bundle
+from crucible.adapters.harness.registry import default_registry
 from crucible.adapters.ui.pages import board as board_page
 from crucible.application.admin import audit
 from crucible.application.admin.board_card import board_card_view
@@ -41,6 +44,7 @@ from crucible.application.errors import (
     TransitionNotAllowedError,
 )
 from crucible.application.queries import task_view
+from crucible.application.supervisor import Supervisor
 from crucible.application.task_notes import add_note, list_notes, operator_notes_for
 from crucible.contracts.common import to_document
 from crucible.contracts.completion_claim import CompletionClaimV1
@@ -538,6 +542,70 @@ def test_the_api_posts_a_note_for_operators_and_refuses_observers() -> None:
     with _api(store, clock, OPERATOR) as client:
         read = client.get(f"/v1/tasks/{TASK_ID}")
     assert [n["text"] for n in read.json()["notes"]] == [NOTE]
+
+
+def test_supervisor_launch_reads_notes_before_its_uow_closes_through_test_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Kubernetes launch path must not reopen and leak a closed SQL session."""
+    active = False
+    uow = Mock()
+
+    def notes(_task_id: str) -> list[TaskNote]:
+        assert active, "operator notes were read after the launch unit of work closed"
+        return []
+
+    uow.task_notes.list_for_task.side_effect = notes
+    uow.provider_settings.get.return_value = None
+    monkeypatch.setattr("crucible.application.supervisor.load_attempt_routing", lambda *_: None)
+
+    @contextmanager
+    def uow_factory() -> Any:
+        nonlocal active
+        active = True
+        try:
+            yield uow
+        finally:
+            active = False
+
+    supervisor: Any = object.__new__(Supervisor)
+    supervisor._uow_factory = uow_factory
+    supervisor._harnesses = default_registry()
+    supervisor._credential_sources = {}
+    supervisor._providers = {}
+    attempt = SimpleNamespace(
+        id="attempt",
+        number=1,
+        selected_harness="codex",
+        selected_model="model",
+        selected_image="image",
+        resume_from_remote=False,
+        routing_version=None,
+        effective_settings=None,
+    )
+    execution = SimpleNamespace(
+        role=ExecutionRole.IMPLEMENT,
+        harness="codex",
+        model="model",
+        image="image",
+        policy_snapshot={},
+        timeout_seconds=60,
+        effort=None,
+        provider="kubernetes",
+    )
+    task = SimpleNamespace(id=TASK_ID, external_id="FDY-0496", principal_id=OPERATOR.id)
+
+    app = FastAPI()
+
+    @app.get("/launch-spec")
+    async def launch_spec() -> dict[str, Any]:
+        spec = await supervisor._build_spec(attempt, execution, task, {}, credential_mounted=True)
+        return {"attempt_id": spec.attempt_id, "operator_notes": spec.operator_notes}
+
+    with TestClient(app) as client:
+        response = client.get("/launch-spec")
+    assert response.status_code == 200, response.text
+    assert response.json() == {"attempt_id": "attempt", "operator_notes": []}
 
 
 # ----- AC3 and AC4: each phase action maps to its operation, with the words recorded ----
