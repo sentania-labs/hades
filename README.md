@@ -293,7 +293,8 @@ Crucible did not push moves the task to `head_diverged` and supersedes that
 head's acceptance, review, and gates.
 
 Delivery needs a GitHub App with Metadata read, Contents read/write, Pull
-requests read/write, Checks read, Actions read, and Issues read (the last for
+requests read/write, Checks read, Actions read/write (write re-runs failed jobs on a
+`ci-decision rerun`; without it the operator re-runs them), and Issues read (the last for
 reactions on the pull request, which is the only place a clean external review
 appears). The App id is configuration; the private key and the webhook secret
 are *paths* to files mounted read-only into the `crucible` container alone.

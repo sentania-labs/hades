@@ -16,9 +16,15 @@ delivery half of the task lifecycle (09).
   preparation step also gets one, read-only (`contents: read`), for the
   length of that step only (ADR 0019, 12).
 - App permissions: Metadata read, Contents read/write, Pull requests
-  read/write, Checks read, Actions read, Issues read (for
+  read/write, Checks read, Actions read/write, Issues read (for
   `GET /issues/{n}/reactions` only, S12 rerun). Nothing else, and no
-  Issues write. Repository
+  Issues write. Actions write is there so a `ci-decision` `rerun` re-runs
+  the failed jobs itself (`POST /actions/runs/{id}/rerun-failed-jobs`,
+  hades #435); the App manifest asks for it, so a newly created App holds
+  it. An installation created before #435 holds Actions read until the
+  operator grants write on GitHub, and Hades never assumes the grant: it
+  reads the installation's permissions (`GET /app/installations/{id}`)
+  on every rerun decision. Repository
   registration (`PUT /repositories/{name}`) records the installation ID
   the App has for that repository; the key never appears in the record.
   The Repositories page's repository picker fills it (25): it lists what each
@@ -480,9 +486,7 @@ the task cannot wait silently (hades #343).
   `false_pre_pr_evidence`, `wrong_sha_checked`, `correction_without_checks`,
   `environment_drift`, `flaky_test`, `crucible_verification_defect`,
   `implementation_defect`, `missing_worker_tooling`, `ci_infrastructure`,
-  `other`, and the action: `rerun` (Crucible records the intent and wakes
-  the operator to re-run it on GitHub, because re-running needs Actions
-  write, which the App does not hold; 22), `correct` (a correction
+  `other`, and the action: `rerun`, `correct` (a correction
   follows), `reject`, `cancel`. A `correct` action requires a cause other
   than `ci_infrastructure` and `flaky_test`; a `rerun` requires one of
   those two; any other combination is refused with 422 (hades #356). After
@@ -492,6 +496,22 @@ the task cannot wait silently (hades #343).
   detail that says so, and the task waits for a fresh result. Any other
   failure, including a re-run of a workflow that fails again under the
   same id, is a new failure.
+- A `rerun` (hades #435): when the installation grants Actions write,
+  Hades re-runs the failed jobs of each failed workflow run on the decided
+  head itself (a failed check run from Actions is a job, resolved to its
+  run through `GET /actions/jobs/{id}`), reads the run back for its
+  `run_attempt`, and records that attempt on the certification. Each
+  decision re-runs once: a second failure of the same job is a new
+  failure, `ci_certification_failed` again, and only a new decision
+  re-runs it. When the installation lacks Actions write, or GitHub
+  refuses the re-run, the decision is recorded and the `ci_rerun_needed`
+  wake is the hand-off to the operator, who re-runs it on GitHub (22).
+  Either way the task waits in `awaiting_ci_certification` and the wake
+  carries the line the Board shows: "waiting on a re-run" until an
+  attempt runs, then "re-run requested, attempt N running", which the
+  certification's detail (shown on the task page) and the Board both say
+  for as long as GitHub reports that attempt running. The attempt's
+  result is judged like any other: green certifies, a failure is new.
 - A task in `ci_certification_failed` that observes a green (or skipped)
   certification on its accepted head goes back to
   `awaiting_ci_certification` and on to `ready_for_merge`: someone re-ran

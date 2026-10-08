@@ -206,6 +206,25 @@ def waiting_line(wake: Any | None, state: TaskState) -> str:
     return str(summary or wake.reason).replace("\n", " ").strip()
 
 
+def rerun_line(task: Any, ci_event: Any | None) -> str | None:
+    """Issue 435: the line for a task waiting on a CI re-run whose attempt is running.
+
+    The newest certification of the task's head names the attempt once GitHub (or Hades
+    itself, with Actions write) has started one; before that the wake's own line says
+    the task is waiting on a re-run."""
+    if task.state is not _C.AWAITING_CI_CERTIFICATION or ci_event is None:
+        return None
+    payload = ci_event.payload if isinstance(ci_event.payload, dict) else {}
+    if payload.get("state") != "pending" or payload.get("head_sha") != getattr(
+        task, "head_sha", None
+    ):
+        return None
+    attempt = (payload.get("failure") or {}).get("rerun_attempt")
+    if not isinstance(attempt, int) or isinstance(attempt, bool):
+        return None
+    return f"re-run requested, attempt {attempt} running"
+
+
 def ci_summary(state: str | None) -> dict[str, str]:
     value = (state or "none").lower()
     if value in {"green", "success", "successful", "skipped"}:
@@ -580,6 +599,14 @@ def _kanban_groups(cards: list[dict[str, Any]], *, queued: bool = False) -> list
     return groups
 
 
+def _holder(
+    column: str, task: Any, attempt: Any | None, wake: Any | None, ci_event: Any | None
+) -> dict[str, str]:
+    holder = kanban_holder(column, task.state, attempt, wake)
+    running = rerun_line(task, ci_event) if column == "ci" else None
+    return {**holder, "detail": running} if running else holder
+
+
 def _kanban(
     uow: UnitOfWork,
     now: datetime,
@@ -590,6 +617,7 @@ def _kanban(
     wake_by_task: dict[str, Any],
     open_escalations: set[str],
     events: list[Any],
+    latest_ci: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     entries = _column_entries(events)
     queue_seqs = _queue_seqs(events)
@@ -617,7 +645,9 @@ def _kanban(
                 "state": task.state.value,
                 "parent_external_id": parent_external_id,
                 "parent_task_id": parent.id if parent else None,
-                "holder": kanban_holder(column, task.state, attempt, wake_by_task.get(task.id)),
+                "holder": _holder(
+                    column, task, attempt, wake_by_task.get(task.id), (latest_ci or {}).get(task.id)
+                ),
                 "age": kanban_age(column, entered_at, now, ci_budget_seconds=budget),
                 "queue": {
                     "seq": queue_seqs.get(task.id) if task.state in QUEUED_STATES else None,
@@ -716,7 +746,8 @@ def board_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
             "pool": attempt.selected_pool if attempt else None,
             "state": task.state.value,
             "state_since": task.updated_at,
-            "waiting_on": waiting_line(wake_by_task.get(task.id), task.state),
+            "waiting_on": rerun_line(task, ci_event)
+            or waiting_line(wake_by_task.get(task.id), task.state),
             "pull_request": (
                 {
                     "number": pr.number,
@@ -793,6 +824,7 @@ def board_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
             wake_by_task=wake_by_task,
             open_escalations=open_escalations,
             events=events,
+            latest_ci=latest_ci,
         ),
         "routing": routing,
         "tokens": _token_view(metrics),
@@ -825,6 +857,7 @@ __all__ = [
     "kanban_column",
     "kanban_holder",
     "quality_totals",
+    "rerun_line",
     "waiting_group",
     "waiting_line",
 ]

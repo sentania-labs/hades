@@ -609,29 +609,46 @@ class RestGitHubClient:
         # A successful response may be ``None``; treat it as success.
         return payload if isinstance(payload, dict) else {}
 
-    def get_installation_permissions(
-        self, token: InstallationToken, *, repository: str
-    ) -> dict[str, str]:
-        """Read the installation's granted permissions for the one repository (issue 435).
+    def get_installation_permissions(self, *, installation_id: int) -> dict[str, str]:
+        """The permissions the installation grants, as GitHub reports them (issue 435).
 
-        Mint a read-only installation token via the App JWT and read
-        ``permissions`` from the response; it carries what the installation
-        itself grants, independent of what we asked for.  This is the canonical
-        way to inspect the App's installed permission set without needing the
-        installation id upfront.  ``token`` and ``repository`` are kept in the
-        signature for the ``GitHubClient`` protocol but are not used here.
+        `GET /app/installations/{installation_id}` with the App JWT: its `permissions`
+        object is what the installation holds right now, which is what decides whether
+        Hades can re-run failed jobs itself. Reading it needs no repository permission.
+        An answer that cannot be read is an empty grant, so the caller falls back to the
+        operator hand-off rather than assuming a permission.
         """
-        del token, repository
-        status, payload, _ = self._http.request(
-            "POST",
-            "/app/installations/self/access_tokens",
-            bearer=self._auth.app_jwt(),
-            body={"permissions": {"metadata": "read"}},
-        )
-        if status != 201 or not isinstance(payload, dict):
+        try:
+            payload = self._http.get(
+                f"/app/installations/{int(installation_id)}", bearer=self._auth.app_jwt()
+            )
+        except GitHubError:
             return {}
-        accepted = payload.get("permissions") or {}
-        return {str(k): str(v) for k, v in accepted.items()}
+        if not isinstance(payload, dict):
+            return {}
+        granted = payload.get("permissions")
+        if not isinstance(granted, dict):
+            return {}
+        return {str(k): str(v) for k, v in granted.items()}
+
+    def workflow_run_for_job(
+        self, token: InstallationToken, *, repository: str, job_id: int
+    ) -> int | None:
+        """The workflow run a job belongs to (Actions read, issue 435).
+
+        A failed check run from Actions is a job, and its id is the job id; re-running
+        needs the run's id, which `GET /repos/{owner}/{repo}/actions/jobs/{job_id}`
+        carries. A check run that is not an Actions job answers 404: None."""
+        try:
+            payload = self._http.get(
+                f"/repos/{repository}/actions/jobs/{int(job_id)}", bearer=token.reveal()
+            )
+        except GitHubError as exc:
+            if exc.status == 404:
+                return None
+            raise
+        run_id = payload.get("run_id") if isinstance(payload, dict) else None
+        return run_id if isinstance(run_id, int) and not isinstance(run_id, bool) else None
 
     def get_workflow_run(
         self, token: InstallationToken, *, repository: str, run_id: int

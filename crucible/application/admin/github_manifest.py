@@ -8,14 +8,13 @@ browser back to `/ui/github/callback` with a one-time code; the service checks t
 exchanges the code once (`POST /app-manifests/{code}/conversions`), and keeps the App ID,
 private key and webhook secret in the credential store it owns (ADR 0017). None of them
 is shown, logged or audited; the key's public fingerprint is. The browser then installs
-the App on the operator's account.
-
-Spec 23 defines the App's permission set: metadata read, contents write, pull_requests
-write, checks read, and actions write (issue #435: so Hades can re-run failed jobs
-through the GitHub API).  No Issues write (the app's own pull requests use the same
-installation, and the operator manages issues manually).
-
 the App from its own page, and GitHub sends it back to the repository picker.
+
+The App asks for spec 23's permission set and nothing else: Metadata read, Contents
+and Pull requests write, Checks read, Actions write (so a `ci-decision rerun` can re-run
+the failed jobs itself, hades #435) and Issues read. No Issues write. An App created
+before #435 keeps Actions read until the operator grants Actions write; Hades reads the
+installation's grant on every rerun decision rather than assuming it.
 
 No public DNS is involved: every redirect is of the operator's own browser, and the one
 call the service makes is outbound. The manifest turns the webhook off, so GitHub never
@@ -54,10 +53,8 @@ from crucible.ports.repository import UnitOfWork
 SETTING_NAME = "github.external_url"
 STATE_TTL = timedelta(minutes=15)
 DEFAULT_NAME_PREFIX = "Hades"
-# Spec 23's permission set: metadata, contents, pull_requests, checks, actions (write
-# so Hades can re-run failed jobs through the API), and issues read.  Actions write
-# enables POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs, which
-# Hades calls from the ci-decision path when the installation grants it (issue 435).
+# Spec 23's permission set, exactly: nothing else, and no Issues write. Actions write is
+# for `POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs` (hades #435).
 PERMISSIONS = {
     "metadata": "read",
     "contents": "write",

@@ -183,6 +183,9 @@ class CheckRecord:
     # When the run concluded, as GitHub reports it. A failure that concluded before a
     # re-run decision is the one the decision was about (hades FDY-0139).
     completed_at: datetime | None = None
+    # A workflow run's attempt number: 1 for the first run, then one more per re-run
+    # (issue 435). None for anything that is not a workflow run.
+    run_attempt: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,19 +355,23 @@ class GitHubClient(Protocol):
     ) -> dict[str, Any]:
         """Re-run all failed jobs of a workflow run (Actions write, issue 435).
 
-        Returns the raw GitHub response, which carries the new attempt number
-        under the ``run`` key as ``run.run_attempt_number``.
+        GitHub answers 201 with no body; the new attempt number is read afterwards
+        with ``get_workflow_run``.
         """
 
-    def get_installation_permissions(
-        self, token: InstallationToken, *, repository: str
-    ) -> dict[str, str]:
-        """Read the installation's granted permissions for the one repository.
+    def get_installation_permissions(self, *, installation_id: int) -> dict[str, str]:
+        """The permissions the installation grants (`GET /app/installations/{id}`).
 
-        GitHub embeds the permissions on the token mint; this method re-reads them
-        from the installation to decide whether Hades can act.  Returns
-        ``{"actions": "write"}`` when the installation grants Actions write.
+        Read on every rerun decision to decide whether Hades can act, never assumed.
+        Returns ``{"actions": "write", ...}`` when the installation grants Actions write,
+        and an empty mapping when the grant cannot be read.
         """
+
+    def workflow_run_for_job(
+        self, token: InstallationToken, *, repository: str, job_id: int
+    ) -> int | None:
+        """The id of the workflow run an Actions job belongs to, or None when the
+        check run is not an Actions job (issue 435)."""
 
     def get_workflow_run(
         self, token: InstallationToken, *, repository: str, run_id: int

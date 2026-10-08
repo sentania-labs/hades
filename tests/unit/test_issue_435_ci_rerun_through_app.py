@@ -1,28 +1,36 @@
-"""Issue 435: CI rerun through the GitHub App when it holds Actions write.
+"""Issue 435: a CI rerun decision re-runs the failed jobs through the GitHub App when the
+installation grants Actions write, and hands off to the operator when it does not.
 
-This file is a unit test of ``record_ci_decision`` (issue 435) exercising the two
-code paths that the delivery-supervisor's ci-decision endpoint reaches:
+* AC1: with Actions write, ``record_ci_decision`` reads the installation's grant, calls
+  ``rerun-failed-jobs`` once for the decided head's workflow run, reads the run back and
+  records the new attempt on the certification.
+* AC2: with Actions read only, the decision is recorded, the ``ci_rerun_needed`` wake is
+  raised, and the Board and the task page say the task is waiting on a re-run, then
+  "re-run requested, attempt N running" once one runs.
+* AC3: a second failure of the same job after the rerun is a new failure; nothing re-runs
+  it until a new decision does, and that decision re-runs once.
+* AC4: the App manifest and spec 23 name Actions write and why.
 
-* AC1 - the installation grants Actions write - the app calls ``rerun-failed-jobs``,
-  the certification records the new attempt number and moves to
-  ``AWAITING_CI_CERTIFICATION``.
-* AC2 - the installation grants only Actions read - the old handoff behaviour
-  (record the decision, raise a wake, leave the task in ``AWAITING_CI_CERTIFICATION``).
-* AC3 - a second failure of the same job after the rerun does **not** auto-rerun;
-  it requires a fresh ci-decision to be recorded.
-
-The test uses a fake GitHub client that mirrors the real client's ``GitHubClient``
-protocol so the domain and application layers never see HTTP.
+The GitHub client is a fake that mirrors the ``GitHubClient`` port, so no HTTP is made
+except in the tests of the real client, which use a recording transport.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from types import TracebackType
-from typing import Any
+from typing import Any, cast
+from unittest.mock import MagicMock, patch
 
+from crucible.adapters.github import normalize
+from crucible.adapters.github.appauth import AppAuthenticator
+from crucible.adapters.github.client import RestGitHubClient
+from crucible.adapters.github.transport import RestTransport
 from crucible.application.admin import github_manifest
+from crucible.application.admin.board import _holder, rerun_line, waiting_line
 from crucible.application.delivery_decisions import record_ci_decision
+from crucible.application.observation import certify_head
 from crucible.contracts.api import CIDecisionRequest
 from crucible.contracts.wake import WakeReason
 from crucible.domain.entities import (
@@ -31,12 +39,15 @@ from crucible.domain.entities import (
     Principal,
     Role,
     Task,
+    Wake,
 )
+from crucible.domain.events import EventKind
 from crucible.domain.lifecycle import TaskState
 from crucible.ports.github import (
     CheckRecord,
     CommentRecord,
     GitHubClient,
+    GitHubError,
     InstallationToken,
     MergeResult,
     Observation,
@@ -71,11 +82,24 @@ class FakeGitHubClient(GitHubClient):
     ``actions_write`` controls whether the fake installation grants that scope.
     """
 
-    def __init__(self, actions_write: bool) -> None:
+    def __init__(
+        self,
+        actions_write: bool,
+        *,
+        rerun_refusal: GitHubError | None = None,
+        jobs: dict[int, int] | None = None,
+    ) -> None:
         self.actions_write = actions_write
+        self.rerun_refusal = rerun_refusal
+        # job id -> workflow run id, for failures observed as Actions check runs.
+        self.jobs = jobs or {}
         self.rerun_calls: list[dict[str, Any]] = []
         self.get_installation_permissions_calls: list[dict[str, Any]] = []
         self.get_workflow_run_calls: list[dict[str, Any]] = []
+        self.token_requests: list[dict[str, str] | None] = []
+        self.revoked: list[str] = []
+        # The attempt each workflow run is on, as GitHub would report it.
+        self.attempts: dict[int, int] = {}
         self._call_count = 0
 
     # -- the methods the ci-decision path exercises ------------------------
@@ -87,6 +111,7 @@ class FakeGitHubClient(GitHubClient):
         repository: str,
         permissions: dict[str, str] | None = None,
     ) -> InstallationToken:
+        self.token_requests.append(permissions)
         requested = permissions["actions"] if permissions and "actions" in permissions else None
 
         self._call_count += 1
@@ -105,6 +130,7 @@ class FakeGitHubClient(GitHubClient):
         )
 
     def revoke_token(self, token: InstallationToken) -> bool:
+        self.revoked.append(token.reveal())
         return True
 
     def authenticated_login(self, token: InstallationToken) -> str:
@@ -296,36 +322,30 @@ class FakeGitHubClient(GitHubClient):
         self, token: InstallationToken, *, repository: str, run_id: int
     ) -> dict[str, Any]:
         self.rerun_calls.append({"repository": repository, "run_id": run_id})
+        if self.rerun_refusal is not None:
+            raise self.rerun_refusal
+        self.attempts[run_id] = self.attempts.get(run_id, 1) + 1
+        # GitHub answers 201 with no body.
+        return {}
+
+    def get_installation_permissions(self, *, installation_id: int) -> dict[str, str]:
+        self.get_installation_permissions_calls.append({"installation_id": installation_id})
         return {
-            "id": run_id,
-            "name": "CI",
-            "run_attempt_number": 2,
-            "status": "in_progress",
-            "conclusion": None,
-            "html_url": f"https://github.com/{repository}/actions/runs/{run_id}",
+            "metadata": "read",
+            "checks": "read",
+            "actions": "write" if self.actions_write else "read",
         }
 
-    def get_installation_permissions(
-        self, token: InstallationToken, *, repository: str
-    ) -> dict[str, str]:
-        self.get_installation_permissions_calls.append({"repository": repository})
-        # For the real client this calls /app/installations/self; the fake
-        # returns whatever the test author configured.
-        return {"actions": "write" if self.actions_write else "read"}
+    def workflow_run_for_job(
+        self, token: InstallationToken, *, repository: str, job_id: int
+    ) -> int | None:
+        return self.jobs.get(job_id)
 
     def get_workflow_run(
         self, token: InstallationToken, *, repository: str, run_id: int
     ) -> dict[str, Any]:
         self.get_workflow_run_calls.append({"repository": repository, "run_id": run_id})
-        # Simulate the workflow run after a rerun: the run_attempt increments.
-        return {
-            "id": run_id,
-            "name": "CI",
-            "run_attempt": 2,
-            "status": "in_progress",
-            "conclusion": None,
-            "html_url": f"https://github.com/{repository}/actions/runs/{run_id}",
-        }
+        return {"id": run_id, "status": "queued", "run_attempt": self.attempts.get(run_id, 1)}
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +573,7 @@ def _build_task(state: TaskState = TaskState.CI_CERTIFICATION_FAILED) -> Task:
         repository_id="repo-1",
         created_at=NOW,
         updated_at=NOW,
+        head_sha=HEAD_SHA,
     )
 
 
@@ -570,7 +591,19 @@ def _cert(task_id: str) -> CICertification:
         state="failed",
         required_checks=[{"name": "build"}],
         check_runs=[],
-        failure={"run_id": "5150", "message": "build failed"},
+        failure={
+            "check": "CI",
+            "run_id": "5150",
+            "source": "workflow_run",
+            "all": [
+                {
+                    "name": "CI",
+                    "run_id": "5150",
+                    "source": "workflow_run",
+                    "completed_at": "2026-10-07T11:00:00+00:00",
+                }
+            ],
+        },
         detail="The required check failed.",
         evaluated_at=NOW,
     )
@@ -586,174 +619,380 @@ def _decision_request(**overrides: Any) -> CIDecisionRequest:
     return CIDecisionRequest(**kwargs)
 
 
-# ---------------------------------------------------------------------------
-# AC1 - Actions write - direct rerun through the API
-# ---------------------------------------------------------------------------
-
-
-def test_ac1_rerun_via_actions_write_records_attempt_and_moves_state() -> None:
-    """AC1: With Actions write the app calls get_installation_permissions first,
-    then rerun-failed-jobs, fetches the workflow run to get the attempt number,
-    records the new attempt on the certification, raises a wake, and moves the task
-    to AWAITING_CI_CERTIFICATION."""
-    task = _build_task()
-    uow = FakeUnitOfWork(task)
+def _cert_for_jobs(*job_ids: int) -> CICertification:
+    """A failure observed as Actions check runs: each run id is a job id."""
     cert = _cert(TASK_ID)
-    uow.ci_certifications.put(cert)
-    clock = FakeClock()
-    gh = FakeGitHubClient(actions_write=True)
-    principal = Principal(
-        id="user-001",
-        name="alice",
-        role=Role.OPERATOR,
-        created_at=NOW,
-    )
+    cert.failure = {
+        "check": "build",
+        "run_id": str(job_ids[0]),
+        "source": "check_run",
+        "all": [
+            {"name": f"job-{job}", "run_id": str(job), "source": "check_run"} for job in job_ids
+        ],
+    }
+    return cert
 
+
+def _principal() -> Principal:
+    return Principal(id="user-001", name="foundry", role=Role.ORCHESTRATOR, created_at=NOW)
+
+
+def _decide(
+    gh: FakeGitHubClient | None,
+    *,
+    cert: CICertification | None = None,
+    task: Task | None = None,
+    uow: FakeUnitOfWork | None = None,
+) -> tuple[Task, FakeUnitOfWork]:
+    task = task or _build_task()
+    if uow is None:
+        uow = FakeUnitOfWork(task)
+        uow.ci_certifications.put(cert or _cert(TASK_ID))
     record_ci_decision(
         uow,  # type: ignore[arg-type]
-        clock,
-        principal=principal,
+        FakeClock(),
+        principal=_principal(),
         task_id=TASK_ID,
         request=_decision_request(),
         github_client=gh,
     )
+    return task, uow
 
-    # get_installation_permissions was called first (finding 1).
-    assert len(gh.get_installation_permissions_calls) == 1
 
-    # The GitHub client was called once for rerun-failed-jobs.
+def _wakes(uow: FakeUnitOfWork) -> list[Wake]:
+    return list(uow.wakes._wakes)
+
+
+def _decision_event(uow: FakeUnitOfWork) -> Any:
+    return next(e for e in uow.events._events if e.kind == EventKind.CI_DECISION_RECORDED.value)
+
+
+def _workflow_run(
+    *, status: str, conclusion: str | None, attempt: int, completed_at: datetime | None = None
+) -> CheckRecord:
+    return CheckRecord(
+        name="CI",
+        status=status,
+        conclusion=conclusion,
+        head_sha=HEAD_SHA,
+        external_id="5150",
+        workflow=".github/workflows/ci.yml",
+        source="workflow_run",
+        completed_at=completed_at,
+        run_attempt=attempt,
+    )
+
+
+def _observe(
+    decision_event: Any, previous: CICertification | None, *checks: CheckRecord
+) -> tuple[CICertification, Any]:
+    """One CI poll of the decided head: the certification and the event it recorded."""
+    uow = MagicMock()
+    uow.events.latest_for_task_kind.return_value = decision_event
+    uow.ci_certifications.get_for_head.return_value = previous
+    uow.ci_certifications.put.side_effect = lambda certification: certification
+    with patch("crucible.application.observation.task_waivers", return_value={}):
+        certification = certify_head(
+            uow,
+            MagicMock(now=MagicMock(return_value=NOW)),
+            task=_build_task(TaskState.AWAITING_CI_CERTIFICATION),
+            pull_request=MagicMock(id="pr-001"),
+            observation=Observation(pull_request=MagicMock(), checks=checks),
+            policy={"ci_certification": {"required_checks": []}},
+            head_sha=HEAD_SHA,
+        )
+    recorded = uow.events.append.call_args.args[0]
+    return certification, recorded
+
+
+# ---------------------------------------------------------------------------
+# AC1: Actions write - Hades re-runs the failed jobs itself
+# ---------------------------------------------------------------------------
+
+
+def test_ac1_actions_write_reruns_the_decided_run_once_and_records_the_attempt() -> None:
+    gh = FakeGitHubClient(actions_write=True)
+    task, uow = _decide(gh)
+
+    # The grant was read from the installation, not assumed.
+    assert gh.get_installation_permissions_calls == [{"installation_id": 42}]
+    assert gh.token_requests == [{"actions": "write", "metadata": "read"}]
+    # One rerun-failed-jobs call, for the decided head's workflow run.
+    assert gh.rerun_calls == [{"repository": TASK_REPOSITORY, "run_id": 5150}]
+    # The attempt GitHub reports for the run afterwards is on the certification.
+    certification = uow.ci_certifications.last
+    assert certification is not None
+    assert certification.failure["rerun_attempt"] == 2
+    assert certification.failure["rerun_decision"] == uow.ci_decisions._decisions[0].id
+    # The token is revoked and the task waits for that attempt's result.
+    assert gh.revoked == ["fake-token-1"]
+    assert task.state is TaskState.AWAITING_CI_CERTIFICATION
+    [wake] = _wakes(uow)
+    assert wake.reason == WakeReason.CI_RERUN_NEEDED.value
+    assert wake.payload["summary"].startswith("re-run requested, attempt 2 running")
+
+
+def test_ac1_failed_actions_jobs_are_resolved_to_their_run_and_rerun_once() -> None:
+    # Two failed jobs of one workflow run: their check-run ids are job ids.
+    gh = FakeGitHubClient(actions_write=True, jobs={777: 5150, 778: 5150})
+    _decide(gh, cert=_cert_for_jobs(777, 778))
+
     assert gh.rerun_calls == [{"repository": TASK_REPOSITORY, "run_id": 5150}]
 
-    # get_workflow_run was called to derive the actual attempt number (finding 3).
-    assert len(gh.get_workflow_run_calls) == 1
 
-    # The certification records the new attempt number from the workflow run.
-    latest_cert = uow.ci_certifications.last
-    assert latest_cert is not None
-    assert latest_cert.failure["rerun_attempt"] == 2
-
-    # A wake was raised in the Actions-write path (finding 4).
-    assert len(uow.wakes._wakes) >= 1
-    wake_reasons = [w.reason for w in uow.wakes._wakes]
-    assert WakeReason.CI_RERUN_NEEDED.value in wake_reasons
-
-    # The task is in AWAITING_CI_CERTIFICATION (the re-run is in progress).
-    assert task.state == TaskState.AWAITING_CI_CERTIFICATION
-
-
-# ---------------------------------------------------------------------------
-# AC2 - Actions read only - handoff via wake, task stays AWAITING_CI_CERTIFICATION
-# ---------------------------------------------------------------------------
-
-
-def test_ac2_actions_read_only_raises_handoff_wake() -> None:
-    """AC2: Without Actions write the app calls get_installation_permissions first,
-    sees only read, skips the rerun path, records the decision, raises a wake,
-    and leaves the task in AWAITING_CI_CERTIFICATION waiting on the operator."""
-    task = _build_task()
-    uow = FakeUnitOfWork(task)
-    uow.ci_certifications.put(_cert(TASK_ID))
-    clock = FakeClock()
-    gh = FakeGitHubClient(actions_write=False)
-    principal = Principal(
-        id="user-002",
-        name="bob",
-        role=Role.OPERATOR,
-        created_at=NOW,
+def test_ac1_a_github_refusal_falls_back_to_the_operator_handoff() -> None:
+    gh = FakeGitHubClient(
+        actions_write=True, rerun_refusal=GitHubError(403, "run is too old", path="/x")
     )
+    task, uow = _decide(gh)
 
-    record_ci_decision(
-        uow,  # type: ignore[arg-type]
-        clock,
-        principal=principal,
-        task_id=TASK_ID,
-        request=_decision_request(),
-        github_client=gh,
-    )
-
-    # get_installation_permissions was called first (finding 1).
-    assert len(gh.get_installation_permissions_calls) == 1
-
-    # No rerun call was made because the installation lacks Actions write.
-    assert gh.rerun_calls == []
-
-    # A wake was raised so the operator knows to perform the re-run manually.
-    assert len(uow.wakes._wakes) >= 1
-    wake_reasons = [w.reason for w in uow.wakes._wakes]
-    assert WakeReason.CI_RERUN_NEEDED.value in wake_reasons
-
-    # The task remains in AWAITING_CI_CERTIFICATION.
-    assert task.state == TaskState.AWAITING_CI_CERTIFICATION
+    assert len(gh.rerun_calls) == 1
+    certification = uow.ci_certifications.last
+    assert certification is not None
+    assert "rerun_attempt" not in certification.failure
+    assert task.state is TaskState.AWAITING_CI_CERTIFICATION
+    [wake] = _wakes(uow)
+    assert wake.payload["summary"].startswith("waiting on a re-run")
+    assert gh.revoked == ["fake-token-1"]
 
 
-# ---------------------------------------------------------------------------
-# AC3 - Second failure of the same job does not auto-rerun
-# ---------------------------------------------------------------------------
-
-
-def test_ac3_second_failure_requires_new_decision() -> None:
-    """AC3: After a rerun attempt has been recorded, a second failure of the same
-    job does not trigger another auto-rerun; it requires a new ci-decision.
-    The app still calls get_installation_permissions (finding 1) and raises a
-    wake so the Board shows the existing running rerun (finding 4), but it never
-    calls rerun-failed-jobs or get_workflow_run."""
-    task = _build_task()  # state=CI_CERTIFICATION_FAILED by default
-    cert_obj = _cert(TASK_ID)
-    cert_obj.failure["rerun_attempt"] = 2  # already had one rerun
-    uow = FakeUnitOfWork(task)
-    uow.ci_certifications.put(cert_obj)
-    clock = FakeClock()
+def test_ac1_the_attempt_stays_on_the_certification_and_its_result_is_judged() -> None:
     gh = FakeGitHubClient(actions_write=True)
-    principal = Principal(
-        id="user-003",
-        name="carl",
-        role=Role.OPERATOR,
-        created_at=NOW,
+    _task, uow = _decide(gh)
+    decided = uow.ci_certifications.last
+    event = _decision_event(uow)
+
+    # While attempt 2 runs, the certification names it.
+    running, _ = _observe(
+        event, decided, _workflow_run(status="in_progress", conclusion=None, attempt=2)
     )
+    assert running.state == "pending"
+    assert running.detail == "re-run requested, attempt 2 running"
+    assert running.failure["rerun_attempt"] == 2
 
-    record_ci_decision(
-        uow,  # type: ignore[arg-type]
-        clock,
-        principal=principal,
-        task_id=TASK_ID,
-        request=_decision_request(),
-        github_client=gh,
+    # Attempt 2's result is judged like any other: green certifies the head.
+    green, _ = _observe(
+        event,
+        running,
+        _workflow_run(status="completed", conclusion="success", attempt=2, completed_at=NOW),
     )
+    assert green.state == "green"
 
-    # get_installation_permissions was still called first (finding 1).
-    assert len(gh.get_installation_permissions_calls) == 1
 
-    # Even with Actions write, a second rerun of the same job after one
-    # rerun was already attempted is rejected (one rerun per decision).
+def test_ac1_the_rest_client_uses_the_issue_435_endpoints() -> None:
+    transport = _RecordingTransport(
+        {
+            ("GET", "/app/installations/42"): (200, {"permissions": {"actions": "write"}}),
+            ("POST", "/repos/owner/repo/actions/runs/5150/rerun-failed-jobs"): (201, None),
+            ("GET", "/repos/owner/repo/actions/runs/5150"): (200, {"run_attempt": 2}),
+            ("GET", "/repos/owner/repo/actions/jobs/777"): (200, {"run_id": 5150}),
+            ("GET", "/repos/owner/repo/actions/jobs/9"): (404, {"message": "Not Found"}),
+        }
+    )
+    client = RestGitHubClient(
+        cast(AppAuthenticator, MagicMock(app_jwt=MagicMock(return_value="app-jwt"))),
+        cast(RestTransport, transport),
+    )
+    token = InstallationToken(value="tok", expires_at=NOW, repository="owner/repo")
+
+    assert client.get_installation_permissions(installation_id=42) == {"actions": "write"}
+    # GitHub's 201 has no body; that is success, not an error.
+    assert client.rerun_failed_jobs(token, repository="owner/repo", run_id=5150) == {}
+    assert client.get_workflow_run(token, repository="owner/repo", run_id=5150)["run_attempt"] == 2
+    assert client.workflow_run_for_job(token, repository="owner/repo", job_id=777) == 5150
+    assert client.workflow_run_for_job(token, repository="owner/repo", job_id=9) is None
+    # The installation's grant is read with the App JWT, the rest with the token.
+    assert transport.bearers[0] == ("/app/installations/42", "app-jwt")
+    assert all(bearer == "tok" for _path, bearer in transport.bearers[1:])
+
+
+def test_ac1_an_unreadable_grant_is_no_grant() -> None:
+    transport = _RecordingTransport({("GET", "/app/installations/42"): (404, {"message": "x"})})
+    client = RestGitHubClient(
+        cast(AppAuthenticator, MagicMock(app_jwt=MagicMock(return_value="app-jwt"))),
+        cast(RestTransport, transport),
+    )
+    assert client.get_installation_permissions(installation_id=42) == {}
+
+
+def test_ac1_a_workflow_run_carries_its_attempt() -> None:
+    record = normalize.workflow_run(
+        {"id": 5150, "name": "CI", "status": "in_progress", "head_sha": HEAD_SHA, "run_attempt": 3}
+    )
+    assert record.run_attempt == 3
+
+
+# ---------------------------------------------------------------------------
+# AC2: Actions read only - the wake is the hand-off, the Board and task page say so
+# ---------------------------------------------------------------------------
+
+
+def test_ac2_actions_read_only_records_the_decision_and_raises_the_wake() -> None:
+    gh = FakeGitHubClient(actions_write=False)
+    task, uow = _decide(gh)
+
+    assert gh.get_installation_permissions_calls == [{"installation_id": 42}]
+    # No write token is asked for and nothing is re-run.
+    assert gh.token_requests == []
     assert gh.rerun_calls == []
-    assert gh.get_workflow_run_calls == []
-
-    # The decision was recorded (the ci_decisions repo tracks it).
     assert len(uow.ci_decisions._decisions) == 1
-
-    # A wake was raised so the Board shows the existing running rerun.
-    assert len(uow.wakes._wakes) >= 1
-
-
-# ---------------------------------------------------------------------------
-# AC4 - Manifest permission set names actions write (verified via import)
-# ---------------------------------------------------------------------------
+    assert _decision_event(uow).payload["action"] == "rerun"
+    assert task.state is TaskState.AWAITING_CI_CERTIFICATION
+    [wake] = _wakes(uow)
+    assert wake.reason == WakeReason.CI_RERUN_NEEDED.value
+    assert wake.payload["summary"].startswith("waiting on a re-run")
+    assert "no Actions write" in wake.payload["summary"]
 
 
-def test_ac4_manifest_permission_set_includes_actions_write() -> None:
-    """AC4: The GitHub manifest's PERMISSIONS dict and spec 23 comment
-    name ``actions: write``."""
-    from crucible.application.admin.github_manifest import PERMISSIONS  # noqa: PLC0415
+def test_ac2_without_a_client_or_grant_reading_the_handoff_stands() -> None:
+    _task, uow = _decide(None)
+    [wake] = _wakes(uow)
+    assert wake.reason == WakeReason.CI_RERUN_NEEDED.value
 
-    assert PERMISSIONS["actions"] == "write", (
-        "Spec 23 must request Actions write so Hades can re-run failed jobs through the API."
+
+def test_ac2_board_and_task_page_show_waiting_then_the_running_attempt() -> None:
+    gh = FakeGitHubClient(actions_write=False)
+    task, uow = _decide(gh)
+    [wake] = _wakes(uow)
+    event = _decision_event(uow)
+    decided = uow.ci_certifications.last
+
+    # Before an attempt runs, the Board's line is the hand-off: waiting on a re-run.
+    assert waiting_line(wake, task.state).startswith("waiting on a re-run")
+    assert _holder("ci", task, None, wake, None)["detail"].startswith("waiting on a re-run")
+    stale, stale_event = _observe(
+        event,
+        decided,
+        _workflow_run(
+            status="completed",
+            conclusion="failure",
+            attempt=1,
+            completed_at=datetime(2026, 10, 7, 11, 0, 0, tzinfo=UTC),
+        ),
+    )
+    assert stale.state == "pending"
+    assert stale.detail.startswith("waiting on a re-run")
+    assert rerun_line(task, stale_event) is None
+
+    # The operator re-runs it on GitHub: attempt 2 is running.
+    running, running_event = _observe(
+        event, stale, _workflow_run(status="in_progress", conclusion=None, attempt=2)
+    )
+    # The task page shows the certification's state and detail.
+    assert f"{running.state}: {running.detail}" == "pending: re-run requested, attempt 2 running"
+    # The Board's list view and the CI column of the kanban both say so.
+    assert rerun_line(task, running_event) == "re-run requested, attempt 2 running"
+    assert _holder("ci", task, None, wake, running_event)["detail"] == (
+        "re-run requested, attempt 2 running"
     )
 
 
-def test_ac4_spec_23_comment_documentation() -> None:
-    """AC4: The module docstring / comments reference actions write with a reason."""
-    module_text = github_manifest.__doc__ or ""
-    # The PERMISSIONS comment and/or module doc should mention actions and write.
-    assert "actions" in module_text.lower() or "write" in module_text.lower(), (
-        "Module-level documentation should reference the actions write permission."
+# ---------------------------------------------------------------------------
+# AC3: a second failure of the same job needs a new decision
+# ---------------------------------------------------------------------------
+
+
+def test_ac3_a_second_failure_is_not_rerun_without_a_new_decision() -> None:
+    gh = FakeGitHubClient(actions_write=True)
+    task, uow = _decide(gh)
+    assert len(gh.rerun_calls) == 1
+    event = _decision_event(uow)
+
+    # Attempt 2 of the same run fails again: a new failure, not the stale one.
+    failed, _ = _observe(
+        event,
+        uow.ci_certifications.last,
+        _workflow_run(status="completed", conclusion="failure", attempt=2, completed_at=NOW),
     )
+    assert failed.state == "failed"
+    assert failed.failure["rerun_attempt"] == 2
+    # Observing it re-runs nothing: the only caller of rerun-failed-jobs is a decision.
+    assert len(gh.rerun_calls) == 1
+    callers = [
+        path
+        for path in Path("crucible").rglob("*.py")
+        if "rerun_failed_jobs(" in path.read_text(encoding="utf-8")
+        and "def rerun_failed_jobs(" not in path.read_text(encoding="utf-8")
+    ]
+    assert callers == [Path("crucible/application/delivery_decisions.py")]
+
+    # A new decision re-runs it once more, and the next attempt is recorded.
+    task.state = TaskState.CI_CERTIFICATION_FAILED
+    uow.ci_certifications.put(failed)
+    _decide(gh, task=task, uow=uow)
+    assert gh.rerun_calls == [
+        {"repository": TASK_REPOSITORY, "run_id": 5150},
+        {"repository": TASK_REPOSITORY, "run_id": 5150},
+    ]
+    latest = uow.ci_certifications.last
+    assert latest is not None
+    assert latest.failure["rerun_attempt"] == 3
+
+
+def test_ac3_an_earlier_decisions_attempt_is_not_shown_for_a_new_one() -> None:
+    gh = FakeGitHubClient(actions_write=False)
+    _task, uow = _decide(gh)
+    event = _decision_event(uow)
+    previous = _cert(TASK_ID)
+    previous.failure = {**previous.failure, "rerun_attempt": 2, "rerun_decision": "older"}
+
+    certification, _ = _observe(
+        event,
+        previous,
+        _workflow_run(
+            status="completed",
+            conclusion="failure",
+            attempt=2,
+            completed_at=datetime(2026, 10, 7, 11, 0, 0, tzinfo=UTC),
+        ),
+    )
+    assert "rerun_attempt" not in certification.failure
+    assert certification.detail.startswith("waiting on a re-run")
+
+
+# ---------------------------------------------------------------------------
+# AC4: the manifest and spec 23 name Actions write and why
+# ---------------------------------------------------------------------------
+
+
+def test_ac4_the_manifest_asks_for_actions_write_and_nothing_else_new() -> None:
+    assert github_manifest.PERMISSIONS == {
+        "metadata": "read",
+        "contents": "write",
+        "pull_requests": "write",
+        "checks": "read",
+        "actions": "write",
+        "issues": "read",
+    }
+    doc = github_manifest.__doc__ or ""
+    assert "Actions write" in doc
+    assert "re-run" in doc
+
+
+def test_ac4_spec_23_names_actions_write_and_why() -> None:
+    spec = Path("docs/spec/23-github-delivery.md").read_text(encoding="utf-8")
+    assert "Checks read, Actions read/write, Issues read" in spec
+    assert "Actions write is there so a `ci-decision` `rerun` re-runs" in spec
+    assert "rerun-failed-jobs" in spec
+    assert "re-run requested, attempt N running" in spec
+
+
+class _RecordingTransport:
+    """Answers the paths it was given and records which bearer each call used."""
+
+    def __init__(self, answers: dict[tuple[str, str], tuple[int, Any]]) -> None:
+        self.answers = answers
+        self.bearers: list[tuple[str, str]] = []
+
+    def request(
+        self, method: str, path: str, *, bearer: str, **_kwargs: Any
+    ) -> tuple[int, Any, dict[str, str]]:
+        self.bearers.append((path, bearer))
+        status, payload = self.answers[(method, path)]
+        return status, payload, {}
+
+    def get(self, path: str, *, bearer: str, **_kwargs: Any) -> Any:
+        status, payload, _ = self.request("GET", path, bearer=bearer)
+        if status >= 400:
+            raise GitHubError(status, "refused", path=path)
+        return payload
