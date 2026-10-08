@@ -39,6 +39,57 @@ permissions:
   contents: read
 
 jobs:
+  # hades #476 (the operator's design, 2026-10-06): one classification per run, from
+  # the paths this push changed, so CI proves only what the change could affect. Core
+  # jobs (lint, scan, test, e2e, manifests, compose-smoke) always run and read nothing
+  # here. images, registry and e2e-kind below gate on this job's outputs. The decision
+  # itself is `crucible.domain.change_class`, wrapped for this workflow by
+  # `tools/ci/changes.py` and unit-tested at
+  # tests/unit/test_issue_476_scoped_ci_classes.py, so this workflow and Hades's own
+  # certification (which records the same `class` label) never disagree.
+  classify:
+    runs-on: ubuntu-24.04
+    outputs:
+      class: ${{ steps.classify.outputs.class }}
+      images: ${{ steps.classify.outputs.images }}
+      kind: ${{ steps.classify.outputs.kind }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c # v7.0.0
+        with:
+          enable-cache: true
+      # Same range as the scan job below: the first push of a new branch has no
+      # `before` (all zeros), and a force push's `before` is on no ref the clone has,
+      # so either way the range is everything the branch adds to main.
+      - name: decide the change class
+        id: classify
+        env:
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          # A no-cache dispatch (114) advertises a from-scratch image build; `before` is
+          # absent on a dispatch, so without this the range falls back to
+          # `origin/main..$SHA`, which is empty or core-only on a dispatch from main (or a
+          # core-only branch) and would silently skip the images job the dispatch exists
+          # to force. `images` and `kind` are forced regardless of what the diff says;
+          # `class` still names the diff's own classification, since this is an
+          # operational override of which jobs run, not a reclassification of the change.
+          DISPATCH_NO_CACHE: ${{ github.event_name == 'workflow_dispatch' && inputs.no_cache }}
+        run: |
+          set -euo pipefail
+          if git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            RANGE="$BEFORE..$SHA"
+          else
+            RANGE="origin/main..$SHA"
+          fi
+          uv sync --frozen --quiet
+          git diff --name-only "$RANGE" | uv run python3 tools/ci/changes.py >> "$GITHUB_OUTPUT"
+          if [ "$DISPATCH_NO_CACHE" = "true" ]; then
+            echo "images=true" >> "$GITHUB_OUTPUT"
+            echo "kind=true" >> "$GITHUB_OUTPUT"
+          fi
+
   lint:
     runs-on: ubuntu-24.04
     steps:
@@ -145,6 +196,13 @@ jobs:
   # bot's own digest commit never writes back again, so a digest that does not
   # reproduce twice fails instead of looping.
   images:
+    needs: classify
+    # hades #476: only when the change touches images/ or tools/images/, the workflow
+    # itself, or an unclassified path (classify's outputs already fold those into
+    # `images`). A core-only or kind-only change skips this job, so the certification
+    # it would have been missing from is read correctly (crucible.domain.certification
+    # excludes a skipped run from the counted set; it is not a missing job).
+    if: needs.classify.outputs.images == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     # The workflow's read-only token and nothing more: every step runs branch code.
@@ -256,6 +314,12 @@ jobs:
   # This belongs beside the Docker tier on GitHub-hosted infrastructure: it needs a
   # daemon but no lab access (github-ci skill).
   e2e-kind:
+    needs: classify
+    # hades #476: when the change touches tools/kind/, deploy/ or the kind test file
+    # itself, or when it touches images/ or tools/images/ (the images class adds the
+    # kind tier too, since e2e-kind builds the same worker image), or the workflow or
+    # unclassified override.
+    if: needs.classify.outputs.kind == 'true'
     runs-on: ubuntu-24.04
     # Three shards (hades #222), each on its own disposable cluster, selected from
     # tools/kind/shards/<n>.txt; tests/unit/test_kind_shards.py proves every kind test
@@ -305,6 +369,10 @@ jobs:
   # internet and neither a Docker daemon nor the lab, and the repository is public, so it
   # is GitHub-hosted (github-ci skill rule 4). No secret: the package is public.
   registry:
+    needs: classify
+    # hades #476: the registry adapter resolves the published worker image, so it
+    # runs with images, the same condition as the images job above.
+    if: needs.classify.outputs.images == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

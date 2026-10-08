@@ -29,7 +29,8 @@ MERGED = {"0044_attempt_stall_shape", "0044_editor_leftovers_policy", "0044_merg
 # 0047 above that; hades #389's migration was renumbered to 0047 on top and chains from
 # 0047_attempt_egress_probe so the graph stays linear. hades #176 adds 0048 on top,
 # hades #265 adds 0049 for persisted batch outcomes, then #485 adds 0050 for the cache TTL,
-# and #489 adds 0052 for operator notes on a task.
+# #489 adds 0052_task_notes for operator notes on a task, and #515 adds 0051 for pair-based
+# routing references; #476's correction adds 0052_cert_change_class.
 ABOVE = "0046_blocked_reason"
 PROBE = "0047_attempt_egress_probe"
 LAUNCH = "0047_successful_launch_time"
@@ -37,7 +38,7 @@ REBOUND = "0048_repository_rebound"
 BATCH = "0049_repository_batch"
 CACHE = "0050_status_cache"
 ROUTE = "0051_routing_model_references"
-HEAD = "0052_task_notes"
+MERGE_HEAD = "0053_merge_0052"
 
 
 def _script() -> ScriptDirectory:
@@ -57,14 +58,13 @@ def test_the_0045_merge_joins_the_three_0044_heads() -> None:
     merge = script.get_revision(MERGE)
     assert merge is not None
     assert set(merge.down_revision or ()) == MERGED
-    assert script.get_current_head() == HEAD
+    assert script.get_current_head() == MERGE_HEAD
     above = script.get_revision(ABOVE)
     assert above is not None and above.down_revision == MERGE
     probe = script.get_revision(PROBE)
     assert probe is not None and probe.down_revision == ABOVE
     launch = script.get_revision(LAUNCH)
     assert launch is not None and launch.down_revision == PROBE
-    head = script.get_revision(HEAD)
     rebound = script.get_revision(REBOUND)
     assert rebound is not None and rebound.down_revision == LAUNCH
     batch = script.get_revision(BATCH)
@@ -73,7 +73,11 @@ def test_the_0045_merge_joins_the_three_0044_heads() -> None:
     assert cache is not None and cache.down_revision == BATCH
     route = script.get_revision(ROUTE)
     assert route is not None and route.down_revision == CACHE
-    assert head is not None and head.down_revision == ROUTE
+    head = script.get_revision(MERGE_HEAD)
+    assert head is not None and head.down_revision == (
+        "0052_cert_change_class",
+        "0052_task_notes",
+    )
 
 
 def test_the_cli_config_sees_the_same_single_head() -> None:
@@ -81,7 +85,7 @@ def test_the_cli_config_sees_the_same_single_head() -> None:
     cfg = Config(str(REPO / "alembic.ini"))
     script = ScriptDirectory.from_config(cfg)
     assert Path(script.dir).resolve() == migrate.MIGRATIONS_DIR.resolve()
-    assert script.get_heads() == [HEAD]
+    assert script.get_heads() == [MERGE_HEAD]
 
 
 def _postgres_renders(kinds: list[str]) -> str:
@@ -101,7 +105,19 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
         plan = [step.revision.revision for step in script._upgrade_revs("head", head)]
         assert plan.index("0043_credential_mount_mode") < plan.index("0044_merge_423_424")
         assert plan.index("0044_merge_423_424") < plan.index(MERGE)
-        assert plan[-9:] == [MERGE, ABOVE, PROBE, LAUNCH, REBOUND, BATCH, CACHE, ROUTE, HEAD]
+        assert plan[-9:] == [
+            MERGE,
+            ABOVE,
+            PROBE,
+            LAUNCH,
+            REBOUND,
+            BATCH,
+            CACHE,
+            ROUTE,
+            "0052_cert_change_class",
+            "0052_task_notes",
+            MERGE_HEAD,
+        ]
 
 
 def test_0043_credential_mount_mode_keeps_the_kinds_the_live_check_permits() -> None:
