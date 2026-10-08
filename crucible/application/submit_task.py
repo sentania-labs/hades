@@ -32,6 +32,7 @@ from crucible.domain.entities import Event, Policy, Principal, Repository, Role,
 from crucible.domain.events import EventKind
 from crucible.domain.exit_class import ExitClass
 from crucible.domain.ids import new_id
+from crucible.domain.injected import INJECTED_PREFIXES
 from crucible.domain.lifecycle import TaskState
 from crucible.domain.verification import task_specific_checks
 from crucible.ports.clock import Clock
@@ -62,6 +63,58 @@ def require_operator_for_pin(principal: Principal, contract: TaskContractV1) -> 
         raise ForbiddenError(
             "only an operator may submit, amend, or correct an operator-pinned task"
         )
+
+
+def _harness_path_warning(contract: TaskContractV1) -> str | None:
+    """Return a warning if allowed_paths reach into a harness directory."""
+    harness_dirs = ", ".join(f"{p!r}" for p in INJECTED_PREFIXES)
+    for pattern in contract.scope.allowed_paths:
+        if _path_hits_harness(pattern, harness_dirs):
+            return (
+                f"allowed_paths contains {pattern!r}, which reaches into a "
+                f"harness directory ({harness_dirs}); the gate will still "
+                f"reject injected files, but the operator is alerted to "
+                f"this overlap"
+            )
+        # Globs: if the pattern could match under a harness prefix
+        if "*" in pattern or "?" in pattern or "[" in pattern:
+            for prefix in INJECTED_PREFIXES:
+                if fnmatch.fnmatch(pattern, prefix + "*") or fnmatch.fnmatch(
+                    pattern, prefix + "/*"
+                ):
+                    return (
+                        f"allowed_paths contains {pattern!r}, which reaches into "
+                        f"a harness directory ({harness_dirs}); the gate will "
+                        f"still reject injected files, but the operator is "
+                        f"alerted to this overlap"
+                    )
+    return None
+
+
+def _path_hits_harness(pattern: str, harness_dirs: str) -> bool:
+    """Check if *pattern* matches any injected prefix directly or via a subpath."""
+    for prefix in INJECTED_PREFIXES:
+        if (
+            pattern == prefix
+            or pattern.startswith(prefix + "/")
+            or (
+                len(pattern) > len(prefix)
+                and pattern[len(prefix)] == "/"
+                and pattern.startswith(prefix)
+            )
+            or (
+                "/" in pattern
+                and pattern[len(pattern) - len(prefix) :] == prefix
+                and (len(pattern) == len(prefix) or pattern[-len(prefix) - 1] == "/")
+            )
+            or (
+                "/" in pattern
+                and pattern[len(pattern) - len(prefix) - 1 :] == "/" + prefix
+                and (len(pattern) == len(prefix) + 1)
+            )
+        ):
+            return True
+    return False
 
 
 def _check_routing(
@@ -350,7 +403,7 @@ def unwired_provider_problems(
         _problem(
             "execution_request.provider",
             f"{provider!r} is not a provider this deployment runs",
-        )
+        ),
     ]
 
 
@@ -440,6 +493,8 @@ def submit_task(
     )
     uow.tasks.add(task)
     uow.contracts.add(stored)
+    # Advisory: alert the operator if allowed_paths reach into a harness directory.
+    warning_text = _harness_path_warning(contract)
     record_event(
         uow,
         clock,
@@ -452,6 +507,7 @@ def submit_task(
             "contract_sha256": stored.sha256,
             "repository": repository.name,
             "policy": {"name": contract.policy.name, "version": contract.policy.version},
+            "allowed_paths_harness_warning": warning_text,
         },
     )
     return task, stored
