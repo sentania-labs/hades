@@ -74,8 +74,10 @@ def test_the_0045_merge_joins_the_three_0044_heads() -> None:
     assert cache is not None and cache.down_revision == BATCH
     routing_refs = script.get_revision(ROUTING_REFS)
     assert routing_refs is not None and routing_refs.down_revision == CACHE
-    head = script.get_revision(HEAD)
+    head = script.get_revision("0052_codex_review_refused")
     assert head is not None and head.down_revision == ROUTING_REFS
+    head = script.get_revision(HEAD)
+    assert head is not None and head.down_revision == "0052_codex_review_refused"
 
 
 def test_the_cli_config_sees_the_same_single_head() -> None:
@@ -103,7 +105,7 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
         plan = [step.revision.revision for step in script._upgrade_revs("head", head)]
         assert plan.index("0043_credential_mount_mode") < plan.index("0044_merge_423_424")
         assert plan.index("0044_merge_423_424") < plan.index(MERGE)
-        assert plan[-9:] == [
+        assert plan[-10:] == [
             MERGE,
             ABOVE,
             PROBE,
