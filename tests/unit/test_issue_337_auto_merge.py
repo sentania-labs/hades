@@ -118,6 +118,10 @@ def setup() -> tuple[DeliveryCoordinator, FakeGitHub, MagicMock, Any, MergePlan]
         merged_at=None,
         merged_by=None,
         base_ref="main",
+        # hades #447: what the branch's migrations touch; none here.
+        schema_tables=None,
+        schema_columns=None,
+        schema_models=None,
         observed_head_sha=HEAD,
         observed_base_ref="main",
         mergeable_state="clean",
