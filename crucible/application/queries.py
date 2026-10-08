@@ -1121,6 +1121,7 @@ def pull_request_view(uow: UnitOfWork, task_id: str) -> PullRequestView:
                 check_runs=list(c.check_runs),
                 failure=dict(c.failure),
                 evaluated_at=c.evaluated_at,
+                change_class=c.change_class,
             )
             for c in certifications
         ],

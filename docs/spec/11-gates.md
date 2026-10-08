@@ -11,7 +11,7 @@ is carried to the reviewer.
 | `report_present` | blocking | The worker submitted a parseable report with self-review |
 | `exit_clean` | blocking | The worker exited with a clean class |
 | `commits_present` | blocking | The branch has at least one commit |
-| `scope_contained` | blocking (prohibited paths) / advisory | Changed paths are inside `allowed_paths` |
+| `scope_contained` | blocking (prohibited paths) / advisory | Worker commit paths are inside `allowed_paths` |
 | `no_injected_files` | blocking | No injected-name or harness paths appear on the branch |
 | `no_secrets` | blocking | The scanner found no secrets in the diff or artifacts |
 | `editor_leftovers` | blocking | No editor or merge leftovers were added to the branch |
@@ -45,6 +45,13 @@ the base ref and is only edited or deleted is not flagged.  When diff change-sta
 information is unavailable the gate conservatively checks all changed paths.
 
 ## Commit authorship range (`commit_policy`, hades #230)
+
+`scope_contained` checks the complete path list from commits in `BASE..HEAD`, rather
+than the merge-base diff. The prepared base is a trusted commit id, not a ref the worker
+can move. Two-dot reachability excludes every commit already reachable from the base,
+so merging a newer base into the work branch cannot charge the base's paths to the
+worker. Paths in the worker's own commits remain in the list even if a later commit or
+base merge hides them from the final diff.
 
 The collector's author check (`commit_policy_check`, FDY-0135) runs over a range,
 `POLICY_FROM..HEAD`, so a correction only re-checks the commits added since the branch

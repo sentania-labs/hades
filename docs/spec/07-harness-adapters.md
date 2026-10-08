@@ -133,6 +133,29 @@ bumping a pin without renaming the fixtures fails the test with a clear
   remain project files and no generated shim is written.
 - Stream-json lines are parsed into progress events (tool use, text) at low
   fidelity; the full stream is stored as the transcript artifact.
+- Quota (hades #373): two refusals, read apart. The account's own refusal is
+  the CLI's `rate_limit_event` whose window `status` is `rejected` (the C5b
+  live sample: status rejected, overage reason `out_of_credits`, then a
+  synthetic result with `terminal_reason` `api_error`); it is the one signal
+  that marks the pool (05b, 16), until the reset the event states, else the
+  pool's `default_cooldown_seconds`. The event's overage fields are not the
+  signal: with extra usage switched off for the account, every ordinary run
+  carries `overageStatus: rejected` and `overageDisabledReason: out_of_credits`
+  beside `status: allowed` (observed on 2.1.280, 2026-10-08), so those words
+  alone classify nothing and mark nothing. A model-only refusal is an error
+  event (a synthetic assistant message, an `api_retry` line, an error result)
+  whose words name the model's own credit requirement
+  (`model_requires_usage_credits`, "out of usage credits") or tell the user to
+  switch models ("Switch to another model to continue"); it classifies
+  `quota_exhausted` like any refusal, but `provider_quota_event` reports it
+  `model_only`, and the supervisor excludes that model id until the refusal's
+  reset, or the pool's `default_cooldown_seconds` when it states none, and
+  reroutes the task to the next candidate in the same pool. The pool is not
+  marked and no pool wake is raised. The same words reaching the tail as plain
+  text exclude the model too: an exclusion is that model's own, so it needs no
+  structured proof the way a shared pool mark does. (2026-10-02, FDY-0256: the
+  429 `model_requires_usage_credits` on claude-fable-5-1 marked anthropic-sub
+  for two days while Opus and Sonnet, which the plan covers, were eligible.)
 - Known: nested invocation from inside another Claude session works, but
   workers never run inside a session anyway.
 
@@ -413,6 +436,32 @@ loaded into `OPENAI_API_KEY` at container start. It never mounts subscription
 `model_context_window` uses the Local gateway page's context length. A saved zero,
 which asks Hermes to discover its window, uses 131072 for Codex because Codex cannot
 use Hermes's discovery. Set a positive context length for the actual gateway model.
+The top-level `model_max_output_tokens` uses the Local gateway page's response
+allowance the same way.
+
+Hades #354: the routing entry Codex launches with is read first. Its own
+`context_length` and `max_output_tokens`, when either is set, replace the Local
+gateway page's figures above, resolved once per attempt like the rest of
+`effective_settings` (hades #388) and reused on every later spec of that attempt. An
+entry that sets neither keeps reading the Local gateway page's defaults, unchanged.
+`context_length` and `max_output_tokens` are set independently, so the two can combine
+(one entry's own pair, or one figure against the other inherited from the Local
+gateway page) into a response reservation that consumes the whole window; that final
+pair is validated before the launch config is emitted, and the launch is refused,
+the same way an unknown harness or a missing credential is, rather than sent to fail
+at request time with no input budget.
+
+`--model` is the routing entry's `model` (the lane, for example `fast`) unless the
+entry carries `harness_model_name`, in which case that name is sent instead, for
+example `gpt-5.4`, a gateway alias Codex's own model catalog recognises for the same
+backing model. Without a recognised name Codex logs `Model metadata for '<name>' not
+found` and falls back to generic tool, prompt, output-token and compaction defaults,
+regardless of `model_context_window` and `model_max_output_tokens` above. Routing,
+pools and `GET /routing/history` always read `model`; the launch event
+(`attempt_launching`) records `sent_model_name` beside it, so the lane and the name
+actually sent are both evidence. An entry with no `harness_model_name` sends `model`
+unchanged, exactly as before #354. Setting `harness_model_name` never changes the
+gateway alias itself or a routing entry's thinking setting; those stay lab-admin's.
 
 The launch retains `--dangerously-bypass-approvals-and-sandbox`, never adds
 `--ignore-user-config`, and sends identity plus the pointer prompt through a finite

@@ -36,6 +36,11 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           fetch-depth: 0
+          # hades #476: `fetch-depth: 0` alone does not fetch tags (actions/checkout's
+          # own default is `--no-tags`); `find the previous release` below needs every
+          # earlier vMAJOR.MINOR.PATCH tag's history, not only the one that triggered
+          # this run.
+          fetch-tags: true
 
       # Gate 1. A tag on a stray branch, or a tag that is not vMAJOR.MINOR.PATCH,
       # must not publish anything.
@@ -59,6 +64,53 @@ jobs:
             exit 1
           fi
           echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
+      # hades #476 (the operator's design, 2026-10-06): find the release before this
+      # one, so the worker image build below can be skipped when nothing in
+      # images/manifest.env's WORKER tag has changed since then. Local git only: every
+      # vMAJOR.MINOR.PATCH tag is a release tag by this repository's own convention
+      # (CONTRIBUTING.md), fetched in full by the checkout above (`fetch-depth: 0`
+      # fetches every tag), so this needs no registry read and no new credential.
+      # `tools/release/version.py --previous` never answers with this release's own
+      # version, even if this run is a re-run of a tag that is somehow already in the
+      # list.
+      - name: find the previous release
+        id: previous
+        run: |
+          set -euo pipefail
+          PREV=$(git tag --list 'v*.*.*' | sed 's/^v//' \
+            | python3 tools/release/version.py --previous "$VERSION")
+          echo "version=$PREV" >> "$GITHUB_OUTPUT"
+          if [ -n "$PREV" ]; then
+            echo "release: the previous release is v$PREV"
+          else
+            echo "release: no previous release found; this is the first one"
+          fi
+
+      # Compares this release's declared worker and script-harness tags against the
+      # previous release's (read from its own commit, not the working tree, since that
+      # tag's manifest is exactly what it published): each image rebuilds only when its
+      # own tag differs (finding 01M4CG0K1TQH50GM73R9H9CQRB -- the two are decided
+      # independently, since a harness-only bump must not be silently republished under
+      # the previous harness). tools/release/worker_decision.py is the single
+      # definition, unit-tested at tests/unit/test_issue_476_scoped_ci_classes.py, and
+      # prints `reuse=`, `previous_worker_tag=`, `harness_reuse=` and
+      # `previous_harness_tag=` directly in $GITHUB_OUTPUT's own key=value form.
+      - name: decide whether the worker image build is needed
+        id: worker_decision
+        env:
+          PREVIOUS_VERSION: ${{ steps.previous.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PREVIOUS_VERSION" ]; then
+            echo "release: no previous release to compare; building the worker image"
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+            echo "harness_reuse=false" >> "$GITHUB_OUTPUT"
+          else
+            git show "v${PREVIOUS_VERSION}:images/manifest.env" > "$RUNNER_TEMP/previous-manifest.env"
+            python3 tools/release/worker_decision.py --current images/manifest.env \
+              --previous "$RUNNER_TEMP/previous-manifest.env" >> "$GITHUB_OUTPUT"
+          fi
 
       # Gate 2. The version reaches the image through the build arg, because
       # .git is not in the build context.
@@ -194,8 +246,30 @@ jobs:
       # digest images/manifest.env declares, with the same script `make images` and the
       # CI images job run, not a copy (the c7c, c7e and c7f lesson). The build leaves
       # both images loaded in the daemon.
+      #
+      # hades #476: skipped only when the previous release already published both the
+      # exact WORKER and SCRIPT_HARNESS tags this manifest declares (`decide whether
+      # the worker image build is needed` above) -- "Maybe we need to not build a
+      # worker with every single release" (the operator, 2026-10-06). The previous
+      # release's own CI and release runs already proved those tags reproduce;
+      # re-proving them on every later release that changes nothing about them buys
+      # nothing. A change to either tag alone still runs this step: images.sh builds
+      # both images together, so there is no way to rebuild only the one that moved
+      # (finding 01M4CG0K1TQH50GM73R9H9CQRB -- a harness-only bump must not be
+      # silently republished under the previous release's stale harness).
       - name: build and prove the worker images
+        if: steps.worker_decision.outputs.reuse != 'true' || steps.worker_decision.outputs.harness_reuse != 'true'
         run: make images-check NO_CACHE=1
+
+      # hades #185: after building the worker images, prove the worker image carries
+      # every program a shipped policy's required check starts with or declares, so a
+      # release whose worker image and shipped policies disagree stops before anything
+      # is published.
+      - uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c # v7.0.0
+        with:
+          enable-cache: true
+      - name: check the worker image carries the policy programs
+        run: make images-policy-check
 
       # The worker images go out the way this image does, with `docker push` (the
       # operator's decision, 2026-09-23): <version> and script-harness-<version> on
@@ -203,9 +277,32 @@ jobs:
       # tag built from the same inputs is a re-run and is skipped, one built from
       # anything else stops the release, and only buildx's own "not found" counts as
       # absent. It comes before the service image's version tag is pushed, so a release
-      # whose worker images cannot be pushed publishes no service version.
+      # whose worker images cannot be pushed publishes no service version. Both tags
+      # push whenever either changed (the condition above), since images-check just
+      # built both from the manifest's current, reproducible inputs.
       - name: push the worker images, never over an existing version
+        if: steps.worker_decision.outputs.reuse != 'true' || steps.worker_decision.outputs.harness_reuse != 'true'
         run: tools/release/push_worker_images.sh
+
+      # hades #476: the reuse path, only when both tags are unchanged. Nothing was
+      # built above, so nothing is pushed; instead the previous release's
+      # already-published worker images are copied to this version's tags on the
+      # registry, by digest, the same `docker buildx imagetools create` the "move
+      # latest" step below uses to move `latest` without pushing from a local build.
+      # The release notes name the reused image and digest (`make release-notes
+      # WORKER_REUSED_FROM=`).
+      - name: re-publish the previous release's worker images by digest
+        if: steps.worker_decision.outputs.reuse == 'true' && steps.worker_decision.outputs.harness_reuse == 'true'
+        env:
+          PREVIOUS_VERSION: ${{ steps.previous.outputs.version }}
+        run: |
+          set -euo pipefail
+          echo "release: images/manifest.env's WORKER and SCRIPT_HARNESS tags are unchanged since v${PREVIOUS_VERSION}; reusing the published images by digest instead of rebuilding"
+          docker buildx imagetools create --prefer-index=false \
+            -t "${WORKER_REGISTRY}:${VERSION}" "${WORKER_REGISTRY}:${PREVIOUS_VERSION}"
+          docker buildx imagetools create --prefer-index=false \
+            -t "${WORKER_REGISTRY}:script-harness-${VERSION}" \
+            "${WORKER_REGISTRY}:script-harness-${PREVIOUS_VERSION}"
 
       # The candidate's own crane resolves the published worker image on GHCR (108): the
       # same adapter the Kubernetes provider runs, inside the image about to be
@@ -304,6 +401,10 @@ jobs:
       - name: render the release notes with the published digests
         env:
           CRUCIBLE_IMAGE: ${{ env.IMAGE }}:${{ env.VERSION }}
+          # hades #476: named only on the reuse path (both tags unchanged), so the
+          # notes say plainly that the worker image is a republish, not a fresh build.
+          WORKER_REUSED_FROM: >-
+            ${{ steps.worker_decision.outputs.reuse == 'true' && steps.worker_decision.outputs.harness_reuse == 'true' && steps.previous.outputs.version || '' }}
         run: make release-notes > release-notes.md
 
       # Gate 5. The release is created last, so a GitHub release never points at
