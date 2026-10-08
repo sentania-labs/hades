@@ -41,13 +41,17 @@ direction of 2026-09-29, FDY-0140). Crucible re-runs every check, commits what
 the worker leaves uncommitted, and enforces the scope and the gates itself, so
 the worker is told what to do, not how Crucible checks it. In order:
 
-1. **Heading and role.** The task id and title; the repository by name, the
-   checkout path, the work branch and the base ref; "do the task yourself; do
-   not redefine, widen or delegate it."
-2. **Objective.** From the contract.
-3. **This is a correction** (only on a correction version). The correction's
+1. **Heading.** The task id and title. **Operator notes** (hades #489) follow
+   at once when the task has any: the operator's notes, newest first, each as
+   `author at time: text` with the text as typed, under one sentence saying
+   to read them before the contract and that where they direct the work they
+   stand. A task with no note has no such section.
+2. **Role.** The repository by name, the checkout path, the work branch and
+   the base ref; "do the task yourself; do not redefine, widen or delegate it."
+3. **Objective.** From the contract.
+4. **This is a correction** (only on a correction version). The correction's
    instructions and the review comments or findings it addresses.
-4. **Scope.** Allowed and prohibited paths, whether dependencies may be added
+5. **Scope.** Allowed and prohibited paths, whether dependencies may be added
    and CI changed (yes or no), the network mode, "Commit your work on
    `work_branch`; never push.", the one line that a new migration's number and
    `down_revision` are provisional and Hades assigns them at merge (hades #447),
@@ -55,10 +59,10 @@ the worker is told what to do, not how Crucible checks it. In order:
    `constraints.prohibited_actions`. Nothing about the trailer, the author,
    hooks or `--no-verify`: none of them is the worker's concern, and nothing
    refuses a commit for them (operator decision, 2026-09-29, hades FDY-0143).
-5. **Read first** (when the contract names any). The contract's `context`
+6. **Read first** (when the contract names any). The contract's `context`
    references and `project_instructions`, each as `kind: ref`.
-6. **Acceptance criteria.** Each criterion's id and text.
-7. **Checks.** The `required_verification` commands, verbatim, to run and fix
+7. **Acceptance criteria.** Each criterion's id and text.
+8. **Checks.** The `required_verification` commands, verbatim, to run and fix
    what fails; an artifact entry is the file to write in the report directory.
    Then two lines: a program a required command needs that is missing from the
    image is not substituted for, it is `blocked.md` naming the program with the
@@ -70,7 +74,7 @@ the worker is told what to do, not how Crucible checks it. In order:
    strings, is refused at validation (05), so the first line
    is about `uv` or `gitleaks`, and the second is for the worker that reads a
    project's instructions to run the kind tier or build an image (ADR 0020).
-8. **Report.** Write `/crucible/report/report.yaml` against
+9. **Report.** Write `/crucible/report/report.yaml` against
    `report-schema.json` with `schema_version: "1.0"` (the format version, not
    the schema's name, hades #181), `summary`, `self_review` (where documentation was
    updated or why no update was needed, every acceptance criterion mapped with evidence,
@@ -79,7 +83,7 @@ the worker is told what to do, not how Crucible checks it. In order:
    per criterion id, which it lists, hades #187), `proposed_pull_request`, and
    the four lists; then run `crucible-report check` and fix every problem it
    prints (hades #215).
-9. **If you are stuck.** Write `/crucible/report/blocked.md`: a first line
+10. **If you are stuck.** Write `/crucible/report/blocked.md`: a first line
    `reason: missing_capability` (the task needs a program or capability the
    image does not have) or `reason: ambiguous_contract` (the contract reads
    more than one way and the readings differ in result), then what blocks you

@@ -154,6 +154,9 @@ class LaunchSpec:
     resume_bundle_head: str | None = None
     resume_bundle_sha256: str | None = None
     resume_bundle_ancestor: str | None = None
+    # hades #489: the operator's notes on the task, newest first, each `author`,
+    # `created_at`, `text` and `verbatim`; rendered at the top of IDENTITY.md (06).
+    operator_notes: tuple[dict[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         validate_endpoint(self.endpoint, self.endpoint_url)

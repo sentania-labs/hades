@@ -554,6 +554,11 @@ def _injected_hits(
     diff_status: dict[str, str] = {}
     for path, status, blob, classification in diff_changes or []:
         diff_status[path] = status
+        # Issue #377: check shim content on every added/modified path, not just
+        # injected names.  The shim's blob id is known, so we compare it directly
+        # without exporting content.
+        if blob in shim and status in ("A", "T", "M"):
+            _record(path, "shim content", blob)
         # Classifications from the collector that start with "error:" capture bad names
         # (surrogates in path) and unreadable blobs.  These may reference an ASCII-encoded
         # path that no longer satisfies `_injected`, so check unconditionally before
@@ -575,6 +580,15 @@ def _injected_hits(
     oldest_status: dict[str, str] = {}
     for path, status, blob, classification in commit_changes or []:
         oldest_status[path] = status
+        # Issue #377: check shim content on every committed path, not just
+        # injected names.  The shim's blob id is known, so we compare it directly
+        # without exporting content.
+        if blob in shim and status in ("A", "T", "M"):
+            _record(path, "shim content", blob)
+        # Classifications from the collector that start with "error:" capture bad names
+        # (surrogates in path) and unreadable blobs.  These may reference an ASCII-encoded
+        # path that no longer satisfies `_injected`, so check unconditionally before
+        # narrowing to injected names.
         if classification.startswith("error:"):
             hits.add(f"{path!r}: {classification}")
         elif _injected(path):

@@ -5850,6 +5850,7 @@ def _render_identity(
             work_branch=work_branch,
             network_mode=spec.network,
             report_schema=CompletionClaimV1.model_json_schema(),
+            operator_notes=spec.operator_notes,
         )
         data: dict[str, str] = {}
         paths: dict[str, str] = {}

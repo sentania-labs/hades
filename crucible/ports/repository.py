@@ -50,6 +50,7 @@ from crucible.domain.entities import (
     SupervisorStatus,
     Task,
     TaskContract,
+    TaskNote,
     UiSession,
     Wake,
 )
@@ -393,6 +394,14 @@ class DecisionRepository(Protocol):
     def list_for_task(self, task_id: str) -> Sequence[Decision]: ...
 
 
+class TaskNoteRepository(Protocol):
+    """Operator notes on a task (hades #489), newest first when listed."""
+
+    def add(self, note: TaskNote) -> None: ...
+
+    def list_for_task(self, task_id: str) -> Sequence[TaskNote]: ...
+
+
 class EscalationRepository(Protocol):
     def add(self, escalation: Escalation) -> None: ...
 
@@ -702,6 +711,7 @@ class UnitOfWork(Protocol):
     gate_results: GateResultRepository
     acceptance: AcceptanceRepository
     decisions: DecisionRepository
+    task_notes: TaskNoteRepository
     escalations: EscalationRepository
     dispositions: DispositionRepository
     wakes: WakeRepository
