@@ -12,7 +12,7 @@ eligible.
 Now (07, 16): a refusal whose words name the model's own credit requirement or tell the
 user to switch models excludes that model until the refusal's reset, or the pool's
 `default_cooldown_seconds` when it states none, and the task reroutes to the next
-candidate in the same pool through the `excluded_models` path. Only the account's own
+candidate in the same pool through the `excluded_routes` path. Only the account's own
 refusal, the `rate_limit_event` with status "rejected", marks the pool; a mark from a
 signal with no stated reset expires at the default cooldown; and every pool mark that
 opens an exhaustion raises the one wake naming the pool, the reason and the reset.
@@ -197,7 +197,7 @@ def test_the_fable_refusal_excludes_fable_and_leaves_anthropic_sub_unmarked(
     _finish(supervisor, pending.attempt, _fable_refusal())
     assert pending.attempt.exit_class is ExitClass.QUOTA_EXHAUSTED
     assert POOL not in marks
-    mark = marks[model_mark_key(FABLE)]
+    mark = marks[model_mark_key(FABLE, "claude_code")]
     assert mark.reset_at == NOW + timedelta(seconds=COOLDOWN)
     assert mark.attempt_id == pending.attempt.id
     assert mark.reason == MODEL_REASON
@@ -223,6 +223,7 @@ def test_an_opus_candidate_launches_next_in_the_same_pool(
     assert rerouted.payload["from_pool"] == POOL
     assert rerouted.payload["to_attempt_id"] == nxt.id
     assert rerouted.payload["excluded_model"] == FABLE
+    assert rerouted.payload["excluded_harness"] == "claude_code"
     assert rerouted.payload["next_attempt_id"] == nxt.id
     assert rerouted.payload["why"] == (
         "previous model refused this model only; rerouted within its pool"
@@ -249,7 +250,7 @@ def test_the_fable_exclusion_lifts_at_its_reset(monkeypatch: pytest.MonkeyPatch)
     before = _selection(supervisor, uow, pending, fresh)
     assert not _candidate(before, FABLE)["eligible"]
     supervisor._clock.advance(COOLDOWN + 1)
-    assert marks[model_mark_key(FABLE)].reset_at < supervisor._clock.now()
+    assert marks[model_mark_key(FABLE, "claude_code")].reset_at < supervisor._clock.now()
     after = _selection(supervisor, uow, pending, fresh)
     assert _candidate(after, FABLE)["eligible"]
 
@@ -259,7 +260,9 @@ def test_a_refusal_that_states_a_reset_excludes_fable_until_it(
 ) -> None:
     supervisor, pending, uow, _attempts, marks = _claude_on_anthropic_sub(monkeypatch)
     _finish(supervisor, pending.attempt, _fable_refusal(reset="2026-09-21T02:00:00Z"))
-    assert marks[model_mark_key(FABLE)].reset_at == datetime(2026, 9, 21, 2, tzinfo=UTC)
+    assert marks[model_mark_key(FABLE, "claude_code")].reset_at == datetime(
+        2026, 9, 21, 2, tzinfo=UTC
+    )
     assert POOL not in marks
     excluded = next(e for e in _events(uow) if e.kind == EventKind.QUOTA_EXHAUSTED.value)
     assert excluded.payload["source"] == "harness"
@@ -305,7 +308,7 @@ def test_a_model_only_exit_is_read_back_for_the_deferred_checkpoint_decision(
     the mark it wrote, so the later decision stays inside the pool too."""
     supervisor, pending, uow, _attempts, _marks = _claude_on_anthropic_sub(monkeypatch)
     _finish(supervisor, pending.attempt, _fable_refusal())
-    assert supervisor._model_exclusion_for(uow, pending.attempt) == {FABLE}
+    assert supervisor._model_exclusion_for(uow, pending.attempt) == {("claude_code", FABLE)}
     assert supervisor._model_exclusion_for(uow, replace(pending.attempt, id="other")) is None
 
 
@@ -336,7 +339,7 @@ def test_an_account_level_out_of_credits_refusal_still_marks_the_pool(
     assert pending.attempt.exit_class is ExitClass.QUOTA_EXHAUSTED
     assert marks[POOL].attempt_id == pending.attempt.id
     assert marks[POOL].reason == ACCOUNT_REASON
-    assert model_mark_key(FABLE) not in marks
+    assert model_mark_key(FABLE, "claude_code") not in marks
     marked = next(e for e in _events(uow) if e.kind == EventKind.POOL_EXHAUSTED.value)
     assert marked.payload["pool"] == POOL
     rerouted = next(e for e in _events(uow) if e.kind == EventKind.TASK_REROUTED.value)

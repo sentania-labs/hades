@@ -352,11 +352,11 @@ for quota, never from quota-shaped text elsewhere in a transcript; text
 alone may still classify that one attempt `quota_exhausted` and reroute it,
 without a mark. A refusal about one model rather than the account (hades
 #373; 07, Claude Code) marks no pool: it writes a mark for the model, keyed
-`model:<id>` in the same table, until the refusal's reset or the pool's
+`model:<harness>:<model>` in the same table, until the refusal's reset or the pool's
 `default_cooldown_seconds`, and selection turns that model away ("model
 excluded until ...") while its pool stays open. Marks are rows, survive a
 restart, expire on their own, and can be cleared by the administrator with
-a reason (25), a model's mark by its `model:<id>` key. A
+a reason (25), a model's mark by its `model:<harness>:<model>` key. A
 launch-time reservation that finds the pool over its soft limit does not
 create a mark; the soft limit is Crucible's own count, the mark is the
 provider's word. A harness that is
@@ -384,16 +384,16 @@ tiers:                                 # task tiers Foundry assigns in the contr
   # ADR 0028: a tier may add prefer_pools: [pool, ...]; absent reads as the local pools
   # first for trivial and standard, and no pool preference otherwise.
 models:                                # every entry weight 1: rotation is least-recent until the outcomes say otherwise
-  - { id: "claude-haiku-4-5",      harness: claude_code, endpoint: subscription, capability: small,    cost: low,    speed: fast,   pool: anthropic-sub, weight: 1, enabled: true }
-  - { id: "claude-sonnet-5",       harness: claude_code, endpoint: subscription, capability: mid,      cost: medium, speed: fast,   pool: anthropic-sub, weight: 1, enabled: true }
-  - { id: "claude-fable-5-1",      harness: claude_code, endpoint: subscription, capability: frontier, cost: high,   speed: medium, pool: anthropic-sub, weight: 1, enabled: true }
-  - { id: "gpt-5.6-luna",          harness: codex,       endpoint: subscription, capability: small,    cost: low,    speed: fast,   pool: openai-sub,    weight: 1, enabled: true }
-  - { id: "gpt-5.6-terra",         harness: codex,       endpoint: subscription, capability: mid,      cost: medium, speed: medium, pool: openai-sub,    weight: 1, enabled: true }
-  - { id: "gpt-5.6-sol",           harness: codex,       endpoint: subscription, capability: frontier, cost: high,   speed: medium, pool: openai-sub,    weight: 1, enabled: true }
-  - { id: "gpt-6-astra",           harness: codex,       endpoint: subscription, capability: frontier, cost: high,   speed: slow,   pool: openai-sub,    weight: 1, enabled: true }
-  - { id: "gemini-3.8-flash-low",  harness: agy,         endpoint: subscription, capability: small,    cost: low,    speed: fast,   pool: google-sub,    weight: 1, enabled: true }
-  - { id: "gemini-3.8-flash-high", harness: agy,         endpoint: subscription, capability: mid,      cost: medium, speed: medium, pool: google-sub,    weight: 1, enabled: true }
-  - { id: "gemini-3.1-pro-high",   harness: agy,         endpoint: subscription, capability: frontier, cost: high,   speed: slow,   pool: google-sub,    weight: 1, enabled: true }
+  - { model: "claude-haiku-4-5",      harness: claude_code, endpoint: subscription, capability: small,    cost: low,    speed: fast,   pool: anthropic-sub, weight: 1, enabled: true }
+  - { model: "claude-sonnet-5",       harness: claude_code, endpoint: subscription, capability: mid,      cost: medium, speed: fast,   pool: anthropic-sub, weight: 1, enabled: true }
+  - { model: "claude-fable-5-1",      harness: claude_code, endpoint: subscription, capability: frontier, cost: high,   speed: medium, pool: anthropic-sub, weight: 1, enabled: true }
+  - { model: "gpt-5.6-luna",          harness: codex,       endpoint: subscription, capability: small,    cost: low,    speed: fast,   pool: openai-sub,    weight: 1, enabled: true }
+  - { model: "gpt-5.6-terra",         harness: codex,       endpoint: subscription, capability: mid,      cost: medium, speed: medium, pool: openai-sub,    weight: 1, enabled: true }
+  - { model: "gpt-5.6-sol",           harness: codex,       endpoint: subscription, capability: frontier, cost: high,   speed: medium, pool: openai-sub,    weight: 1, enabled: true }
+  - { model: "gpt-6-astra",           harness: codex,       endpoint: subscription, capability: frontier, cost: high,   speed: slow,   pool: openai-sub,    weight: 1, enabled: true }
+  - { model: "gemini-3.8-flash-low",  harness: agy,         endpoint: subscription, capability: small,    cost: low,    speed: fast,   pool: google-sub,    weight: 1, enabled: true }
+  - { model: "gemini-3.8-flash-high", harness: agy,         endpoint: subscription, capability: mid,      cost: medium, speed: medium, pool: google-sub,    weight: 1, enabled: true }
+  - { model: "gemini-3.1-pro-high",   harness: agy,         endpoint: subscription, capability: frontier, cost: high,   speed: slow,   pool: google-sub,    weight: 1, enabled: true }
 pools:                                 # budget_units is one of attempts | tokens_out | cost_units, all recorded in AttemptMetrics
   anthropic-sub: { window: "5h", budget_units: "tokens_out", soft_limit: 0, default_cooldown_seconds: 18000 }   # 0 means observe only until measured; cooldown is the mark length when the harness reports no reset
   openai-sub:    { window: "5h", budget_units: "tokens_out", soft_limit: 0, default_cooldown_seconds: 18000 }
@@ -434,8 +434,13 @@ other effective settings. Runtime edits create later immutable versions through
 the admin surface. The database value is authoritative over the environment after the
 migration.
 
-Model ids are what the harness accepts. Which routing version a deployment
-uses is the policy's own choice. `default-software` version 2, seeded by
+The `model` field is what routing, pools and evidence call the entry; by default it is
+also exactly what the harness is sent. A routing entry is unique on `(harness, model)`,
+so Hermes, Qwen Code and Codex may all use `coder`. Local models are references to the
+gateway's authenticated `/models` listing at publish time; an unknown reference is
+refused with 422 and the checked listing. Subscription models are references known by
+their adapter. Which routing version a deployment uses is the policy's own choice.
+`default-software` version 2, seeded by
 migration 0009 (C5b), is version 1's document naming `default-routing`
 version 2, and it is the version the shipped example policy, the example
 contract, the compose smoke, the fixtures, and the tiers all reference, so
@@ -497,9 +502,44 @@ Local model entries may name `harness: codex`, `endpoint: local`, and `pool: lab
 For trivial and standard tiers, within the same pool Codex ranks before Hermes.
 Demotion and probe eligibility still rank first; pool preference still precedes
 harness preference, followed by capability and weighted least-recent rotation.
-An excluded Codex entry leaves Hermes eligible as the next local choice.
+A capacity refusal records both `excluded_harness` and `excluded_model` on the retry
+scheduled event. Selection excludes only that pair: a refused Codex route leaves
+Hermes and Qwen Code eligible even when they reference the same model. Route resolution
+requires the harness for both the submit quota check and the launch reservation, so
+each route uses its own pool and endpoint kind.
 
-Routing IDs remain unique. The optional `model_name` is the model alias sent to the
-harness; when absent it defaults to `id`. The Local gateway page creates
-`codex-local:<alias>` routing IDs with `model_name: <alias>`, so Hermes and Codex
-can both use the gateway's same alias without conflating their quality histories.
+The Local gateway page has one row per gateway model and places every harness using it
+under that row. A newly offered model has an unchecked Hermes control for adding its
+first route. Saving these controls preserves each existing route's thinking preference;
+the form does not edit that preference. It never presents an internal routing key as
+a model. A scheduled
+gateway listing disables every `(harness, model)` entry for a vanished model, records
+when it vanished, and wakes the orchestrator with the model and stranded harnesses.
+
+### Codex on a local lane is sent a model name it knows (hades #354)
+
+Codex logged `Model metadata for 'fast' not found` on a local lane: Hades sent the lane
+name, which Codex's own model catalog does not recognise, so it fell back to generic
+tool, prompt, output-token and compaction defaults. A routing entry may now carry
+`harness_model_name`, the name its harness is actually launched with, for example
+`gpt-5.4`, the gateway alias Codex's catalog does recognise for the same backing
+model, while `model` keeps the lane name (`fast`) that routing, pools and evidence
+always read. Absent, the harness is sent `model` unchanged (every entry before #354,
+and every entry that sets no override, behaves exactly as before). The launch event
+(`attempt_launching`) records both: `model`, the lane, and `sent_model_name`, the name
+actually passed to the harness.
+
+A local Codex entry's own `context_length` and `max_output_tokens` (the same fields
+#448 added for Qwen Code) feed Codex's per-attempt provider config,
+`model_context_window` and `model_max_output_tokens`, ahead of the Hermes-administered
+defaults on the Local gateway page; an entry that sets neither is unaffected, and Codex
+keeps reading the Hermes defaults it reads today. Changing a gateway alias or a
+routing entry's thinking setting is lab-admin's call, not this mechanism's; #354 does
+not touch either.
+
+`context_length` and `max_output_tokens` are independent overrides, so one entry can
+set a value that, against the other figure (its own, or inherited from the Local
+gateway page), leaves no input budget once the response reservation is taken out of
+the window. The saved Hermes settings already reject that pair at save time
+(`hermes_limit_problems`); a local Codex launch validates the same final pair and is
+refused rather than sent to fail at request time.

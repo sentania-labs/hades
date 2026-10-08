@@ -79,7 +79,7 @@ step:
    A model-only refusal (hades #373; 07, Claude Code) writes no pool mark:
    the refused model is excluded until the refusal's reset, or the pool's
    `default_cooldown_seconds` when it states none, as a mark keyed
-   `model:<id>` in the same table, listed and cleared like a pool mark, with
+   `model:<harness>:<model>` (the route) in the same table, listed and cleared like a pool mark, with
    a `quota_exhausted` event of scope `model`; the pool stays open and no
    pool wake is raised.
 3. Selection runs again for the tier with marked pools excluded. A
@@ -89,8 +89,8 @@ step:
    `quota_exhausted` wake naming the pool and its reset when this refusal
    opened the pool's exhaustion; otherwise no wake. After a model-only
    refusal the reroute stays inside the pool: selection runs with that
-   model excluded (the `excluded_models` path a capacity refusal's retry
-   takes, carried on the `reroute` event as `excluded_model` and
+   model excluded (the `excluded_routes` path a capacity refusal's retry
+   takes, carried on the `reroute` event as `excluded_model`, `excluded_harness` and
    `next_attempt_id`) and its mark turns the model away for every task until
    the reset; the next candidate in the same pool launches.
 4. No candidate: the task moves to `awaiting_quota` with `resume_at` the

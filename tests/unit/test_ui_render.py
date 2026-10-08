@@ -558,7 +558,7 @@ def test_routing_model_and_tier_controls_are_ordinary_reasoned_forms(
             "pools": ["codex", "claude"],
             "models": [
                 {
-                    "id": "gpt",
+                    "model": "gpt",
                     "harness": "codex",
                     "pool": "codex",
                     "capability": "frontier",

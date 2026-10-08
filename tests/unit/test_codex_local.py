@@ -200,6 +200,8 @@ def test_local_codex_uses_pool_limit_subscription_still_serial(
             state=AttemptState.RUNNING,
             execution_id="local",
             selected_pool="lab-local",
+            selected_model=None,
+            selected_harness=None,
         )
     ]
     uow = _uow(attempts=live)
@@ -212,6 +214,8 @@ def test_local_codex_uses_pool_limit_subscription_still_serial(
             state=AttemptState.RUNNING,
             execution_id="local",
             selected_pool="lab-local",
+            selected_model=None,
+            selected_harness=None,
         )
     )
     assert "2 of 2 lab-local" in str(supervisor._harness_busy_in_uow(uow, local))
@@ -221,6 +225,8 @@ def test_local_codex_uses_pool_limit_subscription_still_serial(
             routing_version=None,
             execution_id="subscription",
             selected_pool="pool-subscription",
+            selected_model=None,
+            selected_harness=None,
         )
     ]
     assert supervisor._harness_busy_in_uow(uow, local) is None
@@ -250,7 +256,7 @@ async def test_supervisor_launch_uses_gateway_alias_limits_and_key(
         id="attempt",
         number=1,
         selected_harness="codex",
-        selected_model="z-codex",
+        selected_model="coder",
         selected_image="image",
         resume_from_remote=False,
         routing_version=None,
@@ -259,7 +265,7 @@ async def test_supervisor_launch_uses_gateway_alias_limits_and_key(
     execution: Any = SimpleNamespace(
         role=ExecutionRole.IMPLEMENT,
         harness="codex",
-        model="z-codex",
+        model="coder",
         image="image",
         policy_snapshot={},
         timeout_seconds=60,
@@ -269,7 +275,7 @@ async def test_supervisor_launch_uses_gateway_alias_limits_and_key(
     task: Any = SimpleNamespace(id="task", external_id="FDY-0149", principal_id="tests")
     launch = await supervisor._build_spec(attempt, execution, task, {})
     assert requested == ["harness.hermes"]
-    assert launch.model == "z-codex"  # routing history keeps the unique entry id
+    assert launch.model == "coder"
     assert launch.command[launch.command.index("--model") + 1] == "coder"
     assert launch.env_from_files == {"OPENAI_API_KEY": "/home/worker/.hermes-auth/api-key"}
     assert "model_context_window = 96000" in launch.env["CRUCIBLE_CODEX_CONFIG"]

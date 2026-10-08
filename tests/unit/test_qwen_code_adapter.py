@@ -300,7 +300,7 @@ async def test_supervisor_passes_and_freezes_routing_context(
 
     attempt = _attempt()
     attempt.selected_harness = "qwen_code"
-    attempt.selected_model = "qwen-local"
+    attempt.selected_model = "qwen-lane"
     uow = _Uow({"context_length": 999999}, attempt)
     supervisor = _supervisor(monkeypatch, tmp_path, uow, thinking=False)
     route = _routing([model_entry(context_length=limit, model_name="qwen-lane").model_dump()])

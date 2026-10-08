@@ -203,7 +203,7 @@ def test_0013_records_an_unconfigured_spark_route_with_a_reason(migrated: str) -
             conn.execute(text("SELECT count(*) FROM harnesses WHERE name='hermes'")).scalar() == 1
         )
     routing = RoutingPolicyV1.model_validate(document)
-    hermes = routing.model("gpt-oss:120b")
+    hermes = routing.model("gpt-oss:120b", "hermes")
     assert hermes is not None and not hermes.enabled and hermes.endpoint_url is None
     assert hermes.disabled_reason == "CRUCIBLE_SPARK_ENDPOINT_URL is not configured"
     assert routing.pools["spark-local"].max_concurrency == 4
@@ -221,7 +221,7 @@ def test_0013_materializes_the_configured_spark_url(
         document = conn.execute(
             text("SELECT document FROM routing_policies WHERE name='default-routing' AND version=4")
         ).scalar_one()
-    hermes = RoutingPolicyV1.model_validate(document).model("gpt-oss:120b")
+    hermes = RoutingPolicyV1.model_validate(document).model("gpt-oss:120b", "hermes")
     assert hermes is not None and hermes.endpoint_url == "http://192.0.2.41:11434/v1"
     assert hermes.disabled_reason == "enablement gate has not passed"
     with engine.connect() as conn:
@@ -234,7 +234,7 @@ def test_0013_materializes_the_configured_spark_url(
                 "WHERE name='default-software' AND version=5"
             )
         ).scalar_one()
-    enabled = RoutingPolicyV1.model_validate(enabled_document).model("gpt-oss:120b")
+    enabled = RoutingPolicyV1.model_validate(enabled_document).model("gpt-oss:120b", "hermes")
     assert enabled is not None and enabled.enabled and enabled.disabled_reason is None
     assert enabled.endpoint_url == "http://192.0.2.41:11434/v1"
     assert int(policy_ref) == 5
@@ -576,7 +576,7 @@ def test_0019_adds_opus_5_5_disabled_beside_the_frontier_entry(database_url: str
     assert (policy_version, routing_version) == (highest_policy + 1, highest + 1)
     assert "Opus 5.5" in policy["description"]
     routing = RoutingPolicyV1.model_validate(document)
-    opus = routing.model("claude-opus-5-5")
+    opus = routing.model("claude-opus-5-5", "claude_code")
     assert opus is not None
     assert (opus.harness, opus.endpoint, opus.capability, opus.pool) == (
         "claude_code",
@@ -632,7 +632,7 @@ def test_0019_downgrade_keeps_the_version_a_task_was_submitted_against(
             assert policy is not None
             routing = load_routing(uow, policy.document)
             assert routing is not None and routing.version == routing_version
-            assert routing.model("claude-opus-5-5") is not None
+            assert routing.model("claude-opus-5-5", "claude_code") is not None
         migrate.upgrade(migrated)
         # Through the API only once the schema matches the code again: this code reads
         # columns later revisions add (0025's `repositories.private`), and running it
@@ -1532,6 +1532,51 @@ def test_0035_to_head_upgrades_a_populated_database(database_url: str) -> None:
             )
     finally:
         engine.dispose()
+
+
+def test_0051_migrates_populated_qwen_route_without_rerouting_task(database_url: str) -> None:
+    """#513: policy references and the attempt's routing version survive the document
+    rewrite; only the endpoint model spelling changes from qwen-coder to coder."""
+    migrate.downgrade(database_url, "0050_status_cache")
+    engine = make_engine(database_url)
+    with engine.begin() as conn:
+        row = (
+            conn.execute(
+                text(
+                    "SELECT name, version, document FROM routing_policies "
+                    "ORDER BY version DESC LIMIT 1"
+                )
+            )
+            .mappings()
+            .one()
+        )
+        document = dict(row["document"])
+        document["models"].append(
+            {
+                **document["models"][0],
+                "id": "qwen-coder",
+                "model_name": "coder",
+                "harness": "qwen_code",
+            }
+        )
+        conn.execute(
+            text(
+                "UPDATE routing_policies SET document=CAST(:document AS jsonb) "
+                "WHERE name=:name AND version=:version"
+            ),
+            {**row, "document": json.dumps(document)},
+        )
+    migrate.upgrade(database_url)
+    with engine.connect() as conn:
+        migrated = conn.execute(
+            text("SELECT document FROM routing_policies WHERE name=:name AND version=:version"),
+            dict(row),
+        ).scalar_one()
+    qwen = next(entry for entry in migrated["models"] if entry["harness"] == "qwen_code")
+    assert qwen["model"] == "coder"
+    assert "id" not in qwen and "model_name" not in qwen
+    assert migrated["version"] == row["version"]
+    engine.dispose()
 
 
 @pytest.mark.parametrize(

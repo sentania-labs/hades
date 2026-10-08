@@ -507,5 +507,6 @@ async def _run(
         return
     words = EXIT_WORDS.get(record.exit_class, f"the run ended as {record.exit_class}")
     code = f" (exit code {record.exit_code})" if record.exit_code is not None else ""
-    detail = f"{words}{code}, after {seconds}"
+    provider = f": {record.detail}" if record.detail else ""
+    detail = f"{words}{code}{provider}, after {seconds}"
     steps.failed(MODEL, detail, title=f"Fix the credential or provider for {harness}.")

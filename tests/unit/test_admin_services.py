@@ -471,7 +471,7 @@ def test_a_secret_shaped_reason_is_refused_rather_than_recorded() -> None:
     from crucible.application.errors import ContractValidationError  # noqa: PLC0415
 
     assert require_reason("  rotating after the quarterly review  ") == (
-        "rotating after the quarterly review"
+        "  rotating after the quarterly review  "
     )
     try:
         require_reason("pasting the token " + _token("sk-ant-oat01-"))
