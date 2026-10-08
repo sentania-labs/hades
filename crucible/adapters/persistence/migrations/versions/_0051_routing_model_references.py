@@ -112,7 +112,11 @@ def upgrade() -> None:
         for entry in document.get("models", [])
     }
     _rewrite(_current)
+    op.execute("ALTER TABLE executions DISABLE TRIGGER trg_executions_fenced")
+    op.execute("ALTER TABLE attempts DISABLE TRIGGER trg_attempts_fenced")
     _rename_references(aliases)
+    op.execute("ALTER TABLE executions ENABLE TRIGGER trg_executions_fenced")
+    op.execute("ALTER TABLE attempts ENABLE TRIGGER trg_attempts_fenced")
 
 
 def downgrade() -> None:
@@ -121,4 +125,8 @@ def downgrade() -> None:
     )
     ids = _legacy_ids(documents)
     _rewrite(lambda document: _legacy(document, ids))
+    op.execute("ALTER TABLE executions DISABLE TRIGGER trg_executions_fenced")
+    op.execute("ALTER TABLE attempts DISABLE TRIGGER trg_attempts_fenced")
     _rename_references(ids)
+    op.execute("ALTER TABLE executions ENABLE TRIGGER trg_executions_fenced")
+    op.execute("ALTER TABLE attempts ENABLE TRIGGER trg_attempts_fenced")
