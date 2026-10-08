@@ -6,7 +6,6 @@ API remains available for tasks left in awaiting_acceptance by older deployments
 
 from __future__ import annotations
 
-from crucible.application.decisions import record_decision
 from crucible.application.errors import (
     ForbiddenError,
     NotFoundError,
@@ -15,11 +14,12 @@ from crucible.application.errors import (
 from crucible.application.task_access import require_task_principal
 from crucible.application.transitions import move_task, record_event, require_contract
 from crucible.application.wakes import create_wake
-from crucible.contracts.api import AcceptRequest, DecisionRequest
+from crucible.contracts.api import AcceptRequest
 from crucible.contracts.wake import WakeReason
 from crucible.domain.entities import (
     AcceptanceResult,
     AcceptanceVerdict,
+    Decision,
     EscalationState,
     Principal,
     Role,
@@ -195,22 +195,54 @@ def close_task(
         payload={"note": note},
     )
     # Close any open escalations with the close note as the decision.
+    # We create Decision entities directly (not DecisionRequest) so the
+    # public model validator's kind allowlist does not block internal closure.
+    # (Finding 01M4CFEK8J8BXDEB0NETRX267E)
+    now = clock.now()
     for escalation in uow.escalations.list_for_task(task.id):
         if escalation.state is not EscalationState.OPEN:
             continue
-        # Create a decision to answer and close the escalation.
-        decision_request = DecisionRequest(
+        decision = Decision(
+            id=new_id(),
+            task_id=task.id,
+            escalation_id=escalation.id,
+            principal_id=principal.id,
             kind="task_closed",
             verbatim=note,
             resolves=escalation.question,
-            escalation_id=escalation.id,
-            reschedule=False,
+            created_at=now,
         )
-        record_decision(
+        uow.decisions.add(decision)
+        record_event(
             uow,
             clock,
-            principal=principal,
+            EventKind.DECISION_RECORDED,
+            principal=principal.name,
             task_id=task.id,
-            request=decision_request,
+            payload={
+                "decision_id": decision.id,
+                "kind": decision.kind,
+                "escalation_id": decision.escalation_id,
+                "resolves": decision.resolves,
+                "verbatim": decision.verbatim,
+            },
         )
+        # Transition: OPEN -> ANSWERED -> CLOSED (matching record_decision).
+        for target_state, event_kind in (
+            (EscalationState.ANSWERED, EventKind.ESCALATION_ANSWERED),
+            (EscalationState.CLOSED, EventKind.ESCALATION_CLOSED),
+        ):
+            escalation.state = target_state
+            if target_state is EscalationState.CLOSED:
+                escalation.closed_at = now
+            escalation.decision_id = decision.id
+            uow.escalations.save(escalation)
+            record_event(
+                uow,
+                clock,
+                event_kind,
+                principal=principal.name,
+                task_id=task.id,
+                payload={"escalation_id": escalation.id, "decision_id": decision.id},
+            )
     return task

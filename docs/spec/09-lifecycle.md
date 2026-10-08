@@ -41,7 +41,7 @@ awaiting_quota --resume_at reached, a candidate exists--> scheduled
 awaiting_quota --resume_at reached, still no candidate, wait within cap--> awaiting_quota   (resume_at moves to the next reset; no new wake)
 awaiting_quota --wait cap exceeded, or reroute cap exceeded--> reported --wake-->
 awaiting_quota --cancel--> cancelled
-blocked --decision--> scheduled
+blocked --decision (scope_clarified, accept, recollect, waiver kinds, escalation_answer)--> scheduled
 
 reported --a blocking pre-PR gate fails, including a missing self_review--> pre_pr_gates_failed --wake-->
 reported --every gate passes and the report carries self_review--> gates_passed
