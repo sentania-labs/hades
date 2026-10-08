@@ -278,6 +278,23 @@ newer red one set.
   Re-entering at `reported` would put the new head in front of gates with
   no claim behind it (09).
 
+  **Exception: the images-digest commit is Hades's own head move (FDY-0310 /
+  #443)**. When the poll sees that the remote branch moved to a new SHA and
+  the only commit between the old and new SHA is by `github-actions[bot]`
+  with the message prefix `Record the CI-built digest` and the diff touches
+  only `*_DIGEST` lines of `images/manifest.env`, Hades records a
+  `digest_commit_observed` event, carries the previous head_sha's acceptance
+  and dispositions to the new head, and does **not** enter `head_diverged`.
+  If the previous head was `awaiting_ci_certification` the task moves to
+  `awaiting_ci_certification` with the new head; if it was
+  `ready_for_merge` it stays there with the new head. Hades then observes CI
+  on the new head: if every required CI job passed, the task is mergeable
+  without a head decision (no recollect). If CI is missing or failed, Hades
+  observes and records but cannot advance the task; the operator may still
+  decide. The publisher (12) treats a remote branch ahead only by such
+  commits as owned: it pushes the worker's commits on top using the
+  existing lease, rebasing if necessary, instead of failing non-fast-forward.
+
 Foundry is not required to remain connected for any of this.
 
 ## Triggering the external reviewer

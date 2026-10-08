@@ -374,7 +374,14 @@ def observe_head(
         message=observation.head_commit_message,
         diff=observation.head_commit_diff,
     ):
-        _record_digest_commit(uow, clock, task=task, pull_request=pull_request, observed_sha=observed_sha, result=result)
+        _record_digest_commit(
+            uow,
+            clock,
+            task=task,
+            pull_request=pull_request,
+            observed_sha=observed_sha,
+            result=result,
+        )
         return
     supersede_for_head(uow, clock, task=task, reason="head_diverged", new_head=observed_sha)
     move_task(

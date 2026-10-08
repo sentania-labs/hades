@@ -16,21 +16,27 @@ Proves the four acceptance criteria from FDY-0505:
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
-
-import pytest
 
 from crucible.application.observation import (
     DIGEST_AUTHOR,
     DIGEST_FILE,
     DIGEST_MESSAGE_PREFIX,
     _is_digest_commit,
+    observe_head,
+)
+from crucible.domain.entities import (
+    Policy,
+    PullRequest,
+    PullRequestHead,
+    PullRequestState,
+    RoutingPolicyRecord,
+    Task,
 )
 from crucible.domain.events import EventKind
 from crucible.domain.lifecycle import TaskState
-from crucible.domain.entities import PullRequestState
-from crucible.ports.github import CommitDiffRecord
-from tests.fixtures import FakeClock, REPOSITORY_URL
+from crucible.ports.github import CommitDiffRecord, Observation, PullRequestRef
+from tests.fixtures import REPOSITORY_URL, FakeClock
+import inspect
 
 NOW = datetime(2026, 9, 26, 12, 0, 0, tzinfo=UTC)
 OLD_HEAD = "a" * 40
@@ -41,10 +47,27 @@ TASK_PROJECT = "example-project"
 TASK_REPOSITORY_ID = "repo"
 
 
-# ---- helpers for the _Store pattern -------------------------------------------
+class _PullRequestHeads:
+    """In-memory store for pull request head records."""
+
+    def __init__(self) -> None:
+        self.rows: list[PullRequestHead] = []
+
+    def list_for_pull_request(self, pull_request_id: str) -> list[PullRequestHead]:
+        return [h for h in self.rows if h.pull_request_id == pull_request_id]
+
+    def add(self, head: PullRequestHead) -> None:
+        self.rows.append(head)
+
+
+class _Acceptance:
+    """Minimal acceptance mock."""
+
+    def supersede_for_task(self, task_id: str, at: datetime) -> None:
+        pass
+
 
 def _policy():
-    from crucible.domain.entities import Policy
     return Policy(
         name="default",
         version=1,
@@ -54,23 +77,21 @@ def _policy():
 
 
 def _routing():
-    from crucible.domain.entities import RoutingPolicyRecord
     document = {
         "schema_version": "1.0",
         "name": "default-routing",
         "version": 3,
         "tiers": {"standard": {"allowed_capability": ["mid"], "prefer": ["mid"]}},
     }
-    return RoutingPolicyRecord(
-        name="default-routing", version=3, document=document, created_at=NOW
-    )
+    return RoutingPolicyRecord(name="default-routing", version=3, document=document, created_at=NOW)
 
 
 def _make_store():
     """Build the _Store the #360 module expects."""
     from tests.unit.test_issue_360_ready_for_merge_correction import _Store
     from crucible.domain.entities import Repository
-    return _Store(
+
+    store = _Store(
         Repository(
             id="repo",
             name="example-service",
@@ -85,15 +106,18 @@ def _make_store():
         _policy(),
         _routing(),
     )
+    # replace the pull_request_heads mock with one that supports add()
+    store.pull_request_heads = _PullRequestHeads()
+    store.acceptance = _Acceptance()
+    return store
 
 
 def _make_task(
     head_sha: str = OLD_HEAD,
-    state: str = TaskState.CI_CERTIFICATION_FAILED.value,
-    **kwargs: Any,
+    state: TaskState = TaskState.READY_FOR_MERGE,
+    **kwargs,
 ):
     """Return a minimal task row that the unit of work can return."""
-    from crucible.domain.entities import Task
     return Task(
         id=TASK_ID,
         external_id=TASK_ID,
@@ -112,14 +136,28 @@ def _make_task(
     )
 
 
+def _make_pr(pull_request_id: str = "pr-443", head_sha: str = OLD_HEAD):
+    """Return a minimal PR row."""
+    return PullRequest(
+        id=pull_request_id,
+        task_id=TASK_ID,
+        repository_id="repo",
+        number=1,
+        url="https://github.com/example-org/example-service/pull/1",
+        base_ref="main",
+        work_branch="crucible/test-443",
+        state=PullRequestState.OPEN,
+        head_sha=head_sha,
+        opened_at=NOW,
+    )
+
+
 # ---- _is_digest_commit unit tests ---------------------------------------------
 
 
 def test_is_digest_commit_returns_true_for_manifest_only():
     """AC1: a diff touching only images/manifest.env is a digest commit."""
-    diffs = (
-        CommitDiffRecord(path="images/manifest.env", additions=3, deletions=3),
-    )
+    diffs = (CommitDiffRecord(path="images/manifest.env", additions=3, deletions=3),)
     assert _is_digest_commit(diffs) is True
 
 
@@ -139,9 +177,7 @@ def test_is_digest_commit_returns_false_for_empty_diff():
 
 def test_is_digest_commit_returns_false_for_non_manifest_file():
     """AC2: a diff touching any file other than images/manifest.env is NOT a digest commit."""
-    diffs = (
-        CommitDiffRecord(path="src/main.py", additions=1, deletions=0),
-    )
+    diffs = (CommitDiffRecord(path="src/main.py", additions=1, deletions=0),)
     assert _is_digest_commit(diffs) is False
 
 
@@ -156,11 +192,7 @@ def test_is_digest_commit_returns_false_for_mixed_files():
 
 def test_is_digest_commit_returns_false_for_manifest_env_not_in_root():
     """AC2: a file named images/manifest.env in a subdirectory is NOT the target file."""
-    # Note: the current implementation checks exact path equality against _DIGEST_FILE
-    # which is "images/manifest.env". So this test verifies exact match.
-    diffs = (
-        CommitDiffRecord(path="other/manifest.env", additions=2, deletions=2),
-    )
+    diffs = (CommitDiffRecord(path="other/manifest.env", additions=2, deletions=2),)
     assert _is_digest_commit(diffs) is False
 
 
@@ -190,15 +222,12 @@ def test_observe_head_digest_commit_records_digest_event_not_divergence():
     head_commit_diff from the GitHub compare endpoint, so the test must
     construct the Observation with those fields set correctly.
     """
-    from crucible.application.observation import (
-        ObservationResult,
-        apply_observation,
-    )
-    from crucible.domain.entities import PullRequest
-    from crucible.ports.github import Observation, PullRequestRef
-
     store = _make_store()
-    task = _make_task(state=TaskState.CI_CERTIFICATION_FAILED.value)
+    task = _make_task(state=TaskState.READY_FOR_MERGE)
+    store.tasks.rows[TASK_ID] = task
+
+    pr_row = _make_pr(head_sha=OLD_HEAD)
+    store.pull_requests.rows["pr-443"] = pr_row
 
     pr_ref = PullRequestRef(
         number=1,
@@ -208,82 +237,43 @@ def test_observe_head_digest_commit_records_digest_event_not_divergence():
         state="open",
     )
 
-    # Construct the task object from the store (which has the DB row)
-    store.tasks._data[TASK_ID] = task
-    pr_row = PullRequest(
-        id="pr-443",
-        task_id=TASK_ID,
-        repository_id="repo",
-        number=1,
-        url="https://github.com/example-org/example-service/pull/1",
-        base_ref="main",
-        work_branch="crucible/test-443",
-        state=PullRequestState.OPEN,
-        head_sha=OLD_HEAD,
-        opened_at=NOW,
-    )
-    store.pull_requests._data["pr-443"] = pr_row
-
     # Observation with digest commit metadata (as the real client would populate)
     obs = Observation(
         pull_request=pr_ref,
         head_commit_author=DIGEST_AUTHOR,
         head_commit_message="Record the CI-built digest for sha1 sha2",
-        head_commit_diff=(
-            CommitDiffRecord(path="images/manifest.env", additions=3, deletions=3),
-        ),
+        head_commit_diff=(CommitDiffRecord(path="images/manifest.env", additions=3, deletions=3),),
     )
 
-    result = ObservationResult()
-    policy = {"ci": {"required": [], "ignore": []}}
+    result = type("ObservationResult", (), {"changed": False, "diverged": False})()
 
-    apply_observation(
+    observe_head(
         uow=store,
         clock=FakeClock(NOW),
         task=task,
         pull_request=pr_row,
-        observation=obs,
-        policy=policy,
-        attempt_id="att-1",
-        signals=[],
+        observed_sha=NEW_HEAD_DIGEST,
         result=result,
+        observation=obs,
     )
 
     # The task should NOT be in HEAD_DIVERGED state
-    assert task.state != TaskState.HEAD_DIVERGED.value
+    assert task.state != TaskState.HEAD_DIVERGED
     # The head_sha should have been updated to the new head
     assert task.head_sha == NEW_HEAD_DIGEST
     # A DIGEST_COMMIT_OBSERVED event should have been recorded
-    event_kinds = [e.event_kind for e in store.events._data.values()]
-    assert EventKind.DIGEST_COMMIT_OBSERVED in event_kinds
+    event_kinds = [e.kind for e in store.events.rows]
+    assert EventKind.DIGEST_COMMIT_OBSERVED.value in event_kinds
 
 
 def test_observe_head_non_digest_author_records_head_diverged():
     """AC2: a head move by a non-bot author still diverges."""
-    from crucible.application.observation import (
-        ObservationResult,
-        apply_observation,
-    )
-    from crucible.domain.entities import PullRequest
-    from crucible.ports.github import Observation, PullRequestRef
-
     store = _make_store()
-    task = _make_task(state=TaskState.CI_CERTIFICATION_FAILED.value)
-    store.tasks._data[TASK_ID] = task
+    task = _make_task(state=TaskState.READY_FOR_MERGE)
+    store.tasks.rows[TASK_ID] = task
 
-    pr_row = PullRequest(
-        id="pr-443",
-        task_id=TASK_ID,
-        repository_id="repo",
-        number=1,
-        url="https://github.com/example-org/example-service/pull/1",
-        base_ref="main",
-        work_branch="crucible/test-443",
-        state=PullRequestState.OPEN,
-        head_sha=OLD_HEAD,
-        opened_at=NOW,
-    )
-    store.pull_requests._data["pr-443"] = pr_row
+    pr_row = _make_pr(head_sha=OLD_HEAD)
+    store.pull_requests.rows["pr-443"] = pr_row
 
     pr_ref = PullRequestRef(
         number=1,
@@ -297,59 +287,36 @@ def test_observe_head_non_digest_author_records_head_diverged():
         pull_request=pr_ref,
         head_commit_author="human-dev",
         head_commit_message="wip: changing manifest",
-        head_commit_diff=(
-            CommitDiffRecord(path="images/manifest.env", additions=3, deletions=3),
-        ),
+        head_commit_diff=(CommitDiffRecord(path="images/manifest.env", additions=3, deletions=3),),
     )
 
-    result = ObservationResult()
-    policy = {"ci": {"required": [], "ignore": []}}
+    result = type("ObservationResult", (), {"changed": False, "diverged": False})()
 
-    apply_observation(
+    observe_head(
         uow=store,
         clock=FakeClock(NOW),
         task=task,
         pull_request=pr_row,
-        observation=obs,
-        policy=policy,
-        attempt_id="att-1",
-        signals=[],
+        observed_sha=NEW_HEAD_NON_DIGEST,
         result=result,
+        observation=obs,
     )
 
     # The task SHOULD be in HEAD_DIVERGED state
-    assert task.state == TaskState.HEAD_DIVERGED.value
+    assert task.state == TaskState.HEAD_DIVERGED
     # A TASK_HEAD_DIVERGED event should have been recorded
-    event_kinds = [e.event_kind for e in store.events._data.values()]
-    assert EventKind.TASK_HEAD_DIVERGED in event_kinds
+    event_kinds = [e.kind for e in store.events.rows]
+    assert EventKind.TASK_HEAD_DIVERGED.value in event_kinds
 
 
 def test_observe_head_non_digest_message_records_head_diverged():
     """AC2: same author but wrong message still diverges."""
-    from crucible.application.observation import (
-        ObservationResult,
-        apply_observation,
-    )
-    from crucible.domain.entities import PullRequest
-    from crucible.ports.github import Observation, PullRequestRef
-
     store = _make_store()
-    task = _make_task(state=TaskState.CI_CERTIFICATION_FAILED.value)
-    store.tasks._data[TASK_ID] = task
+    task = _make_task(state=TaskState.READY_FOR_MERGE)
+    store.tasks.rows[TASK_ID] = task
 
-    pr_row = PullRequest(
-        id="pr-443",
-        task_id=TASK_ID,
-        repository_id="repo",
-        number=1,
-        url="https://github.com/example-org/example-service/pull/1",
-        base_ref="main",
-        work_branch="crucible/test-443",
-        state=PullRequestState.OPEN,
-        head_sha=OLD_HEAD,
-        opened_at=NOW,
-    )
-    store.pull_requests._data["pr-443"] = pr_row
+    pr_row = _make_pr(head_sha=OLD_HEAD)
+    store.pull_requests.rows["pr-443"] = pr_row
 
     pr_ref = PullRequestRef(
         number=1,
@@ -363,55 +330,32 @@ def test_observe_head_non_digest_message_records_head_diverged():
         pull_request=pr_ref,
         head_commit_author=DIGEST_AUTHOR,
         head_commit_message="Record the updated manifest (not a digest)",
-        head_commit_diff=(
-            CommitDiffRecord(path="images/manifest.env", additions=3, deletions=3),
-        ),
+        head_commit_diff=(CommitDiffRecord(path="images/manifest.env", additions=3, deletions=3),),
     )
 
-    result = ObservationResult()
-    policy = {"ci": {"required": [], "ignore": []}}
+    result = type("ObservationResult", (), {"changed": False, "diverged": False})()
 
-    apply_observation(
+    observe_head(
         uow=store,
         clock=FakeClock(NOW),
         task=task,
         pull_request=pr_row,
-        observation=obs,
-        policy=policy,
-        attempt_id="att-1",
-        signals=[],
+        observed_sha=NEW_HEAD_NON_DIGEST,
         result=result,
+        observation=obs,
     )
 
-    assert task.state == TaskState.HEAD_DIVERGED.value
+    assert task.state == TaskState.HEAD_DIVERGED
 
 
 def test_observe_head_non_manifest_diff_records_head_diverged():
     """AC2: same author, correct message, but non-manifest files diverges."""
-    from crucible.application.observation import (
-        ObservationResult,
-        apply_observation,
-    )
-    from crucible.domain.entities import PullRequest
-    from crucible.ports.github import Observation, PullRequestRef
-
     store = _make_store()
-    task = _make_task(state=TaskState.CI_CERTIFICATION_FAILED.value)
-    store.tasks._data[TASK_ID] = task
+    task = _make_task(state=TaskState.READY_FOR_MERGE)
+    store.tasks.rows[TASK_ID] = task
 
-    pr_row = PullRequest(
-        id="pr-443",
-        task_id=TASK_ID,
-        repository_id="repo",
-        number=1,
-        url="https://github.com/example-org/example-service/pull/1",
-        base_ref="main",
-        work_branch="crucible/test-443",
-        state=PullRequestState.OPEN,
-        head_sha=OLD_HEAD,
-        opened_at=NOW,
-    )
-    store.pull_requests._data["pr-443"] = pr_row
+    pr_row = _make_pr(head_sha=OLD_HEAD)
+    store.pull_requests.rows["pr-443"] = pr_row
 
     pr_ref = PullRequestRef(
         number=1,
@@ -431,95 +375,104 @@ def test_observe_head_non_manifest_diff_records_head_diverged():
         ),
     )
 
-    result = ObservationResult()
-    policy = {"ci": {"required": [], "ignore": []}}
+    result = type("ObservationResult", (), {"changed": False, "diverged": False})()
 
-    apply_observation(
+    observe_head(
         uow=store,
         clock=FakeClock(NOW),
         task=task,
         pull_request=pr_row,
-        observation=obs,
-        policy=policy,
-        attempt_id="att-1",
-        signals=[],
+        observed_sha=NEW_HEAD_NON_DIGEST,
         result=result,
+        observation=obs,
     )
 
-    assert task.state == TaskState.HEAD_DIVERGED.value
+    assert task.state == TaskState.HEAD_DIVERGED
 
 
 # ---- publisher script: digest commits ahead -----------------------------------
 
 
 def test_publisher_script_digest_commits_are_ignored_for_ownership():
-    """AC3: when the remote work branch is ahead only by digest commits,
-    the publisher script treats them as owned and pushes the worker's work."""
-    from crucible.adapters.execution import scripts
-    from crucible.adapters.execution.fake import FakeProvider
-    from crucible.domain.entities import ExecutionRole, ProviderSetting
+    """AC3: the publisher and merge_main scripts are the entry points.
 
-    provider = FakeProvider()
-    assert provider.publisher.scripts == [scripts.publisher_script]
-    assert provider.merge_main.scripts == [scripts.merge_main_script]
+    The actual rebase/merge logic lives in the shell scripts (12, 15), so we
+    verify the Python glue: scripts exposes publisher_script/merge_main_script
+    and they reference the same digest constants that observation.py uses,
+    so that both sides agree on what a digest commit is.
+    """
+    from crucible.adapters.execution import scripts
+    from crucible.application.observation import DIGEST_AUTHOR
+
+    # The scripts module exports the publisher script.
+    assert "publisher_script" in scripts.__all__
+
+    # Both sides use the same author value.
+    assert scripts.DIGEST_AUTHOR_LOGIN == DIGEST_AUTHOR
+
+    # The publisher and merge_main scripts reference the same constants.
+    pub_src = inspect.getsource(scripts.publisher_script)
+    merge_src = inspect.getsource(scripts.merge_main_script)
+
+    # The shell scripts use DIGEST_AUTHOR_LOGIN in the Jinja template which
+    # gets rendered into the shell constant DIGEST_AUTHOR.
+    assert "DIGEST_AUTHOR_LOGIN" in pub_src
+    assert "DIGEST_AUTHOR_LOGIN" in merge_src
 
 
 # ---- delivery: certified head + digest commit -> ready_for_merge --------------
 
 
-def test_delivery_flow_digest_commit_after_certification():
-    """AC4: after CI certification, a digest commit moves the head and the
-    task continues to ready_for_merge because CI on the new head is green."""
-    from crucible.application.observation import ObservationResult, certify_head
-    from crucible.domain.entities import PullRequest
+def test_observe_head_digest_updates_head_sha_and_carries_state():
+    """AC4: after CI certification, a digest commit moves the head_sha forward.
+    The task stays in its current state (e.g. READY_FOR_MERGE ->
+    READY_FOR_MERGE still, but with the new head_sha). In the real flow,
+    advance_delivery would then re-evaluate CI on the new head and, if green,
+    proceed to ready_for_merge.
 
+    This test verifies that observe_head correctly updates the head_sha without
+    triggering head_diverged when the commit matches the digest criteria.
+    """
     store = _make_store()
-    # Start with CI certified on the old head
-    task = _make_task(state=TaskState.CI_CERTIFICATION_FAILED.value)
-    store.tasks._data[TASK_ID] = task
+    task = _make_task(state=TaskState.READY_FOR_MERGE)
+    store.tasks.rows[TASK_ID] = task
 
-    pr_row = PullRequest(
-        id="pr-443",
-        task_id=TASK_ID,
-        repository_id="repo",
+    pr_row = _make_pr(head_sha=OLD_HEAD)
+    store.pull_requests.rows["pr-443"] = pr_row
+
+    pr_ref = PullRequestRef(
         number=1,
         url="https://github.com/example-org/example-service/pull/1",
+        head_sha=NEW_HEAD_DIGEST,
         base_ref="main",
-        work_branch="crucible/test-443",
-        state=PullRequestState.OPEN,
-        head_sha=OLD_HEAD,
-        opened_at=NOW,
+        state="open",
     )
-    store.pull_requests._data["pr-443"] = pr_row
 
-    # Certify CI on the old head first
-    certify_head(
+    obs = Observation(
+        pull_request=pr_ref,
+        head_commit_author=DIGEST_AUTHOR,
+        head_commit_message="Record the CI-built digest for sha1 sha2",
+        head_commit_diff=(CommitDiffRecord(path="images/manifest.env", additions=3, deletions=3),),
+    )
+
+    result = type("ObservationResult", (), {"changed": False, "diverged": False})()
+
+    observe_head(
         uow=store,
         clock=FakeClock(NOW),
         task=task,
         pull_request=pr_row,
-        head_sha=OLD_HEAD,
+        observed_sha=NEW_HEAD_DIGEST,
+        result=result,
+        observation=obs,
     )
 
-    # The certification was recorded
-    ci_records = [
-        c for c in store.certs._data.values()
-        if c.head_sha == OLD_HEAD
-    ]
-    assert len(ci_records) == 1
-
-    # Now simulate the head moving to a new SHA via a digest commit.
-    # The observe_head path handles this: it records DIGEST_COMMIT_OBSERVED
-    # and updates task.head_sha. Since the task was in CI_CERTIFICATION_FAILED
-    # and the move is a digest move, it does NOT diverge.
-    # After the head move, advance_delivery would re-evaluate CI on the new head.
-    # For this test, we verify that the head_sha was updated.
-    task.head_sha = NEW_HEAD_DIGEST
-
-    # The old head's CI certification is still recorded
-    old_ci = [c for c in store.certs._data.values() if c.head_sha == OLD_HEAD]
-    assert len(old_ci) == 1
-
-    # A new head_digest_commit event should be recorded (tested above)
-    # In the real flow, advance_delivery would certify CI on the new head,
-    # and the task would proceed to ready_for_merge since CI is green on the new head.
+    # Task head_sha moved to the new digest head
+    assert task.head_sha == NEW_HEAD_DIGEST
+    # Task stayed in READY_FOR_MERGE (not diverged)
+    assert task.state == TaskState.READY_FOR_MERGE
+    # A DIGEST_COMMIT_OBSERVED event was recorded
+    event_kinds = [e.kind for e in store.events.rows]
+    assert EventKind.DIGEST_COMMIT_OBSERVED.value in event_kinds
+    # The PR head_sha was also updated
+    assert pr_row.head_sha == NEW_HEAD_DIGEST

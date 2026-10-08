@@ -244,6 +244,17 @@ Rules:
   refuses unless the result differs in digest values alone. The branch
   checkout is data, never imported or run. The push is not forced and is
   skipped when the branch has moved past the commit CI built.
+- **Digest commits are Hades's own head moves (FDY-0310 / #443)**: when the
+  remote branch tip moves to a SHA reachable by a commit from the known
+  expected tip and that commit is by `github-actions[bot]` with the message
+  prefix `Record the CI-built digest` touching only `*_DIGEST` lines of
+  `images/manifest.env`, Hades records a `digest_commit_observed` event,
+  carries the previous acceptance and dispositions forward, and does not
+  enter `head_diverged`. The task stays in its current delivery state
+  (e.g. `ready_for_merge`) with the new head SHA. If CI is green on the new
+  head, the task proceeds to merge without a head decision. The publisher
+  (12) treats a remote branch ahead only by digest commits as owned, pushing
+  the worker's commits on top using the existing lease.
 - The release publishes both to `ghcr.io/sentania-labs/crucible-worker`
   with `docker push`, the way the service image and every ScarGuard service
   are pushed (the operator's decision, 2026-09-23; 24): it builds from

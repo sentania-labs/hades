@@ -362,9 +362,7 @@ class RestGitHubClient:
                         author_data = author_data.get("author", {})
                         if isinstance(author_data, dict):
                             head_commit_author = str(author_data.get("name", ""))
-                head_commit_message = str(
-                    commit_payload.get("commit", {}).get("message", "")
-                )
+                head_commit_message = str(commit_payload.get("commit", {}).get("message", ""))
         except GitHubError:
             # If we can't read the commit metadata, proceed without it.
             pass

@@ -213,11 +213,6 @@ class Observation:
     observed_at: datetime | None = None
     rate_limit_remaining: int | None = None
     notes: tuple[str, ...] = field(default=())
-    # hades #443: the observed head's commit metadata (author login, message, files).
-    # Populated by the real client on observe(); tests may set it directly.
-    head_commit_author: str = ""
-    head_commit_message: str = ""
-    head_commit_diff: tuple[CommitDiffRecord, ...] = ()
 
 
 class GitHubClient(Protocol):

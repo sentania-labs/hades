@@ -1270,10 +1270,12 @@ if [ -n "$REMOTE" ]; then
   fi
   # hades #443: if the remote is ahead only by digest commits, treat it as owned.
   if [ "$OWNED" != yes ]; then
-    # Count commits between EXPECTED and REMOTE; if all are digest commits, OWNED=yes.
+    # Only check if the remote tip is an ancestor of EXPECTED (REMOTE behind or equal)
+    # or if it's ahead of EXPECTED. Digest commits only matter when the remote is ahead.
     SPOOLS=$(git log --oneline --no-merges "$EXPECTED".."$REMOTE" 2>/dev/null || echo "")
-    DIGEST_OK=yes
     if [ -n "$SPOOLS" ]; then
+      # Remote is ahead: check that every ahead commit is a digest commit.
+      DIGEST_OK=yes
       for COMMIT in $SPOOLS; do
         COMMIT_SHA=${{COMMIT%% *}}
         AUTHOR=$(git show -s --format='%an' "$COMMIT_SHA" 2>/dev/null || echo "")
@@ -1284,10 +1286,10 @@ if [ -n "$REMOTE" ]; then
           break
         fi
       done
-    fi
-    if [ "$DIGEST_OK" = yes ]; then
-      OWNED=yes
-      REMOTE="$REMOTE"
+      if [ "$DIGEST_OK" = yes ]; then
+        OWNED=yes
+        REMOTE="$REMOTE"
+      fi
     fi
   fi
   if [ "$OWNED" != yes ]; then
@@ -1390,6 +1392,9 @@ export CRUCIBLE_AUTHOR_NAME={_quote(author_name)}
 export CRUCIBLE_AUTHOR_EMAIL={_quote(author_email)}
 {_CRED_HELPER}
 echo credential > "$OUT/step.txt"
+# hades #443: digest commit author and message prefix for ownership check.
+DIGEST_AUTHOR={_quote(DIGEST_AUTHOR_LOGIN)}
+DIGEST_MSG_PREFIX={_quote(DIGEST_MESSAGE_PREFIX)}
 if ! printf 'protocol=https\\nhost=%s\\n\\n' "$CRUCIBLE_CREDENTIAL_HOST" \\
     | git credential fill 2>> "$OUT/publisher.log" | grep -q '^password=.'; then
   echo "the credential helper could not read the token" > "$OUT/error.txt"; drop_token; exit 3
@@ -1411,10 +1416,12 @@ REMOTE=$(git rev-parse "refs/remotes/origin/$WORK_BRANCH")
 printf '%s\\n' "$REMOTE" > "$OUT/remote-head-before.txt"
 if [ "$REMOTE" != "$EXPECTED" ]; then
   # hades #443: if the remote is ahead only by digest commits, accept it.
-  # Check all commits between EXPECTED and REMOTE are digest commits.
-  DIGEST_OK=yes
+  # Check all commits between EXPECTED and REMOTE are digest commits, but only when
+  # the remote tip is ahead of (not behind) the expected tip.
+  DIGEST_OK=no
   SPOOLS=$(git log --oneline --no-merges "$EXPECTED".."$REMOTE" 2>/dev/null || echo "")
   if [ -n "$SPOOLS" ]; then
+    DIGEST_OK=yes
     for COMMIT in $SPOOLS; do
       COMMIT_SHA=${{COMMIT%% *}}
       AUTHOR=$(git show -s --format='%an' "$COMMIT_SHA" 2>/dev/null || echo "")
