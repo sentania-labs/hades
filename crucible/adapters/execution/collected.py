@@ -170,6 +170,7 @@ def read_outputs(
                 else ""
             ),
             commit_paths=commit_paths,
+            attempt_commit_paths=read_path_list(output / "attempt-commit-paths.txt"),
             commit_messages=tuple(messages),
             commit_policy=commit_policy,
             commit_changes=commit_changes,

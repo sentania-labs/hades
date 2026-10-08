@@ -39,6 +39,7 @@ from crucible.adapters.execution.kubernetes import (
 )
 from crucible.ports.execution import ImageInfo
 from tests.conftest import cpu_time
+from tests.wait import async_wait_until
 
 DIGEST = "sha256:" + "a" * 64
 CONFIG = {
@@ -364,7 +365,7 @@ class _SlowRegistry(FakeRegistry):
             self.in_flight += 1
             self.peak = max(self.peak, self.in_flight)
         try:
-            time.sleep(0.05)
+            threading.Event().wait(0.05)
             return super().resolve(reference)
         finally:
             with self.lock:
@@ -552,9 +553,11 @@ async def test_stuck_registry_work_neither_starves_api_calls_nor_multiplies() ->
     try:
         # A page polling the harnesses ten times while the registry is stuck.
         callers = [asyncio.create_task(provider.list_images()) for _ in range(10)]
-        waited = time.monotonic() + 5 * cpu_time()
-        while registry.in_flight < LIST_IMAGES_CONCURRENCY and time.monotonic() < waited:
-            await asyncio.sleep(0.01)
+        await async_wait_until(
+            lambda: registry.in_flight >= LIST_IMAGES_CONCURRENCY,
+            timeout=5 * cpu_time(),
+            describe="registry calls to fill the image-listing concurrency limit",
+        )
 
         started = time.monotonic()
         assert (

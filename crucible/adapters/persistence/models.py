@@ -65,6 +65,7 @@ class RepositoryRow(Base):
     attested_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     attested_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
     private: Mapped[bool] = mapped_column(Boolean, default=False)
+    codex_review_refused_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
 
 
 class PolicyRow(Base):
@@ -659,6 +660,9 @@ class CICertificationRow(Base):
     failure: Mapped[dict[str, Any]] = mapped_column(JSONB)
     detail: Mapped[str] = mapped_column(Text)
     evaluated_at: Mapped[datetime] = mapped_column(TZ)
+    # hades #476: the change class recorded for this head; empty for a row written
+    # before this column existed.
+    change_class: Mapped[str] = mapped_column(String(16), server_default="", nullable=False)
 
 
 class CIDecisionRow(Base):

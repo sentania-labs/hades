@@ -96,16 +96,22 @@ def _unpublished_bundle_problem(
         return {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
     attempt, execution = work
     exited = uow.events.latest_for_task_kind(task.id, EventKind.ATTEMPT_EXITED.value)
-    if (
+    never_started = (
         exited is not None
         and exited.attempt_id == attempt.id
         and (
             exited.payload.get("never_started") is True or exited.payload.get("no_commits") is True
         )
-    ):
+    )
+    # hades #503: an attempt whose prepare never produced a workspace (the preparer Job's
+    # Pods outlived the deletion wait, or any other prepare failure) has no bundle of its
+    # own either, whichever execution it belongs to; the bundle it would have resumed
+    # from is the task's last sealed one, and a prepare failure never discards it.
+    if never_started or attempt.workspace_path is None:
         # Hades #346: an attempt that never started (or ended before committing) left
         # no bundle of its own, and it does not discard the work before it. The checks
-        # below run against the last attempt that did start and seal a bundle.
+        # below run against the last attempt that did start and seal a bundle, in any
+        # of the task's implementing or correcting executions.
         sealed = [
             candidate
             for candidate in uow.attempts.list_for_task(task.id)

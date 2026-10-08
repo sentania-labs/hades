@@ -80,14 +80,20 @@ def list_wakes(
     since: datetime | None = None,
     include_acked: bool = False,
     limit: Annotated[int | None, Query(ge=1, le=200)] = None,
+    cursor: str | None = None,
 ) -> WakeList:
-    """Pending wakes for the caller's principal (04, 17). Poll is the durable fallback."""
+    """Pending wakes for the caller's principal (04, 17). Poll is the durable fallback.
+
+    Pages by wake id through `cursor`, the opaque form of the last id returned (hades
+    #502). `since` is the older time filter: a caller that still sends it gets a valid
+    page narrowed to wakes created at or after it."""
     return wake_list(
         uow,
         principal_id=principal.id,
         since=since,
         include_acked=include_acked,
         limit=limit,
+        cursor=cursor,
     )
 
 
