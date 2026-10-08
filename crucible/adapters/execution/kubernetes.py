@@ -1791,6 +1791,7 @@ class KubernetesProvider:
         elif from_remote_branch:
             resume_source = f"the remote work branch {work_branch!r}"
         await _stop_if_cancelled(cancelled, "before the preparer")
+        preparer_log: list[str] = []
         async with gate.reading() if gate is not None else contextlib.nullcontext():
             exit_code = await self._run_role_job(
                 spec,
@@ -1836,6 +1837,7 @@ class KubernetesProvider:
                 plan=self._checkout_plan(spec, k8sspec.ROLE_PREPARER, token is not None),
                 cancelled=cancelled,
                 stall_seconds=self.config.preparer_stall_seconds,
+                keep_log=preparer_log,
             )
         if exit_code != 0:
             detail = redact(self.last_error.get(k8sspec.ROLE_PREPARER, ""))
@@ -1845,7 +1847,9 @@ class KubernetesProvider:
                 # itself (the Job's FailedCreate event, or the API server's 403) is the
                 # detail the supervisor records (hades #370).
                 raise LaunchWaitError(f"the namespace quota has no room for the preparer: {detail}")
-            raise self._prepare_failed(exit_code, detail, resume_source)
+            raise self._prepare_failed(
+                exit_code, detail, resume_source, redact("".join(preparer_log))
+            )
         prepared = await self._read_files(
             spec,
             ["output/prepared-head.txt", "output/started-from.txt"],
@@ -1871,14 +1875,15 @@ class KubernetesProvider:
         )
 
     def _prepare_failed(
-        self, exit_code: int, detail: str, resume_source: str | None
+        self, exit_code: int, detail: str, resume_source: str | None, log: str = ""
     ) -> PrepareFailedError:
         """hades #370: the error a preparer that ran and failed raises. The message
         carries the preparer's last lines, so the attempt's environment detail and the
-        wake say what the clone said; the whole tail rides as `output` for the attempt's
-        evidence; and a correction names the source it was resuming from, so a bundle
-        that is gone or a remote branch that could not be fetched is told apart from a
-        clone of the base that failed."""
+        wake say what the clone said; the Pod's whole log (`log`, read uncut before the
+        Job was deleted) rides as `output` for the attempt's evidence; and a correction
+        names the source it was resuming from, so a bundle that is gone or a remote
+        branch that could not be fetched is told apart from a clone of the base that
+        failed."""
         if exit_code == JOB_STALLED:
             what = "the preparer stalled"
         elif exit_code == JOB_TIMED_OUT:
@@ -1891,9 +1896,10 @@ class KubernetesProvider:
             what = f"the correction resumes from {resume_source}, and {what}"
         return PrepareFailedError(
             f"{what}: {_last_lines(detail)}",
-            # Only a preparer that ran has output to keep: an API error or a wait that
-            # ran out is Crucible's own words, which the detail already carries.
-            output=detail if exit_code >= 0 or exit_code == JOB_STALLED else "",
+            # Only a preparer that ran has output to keep: an API error is Crucible's own
+            # words, which the detail already carries. The whole log is kept when it
+            # could be read; a ran-and-failed Pod whose log read failed keeps its tail.
+            output=log or (detail if exit_code >= 0 or exit_code == JOB_STALLED else ""),
             exit_code=exit_code,
             resume_source=resume_source,
         )
@@ -4611,6 +4617,7 @@ class KubernetesProvider:
         preserve_on_cancel: bool = False,
         init_containers: Sequence[Mapping[str, Any]] = (),
         stall_seconds: int = 0,
+        keep_log: list[str] | None = None,
     ) -> int:
         """Run one single-purpose Job to completion and delete it. With `cancelled`, a
         cancel ends the wait (hades #189): the Job and its policy are deleted on the way
@@ -4624,7 +4631,12 @@ class KubernetesProvider:
 
         With `stall_seconds` (hades #370), a Pod that has been Running that long without
         writing a log line is ended as a stall, JOB_STALLED, with the bound and its last
-        output as the role's error, instead of waiting for the role's timeout."""
+        output as the role's error, instead of waiting for the role's timeout.
+
+        With `keep_log` (hades #370), a Job that exits non-zero, stalls or times out has
+        its Pod's whole log, uncut, appended before the Job is deleted, so the caller
+        keeps it as evidence; the role's error carries only the bounded tail. A timed-out
+        Pod's last output is added to the timeout reason too."""
         key = (role, spec.attempt_id)
         name = k8sspec.object_name(OBJECT_PREFIX.get(role, role), spec.attempt_id)
         collection = role in COLLECTION_ROLES
@@ -4707,6 +4719,8 @@ class KubernetesProvider:
                 # last lines, if it wrote any, go with the reason; the Job is deleted
                 # on the way out as on every other path.
                 tail = (await self._job_tail(name)).strip()
+                if keep_log is not None:
+                    keep_log.append(await self._job_log(name))
                 self._role_error(
                     role,
                     spec.attempt_id,
@@ -4726,11 +4740,15 @@ class KubernetesProvider:
                     # An API error, not a timeout, so every collection step's
                     # unavailable check sees it and the attempt is collected again later.
                     return JOB_API_ERROR
-                self._role_error(
-                    role,
-                    spec.attempt_id,
-                    refusal or f"the {role} Job did not finish within {timeout}s of running",
-                )
+                reason = refusal or f"the {role} Job did not finish within {timeout}s of running"
+                if keep_log is not None and refusal is None:
+                    # A Pod that ran to the timeout may have said why (a clone still
+                    # reporting progress); it is read before the Job is deleted.
+                    whole = await self._job_log(name)
+                    keep_log.append(whole)
+                    if whole.strip():
+                        reason = f"{reason}; its last output: {whole.strip()[-4000:]}"
+                self._role_error(role, spec.attempt_id, reason)
                 return JOB_TIMED_OUT
             if code == JOB_API_ERROR and refusal is not None:
                 # A full namespace is a wait, not a verdict on the attempt.
@@ -4754,6 +4772,8 @@ class KubernetesProvider:
                     checkout_tail = await self._job_tail(name, container="checkout")
                     if checkout_tail and checkout_tail != tail:
                         tail = "\n".join(part for part in (checkout_tail, tail) if part)
+                if keep_log is not None:
+                    keep_log.append(await self._job_log(name))
                 self._role_error(role, spec.attempt_id, tail)
                 log.warning("%s Job exited %s: %s", role, code, tail[-1000:])
             if collection and code >= 0:
@@ -5395,6 +5415,24 @@ class KubernetesProvider:
             f"Pods for Job {job_name!r} deletion was not confirmed "
             f"after {timeout:g} seconds: {reason}"
         )
+
+    async def _job_log(self, job_name: str) -> str:
+        """hades #370: the whole log of a Job's Pod, with no line or byte bound, for the
+        evidence a caller keeps; `_job_tail` is the bounded end for a message. A Pod or a
+        read that is gone is an empty log, never an error over the one in flight."""
+        try:
+            pod = await self._pod_of(job_name)
+            if pod is None:
+                return ""
+            frames = await self._call(
+                self.client.pod_log,
+                str((pod.get("metadata") or {}).get("name") or ""),
+                container=k8sspec.CONTAINER_NAME,
+                timestamps=False,
+            )
+        except KubernetesApiError:
+            return ""
+        return b"".join(f.payload for f in frames).decode("utf-8", "replace")
 
     async def _job_tail(
         self, job_name: str, limit: int = 4000, container: str = k8sspec.CONTAINER_NAME

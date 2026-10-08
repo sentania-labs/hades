@@ -432,9 +432,84 @@ async def test_without_a_stall_bound_the_silent_preparer_waits_out_the_prepare_t
 
     assert raised.value.exit_code == JOB_TIMED_OUT
     assert str(raised.value).startswith("the preparer timed out: ")
-    # A wait that ran out is Crucible's words, not preparer output: nothing to keep.
-    assert raised.value.output == ""
+    # The Pod ran, so what it wrote is read before the Job is deleted: the timeout
+    # reason ends with it, and it is the output the attempt keeps.
+    assert "did not finish within 900s of running" in str(raised.value)
+    assert "its last output: Cloning into '/crucible/work/repo'..." in str(raised.value)
+    assert raised.value.output.strip() == "Cloning into '/crucible/work/repo'..."
     assert clock["now"] >= 900
+
+
+async def test_a_preparer_still_writing_at_the_prepare_timeout_keeps_its_log(
+    clock: dict[str, float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clone that keeps reporting progress is not a stall, but it can still run out
+    the prepare timeout. Its log is kept as evidence and its last lines are the detail."""
+    api, _registry, provider = build(
+        config=_config(
+            launch_timeout_seconds=300, prepare_timeout_seconds=900, preparer_stall_seconds=60
+        )
+    )
+    launch = spec()
+    api.script(launch.attempt_id, "prepare-hangs")
+    original = api.pod_log
+    reads = {"n": 0}
+
+    def progressing(name: str, **kwargs: Any) -> Any:
+        if name.startswith("prepare-"):
+            reads["n"] += 1
+            api.logs[name] = [
+                f"2026-10-02T{reads['n'] // 3600:02d}:{reads['n'] // 60 % 60:02d}:"
+                f"{reads['n'] % 60:02d}.000000000Z Receiving objects: {i}%"
+                for i in range(reads["n"])
+            ]
+        return original(name, **kwargs)
+
+    monkeypatch.setattr(api, "pod_log", progressing)
+
+    with pytest.raises(PrepareFailedError) as raised:
+        await provider.prepare(launch)
+
+    error = raised.value
+    assert error.exit_code == JOB_TIMED_OUT
+    assert str(error).startswith("the preparer timed out: ")
+    assert "Receiving objects: " in str(error)
+    # The whole log, from its first line, is the output, not only the tail.
+    assert error.output.startswith("Receiving objects: 0%\n")
+    assert error.output.count("Receiving objects: ") > 900
+    assert not any(kind == "jobs" for kind, _ in api.objects)
+
+
+async def test_a_failed_preparer_keeps_its_whole_log_beyond_the_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The detail and the wake carry a bounded tail; the evidence is the whole log. A
+    clone that wrote more than the tail's 2,000 lines and 4,000 characters loses none of
+    it from `output`."""
+    api, _registry, provider = build(config=_config())
+    launch = spec()
+    api.script(launch.attempt_id, "prepare-fails")
+    original = api.pod_log
+    lines = [f"Receiving objects: {i}/5000" for i in range(5000)] + [
+        "fatal: the remote end hung up unexpectedly"
+    ]
+
+    def long_log(name: str, **kwargs: Any) -> Any:
+        if name.startswith("prepare-"):
+            api.logs[name] = list(lines)
+        return original(name, **kwargs)
+
+    monkeypatch.setattr(api, "pod_log", long_log)
+
+    with pytest.raises(PrepareFailedError) as raised:
+        await provider.prepare(launch)
+
+    error = raised.value
+    assert error.output == "\n".join(lines) + "\n"
+    assert str(error).endswith("fatal: the remote end hung up unexpectedly")
+    assert "Receiving objects: 0/5000" not in str(error)
+    # The role's error, read for messages, is still the bounded tail.
+    assert len(provider.last_error[k8sspec.ROLE_PREPARER]) <= 4000
 
 
 def test_the_stall_bound_has_a_default_well_below_the_prepare_timeout() -> None:

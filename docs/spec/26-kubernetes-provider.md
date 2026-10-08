@@ -158,8 +158,10 @@ When the preparer exits non-zero, times out or stalls, the provider raises
 `PrepareFailedError` (08's `ProviderError`, hades #370): its message ends
 with the preparer's last output lines (the last twelve, capped), which become
 the attempt's `termination_detail` ("prepare: ...") and the wake's summary;
-its `output` is the whole tail the provider read, which the supervisor keeps
-as the `crucible/preparer.log` artifact (type `preparer_log`) with an
+its `output` is the Pod's whole log, read with no line or byte bound before
+the Job is deleted (the detail's tail is bounded, the evidence is not; a
+timed-out preparer's log is read too, and its timeout reason ends with that
+log's last output), which the supervisor keeps as the `crucible/preparer.log` artifact (type `preparer_log`) with an
 `artifact_present` evidence row of role `preparer_log`, redacted first if a
 secret pattern matches; and for a correction its `resume_source` names what
 the correction was resuming from, the remote work branch or the preceding

@@ -66,7 +66,7 @@ hades #370 the record says:
 
 - **what the preparer said.** A preparer that exits non-zero, times out or
   stalls ends with its last output lines in the detail and the wake, and its
-  whole stdout and stderr kept as the attempt's `crucible/preparer.log`
+  whole stdout and stderr (uncut, a timed-out preparer's included) kept as the attempt's `crucible/preparer.log`
   artifact (type `preparer_log`) with an `artifact_present` evidence row of
   role `preparer_log`; a secret pattern in it is redacted first (14). The
   Kubernetes provider's path is in 26; the Docker provider keeps the tail in
