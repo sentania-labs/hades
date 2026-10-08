@@ -2829,10 +2829,7 @@ class Supervisor:
                     break
                 candidate["busy"] = busy
                 skipped_busy.append({"model": model.id, "harness": model.harness, "reason": busy})
-                # FDY-0541/#539: mark the candidate as not eligible and record the
-                # busy reason in excluded so the ordered_candidates list in the
-                # ATTEMPT_ROUTED event accurately reflects that this candidate was
-                # actually unavailable (not merely skipped but listed as eligible).
+                # The route event must not describe a candidate skipped here as eligible.
                 candidate["eligible"] = False
                 if busy not in candidate["excluded"]:
                     candidate["excluded"] = [*list(candidate["excluded"]), busy]
