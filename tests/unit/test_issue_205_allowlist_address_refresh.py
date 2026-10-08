@@ -334,3 +334,116 @@ async def test_an_ended_worker_is_not_refreshed() -> None:
     await asyncio.sleep(0.02)
     await provider.observe(handle)
     assert _https_cidrs(api) == {OLD, PYPI}
+
+
+# ----- an adopted worker (Codex finding: adopted workers were never refreshed) -----
+
+
+async def _restart(provider: KubernetesProvider) -> None:
+    """What a supervisor restart leaves: no memory of the launch, then reconcile."""
+    provider._launched.clear()
+    provider._resolved.clear()
+    adopted = await provider.reconcile()
+    assert [h.attempt_id for h in adopted] == [ATTEMPT]
+
+
+async def test_an_adopted_worker_keeps_following_its_names() -> None:
+    api, provider, answers, handle = await _running_worker(overlap_seconds=60.0)
+    before = _policy(api)
+    await _restart(provider)
+
+    answers.by_host["github.com"] = [NEW]
+    observation = await provider.observe(handle)
+    assert observation.state is ObservationState.RUNNING
+    assert _https_cidrs(api) == {OLD, NEW, PYPI}
+    after = _policy(api)
+    # Only the allowlist rule moved: every other rule is as the policy was written.
+    others = [
+        r for r in after["spec"]["egress"] if r["ports"] != [{"protocol": "TCP", "port": 443}]
+    ]
+    assert others == [
+        r for r in before["spec"]["egress"] if r["ports"] != [{"protocol": "TCP", "port": 443}]
+    ]
+    assert after["metadata"]["annotations"] == before["metadata"]["annotations"]
+    assert after["spec"]["podSelector"] == before["spec"]["podSelector"]
+
+
+async def test_an_adopted_worker_keeps_its_pinned_addresses_and_retires_the_rest() -> None:
+    api, provider, answers, handle = await _running_worker(overlap_seconds=0.5)
+    answers.by_host["github.com"] = [NEW]
+    await _observe_after_the_interval(provider, handle)
+    assert _https_cidrs(api) == {OLD, NEW, PYPI}
+
+    await _restart(provider)
+    answers.by_host["github.com"] = [NEWER]
+    await provider.observe(handle)
+    # NEW was a previous process's refresh: it gets the overlap window, not a cut.
+    assert _https_cidrs(api) == {OLD, NEW, NEWER, PYPI}
+
+    await asyncio.sleep(0.6)
+    await provider.observe(handle)
+    # OLD is what hostAliases pins the Pod to and stays; NEW is gone after the window.
+    assert _https_cidrs(api) == {OLD, NEWER, PYPI}
+
+
+async def test_an_adopted_worker_whose_policy_cannot_be_read_is_left_as_it_is() -> None:
+    api, provider, answers, handle = await _running_worker(overlap_seconds=60.0)
+    provider._launched.clear()
+    api.fail_next("get", kind="networkpolicies")
+    await provider.reconcile()
+    assert provider._launched[ATTEMPT].egress_plan is None
+    answers.by_host["github.com"] = [NEW]
+    await _observe_after_the_interval(provider, handle)
+    assert _https_cidrs(api) == {OLD, PYPI}
+
+
+# ----- the interval clock (Codex finding: it advanced before the patch landed) -----
+
+
+def _age(provider: KubernetesProvider, seconds: float) -> None:
+    """Move the last lookup and the resolution cache `seconds` into the past."""
+    provider._launched[ATTEMPT].egress_refreshed_at -= seconds
+    for host, (at, addresses) in list(provider._resolved.items()):
+        provider._resolved[host] = (at - seconds, addresses)
+
+
+def _long_interval_worker() -> tuple[FakeKubernetesApi, KubernetesProvider, _Answers]:
+    answers = _Answers()
+    config = KubernetesConfig(
+        poll_interval_seconds=0,
+        launch_timeout_seconds=5,
+        storage_class="lab-ssd",
+        image_pull_secret="ghcr-pull",
+        resolve_ttl_seconds=300.0,
+    )
+    api, _registry, provider = build(config=config, resolver=answers)
+    api.script(ATTEMPT, "succeed", after=100)
+    return api, provider, answers
+
+
+async def test_a_failed_patch_is_retried_without_waiting_a_whole_interval() -> None:
+    api, provider, answers = _long_interval_worker()
+    launch = spec()
+    handle = await provider.launch(await provider.prepare(launch), launch)
+    _age(provider, 301.0)
+    answers.by_host["github.com"] = [NEW]
+    api.fail_next("patch", kind="networkpolicies")
+    await provider.observe(handle)
+    assert _https_cidrs(api) == {OLD, PYPI}
+    lookups = len(answers.lookups)
+    # The next observation, well inside the 300 second interval, lands the patch from
+    # the cached answer without asking the resolver again.
+    await provider.observe(handle)
+    assert _https_cidrs(api) == {OLD, NEW, PYPI}
+    assert len(answers.lookups) == lookups
+
+
+async def test_a_lookup_that_changes_nothing_restarts_the_interval() -> None:
+    api, provider, _answers = _long_interval_worker()
+    launch = spec()
+    handle = await provider.launch(await provider.prepare(launch), launch)
+    _age(provider, 301.0)
+    stale = provider._launched[ATTEMPT].egress_refreshed_at
+    await provider.observe(handle)
+    assert provider._launched[ATTEMPT].egress_refreshed_at > stale + 300.0
+    assert _https_cidrs(api) == {OLD, PYPI}

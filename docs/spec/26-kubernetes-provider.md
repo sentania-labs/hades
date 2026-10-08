@@ -360,8 +360,17 @@ to narrow a running attempt's network. A patch that fails is tried again on the
 next observation. The refresh applies to the worker role, whose Pod is the
 long-running one; the git, login and verifier Jobs end in minutes, under the
 addresses they were written with. An attempt adopted after a supervisor restart
-is not refreshed, because its plan was never in this process's memory; its
-policy stays as written. The rule itself is `refresh_addresses` in
+keeps being refreshed: its names are read back from the policy's egress
+annotation, the addresses it allows from its allowlist rule, and the addresses
+the Pod is pinned to from its `hostAliases` (kept for the Pod's life, as at
+launch). Any other address the policy allows, a previous process's refresh, is
+treated as retiring from the moment of adoption, and the first lookup is due at
+once, so an address still answered stays and one that is not gets the overlap
+window. A refresh of an adopted attempt replaces the peers of that one rule and
+leaves every other rule as written; a policy that cannot be read is left as it
+is. The resolve interval restarts only once a lookup's result is in the policy:
+a patch that fails is tried again on the next observation from the cached
+answer, not a whole interval later. The rule itself is `refresh_addresses` in
 `crucible/domain/cluster_egress.py`, pure, and the window setting is
 restart-bound like the two above. (Chosen 2026-10-07, Foundry on the operator's
 delegation.)
@@ -564,9 +573,9 @@ the namespace. A deployment therefore names one exact, pullable reference in
   Tags starting `ci-` are CI proof pushes, never promotable, and are skipped before
   anything is resolved, so their number does not add to the listing's cost (111);
   the Images page says so. Nothing on the registry is pruned.
-- `observe`: read the Job and its Pod. First, for a worker this process
-  launched, look its allowlisted names up again when the resolve interval has
-  passed and patch its NetworkPolicy to follow them (hades #205, above); a
+- `observe`: read the Job and its Pod. First, for a running worker (launched
+  by this process or adopted), look its allowlisted names up again when the
+  resolve interval has passed and patch its NetworkPolicy to follow them (hades #205, above); a
   refresh that fails is logged and never fails the observation.
 
   | Job | Pod | Result |
