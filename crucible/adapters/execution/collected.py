@@ -30,6 +30,7 @@ from crucible.adapters.execution import scripts
 from crucible.adapters.execution.injected_collection import classify_collected, nul_fields
 from crucible.adapters.execution.workspace import harness_private_path
 from crucible.contracts.evidence import REVIEW_DIFF_NAME, REVIEW_DIFF_TYPE
+from crucible.domain.acceptance_checks import verifier_checks
 from crucible.domain.secrets import SecretMatch, match_text, scan_chunks
 from crucible.ports.execution import (
     BranchBundle,
@@ -555,10 +556,7 @@ def read_commit_policy(directory: Path) -> CommitPolicyCheck | None:
 def read_verifications(
     verify: Path, spec: LaunchSpec, checks: list[tuple[str, str]]
 ) -> tuple[VerificationRun, ...]:
-    expected = {
-        str(v.get("id")): int(v.get("expect_exit", 0))
-        for v in spec.contract.get("required_verification", [])
-    }
+    expected = {c["id"]: c["expect_exit"] for c in verifier_checks(spec.contract)}
     runs: list[VerificationRun] = []
     for check_id, command in checks:
         safe = scripts.encode_check_id(check_id)

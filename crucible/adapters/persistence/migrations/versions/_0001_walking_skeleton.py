@@ -125,7 +125,6 @@ DEFAULT_POLICY = {
             "ci_unchanged",
             "workspace_clean",
             "internal_review_recorded",
-            "acceptance_checks",
         ],
         "publication": ["branch_pushed_at_head", "pr_exists_head_matches"],
         "post_pr": [

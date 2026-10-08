@@ -87,6 +87,15 @@ def _check(verification: dict[str, Any]) -> str:
     return f"write `{REPORT_MOUNT}/{leaf}`" if leaf != path else f"write `{path}` in the checkout"
 
 
+def _criterion(criterion: dict[str, Any]) -> str:
+    """A criterion, and under it its executable check verbatim (hades #449)."""
+    line = f"`{criterion.get('id')}`: {criterion.get('text', '')}"
+    check = criterion.get("check")
+    if not isinstance(check, dict):
+        return line
+    return f"{line}\n  - check: {_check(check)}"
+
+
 def render_identity_md(
     *,
     contract: dict[str, Any],
@@ -147,17 +156,12 @@ def render_identity_md(
         sections.append(f"## Read first\n\n{_bullets(context)}")
     sections.append(
         "## Acceptance criteria\n\n"
-        + _bullets(
-            [
-                f"`{c.get('id')}`: {c.get('text', '')}"
-                + (
-                    f"\n  check: `{c.get('check', {}).get('command', '')}` "
-                    f"(expect exit {c.get('check', {}).get('expect_exit', 0)})"
-                    if isinstance(c.get("check"), dict) and c["check"].get("command")
-                    else ""
-                )
-                for c in criteria
-            ]
+        + _bullets([_criterion(c) for c in criteria])
+        + (
+            "\n\nCrucible runs each criterion's check on the collected tree before any pull "
+            "request; run them yourself."
+            if any(isinstance(c.get("check"), dict) for c in criteria)
+            else ""
         )
     )
     sections.append(

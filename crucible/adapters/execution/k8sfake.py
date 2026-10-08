@@ -73,6 +73,7 @@ from crucible.adapters.execution.scripts import (
     PUBLISH_LEAF_MARKER,
     REVIEW_DIFF_DIR,
 )
+from crucible.domain.acceptance_checks import verifier_checks
 from crucible.domain.time import parse_rfc3339
 from crucible.ports.execution import ImageInfo
 
@@ -957,11 +958,7 @@ class FakeKubernetesApi:
         behavior, _ = self._behavior(attempt_id, obj)
         claim = self._claim_of(obj)
         spec = self._spec_of(attempt_id)
-        checks = [
-            check
-            for check in (getattr(spec, "contract", {}) or {}).get("required_verification", [])
-            if str(check.get("kind", "command")) == "command"
-        ]
+        checks = verifier_checks(getattr(spec, "contract", {}) or {})
         for index, check in enumerate(checks):
             expect = int(check.get("expect_exit", 0))
             failed = behavior == "verification-fails" and index == 0

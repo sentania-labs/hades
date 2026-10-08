@@ -174,11 +174,14 @@ recorded only after the correction attempt succeeds.
   a path separator and only `**` crosses one (the permissive reading would
   silently widen every contract); the two must not fully overlap.
 - Every `acceptance_criteria.id` and `required_verification.id` unique.
-- Each `acceptance_criteria.check` (optional) is an object with `command`
-  (string, at least one character) and `expect_exit` (integer, default 0).
-  If present, it is validated the same way as a `required_verification` item:
-  no worker image has `docker`, `kind` or `kubectl`, so a check naming one
-  of those programs is rejected with a 422 naming the criterion id.
+- An `acceptance_criteria` entry may carry a `check` (hades #449): `command`
+  (non-blank) and `expect_exit` (integer, default 0), the shape of a
+  `required_verification` command. Foundry writes it when it scopes. A
+  malformed check, including one that needs `docker`, `kind` or `kubectl`, is
+  a 422 whose reason names the criterion id. Crucible's verifier runs each
+  check on the collected tree and the `acceptance_checks` gate judges it,
+  blocking when the attempt ran on a lab-local pool and advisory elsewhere
+  (11). A criterion without a check is judged by the reviewer, as before.
 - `required_verification` includes every command the repository policy's
   `repository.required_checks` lists (05b); missing ones are a 422 naming
   the check.

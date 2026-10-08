@@ -23,23 +23,32 @@ is carried to the reviewer.
 | `workspace_clean` | blocking | No provider containers or volumes remain |
 | `internal_review_recorded` | skipped | Filled by the orchestrator; the worker self-review is the review |
 | `commit_policy` | advisory | Commit authorship matches the policy (FDY-0143) |
-| `acceptance_checks` | dynamic | Runs executable criterion checks from the contract; blocking on lab-local pools, advisory elsewhere (hades #449) |
+| `acceptance_checks` | blocking (lab-local pool) / advisory | Crucible's re-run of each acceptance criterion's executable check passed (hades #449) |
 
 ## Acceptance checks gate (`acceptance_checks`)
 
-Each `acceptance_criteria` entry in the task contract may carry an optional `check` field
-with `command` and `expect_exit` (default 0). Foundry writes these when it scopes.
+An acceptance criterion may carry an executable `check` (`command`, `expect_exit`,
+default 0; 05). Foundry writes these when it scopes, and the worker sees each one under
+its criterion in `IDENTITY.md`, verbatim, so it can run it itself.
 
-When Hades' gate probe evaluates the `acceptance_checks` gate on a **lab-local pool**
-attempt, it runs every criterion check on the collected tree. A check that exits with a
-non-matching code blocks publication with a `FAIL` on the gate, naming the criterion id
-and the exit in the gate detail.
+After the worker exits, the verifier container that re-runs every `required_verification`
+command from the collected tree also runs each criterion check, under the id
+`acceptance:<criterion id>`, and records its exit as a `verification_run` row. The PR
+body's verification table lists these runs beside the required ones. The gate then reads
+those rows before any pull request is opened:
 
-When the attempt ran on a **frontier pool**, the gate is advisory: checks still run, but
-a failing check does not block publication. Instead the finding is listed for the reviewer.
+- On an attempt that ran on a **lab-local pool** (a pool holding a model on a local
+  endpoint, by the routing version the attempt was routed with), a check that did not
+  run or exited other than it expects fails the gate and stops the task, whatever the
+  policy's advisory list says. The detail names the criterion and the exit, for
+  example ``criterion AC2: `uv run pytest -q tests/unit/test_x.py` exited 1, expected 0``.
+- On any other attempt (a frontier pool, or no recorded pool) the gate is advisory: it
+  passes, and each failure is listed for the reviewer.
+- A criterion without a check is listed for the reviewer, as before; the gate is
+  skipped when no criterion carries one.
 
-A criterion without a `check` field is advisory and listed in the gate's `findings` for
-the reviewer, exactly as before.
+Like `report_present` and `commit_policy`, the gate always runs and is not listed in a
+policy's gate groups. It launches no review attempt: the judgement is mechanical.
 
 ## Editor and merge leftovers (`editor_leftovers`)
 

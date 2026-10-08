@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from crucible.contracts.evidence import REVIEW_DIFF_NAME, REVIEW_DIFF_TYPE
+from crucible.domain.acceptance_checks import verifier_checks
 from crucible.ports.execution import (
     BranchBundle,
     CancelCheck,
@@ -224,13 +225,12 @@ def synthetic_review_diff(paths: tuple[str, ...], behavior: str) -> str:
 
 
 def verification_runs(contract: dict[str, Any], behavior: str) -> tuple[VerificationRun, ...]:
-    """Crucible's own re-run of every required command (11). The fake verifier agrees
-    with the contract unless the behavior asks it not to."""
+    """Crucible's own re-run of every required command and criterion check (11, hades
+    #449). The fake verifier agrees with the contract unless the behavior asks it not
+    to."""
     runs: list[VerificationRun] = []
-    for index, check in enumerate(contract.get("required_verification", [])):
-        if str(check.get("kind", "command")) != "command":
-            continue
-        expect = int(check.get("expect_exit", 0))
+    for index, check in enumerate(verifier_checks(contract)):
+        expect = int(check["expect_exit"])
         failed = behavior == "verification-fails" and index == 0
         runs.append(
             VerificationRun(
