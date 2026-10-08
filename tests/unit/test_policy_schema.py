@@ -131,8 +131,21 @@ def test_the_self_hosting_policy_is_default_software_with_the_worker_checks() ->
     assert "branch CI" in policy.description and "2026-09-28" in policy.description
     assert policy.ci_certification.require_green_on_final_sha
     assert "image_checks_required" in document["gates"]["pre_pr"]
+    # hades #558, #85: the worker's integration tier needs a database, so the example
+    # declares the Postgres service; the seed declares none.
+    assert [s.kind for s in policy.services] == ["postgres"]
+    assert document["services"] == [{"kind": "postgres"}]
     seed = seeded_policy_v3()
-    ignored = {"name", "version", "description", "repository", "network", "routing", "gates"}
+    ignored = {
+        "name",
+        "version",
+        "description",
+        "repository",
+        "network",
+        "routing",
+        "gates",
+        "services",
+    }
     assert {k: v for k, v in document.items() if k not in ignored} == {
         k: v for k, v in seed.items() if k not in ignored
     }

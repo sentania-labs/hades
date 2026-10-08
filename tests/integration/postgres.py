@@ -33,6 +33,22 @@ SERVER_STOP = pytest.StashKey[Callable[[], None]]()
 WORKER_SERVER_URL = "integration_postgres_url"
 
 
+def server_url_from_env() -> str | None:
+    """`CRUCIBLE_TEST_DATABASE_URL`, with the driver this project uses.
+
+    A Crucible worker is handed `postgresql://crucible:crucible@127.0.0.1:5432/crucible`
+    (hades #558, #85: the declared Postgres sidecar beside the worker). SQLAlchemy reads
+    a bare `postgresql://` as psycopg2, which this project does not ship, so a URL that
+    names no driver is read as psycopg; one that names a driver is kept as written."""
+    url = os.environ.get("CRUCIBLE_TEST_DATABASE_URL")
+    if not url:
+        return None
+    scheme, separator, rest = url.partition("://")
+    if separator and scheme == "postgresql":
+        return f"postgresql+psycopg://{rest}"
+    return url
+
+
 def lock_and_share(directory: Path, start: Callable[[], str]) -> str:
     """Publish a server URL once, only after startup succeeds, under a Linux file lock."""
     with (directory / "postgres.lock").open("a") as lock:
@@ -52,11 +68,9 @@ def lock_and_share(directory: Path, start: Callable[[], str]) -> str:
 def pytest_configure(config: pytest.Config) -> None:
     """The controller owns Postgres, so worker exit order cannot shorten its lifetime."""
     if hasattr(config, "workerinput"):
-        config.stash[SERVER_URL] = config.workerinput.get(
-            WORKER_SERVER_URL, os.environ.get("CRUCIBLE_TEST_DATABASE_URL")
-        )
+        config.stash[SERVER_URL] = config.workerinput.get(WORKER_SERVER_URL, server_url_from_env())
         return
-    config.stash[SERVER_URL] = os.environ.get("CRUCIBLE_TEST_DATABASE_URL")
+    config.stash[SERVER_URL] = server_url_from_env()
     if config.stash[SERVER_URL] or config.option.collectonly or not includes_integration(config):
         return
 

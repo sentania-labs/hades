@@ -25,6 +25,8 @@ CRUCIBLE_KIND_DOCKER_HUB_MIRROR=mirror.gcr.io
 # The node image kind v0.33.0 (the CI pin) uses by default, named here so it can be
 # pulled through the mirror like the rest and handed to `kind create cluster --image`.
 # shellcheck disable=SC2034 # used by the scripts that source this file
+# Kubernetes 1.29 or later: the declared test services (hades #558, #85) are native
+# sidecars (an init container with restartPolicy Always), which older kubelets refuse.
 CRUCIBLE_KIND_NODE_IMAGE='kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5'
 # shellcheck disable=SC2034 # used by the scripts that source this file
 CRUCIBLE_BUSYBOX_IMAGE='busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0'

@@ -163,7 +163,50 @@ retention:
   indefinite: ["events", "completion_claims", "decisions", "gate_results", "review_reports",
                "external_reviews", "dispositions", "ci_certifications", "release_records",
                "diffs", "artifact_metadata"]
+
+services: []                           # optional (hades #558, #85): test services run beside the worker; see below
 ```
+
+### Test services (hades #558, #85)
+
+A worker has no Docker daemon (ADR 0020), so a check that needs a database
+(`make test-integration` reads `CRUCIBLE_TEST_DATABASE_URL` or starts a
+container) could not run in one. `services` declares what the worker's checks
+need beside it; the one kind so far is `postgres`:
+
+```yaml
+services:
+  - kind: "postgres"                   # the only kind in this version
+    image: "postgres:16@sha256:f1c3376c26f2609ab9f29f71f824103fe2fcd8ee0346485cb6122a4f93df6f94"
+                                       # optional; defaults to the digest of postgres:16 the CI workflow's
+                                       # integration tier runs (tests/integration/postgres.py); must be
+                                       # pinned by digest, never a moving tag
+    enabled: true                      # optional; a contract entry sets false to drop the policy's for one task
+    resources:                         # optional; what the service may use
+      cpus: 1                          # default 1; the limit
+      memory: "1GiB"                   # default 1GiB; the limit
+      storage: "1Gi"                   # default 1Gi; the data directory (a Kubernetes quantity)
+```
+
+Both providers run the service beside the worker and tell the worker where it
+is through the same variable, `CRUCIBLE_TEST_DATABASE_URL=postgresql://crucible:crucible@127.0.0.1:5432/crucible`,
+so one checkout's `make test-integration` works the same on either. The role,
+password and database are fixed and are not secrets: the server listens on the
+attempt's own loopback and nothing else can reach it. On Kubernetes it is a
+native sidecar of the worker Job (26): an init container with `restartPolicy:
+Always`, a `pg_isready` startup probe the worker's start waits on, requests at
+the policy's `cpu_request_fraction` and `memory_request_fraction` of its own
+limits, no NetworkPolicy change. On Docker it is one more container of the
+attempt in the worker's network namespace (08). The attempt's launch evidence
+(`report/kubernetes-launch.json`, `report/docker-launch.json`) records each
+declared service and the image digest it ran from. A task contract may declare
+the same list under `execution_request.services` (05): its entry replaces the
+policy's of the same kind, and `enabled: false` drops it. A version uploaded
+before the field existed runs no service. The shipped `hades-self-hosting`
+example declares it, so a task against this repository can run the
+integration tier in the worker; the verifier re-runs `required_verification`
+without a service, so `make test-integration` stays a worker-side check and a
+CI tier, not a required verification.
 
 ## Validation
 
@@ -178,6 +221,9 @@ retention:
   contract names both `make images-check` and `make registry-check` in
   `required_verification`, and the message names the missing ones.
 - `retry.eligible_classes` is a subset of the `ExitClass` enum (07).
+- `services` (hades #558, #85) is optional; each entry's `kind` is `postgres`,
+  a kind appears at most once, and an `image` given must be pinned by digest
+  (`name@sha256:<64 hex>`). Absent, no service runs.
 - `concurrency.per_harness` may exceed 1 for read-only adapters or adapters declaring
   `parallel_attempts_safe`. Writable adapters without that declaration are refused
   with a reason. Claude Code's long-lived setup token is read-only and never syncs

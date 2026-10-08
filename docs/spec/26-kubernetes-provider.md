@@ -289,6 +289,43 @@ request and limit a fixed small size, `kubernetes.canary_cpu_millicores` (defaul
 100m) and `kubernetes.canary_memory` (default 64Mi), configured the same
 way as `kubernetes.probe_image`.
 
+### Declared test services as native sidecars (hades #558, #85)
+
+A policy's or a contract's `services` list (05b, 05) adds one container per
+service to the worker Job's Pod and nothing to any other role. The container
+is a native sidecar (KEP-753, GA in Kubernetes 1.29): an entry of
+`initContainers` with `restartPolicy: Always`, named `svc-<kind>`, after the
+credential seed. That one field is the whole mechanism: the kubelet starts it
+before the worker, restarts it if it dies, and stops it once the worker
+container has exited, so the Job completes on the worker's exit and the
+database never keeps it alive. A second app container would have kept the Pod
+Running after the worker finished, and a plain init container would have had
+to finish before the worker started; neither is a sidecar. The provider was
+written against the kind node this repository tests on (`tools/kind/cluster.sh`,
+Kubernetes 1.37), which supports the pattern; a cluster older than 1.29 refuses
+the field at admission, and the launch ends as `environment` with the API
+server's message rather than running without the service.
+
+The Postgres sidecar runs the declared digest (the one the CI workflow's
+integration tier runs) as uid 1000 under the Pod's security context, with a
+read-only root filesystem and three volumes of its own: the data directory, an
+`emptyDir` bounded by the declared `storage`; the socket directory and `/tmp`,
+memory-backed. Its `startupProbe` is `pg_isready` over TCP on `127.0.0.1`
+(the image's bootstrap runs a socket-only server first, which must not count),
+so the worker container starts only once the server the worker will connect to
+answers; a `readinessProbe` with the same command keeps reporting it. The
+server listens on the Pod's loopback; the worker is told
+`CRUCIBLE_TEST_DATABASE_URL=postgresql://crucible:crucible@127.0.0.1:5432/crucible`
+and nothing else, and no NetworkPolicy changes: traffic inside one Pod never
+leaves it, and the namespace's default deny stands. The sidecar's limits are
+the declaration's `cpus` and `memory` (defaults 1 CPU, 1GiB) with the role's
+ephemeral storage, and its requests are the policy's
+`cpu_request_fraction` and `memory_request_fraction` of them, so a service
+asks the scheduler for the same share the worker does. A sidecar's exit code
+after the worker's exit is the server's shutdown and is never read as an init
+failure; `observe` skips `svc-` names when it looks for an init container that
+failed before the worker started.
+
 ## Networking: NetworkPolicy replaces the egress proxy
 
 There is no Squid on the cluster. The workers namespace carries a default
@@ -834,6 +871,11 @@ the observed fact. The same reading gives an adopted attempt's drain the grace
 period its Pod was created with, which is the task policy's. (Made concrete
 2026-09-25, issues 66 and 76.)
 
+Since hades #558 the same artifact carries `services`: each declared test
+service's kind, container name, declared image and digest, the variable and
+URL the worker was told, its resources, and `image_id`, the image the kubelet
+reported for the sidecar once the Pod was seen (empty until then).
+
 `GET /providers` reports the Kubernetes provider with `isolation: pod`,
 `network_control: true`, `resource_limits: true`, `shared_disk: false`, the
 harnesses that have a default image (each harness its own, ADR 0018), and `max_concurrency` from the
@@ -948,6 +990,12 @@ the status page.
 8. Public DNS is the operator's alone (operator rule 10): the API's ingress
    route is provisioned and reported; no record is created by Crucible or by
    any manifest.
+10. Kubernetes 1.29 or later on every node that runs a Pod of
+   `crucible-workers`, when any policy or contract declares a test service
+   (hades #558, #85): the service is a native sidecar, an init container with
+   `restartPolicy: Always`, which an older kubelet refuses. The kind node this
+   repository tests on is 1.37 (`tools/kind/cluster.sh`). The cluster must
+   also be able to pull the declared image (the pinned postgres:16 digest).
 
 A runtime class for worker pods (gVisor or Kata) is not a prerequisite for
 this version.

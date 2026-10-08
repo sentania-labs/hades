@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from crucible.application.auto_merge import auto_merge_enabled, certified_jobs_green
+from crucible.application.ci_junit import JUnitFindings, junit_sentence
 from crucible.application.decisions import open_escalation
 from crucible.application.publish import (
     external_review_trigger,
@@ -1089,6 +1090,7 @@ def certify_head(
     attempt_id: str = "",
     log_excerpt: str = "",
     log_fetched: bool = False,
+    junit: JUnitFindings | None = None,
 ) -> CICertification:
     """Compute and record the certification for the accepted head (23, ADR 0009).
 
@@ -1137,10 +1139,14 @@ def certify_head(
         if not log_fetched and previous is not None and same_run:
             log_excerpt = str(previous.failure.get("log_excerpt", ""))
             log_fetched = bool(previous.failure.get("log_fetched"))
+            # hades #558: the junit finding is read with the log, once per failed run.
+            junit = junit or JUnitFindings.from_dict(previous.failure.get("junit"))
         if log_excerpt:
             failure["log_excerpt"] = log_excerpt
         if log_fetched:
             failure["log_fetched"] = True
+        if junit is not None:
+            failure["junit"] = junit.as_dict()
         rerun = pending_rerun(
             uow,
             task,
@@ -1989,14 +1995,33 @@ def advance_delivery(
                     "note": "no automatic retry, no automatic worker correction (ADR 0009)",
                 },
             )
+            # hades #558, #85: a test job's wake names the failing tests from the
+            # junit artifact, or says why it cannot; it never guesses from the log.
+            junit = certification.failure.get("junit")
+            sentence = junit_sentence(junit)
             create_wake(
                 uow,
                 clock,
                 principal_id=task.principal_id,
                 reason=WakeReason.CI_CERTIFICATION_FAILED,
-                summary=(f"required CI failed on {certification.head_sha}: {certification.detail}"),
+                summary=(
+                    f"required CI failed on {certification.head_sha}: {certification.detail}"
+                    + (f"; {sentence}" if sentence else "")
+                ),
                 task=task,
                 extra_links={"ci_decision": f"/v1/tasks/{task.id}/ci-decision"},
+                extra=(
+                    {
+                        "failed_check": {
+                            k: v
+                            for k, v in certification.failure.items()
+                            if k in {"check", "workflow", "job", "conclusion", "url", "run_id"}
+                        },
+                        "junit": dict(junit),
+                    }
+                    if isinstance(junit, dict)
+                    else None
+                ),
             )
             return
         if task.state is TaskState.AWAITING_CI_CERTIFICATION and certification.state in (
@@ -2312,6 +2337,7 @@ def apply_observation(
     with_reactions: bool,
     log_excerpt: str = "",
     log_fetched: bool = False,
+    junit: JUnitFindings | None = None,
 ) -> ObservationResult:
     """One poll, applied. The whole of what a tick does with a pull request."""
     result = ObservationResult()
@@ -2406,6 +2432,7 @@ def apply_observation(
             attempt_id=attempt_id,
             log_excerpt=log_excerpt,
             log_fetched=log_fetched,
+            junit=junit,
         )
         result.certification = certification.state
     if result.diverged:

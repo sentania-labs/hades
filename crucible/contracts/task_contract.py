@@ -13,6 +13,7 @@ from typing import Any, Literal
 from pydantic import Field, ValidationError, field_validator, model_validator
 
 from crucible.contracts.common import StrictModel, check_major_version
+from crucible.contracts.policy import TestServiceDeclaration, _one_service_per_kind
 from crucible.domain.acceptance_checks import ACCEPTANCE_CHECK_PREFIX
 from crucible.domain.exit_class import ExitClass
 from crucible.domain.refs import ref_problem
@@ -308,6 +309,17 @@ class ExecutionRequest(StrictModel):
     # timeout each harness runs a shell command under. Absent: the policy default.
     command_timeout_ms: int | None = Field(default=None, ge=1)
     rationale: str = Field(min_length=1)
+    # hades #558, #85: the services this task's checks need beside the worker, the same
+    # shape as the policy's `services` (05b). An entry replaces the policy's of its
+    # kind; `enabled: false` drops the policy's for this task. Absent: the policy's.
+    services: list[TestServiceDeclaration] | None = None
+
+    @field_validator("services")
+    @classmethod
+    def _services_once(
+        cls, value: list[TestServiceDeclaration] | None
+    ) -> list[TestServiceDeclaration] | None:
+        return _one_service_per_kind(value) if value is not None else None
 
     @model_validator(mode="after")
     def _selection_or_pin(self) -> ExecutionRequest:

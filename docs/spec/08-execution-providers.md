@@ -156,6 +156,29 @@ It is a test fixture: wired only when `test_fixtures` is on (18).
   one, else `base_ref`), and writes what it found to `commit-policy/`
   for the `commit_policy` gate (11), which shows it to the reviewer.
   Everything read from the tree is data.
+- declared test services (hades #558, #85): for each entry of the policy's
+  or the contract's `services` (05b, 05), `launch` creates one more container
+  of the attempt, `svc-<kind>-<attempt>`, labelled with the attempt and
+  `crucible.role=service`, from the declared digest, which the daemon must
+  already hold (the provider pulls nothing; `make up` runs Hades's own
+  Postgres from the same digest, so the compose stack has it, and a missing
+  image refuses the launch naming it). The container is hardened as every
+  container of 13 is, runs as uid 1000 with tmpfs for the data directory
+  (bounded by the declared `storage`), the socket directory and `/tmp`, and
+  joins the worker's network namespace (`NetworkMode: container:<worker>`),
+  so the worker reaches it at the same `127.0.0.1:5432` the Kubernetes
+  sidecar answers on and nothing else on the workers network can. The worker
+  is told `CRUCIBLE_TEST_DATABASE_URL=postgresql://crucible:crucible@127.0.0.1:5432/crucible`,
+  the one value both providers use. Docker lets a container join another's
+  namespace only once that one runs, so the worker is created and started
+  first and each service right after it; a check that needs the database in
+  the worker's first second finds a server still starting, where the
+  Kubernetes sidecar's startup probe gates the worker's start. After the
+  worker exits the service stays until `cleanup`, which removes every
+  container of the attempt; nothing connects to it after the worker. When a
+  service was declared, `collect` adds a `report/docker-launch.json` artifact
+  (type `run_evidence`) recording the worker's digest and, per service, the
+  declaration, the container id and the digest the daemon resolved.
 - `terminate`: `drain` sends SIGTERM and waits the policy grace; `kill`
   sends SIGKILL.
 - `cleanup`: only for attempts whose exit path recorded `logs_drained`;

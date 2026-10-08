@@ -41,6 +41,23 @@ decision, 2026-09-28). ADR 0020 records the choices.
   `CRUCIBLE_COMPOSE_REQUIRED` and `CRUCIBLE_E2E_KIND_*` variables belong to the test
   tiers.
 
+## The integration tier in the worker (hades #558, #85)
+
+The policy's `services: [{kind: postgres}]` (05b) gives each attempt the database
+`make test-integration` needs: on Kubernetes a native sidecar of the worker Job, on
+Docker a container in the worker's network namespace, both reached as
+`CRUCIBLE_TEST_DATABASE_URL=postgresql://crucible:crucible@127.0.0.1:5432/crucible`,
+which `tests/integration/postgres.py` reads (a bare `postgresql://` is read as psycopg).
+The image is the postgres:16 digest the CI workflow's integration tier runs. A task
+against this repository can therefore run `make test-integration` in the worker and
+read its own failures before CI does; `required_checks` stays `make lint`, `make
+test-unit` and `make scan`, because the verifier re-runs required checks without a
+service and branch CI remains the proof of record. The attempt's launch evidence
+records the service and its digest. A CI failure on the `test` job also names the
+failing tests from the `junit-test-<attempt>` artifact on the `ci_certification_failed`
+wake (23), once the GitHub client can read workflow artifacts; until then the wake says
+the artifact was not read.
+
 ## The kind proof
 
 `make e2e-kind-self-hosting` (tests/e2e/test_kind_self_hosting.py): a Calico kind
