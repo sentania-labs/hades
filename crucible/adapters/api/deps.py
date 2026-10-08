@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Annotated
@@ -24,6 +25,49 @@ from crucible.ports.execution import ExecutionProvider
 from crucible.ports.first_run import FirstRunDelivery
 from crucible.ports.harness import CredentialSource, HarnessGate
 from crucible.ports.repository import UnitOfWork, UnitOfWorkFactory
+
+
+class SseTailPermit:
+    """One admitted live tail; releasing it more than once is a no-op."""
+
+    __slots__ = ("_limiter", "_released")
+
+    def __init__(self, limiter: SseTailLimiter) -> None:
+        self._limiter = limiter
+        self._released = False
+
+    def release(self) -> None:
+        with self._limiter._lock:
+            if self._released:
+                return
+            self._released = True
+            self._limiter._count -= 1
+
+
+@dataclass(slots=True)
+class SseTailLimiter:
+    """Process-local admission control for database-polling SSE log tails (#37).
+
+    It only gates admission: a tail that is admitted streams exactly as before and
+    gives its slot back when it ends. A threading lock, not an asyncio primitive,
+    guards the count so one instance can serve any event loop.
+    """
+
+    limit: int = 20
+    _count: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    @property
+    def in_use(self) -> int:
+        return self._count
+
+    def try_acquire(self) -> SseTailPermit | None:
+        """A permit for one more tail, or None when the limit is already in use."""
+        with self._lock:
+            if self._count >= self.limit:
+                return None
+            self._count += 1
+        return SseTailPermit(self)
 
 
 @dataclass(slots=True)
@@ -53,6 +97,7 @@ class AppContext:
     # Browser sessions are process-local and intentionally expire on restart. The
     # bearer token remains the source of identity and is never copied into state.
     ui_signing_key: bytes = field(default_factory=lambda: secrets.token_bytes(32))
+    sse_tail_limiter: SseTailLimiter = field(default_factory=SseTailLimiter)
     settings: object | None = None
     credential_renewer: ReadOnlyCredentialStore | None = None
     # Where the migration left the first-run administrator token, removed from there

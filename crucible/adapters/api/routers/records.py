@@ -10,8 +10,10 @@ from typing import Annotated, Literal
 
 from fastapi import Header, Query, Request, Response
 from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 
 from crucible.adapters.api.deps import Admin, Ctx, Orchestrator, Reader, UoW
+from crucible.adapters.api.problems import problem_response
 from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.application.artifacts import read_artifact, upload_artifact
 from crucible.application.auth import authenticate
@@ -113,39 +115,60 @@ async def get_attempt_logs(
             },
         )
 
+    permit = ctx.sse_tail_limiter.try_acquire()
+    if permit is None:
+        return problem_response(
+            slug="sse-tail-limit-exceeded",
+            title="Too many live log tails",
+            status=429,
+            detail="the configured live log tail limit is in use; retry shortly",
+            instance=str(request.url.path),
+            headers={"Retry-After": "1"},
+        )
+
     async def events() -> AsyncIterator[str]:
         cursor = offset
-        while True:
-            with ctx.uow_factory() as fresh:
-                current = fresh.attempts.get(attempt_id)
-                if current is None:
+        try:
+            while True:
+                with ctx.uow_factory() as fresh:
+                    current = fresh.attempts.get(attempt_id)
+                    if current is None:
+                        return
+                    chunks = list(
+                        fresh.logs.list_from_offset(attempt_id, offset=cursor, stream=stream)
+                    )
+                    drained = current.logs_drained_at is not None
+                for chunk in chunks:
+                    start = max(cursor, chunk.offset_start)
+                    content = chunk.content[start - chunk.offset_start :].decode("utf-8", "replace")
+                    cursor = max(cursor, chunk.offset_end)
+                    data = json.dumps(
+                        {
+                            "offset_start": start,
+                            "offset_end": chunk.offset_end,
+                            "content": content,
+                        },
+                        separators=(",", ":"),
+                    )
+                    yield f"id: {cursor}\nevent: {chunk.stream}\ndata: {data}\n\n"
+                if drained and not chunks:
+                    yield f'id: {cursor}\nevent: end\ndata: {{"offset":{cursor}}}\n\n'
                     return
-                chunks = list(fresh.logs.list_from_offset(attempt_id, offset=cursor, stream=stream))
-                drained = current.logs_drained_at is not None
-            for chunk in chunks:
-                start = max(cursor, chunk.offset_start)
-                content = chunk.content[start - chunk.offset_start :].decode("utf-8", "replace")
-                cursor = max(cursor, chunk.offset_end)
-                data = json.dumps(
-                    {
-                        "offset_start": start,
-                        "offset_end": chunk.offset_end,
-                        "content": content,
-                    },
-                    separators=(",", ":"),
-                )
-                yield f"id: {cursor}\nevent: {chunk.stream}\ndata: {data}\n\n"
-            if drained and not chunks:
-                yield f'id: {cursor}\nevent: end\ndata: {{"offset":{cursor}}}\n\n'
-                return
-            if await request.is_disconnected():
-                return
-            await asyncio.sleep(0.25)
+                if await request.is_disconnected():
+                    return
+                await asyncio.sleep(0.25)
+        finally:
+            permit.release()
 
+    # The limiter only gates admission. The slot comes back in the generator's
+    # finally, after the end event; the background task covers a client that
+    # disconnects before the generator ever starts, whose finally would never run.
+    # A permit releases once, so the two together cannot over-release.
     return StreamingResponse(
         events(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        background=BackgroundTask(permit.release),
     )
 
 

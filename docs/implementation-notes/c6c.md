@@ -198,3 +198,38 @@ the Python call stack and raise ``RecursionError`` before the time budget
 check.  The walker now uses an explicit ``list[Path]`` stack (``while stack``)
 instead of recursive ``yield from _walk(child)`` calls, eliminating the
 recursion depth limit entirely.
+
+## FDY-0535: SSE log tail concurrency target (Issue 37)
+
+Each live log tail polls its attempt and log chunks in a short-lived database
+unit of work every 250 ms. The service now admits at most 20 concurrent tails
+per process by default (`service.max_sse_log_tails`). The next tail receives
+the `sse-tail-limit-exceeded` RFC 9457 problem with `429` and `Retry-After: 1`;
+plain (non-streaming) log reads are not limited.
+
+Measured with `uv run python tools/benchmarks/issue_37_sse_tail_concurrency.py
+<tails> 2` against its SQLite test database on 2026-10-08:
+
+| Tails | Elapsed | Queries | Queries/s | Connection checkouts | Peak connections in use |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 2.016 s | 18 | 8.93 | 9 | 1 |
+| 20 | 2.025 s | 360 | 177.74 | 180 | 1 |
+
+Load is linear in tails: each poll is two statements (attempt, log chunks) on one
+pool checkout, about 4.5 checkouts and 9 queries per second per tail, so the
+20-tail cap bounds a process at roughly 180 queries per second from tails. The
+benchmark counts SQL statements and pool checkout/checkin events only over the
+timed interval, after every tail's initial snapshot. The poll's unit of work is
+synchronous inside the async route, so tails never hold more than one connection
+at a time in this measurement; that is a property of this local SQLite run, not
+a production database capacity claim.
+
+The limiter only gates admission. An admitted tail streams exactly as before
+and returns its slot in the generator's `finally`, after the `event: end` it
+sends when the attempt's logs are drained. A client that disconnects before the
+generator first runs never reaches that `finally` (closing an unstarted async
+generator runs none of its body), so the `StreamingResponse` also carries a
+background task that releases the same permit; a permit releases only once.
+An earlier revision of this branch released only from the background task and
+wrapped the generator in handlers that swallowed cancellation, and the live tail
+end-to-end test stopped seeing `event: end`; that revision was replaced.

@@ -7,6 +7,8 @@ local_endpoint_url = "https://llm.apps.int.sentania.net/v1"
 bind = "0.0.0.0:8080"
 render_timezone = "UTC"            # operators set their own zone in private configuration
 artifact_root = "/var/lib/crucible/artifacts"
+# Process-local cap on simultaneous database-polling SSE log tails.
+max_sse_log_tails = 20
 
 [database]
 url = "postgresql+psycopg://crucible:CHANGE_ME@postgres:5432/crucible"

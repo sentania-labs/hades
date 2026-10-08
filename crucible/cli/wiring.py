@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from sqlalchemy.exc import SQLAlchemyError
 
 from crucible.adapters.api.app import create_app
-from crucible.adapters.api.deps import AppContext
+from crucible.adapters.api.deps import AppContext, SseTailLimiter
 from crucible.adapters.clock import SystemClock
 from crucible.adapters.execution.docker import DockerConfig, DockerProvider
 from crucible.adapters.execution.fake import FakeProvider
@@ -613,6 +613,7 @@ def wire(settings: Settings, *, role: ProcessRole) -> Wiring:
         harness_gates=harness_gates(settings),
         credential_sources=credential_sources(settings),
         admin=admin,
+        sse_tail_limiter=SseTailLimiter(settings.service.max_sse_log_tails),
         settings=settings,
         first_run=first_run,
         credential_renewer=api_renewer,
