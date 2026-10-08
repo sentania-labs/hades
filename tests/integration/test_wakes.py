@@ -84,15 +84,17 @@ async def test_webhook_delivery_signs_the_body(
     task_id = submit_and_start(client, "crucible-worker:fake-malformed-report")
     await run_to_settled(supervisor, client, task_id)
     await supervisor.tick()
-    assert len(receiver.bodies) == 1
-    document = json.loads(receiver.bodies[0])
-    assert document["reason"] == "pre_pr_gates_failed"
-    assert document["task"]["id"] == task_id
-    wake = client.get("/v1/wakes").json()["items"][0]
-    assert wake["attempts"] == 1 and wake["delivered_at"] is not None
+    # The unparseable report fails the attempt (no retry remaining) and then fails the
+    # pre-PR gates that read it: one wake each, for the same attempt (17, 09).
+    assert len(receiver.bodies) == 2
+    documents = [json.loads(body) for body in receiver.bodies]
+    assert [d["reason"] for d in documents] == ["attempt_failed", "pre_pr_gates_failed"]
+    assert all(d["task"]["id"] == task_id for d in documents)
+    wakes = client.get("/v1/wakes").json()["items"]
+    assert all(w["attempts"] == 1 and w["delivered_at"] is not None for w in wakes)
     # A delivered wake is not redelivered.
     await supervisor.tick()
-    assert len(receiver.bodies) == 1
+    assert len(receiver.bodies) == 2
 
 
 async def test_a_failing_receiver_only_delays(
@@ -103,6 +105,9 @@ async def test_a_failing_receiver_only_delays(
     task_id = submit_and_start(client, "crucible-worker:fake-malformed-report")
     await run_to_settled(supervisor, client, task_id)
     await supervisor.tick()
+    # The unparseable report fails the attempt and then the pre-PR gates that read it:
+    # one wake each, for the same attempt (17, 09). Both were created and first
+    # attempted in the same tick, so their retry schedules stay in lockstep.
     wake = client.get("/v1/wakes").json()["items"][0]
     assert wake["attempts"] == 1 and wake["delivered_at"] is None
     assert wake["last_error"] == "HTTP 503"
@@ -111,11 +116,11 @@ async def test_a_failing_receiver_only_delays(
 
     # Before the backoff elapses nothing is retried.
     await supervisor.tick()
-    assert len(receiver.bodies) == 1
+    assert len(receiver.bodies) == 2
 
     clock.advance(RETRY_BACKOFF_SECONDS[0] + 1)
     await supervisor.tick()
-    assert len(receiver.bodies) == 2
+    assert len(receiver.bodies) == 4
     wake = client.get("/v1/wakes").json()["items"][0]
     assert wake["attempts"] == 2
     assert wake["next_attempt_at"] != first_retry
@@ -141,7 +146,9 @@ async def test_no_webhook_configured_means_poll_only(
     await run_to_settled(supervisor, client, task_id)
     await supervisor.tick()
     assert receiver.bodies == []
-    assert len(client.get("/v1/wakes").json()["items"]) == 1
+    # The unparseable report fails the attempt and then the pre-PR gates that read it:
+    # one wake each, for the same attempt (17, 09).
+    assert len(client.get("/v1/wakes").json()["items"]) == 2
 
 
 async def test_a_failed_attempt_wakes_with_its_class(
