@@ -55,12 +55,13 @@ def _hits(
     commit_paths: list[str] | None = None,
     commit_changes: list[tuple[str, str, str, str]] | None = None,
 ) -> set[str]:
-    return _injected_hits(
+    hits, _ = _injected_hits(
         paths,
         diff_changes,
         commit_paths or [],
         commit_changes,
     )
+    return hits
 
 
 def _gate_result(
