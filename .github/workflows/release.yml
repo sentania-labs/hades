@@ -265,10 +265,19 @@ jobs:
       # every program a shipped policy's required check starts with or declares, so a
       # release whose worker image and shipped policies disagree stops before anything
       # is published.
+      #
+      # hades #570: only when the worker image was built on this runner. When the
+      # worker image is reused (both tags unchanged since the previous release),
+      # `make images-policy-check` runs `docker run` against the local tag from
+      # images/manifest.env, which was never built on this runner; docker exits 125
+      # and the release stops. A reused worker image passed this check at its own
+      # release; its digest is re-published unchanged, so the check is unnecessary.
       - uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c # v7.0.0
+        if: steps.worker_decision.outputs.reuse != 'true' || steps.worker_decision.outputs.harness_reuse != 'true'
         with:
           enable-cache: true
       - name: check the worker image carries the policy programs
+        if: steps.worker_decision.outputs.reuse != 'true' || steps.worker_decision.outputs.harness_reuse != 'true'
         run: make images-policy-check
 
       # The worker images go out the way this image does, with `docker push` (the
