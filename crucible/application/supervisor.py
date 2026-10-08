@@ -4031,7 +4031,7 @@ class Supervisor:
                 try:
                     provider = self._provider(provider_name)
                     keep = choice == "keep"
-                    spec = await self._spec_for(attempt) if keep else None
+                    spec = await self._spec_for(attempt)
                     policy = CleanupPolicy.KEEP if keep else CleanupPolicy.DELETE
                     await provider.cleanup(self._workspace_for(attempt), policy, spec)
                 except LeaseLostError:

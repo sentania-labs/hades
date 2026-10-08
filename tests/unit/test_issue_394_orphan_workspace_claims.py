@@ -10,6 +10,7 @@ a resume source are left alone."""
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from contextlib import nullcontext
 from datetime import timedelta
 from types import SimpleNamespace
@@ -27,7 +28,7 @@ from crucible.domain.entities import Attempt, EvidenceRecord
 from crucible.domain.events import EventKind
 from crucible.domain.exit_class import ExitClass
 from crucible.domain.lifecycle import AttemptState
-from crucible.ports.execution import CleanupPolicy, ProviderError, Workspace
+from crucible.ports.execution import CleanupPolicy, LaunchSpec, ProviderError, Workspace
 from tests.fixtures import FakeClock
 from tests.unit.kubernetes_fixtures import build, spec
 from tests.unit.test_class_routing import NOW
@@ -96,7 +97,10 @@ def supervisor_over(
     uow.attempts.get.side_effect = lambda attempt_id, **_: next(
         (row for row in attempts if row.id == attempt_id), None
     )
-    uow.executions.get.return_value = SimpleNamespace(provider=provider.name)
+    uow.executions.get.return_value = SimpleNamespace(provider=provider.name, contract_version="1")
+    uow.tasks.get.return_value = SimpleNamespace(id="task", repository_id="repo")
+    uow.contracts.get.return_value = SimpleNamespace(document=spec(attempt_id="task").contract)
+    uow.repositories.get.return_value = SimpleNamespace(url="https://github.com/acme/example.git")
     uow.evidence.list_for_attempt.side_effect = lambda attempt_id: (evidence or {}).get(
         attempt_id, []
     )
@@ -104,6 +108,15 @@ def supervisor_over(
     monkeypatch.setattr(supervisor, "_fenced", lambda: nullcontext(uow))
     monkeypatch.setattr(supervisor, "_release_checkout_leases", MagicMock())
     return supervisor, uow
+
+
+def _spec_returning(spec_: LaunchSpec) -> Callable[[Attempt], Awaitable[LaunchSpec]]:
+    """Build a monkeypatch that makes ``_spec_for`` always return *spec_*."""
+
+    async def _inner(attempt: Attempt) -> LaunchSpec:
+        return spec_
+
+    return _inner
 
 
 async def prepared(api: FakeKubernetesApi, provider: KubernetesProvider, attempt_id: str) -> None:
@@ -137,6 +150,7 @@ async def test_an_attempt_that_ends_environment_at_prepare_has_its_claim_deleted
     supervisor, uow = supervisor_over(monkeypatch, provider, [row])
     monkeypatch.setattr(supervisor, "_record_bare_evidence", MagicMock())
     monkeypatch.setattr(supervisor, "_classify_and_finish", MagicMock())
+    monkeypatch.setattr(supervisor, "_spec_for", _spec_returning(spec(attempt_id=PRE_LAUNCH)))
     supervisor._environment_failure(row.id, "prepare", "the fake preparer could not clone")
     assert row.exit_class is ExitClass.ENVIRONMENT
     assert row.started_at is None and row.logs_drained_at is None
@@ -171,6 +185,7 @@ async def test_every_pre_launch_ending_has_its_claim_deleted(
     supervisor, uow = supervisor_over(
         monkeypatch, provider, [attempt(PRE_LAUNCH, state, exit_class)]
     )
+    monkeypatch.setattr(supervisor, "_spec_for", _spec_returning(spec(attempt_id=PRE_LAUNCH)))
 
     assert await supervisor._pre_launch_cleanup_step() == 1
 
@@ -186,6 +201,7 @@ async def test_an_interrupted_start_waits_the_attempt_lease_as_cleanup_does(
     await prepared(api, provider, PRE_LAUNCH)
     row = attempt(PRE_LAUNCH, AttemptState.FAILED, ExitClass.INFRASTRUCTURE)
     supervisor, _uow = supervisor_over(monkeypatch, provider, [row])
+    monkeypatch.setattr(supervisor, "_spec_for", _spec_returning(spec(attempt_id=PRE_LAUNCH)))
 
     assert await supervisor._pre_launch_cleanup_step() == 0
     assert PRE_LAUNCH in supervisor._live_attempt_ids()
