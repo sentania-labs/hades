@@ -81,18 +81,12 @@ def _changes_payload(changes: tuple[PathChange, ...]) -> list[dict[str, str]]:
 
 
 def _commit_changes_payload(bundle: BranchBundle) -> dict[str, Any]:
-    """hades #369: the commits' status records for injected-name paths, the only ones
-    `no_injected_files` reads, so a long branch does not carry every path of every
-    commit twice. Absent when the collector recorded none, which the gate judges as
-    before #369."""
+    """hades #369/#377: commit changes for every path (shim content check on all)
+    plus injected-name paths. The gate needs every path to check shim blob ids, but
+    only injected-name status records matter for add/detect (#369)."""
     if bundle.commit_changes is None:
         return {}
-    kept = tuple(
-        c
-        for c in bundle.commit_changes
-        if injected_name(c.path) or c.classification.startswith("error:")
-    )
-    return {"commit_changes": _changes_payload(kept)}
+    return {"commit_changes": _changes_payload(bundle.commit_changes)}
 
 
 def _commit_policy_payload(bundle: BranchBundle) -> dict[str, Any]:
@@ -541,13 +535,10 @@ def record_collection_evidence(
     if outputs.diff_paths or outputs.bundle is not None:
         diff_payload: dict[str, Any] = {"paths": list(outputs.diff_paths)}
         if outputs.diff_changes is not None:
-            # Only the injected-name records the gate reads, as for the commits (#369).
-            kept = tuple(
-                c
-                for c in outputs.diff_changes
-                if injected_name(c.path) or c.classification.startswith("error:")
-            )
-            diff_payload["changes"] = _changes_payload(kept)
+            # hades #377: preserve every path so the gate can check shim content
+            # on all added / modified paths, not just injected names.  The gate
+            # itself still only reports injected-name hits (or shim hits).
+            diff_payload["changes"] = _changes_payload(outputs.diff_changes)
         if outputs.base_paths is not None:
             diff_payload["base_paths"] = [p for p in outputs.base_paths if injected_name(p)]
         if outputs.over_limit:
