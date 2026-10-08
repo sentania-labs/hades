@@ -1163,6 +1163,144 @@ export GIT_CONFIG_GLOBAL=/tmp/gitconfig
 )
 
 
+# hades #447: what a work branch does to the schema, and the renumbering of its new
+# migrations. Both the publisher and merge-main write this program into their output
+# directory and run it there: it reads the migrations the branch adds under
+# `migrations/versions/`, records the tables and columns their alembic operations touch
+# and whether `models.py` changed (schema.json), and, when RUN_RENUMBER is 1 (merge-main
+# only), renumbers the added migrations to follow the base's highest number, points the
+# first at the base's head, and commits that as Crucible's own commit. A plain string,
+# not an f-string: its braces and backslashes are its own.
+SCHEMA_SCRIPT = r"""import ast
+import json
+import os
+import re
+import subprocess
+
+VERSIONS = 'crucible/adapters/persistence/migrations/versions/'
+MODELS = 'crucible/adapters/persistence/models.py'
+NUMBERED = re.compile(r'^_?(\d+)_(.*)\.py$')
+TABLE_OPS = ('add_column', 'drop_column', 'alter_column', 'create_table', 'drop_table')
+INDEX_OPS = ('create_index', 'drop_index')
+COLUMN_OPS = ('add_column', 'drop_column', 'alter_column')
+COMMIT_MESSAGE = 'Crucible: renumber migrations to follow main'
+base = 'refs/remotes/origin/' + os.environ['BASE_REF']
+out_dir = os.environ['OUT']
+tables = set()
+columns = set()
+
+
+def cmd(args):
+    return subprocess.check_output(args).decode('utf-8').strip()
+
+
+def changed(*flags):
+    try:
+        return cmd(['git', 'diff', '--name-only', *flags, base + '...HEAD']).splitlines()
+    except subprocess.CalledProcessError:
+        return []
+
+
+def is_migration(path):
+    return path.startswith(VERSIONS) and path.endswith('.py') and '__init__' not in path
+
+
+def constant(node):
+    return node.value if isinstance(node, ast.Constant) else None
+
+
+def column_name(node):
+    if constant(node) is not None:
+        return constant(node)
+    is_column = isinstance(node, ast.Call) and getattr(node.func, 'attr', None) == 'Column'
+    if is_column and node.args:
+        return constant(node.args[0])
+    return None
+
+
+class Visitor(ast.NodeVisitor):
+    def visit_Call(self, node):
+        func = node.func
+        if isinstance(func, ast.Attribute) and getattr(func.value, 'id', None) == 'op':
+            args = node.args
+            if func.attr in TABLE_OPS and args and constant(args[0]) is not None:
+                tables.add(constant(args[0]))
+            if func.attr in INDEX_OPS and len(args) >= 2 and constant(args[1]) is not None:
+                tables.add(constant(args[1]))
+            if func.attr in COLUMN_OPS and len(args) >= 2 and column_name(args[1]) is not None:
+                columns.add(column_name(args[1]))
+        self.generic_visit(node)
+
+
+def number(path):
+    match = NUMBERED.match(os.path.basename(path))
+    return int(match.group(1)) if match else 999999
+
+
+def slug(path):
+    match = NUMBERED.match(os.path.basename(path))
+    return match.group(2) if match else os.path.basename(path)[:-3]
+
+
+def rewrite(source, revision, down):
+    source = re.sub(r'(?m)^revision\s*=.*$', 'revision = "%s"' % revision, source)
+    source = re.sub(r'(?m)^down_revision\s*=.*$', 'down_revision = "%s"' % down, source)
+    source = re.sub(r'Revision ID:\s*.*', 'Revision ID: ' + revision, source)
+    return re.sub(r'Revises:\s*.*', 'Revises: ' + down, source)
+
+
+def renumber(added):
+    try:
+        on_base = cmd(['git', 'ls-tree', '-r', '--name-only', base, VERSIONS]).splitlines()
+    except subprocess.CalledProcessError:
+        on_base = []
+    highest = 0
+    head = ''
+    for path in on_base:
+        match = NUMBERED.match(os.path.basename(path))
+        if match and int(match.group(1)) >= highest:
+            highest = int(match.group(1))
+            head = os.path.basename(path)[:-3].lstrip('_')
+    renumbered = False
+    for path in sorted(added, key=number):
+        highest += 1
+        revision = '%04d_%s' % (highest, slug(path))
+        new_path = os.path.join(os.path.dirname(path), '_' + revision + '.py')
+        with open(path) as handle:
+            source = handle.read()
+        updated = rewrite(source, revision, head)
+        if new_path != path:
+            subprocess.check_call(['git', 'mv', path, new_path])
+        if updated != source or new_path != path:
+            with open(new_path, 'w') as handle:
+                handle.write(updated)
+            subprocess.check_call(['git', 'add', new_path])
+            renumbered = True
+        head = revision
+    if renumbered:
+        subprocess.check_call(['git', 'commit', '--quiet', '-m', COMMIT_MESSAGE])
+
+
+added = [p for p in changed('--diff-filter=A') if is_migration(p)]
+for path in added:
+    if not os.path.exists(path):
+        continue
+    with open(path) as handle:
+        source = handle.read()
+    try:
+        Visitor().visit(ast.parse(source))
+    except SyntaxError:
+        pass
+
+if os.environ.get('RUN_RENUMBER') == '1' and added:
+    renumber(added)
+
+models = [p for p in changed() if p == MODELS]
+with open(os.path.join(out_dir, 'schema.json'), 'w') as handle:
+    json.dump({'tables': sorted(tables), 'columns': sorted(columns), 'models': models}, handle)
+"""
+
+
 def publisher_script(
     *,
     clone_url: str,
@@ -1327,6 +1465,15 @@ if [ -n "$REMOTE" ]; then
     drop_token; exit 5
   fi
 fi
+
+# crucible: parse and renumber migrations
+export BASE_REF="{base_ref}"
+export OUT
+export RUN_RENUMBER=0
+cat << 'PYEOF' > "$OUT/schema.py"
+{SCHEMA_SCRIPT}PYEOF
+python3 "$OUT/schema.py" >> "$OUT/publisher.log" 2>&1 || true
+
 echo push > "$OUT/step.txt"
 # Hades owns its work branches (issue 403): a tip it pushed, such as a quota checkpoint
 # of ungated partial work, is replaced by the accepted head whether or not the head
@@ -1485,6 +1632,15 @@ if ! git merge --no-ff --no-edit -m "Merge origin/$BASE_REF into $WORK_BRANCH" \
   chmod 0644 "$OUT"/* 2>/dev/null || true
   exit {MERGE_MAIN_CONFLICT}
 fi
+
+# crucible: parse and renumber migrations
+export BASE_REF="{base_ref}"
+export OUT
+export RUN_RENUMBER=1
+cat << 'PYEOF' > "$OUT/schema.py"
+{SCHEMA_SCRIPT}PYEOF
+python3 "$OUT/schema.py" >> "$OUT/publisher.log" 2>&1 || true
+
 git rev-parse HEAD > "$OUT/merge-head.txt"
 echo push > "$OUT/step.txt"
 if git push --quiet --force-with-lease="refs/heads/$WORK_BRANCH:$EXPECTED" origin \\

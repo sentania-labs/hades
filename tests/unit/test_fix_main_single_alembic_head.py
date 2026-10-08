@@ -32,7 +32,10 @@ MERGED = {"0044_attempt_stall_shape", "0044_editor_leftovers_policy", "0044_merg
 # #437 adds 0051 for routing model references, and #343 adds 0052 for the repository's
 # own Codex connector refusal. #476's correction adds 0053 for the certification's
 # change class, and #443 adds 0054 digest_commit on top. Then #489 adds
-# 0055_task_notes for operator notes on a task.
+# 0055_task_notes for operator notes on a task. hades #447 adds 0056 for the schema a
+# pull request's migrations touch; it was written as 0052, renumbered past main's 0053
+# at one merge-main, past 0054 at the next and past #489's 0055 at the one after, which
+# is the provisional numbering #447 itself describes.
 ABOVE = "0046_blocked_reason"
 PROBE = "0047_attempt_egress_probe"
 LAUNCH = "0047_successful_launch_time"
@@ -43,7 +46,8 @@ ROUTING_REFS = "0051_routing_model_references"
 REFUSED = "0052_codex_review_refused"
 CERT_CLASS = "0053_cert_change_class"
 DIGEST_COMMIT = "0054_digest_commit"
-HEAD = "0055_task_notes"
+TASK_NOTES = "0055_task_notes"
+HEAD = "0056_pull_request_schema_overlap"
 
 
 def _script() -> ScriptDirectory:
@@ -84,8 +88,10 @@ def test_the_0045_merge_joins_the_three_0044_heads() -> None:
     assert cert_class is not None and cert_class.down_revision == REFUSED
     digest_commit = script.get_revision(DIGEST_COMMIT)
     assert digest_commit is not None and digest_commit.down_revision == CERT_CLASS
+    task_notes = script.get_revision(TASK_NOTES)
+    assert task_notes is not None and task_notes.down_revision == DIGEST_COMMIT
     head = script.get_revision(HEAD)
-    assert head is not None and head.down_revision == DIGEST_COMMIT
+    assert head is not None and head.down_revision == TASK_NOTES
 
 
 def test_the_cli_config_sees_the_same_single_head() -> None:
@@ -113,7 +119,7 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
         plan = [step.revision.revision for step in script._upgrade_revs("head", head)]
         assert plan.index("0043_credential_mount_mode") < plan.index("0044_merge_423_424")
         assert plan.index("0044_merge_423_424") < plan.index(MERGE)
-        assert plan[-15:] == [
+        assert plan[-16:] == [
             "0043_credential_mount_mode",
             "0044_merge_423_424",
             ("0044_editor_leftovers_policy", "0044_attempt_stall_shape")[
@@ -130,6 +136,7 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
             REFUSED,
             CERT_CLASS,
             DIGEST_COMMIT,
+            TASK_NOTES,
             HEAD,
         ]
 

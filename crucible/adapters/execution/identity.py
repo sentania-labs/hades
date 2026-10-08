@@ -161,7 +161,9 @@ def render_identity_md(
         f"- Never touch: {_paths(scope.get('prohibited_paths'))}\n"
         f"- Add dependencies: {_yes_no(scope.get('may_add_dependencies'))}. "
         f"Change CI: {_yes_no(scope.get('may_modify_ci'))}. Network: {network_mode}.\n"
-        f"- Commit your work on `{work_branch}`; never push."
+        f"- Commit your work on `{work_branch}`; never push.\n"
+        "- A new migration's number and down_revision are provisional; Hades assigns "
+        "them at merge (hades #447)."
         + "".join(
             f"\n- Do not {str(a).strip()}" for a in _items(constraints.get("prohibited_actions"))
         )

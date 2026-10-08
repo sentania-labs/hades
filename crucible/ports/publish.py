@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from crucible.ports.github import InstallationToken
 
@@ -52,6 +52,8 @@ class PublishOutcome:
     head_sha: str
     step: str
     detail: str = ""
+    # hades #447: the publisher's reading of the branch's new migrations (schema.json).
+    schema_changes: dict[str, Any] | None = None
     exit_code: int = 0
     remote_head_before: str = ""
     log_tail: str = ""
@@ -92,6 +94,8 @@ class MergeMainOutcome:
     merged: bool
     head_sha: str = ""
     conflicting_files: tuple[str, ...] = ()
+    # hades #447: the publisher's reading of the branch's new migrations (schema.json).
+    schema_changes: dict[str, Any] | None = None
     detail: str = ""
     step: str = ""
     exit_code: int = 0

@@ -673,6 +673,28 @@ refusals retry after 60 seconds, doubling to a maximum of 30 minutes. A changed 
 head, base or mergeability state allows an earlier retry; only a changed refusal cause
 produces another wake. These are failure retries, not a hold on newly ready heads.
 
+Two steps precede the squash merge of a pull request whose branch adds migrations
+(hades #447). The publisher records, from the files the branch adds under
+`crucible/adapters/persistence/migrations/versions/`, the tables and columns their
+alembic operations touch and whether `crucible/adapters/persistence/models.py` changed,
+on the pull request (`schema_tables`, `schema_columns`, `schema_models`); merge-main
+refreshes the record from the branch it pushed. First, the record is compared with every
+other open pull request of the repository: when their migrations touch the same table,
+the lower-numbered pull request merges first and the later one is held in
+`ready_for_merge` with one `schema_overlap` wake per pair naming the pull request it
+waits for and the shared tables, which the Board shows as what the task waits on. Once
+the first has merged it is no longer open, so the next merge tick finds no overlap.
+Second, Hades runs the merge-main script of #411 on the branch: it merges the base in,
+renumbers the branch's new migrations to follow the base's highest number, points the
+first at the base's head (and its `Revision ID` and `Revises` lines with it), commits
+that as Crucible's own commit and pushes it with a lease. A migration already on the base
+is never edited. The new head goes to CI certification like any merge-main head and the
+merge comes back to it; a branch that already contains the base is merged as it is. A
+merge-main that fails or stops on conflicts is recorded as a merge refusal with its
+cause, and GitHub's own word on mergeability then takes the conflict down the #411 path.
+A worker's new migration therefore carries a provisional number and `down_revision`
+(06); Hades assigns the final ones at merge.
+
 `delivery.auto_merge: false` leaves the task ready for an operator. Administrators can
 also disable automatic merges globally through `GET` or `POST
 /v1/admin/delivery/auto-merge` with `{"enabled": false}` or the switch on `/ui/settings`.

@@ -71,6 +71,7 @@ from crucible.application.wakes import create_wake
 from crucible.contracts.task_contract import contract_sha256
 from crucible.contracts.wake import WakeReason
 from crucible.domain.entities import (
+    PullRequest,
     PullRequestHead,
     PullRequestState,
     PushedBy,
@@ -530,8 +531,11 @@ class DeliveryCoordinator:
                 if known is None:
                     return False
             github_step = "branch_pushed_at_head"
+            # hades #447: what the branch's new migrations touch, from the publisher.
+            schema_changes: dict[str, Any] | None = None
             if plan.resume_step not in ("branch_pushed_at_head", "github"):
                 outcome = await self._publisher.push(self._publish_request(plan), token)
+                schema_changes = outcome.schema_changes
                 await self._host._db(lambda: self._record_publisher(plan, outcome))
                 if not outcome.pushed:
                     await self._host._db(
@@ -632,7 +636,7 @@ class DeliveryCoordinator:
                     )
                 )
                 return False
-            await self._host._db(lambda: self._record_pull_request(plan, resolved))
+            await self._host._db(lambda: self._record_pull_request(plan, resolved, schema_changes))
             trigger = external_review_trigger(plan.policy)
             if trigger is not None and not plan.external_review_needs_person:
                 github_step = "external_review_request"
@@ -654,7 +658,11 @@ class DeliveryCoordinator:
                 # or a refusal was already seen there; Crucible never posts the App's
                 # trigger, which the provider would only refuse again.
                 await self._host._db(lambda: self._record_review_needs_person(plan, resolved))
-            await self._host._db(lambda: self._finish(plan, ref=resolved, others=others))
+            await self._host._db(
+                lambda: self._finish(
+                    plan, ref=resolved, others=others, schema_changes=schema_changes
+                )
+            )
             return True
         except GitHubError as exc:
             failure = exc
@@ -822,7 +830,9 @@ class DeliveryCoordinator:
             uow.commit()
             return True
 
-    def _record_pull_request(self, plan: PublishPlan, ref: Any) -> None:
+    def _record_pull_request(
+        self, plan: PublishPlan, ref: Any, schema_changes: dict[str, Any] | None = None
+    ) -> None:
         with self._host._fenced() as uow:
             task = uow.tasks.get(plan.task_id, for_update=True)
             if task is None or task.state is not TaskState.PUBLISHING:
@@ -834,6 +844,7 @@ class DeliveryCoordinator:
                 plan=plan,
                 ref=ref,
                 body_hash=body_sha256(plan.body),
+                schema_changes=schema_changes,
             )
             uow.commit()
 
@@ -1007,7 +1018,12 @@ class DeliveryCoordinator:
             uow.commit()
 
     def _finish(
-        self, plan: PublishPlan, *, ref: Any, others: tuple[PullRequestRef, ...] = ()
+        self,
+        plan: PublishPlan,
+        *,
+        ref: Any,
+        others: tuple[PullRequestRef, ...] = (),
+        schema_changes: dict[str, Any] | None = None,
     ) -> None:
         with self._host._fenced() as uow:
             task = uow.tasks.get(plan.task_id, for_update=True)
@@ -1019,7 +1035,13 @@ class DeliveryCoordinator:
                 pull_request = uow.pull_requests.get_for_task(task.id, for_update=True)
                 if pull_request is None:
                     pull_request, _opened = upsert_pull_request(
-                        uow, self._clock, task=task, plan=plan, ref=ref, body_hash=body_hash
+                        uow,
+                        self._clock,
+                        task=task,
+                        plan=plan,
+                        ref=ref,
+                        body_hash=body_hash,
+                        schema_changes=schema_changes,
                     )
             record_event(
                 uow,
@@ -1589,6 +1611,19 @@ class DeliveryCoordinator:
         """Compare the live head, then immediately merge with the same SHA precondition."""
         assert self._github is not None
         token: InstallationToken | None = None
+        # hades #447: a pull request whose migrations touch a table that an older open
+        # pull request's migrations also touch waits for that one to merge.
+        other = await self._host._db(lambda: self._schema_overlap(plan))
+        if other is not None:
+            await self._host._db(lambda: self._hold_for_schema_overlap(plan, other))
+            return False
+        # hades #447: before the squash merge of a pull request that adds migrations,
+        # Crucible merges the base into the branch and renumbers them past the base's.
+        # A new head is certified by its own checks first; the merge comes back to it.
+        if await self._host._db(
+            lambda: self._adds_migrations(plan)
+        ) and await self._merge_main_before_merge(plan):
+            return False
         try:
             token = await asyncio.to_thread(
                 self._github.installation_token,
@@ -1692,6 +1727,154 @@ class DeliveryCoordinator:
                 token.discard()
         await self._host._db(lambda: self._record_merge(plan, result))
         return True
+
+    def _schema_overlap(self, plan: MergePlan) -> PullRequest | None:
+        """hades #447: the oldest other open pull request of the same repository whose
+        migrations touch a table this one's touch, else None. The lower number merges
+        first; this one waits for it (`_hold_for_schema_overlap`)."""
+        with self._host._fenced() as uow:
+            pull_request = uow.pull_requests.get(plan.pull_request_id)
+            if pull_request is None or not pull_request.schema_tables:
+                return None
+            tables = set(pull_request.schema_tables)
+            overlapping = [
+                other
+                for other in uow.pull_requests.list_in_states([PullRequestState.OPEN])
+                if other.id != pull_request.id
+                and other.repository_id == pull_request.repository_id
+                and other.number < pull_request.number
+                and tables.intersection(other.schema_tables or ())
+            ]
+            return min(overlapping, key=lambda other: other.number, default=None)
+
+    def _hold_for_schema_overlap(self, plan: MergePlan, other: PullRequest) -> None:
+        """One `schema_overlap` wake per pair of pull requests, naming the one waited
+        for; the Board shows its summary as what the task waits on. The task stays
+        `ready_for_merge`: once the other merges it is no longer open, the next merge tick
+        finds no overlap, and `_merge_main_before_merge` brings the base in."""
+        with self._host._fenced() as uow:
+            task = uow.tasks.get(plan.task_id, for_update=True)
+            pull_request = uow.pull_requests.get(plan.pull_request_id)
+            if task is None or pull_request is None or task.state is not TaskState.READY_FOR_MERGE:
+                return
+            shared = sorted(set(pull_request.schema_tables or ()) & set(other.schema_tables or ()))
+            marker = f"pull request #{pull_request.number} waits for #{other.number}"
+            if any(
+                event.kind == EventKind.WAKE_CREATED.value
+                and event.payload.get("reason") == WakeReason.SCHEMA_OVERLAP.value
+                and marker in str(event.payload.get("summary", ""))
+                for event in uow.events.list_for_task(task.id, after_seq=0, limit=10_000)
+            ):
+                return
+            create_wake(
+                uow,
+                self._clock,
+                principal_id=task.principal_id,
+                reason=WakeReason.SCHEMA_OVERLAP,
+                summary=(
+                    f"schema overlap: {marker}; both change {', '.join(shared)}. Next: when "
+                    f"#{other.number} merges, Crucible merges {plan.base_ref} into the branch, "
+                    "renumbers its migrations and merges it"
+                ),
+                task=task,
+                extra_links={"pull_request": f"/v1/tasks/{task.id}/pull-request"},
+            )
+            uow.commit()
+
+    def _adds_migrations(self, plan: MergePlan) -> bool:
+        """hades #447: the publisher recorded tables or columns the branch's new
+        migrations touch."""
+        with self._host._fenced() as uow:
+            pull_request = uow.pull_requests.get(plan.pull_request_id)
+            return pull_request is not None and bool(
+                pull_request.schema_tables or pull_request.schema_columns
+            )
+
+    async def _merge_main_before_merge(self, plan: MergePlan) -> bool:
+        """hades #447: merge the base into the branch and renumber its migrations to
+        follow the base's (the merge-main script of #411). True when the squash merge
+        must wait: the branch has a new head that CI certifies first, or the merge did not
+        happen and the refusal's backoff decides when to try again. A branch that already
+        contains the base is left as it is and merged now."""
+        prepared = await self._host._db(lambda: self._merge_main_for_merge(plan))
+        if prepared is None or self._publisher is None or self._github is None:
+            return False
+        poll_plan, request = prepared
+        token: InstallationToken | None = None
+        try:
+            token = await asyncio.to_thread(
+                self._github.installation_token,
+                installation_id=plan.installation_id or 0,
+                repository=plan.repository_name,
+            )
+            outcome = await self._publisher.merge_main(request, token)
+        except Exception as exc:
+            log.warning("publisher merge-main before merge failed", exc_info=True)
+            outcome = MergeMainOutcome(merged=False, step="error", detail=redact(str(exc)))
+        finally:
+            if token is not None:
+                token.discard()
+        if outcome.step == "up-to-date" and outcome.exit_code == 0:
+            return False
+        if outcome.merged and outcome.head_sha:
+            if outcome.head_sha == plan.certified_head_sha:
+                return False
+            await self._host._db(
+                lambda: self._record_merge_main_push(poll_plan, plan.certified_head_sha, outcome)
+            )
+            return True
+        conflicts = ", ".join(outcome.conflicting_files)
+        cause = (
+            f"merging {plan.base_ref} into the branch before the squash merge "
+            f"{'stopped on conflicts in ' + conflicts if conflicts else 'failed'}: "
+            f"{outcome.detail or outcome.step}"
+        )
+        await self._host._db(lambda: self._record_merge_refusal(plan, cause, None))
+        return True
+
+    def _merge_main_for_merge(self, plan: MergePlan) -> tuple[PollPlan, MergeMainRequest] | None:
+        """The merge-main request for a ready merge, with the poll plan its outcome is
+        recorded under, else None when the task or head moved on."""
+        with self._host._fenced() as uow:
+            task = uow.tasks.get(plan.task_id)
+            pull_request = uow.pull_requests.get(plan.pull_request_id)
+            if (
+                task is None
+                or pull_request is None
+                or task.state is not TaskState.READY_FOR_MERGE
+                or pull_request.head_sha != plan.certified_head_sha
+            ):
+                return None
+            work = latest_work_attempt(uow, task)
+            repository = uow.repositories.get(task.repository_id)
+            if work is None or repository is None:
+                return None
+            attempt, execution = work
+            poll_plan = PollPlan(
+                task_id=task.id,
+                pull_request_id=pull_request.id,
+                number=pull_request.number,
+                repository_name=plan.repository_name,
+                installation_id=plan.installation_id,
+                base_ref=plan.base_ref,
+                attempt_id=attempt.id,
+                with_reactions=False,
+                created_at=_delivery_age(plan.created_at, self._clock),
+            )
+            request = MergeMainRequest(
+                task_id=task.id,
+                attempt_id=attempt.id,
+                owner=task.external_id,
+                repository_url=push_url_for(repository),
+                work_branch=pull_request.work_branch,
+                base_ref=pull_request.base_ref,
+                expected_head=plan.certified_head_sha,
+                image=self.config.publisher_image or attempt.image_digest or execution.image,
+                policy=execution.policy_snapshot or {},
+                workspace_path=attempt.workspace_path or "",
+                timeout_seconds=self.config.publisher_timeout_seconds,
+            )
+            return poll_plan, request
 
     def _record_behind(self, plan: MergePlan, head_sha: str | None) -> None:
         with self._host._fenced() as uow:
@@ -2214,6 +2397,11 @@ class DeliveryCoordinator:
             pull_request.observed_head_sha = outcome.head_sha
             pull_request.mergeable = None
             pull_request.mergeable_state = "unknown"
+            if outcome.schema_changes is not None:
+                # hades #447: the branch as merged and renumbered.
+                pull_request.schema_tables = list(outcome.schema_changes.get("tables") or [])
+                pull_request.schema_columns = list(outcome.schema_changes.get("columns") or [])
+                pull_request.schema_models = list(outcome.schema_changes.get("models") or [])
             uow.tasks.save(task)
             uow.pull_requests.save(pull_request)
             # Crucible's own push: the next poll sees this head as ours, not as a

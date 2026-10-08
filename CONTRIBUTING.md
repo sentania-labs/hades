@@ -99,7 +99,10 @@ time in operator-facing text.
 
 ## Migrations
 
-A migration that has been applied to any database, including a
+A new migration's number and `down_revision` are provisional: number it after the
+highest you can see, and Hades renumbers it past main's highest and points it at
+main's head when it merges main into the branch before the squash merge, as its own
+commit (hades #447). A migration that has been applied to any database, including a
 developer's, is never edited. Schema changes are a new revision. Before the
 first tagged release the initial revision may be squashed, only together with a
 `make reset` (compose down with volumes) called out in the PR, because every

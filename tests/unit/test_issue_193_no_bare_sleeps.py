@@ -22,6 +22,7 @@ SLEEP_ALLOWLIST = {
     Path("e2e/test_kind.py"),
     Path("e2e/test_kind_self_hosting.py"),
     Path("e2e/test_live_harness.py"),
+    Path("unit/test_issue_508_kind_shard_cancel.py"),
 }
 
 

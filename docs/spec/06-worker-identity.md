@@ -53,7 +53,9 @@ the worker is told what to do, not how Crucible checks it. In order:
    instructions and the review comments or findings it addresses.
 5. **Scope.** Allowed and prohibited paths, whether dependencies may be added
    and CI changed (yes or no), the network mode, "Commit your work on
-   `work_branch`; never push.", and each of the contract's
+   `work_branch`; never push.", the one line that a new migration's number and
+   `down_revision` are provisional and Hades assigns them at merge (hades #447),
+   and each of the contract's
    `constraints.prohibited_actions`. Nothing about the trailer, the author,
    hooks or `--no-verify`: none of them is the worker's concern, and nothing
    refuses a commit for them (operator decision, 2026-09-29, hades FDY-0143).
@@ -145,3 +147,10 @@ Credentials, the Crucible API token, GitHub tokens, other tasks'
 contracts, external review feedback that Foundry has not turned into a
 correction contract, the orchestrator's own identity, or any file the
 contract did not name.
+
+## Migrations
+
+A new migration's number and `down_revision` are provisional: the worker numbers it
+after the highest it can see, and Hades assigns the final number and `down_revision`
+when it merges the base into the branch and before the squash merge, as its own commit
+(23, hades #447). A worker never edits a migration that is already on the base.
