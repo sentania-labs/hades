@@ -16,16 +16,28 @@ An empty `dns.namespace` means the resolver is allowed by its service address al
 An empty `local_endpoint.namespace` means the local model endpoint is outside the
 cluster and keeps its resolved-address rule. A `port` of 0 means the endpoint URL's own
 port, which is right when the Service's port and its pods' port are the same.
+
+The module also holds the one rule for how a running attempt's allowlist addresses
+move (hades #205): `AllowedAddresses` and `refresh_addresses`, which decide what a
+policy allows after its names are looked up again, with an overlap window before an
+address that left the answer is dropped. It is pure so the provider and its tests
+share the rule.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 SETTING_NAME = "kubernetes.egress"
+
+# How long an address that has left a name's answer stays in a running attempt's
+# NetworkPolicy beside the new one (hades #205). Twice the 60 second TTL github.com
+# answers with: a client in the Pod that cached the old answer when the policy changed
+# has had that cache expire and reconnected before the old address is dropped.
+DEFAULT_ADDRESS_OVERLAP_SECONDS = 120.0
 
 DEFAULT_DNS_NAMESPACE = "kube-system"
 DEFAULT_DNS_POD_LABELS: tuple[tuple[str, str], ...] = (("k8s-app", "kube-dns"),)
@@ -177,14 +189,90 @@ def parse_cluster_egress(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class AllowedAddresses:
+    """What one running attempt's NetworkPolicy allows for its allowlisted names, and
+    why each address is there (hades #205).
+
+    `written` are the addresses the policy was written with at launch. The Pod's
+    `hostAliases` pin its names to exactly those (hades #191), and a Pod's hostAliases
+    cannot change, so they stay in the policy for as long as the Pod runs: dropping one
+    would leave the Pod pinned to an address its policy no longer allows.
+
+    `current` is each name's most recent answer, which is where a client that resolves
+    the name itself rather than through the hosts file connects. `retiring` are
+    addresses that were current once and have left the answer since, each with the
+    monotonic time it left; they stay allowed for the overlap window and are dropped
+    after it, unless the name answers them again first.
+
+    `cidrs` is what the policy carries: the three sets in that order, each address once."""
+
+    written: tuple[str, ...] = ()
+    current: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    retiring: tuple[tuple[str, float], ...] = ()
+
+    @property
+    def cidrs(self) -> tuple[str, ...]:
+        ordered: list[str] = list(self.written)
+        for _host, addresses in self.current:
+            ordered.extend(addresses)
+        ordered.extend(address for address, _since in self.retiring)
+        return tuple(dict.fromkeys(ordered))
+
+    @property
+    def hosts(self) -> tuple[str, ...]:
+        return tuple(host for host, _addresses in self.current)
+
+
+def refresh_addresses(
+    allowed: AllowedAddresses,
+    answers: Mapping[str, Sequence[str]],
+    *,
+    now: float,
+    overlap_seconds: float,
+) -> AllowedAddresses:
+    """One refresh of a running attempt's addresses (hades #205).
+
+    `answers` holds the names that were looked up again, each with every address it
+    resolved to; a name that is not in it, or that answered nothing, keeps what it had,
+    because a resolver that did not answer is not a reason to narrow a running attempt's
+    network. An address that left a name's answer, and is not one the policy was
+    written with, starts retiring at `now`; one that is retiring and comes back is
+    current again; one retiring for `overlap_seconds` or longer is dropped. Called with
+    no answers it only drops what has retired, which is how the window stays bounded
+    between lookups."""
+    current: list[tuple[str, tuple[str, ...]]] = []
+    for host, addresses in allowed.current:
+        answer = tuple(dict.fromkeys(answers.get(host) or ()))
+        current.append((host, answer or addresses))
+    before = {address for _host, addresses in allowed.current for address in addresses}
+    after = {address for _host, addresses in current for address in addresses}
+    pinned = set(allowed.written)
+    retiring: list[tuple[str, float]] = [
+        (address, since)
+        for address, since in allowed.retiring
+        if address not in after and address not in pinned and now - since < overlap_seconds
+    ]
+    already = {address for address, _since in retiring}
+    for address in sorted(before - after - pinned):
+        if address not in already and overlap_seconds > 0:
+            retiring.append((address, now))
+    return AllowedAddresses(
+        written=allowed.written, current=tuple(current), retiring=tuple(retiring)
+    )
+
+
 __all__ = [
+    "DEFAULT_ADDRESS_OVERLAP_SECONDS",
     "DEFAULT_DNS_NAMESPACE",
     "DEFAULT_DNS_POD_LABELS",
     "SETTING_NAME",
+    "AllowedAddresses",
     "ClusterEgress",
     "format_labels",
     "label_problem",
     "namespace_problem",
     "parse_cluster_egress",
     "parse_labels",
+    "refresh_addresses",
 ]

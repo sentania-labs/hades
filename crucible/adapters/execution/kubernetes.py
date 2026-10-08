@@ -83,7 +83,13 @@ from crucible.application.harnesses import (
 )
 from crucible.contracts.completion_claim import CompletionClaimV1
 from crucible.domain.acceptance_checks import verifier_checks
-from crucible.domain.cluster_egress import ClusterEgress, parse_cluster_egress
+from crucible.domain.cluster_egress import (
+    DEFAULT_ADDRESS_OVERLAP_SECONDS,
+    AllowedAddresses,
+    ClusterEgress,
+    parse_cluster_egress,
+    refresh_addresses,
+)
 from crucible.domain.command_timeout import effective_command_timeout_ms
 from crucible.domain.exit_class import ExitClass
 from crucible.domain.ids import new_id
@@ -450,8 +456,14 @@ class KubernetesConfig:
     # the git and login roles only; a worker and a verifier always get their resolved
     # allowlist (`_broad_for`, hades #425).
     broad_egress: bool = False
-    # How long a resolved address stays in a policy before it is looked up again.
+    # How long a resolved address stays in a policy before it is looked up again. For a
+    # running attempt that is also how often its names are looked up again (hades #205).
     resolve_ttl_seconds: float = 300.0
+    # hades #205: when a running attempt's name answers a new address, its policy allows
+    # the old and the new together for this long before the old one is dropped. The
+    # addresses the policy was written with are never dropped: the Pod's hostAliases
+    # pin it to them and cannot change.
+    address_overlap_window_seconds: float = DEFAULT_ADDRESS_OVERLAP_SECONDS
     extra_image_allowlist: tuple[str, ...] = ()
     # The harness credential Secrets in the workers namespace, by harness name (12, 26).
     # The service creates and owns them (ADR 0015); this only names them, and a harness
@@ -598,6 +610,20 @@ class _Launched:
     # launch, `template` for an attempt adopted before its Pod existed, `pod` once the
     # live Pod has been read.
     limits_source: Literal["policy", "template", "pod"] = "policy"
+    # hades #205: the worker's resolved egress plan as its policy was written, and what
+    # the policy allows now, so a long-running attempt's names are looked up again on
+    # the resolve interval and its policy follows them. An adopted attempt's are read
+    # back from its live policy and Pod (`_adopt_egress`).
+    egress_plan: EgressPlan | None = None
+    allowed: AllowedAddresses | None = None
+    # When the names were last looked up (monotonic).
+    egress_refreshed_at: float = 0.0
+    # An adopted attempt's live egress rules and the index of the one that carries its
+    # allowlisted addresses: a refresh replaces that rule's peers and leaves every
+    # other rule as the policy was written, because this process never saw the plan the
+    # DNS and endpoint rules came from. None for an attempt this process launched.
+    adopted_egress: tuple[dict[str, Any], ...] | None = None
+    adopted_rule: int = -1
 
 
 # What an adopted attempt's `_Launched` carries before the supervisor hands the real
@@ -2157,6 +2183,13 @@ class KubernetesProvider:
             network_policy=policy_name,
             credential=copy,
             launched_at=time.monotonic(),
+            egress_plan=plan if policy_name else None,
+            allowed=(
+                AllowedAddresses(written=plan.cidrs, current=plan.host_addresses)
+                if policy_name
+                else None
+            ),
+            egress_refreshed_at=time.monotonic(),
         )
         return Handle(
             provider=self.name,
@@ -2189,6 +2222,8 @@ class KubernetesProvider:
 
     async def observe(self, h: Handle) -> Observation:
         launched = self._launched.get(h.attempt_id)
+        if launched is not None:
+            await self._refresh_addresses(launched)
         try:
             job = await self._call(self.client.get, "jobs", h.ref)
         except KubernetesApiError as exc:
@@ -2293,6 +2328,181 @@ class KubernetesProvider:
         if phase in _PENDING_PHASES and self._pending_too_long(launched):
             return self._pending_failure(pod)
         return Observation(ObservationState.RUNNING, detail=phase or "Pending")
+
+    async def _refresh_addresses(self, launched: _Launched) -> None:
+        """hades #205: keep a running attempt's NetworkPolicy valid as its names move.
+
+        The policy was written with the addresses its names resolved to at launch, and
+        the Pod's `hostAliases` pin the names to them (hades #191); neither the Pod nor
+        the answer a long-running attempt's names give stand still. On the resolve
+        interval (`resolve_ttl_seconds`) each allowlisted name is looked up again. An
+        address that is new joins the policy; one that left the answer stays beside it
+        for `address_overlap_window_seconds` and is then dropped; the written addresses
+        stay for the Pod's life, because a Pod pinned to an address its policy no longer
+        allows could reach nothing. The rule itself is `refresh_addresses`
+        (`crucible.domain.cluster_egress`); this method feeds it the lookups and writes
+        the result to the policy with one merge patch of the egress rules.
+
+        A lookup or a patch that fails leaves the policy as it is and is tried again on
+        the next observation; observing an attempt never fails because of it."""
+        plan, allowed, policy_name = launched.egress_plan, launched.allowed, launched.network_policy
+        if plan is None or allowed is None or not policy_name or plan.broad or not plan.hosts:
+            return
+        if launched.exit_code is not None or launched.terminated is not None:
+            return
+        now = time.monotonic()
+        answers: dict[str, tuple[str, ...]] = {}
+        due = now - launched.egress_refreshed_at >= self.config.resolve_ttl_seconds
+        if due:
+            for host in allowed.hosts:
+                answer = await self._lookup(host, now)
+                if answer is None:
+                    continue
+                permitted = tuple(
+                    address
+                    for address in answer
+                    if k8sspec.denied_by(address, self.config.denied_cidrs) is None
+                )
+                if len(permitted) < len(answer):
+                    # 26 denies these ranges; at launch such an answer refuses the
+                    # attempt. A running attempt keeps its network and never gets the
+                    # address: the rule is never widened into a denied range.
+                    log.warning(
+                        "attempt %s: %s now resolves into a denied range; the address is "
+                        "not added to %s",
+                        launched.spec.attempt_id,
+                        host,
+                        policy_name,
+                    )
+                answers[host] = permitted
+        refreshed = refresh_addresses(
+            allowed,
+            answers,
+            now=now,
+            overlap_seconds=self.config.address_overlap_window_seconds,
+        )
+        if refreshed.cidrs == allowed.cidrs:
+            launched.allowed = refreshed
+            if due:
+                launched.egress_refreshed_at = now
+            return
+        if launched.adopted_egress is not None:
+            egress = [dict(rule) for rule in launched.adopted_egress]
+            egress[launched.adopted_rule]["to"] = [
+                {"ipBlock": {"cidr": cidr}} for cidr in refreshed.cidrs
+            ]
+        else:
+            body = self._policy_body(
+                policy_name,
+                self._labels(launched.spec, k8sspec.ROLE_WORKER),
+                launched.spec.attempt_id,
+                k8sspec.ROLE_WORKER,
+                replace(plan, cidrs=refreshed.cidrs),
+            )
+            egress = body["spec"]["egress"]
+        try:
+            await self._call(
+                self.client.patch, "networkpolicies", policy_name, {"spec": {"egress": egress}}
+            )
+        except (KubernetesApiError, OSError) as exc:
+            log.warning(
+                "attempt %s: the NetworkPolicy %s could not follow its addresses (%s); "
+                "trying again on the next observation",
+                launched.spec.attempt_id,
+                policy_name,
+                exc,
+            )
+            return
+        launched.allowed = refreshed
+        if due:
+            # Only once the policy carries the answer: a patch that failed is tried again
+            # on the next observation, from the cached answer, not a whole interval later.
+            launched.egress_refreshed_at = now
+        log.info(
+            "attempt %s: %s now allows %s (was %s)",
+            launched.spec.attempt_id,
+            policy_name,
+            ", ".join(refreshed.cidrs),
+            ", ".join(allowed.cidrs),
+        )
+
+    async def _adopt_egress(
+        self, launched: _Launched, attempt_id: str, pod_spec: Mapping[str, Any]
+    ) -> None:
+        """hades #205: pick up an adopted worker's addresses so they keep following its
+        names after a restart. This process never saw the plan, so it is read back from
+        what is live: the names from the policy's egress annotation, the addresses it
+        allows from its allowlist rule (the first rule after the DNS one, as
+        `k8sspec.egress_policy` writes it), and the addresses the Pod is pinned to from
+        its `hostAliases`. Those stay for the Pod's life as at launch; any other address
+        the policy allows (a previous process's refresh) is treated as retiring now, so
+        it stays for the overlap window unless the first lookup, due at once, answers
+        it again. A policy that cannot be read or is not in that form is left as it is
+        and is not refreshed."""
+        name = k8sspec.object_name(f"np-{k8sspec.ROLE_WORKER}", attempt_id)
+        try:
+            policy = await self._call(self.client.get, "networkpolicies", name)
+        except (KubernetesApiError, OSError):
+            return
+        annotations = (policy.get("metadata") or {}).get("annotations") or {}
+        hosts = tuple(
+            h for h in str(annotations.get(k8sspec.ANNOTATION_EGRESS, "")).split(",") if h
+        )
+        egress = tuple(dict(rule) for rule in (policy.get("spec") or {}).get("egress") or [])
+        index = next(
+            (
+                i
+                for i, rule in enumerate(egress)
+                if not any(int(p.get("port") or 0) == 53 for p in rule.get("ports") or [])
+            ),
+            -1,
+        )
+        if not hosts or index < 0:
+            return
+        peers = egress[index].get("to") or []
+        if not peers or any(
+            set(peer) != {"ipBlock"} or set(peer["ipBlock"]) != {"cidr"} for peer in peers
+        ):
+            # The broad rule, or not an allowlist rule: nothing to follow.
+            return
+        live = tuple(dict.fromkeys(str(peer["ipBlock"]["cidr"]) for peer in peers))
+        pinned: dict[str, list[str]] = {}
+        for alias in pod_spec.get("hostAliases") or []:
+            for alias_host in alias.get("hostnames") or []:
+                pinned.setdefault(str(alias_host), []).append(f"{alias.get('ip', '')}/32")
+        current = tuple(
+            (host, tuple(c for c in pinned.get(host.lower().rstrip("."), ()) if c in live))
+            for host in hosts
+        )
+        written = tuple(c for c in live if any(c in addresses for _h, addresses in current))
+        now = time.monotonic()
+        launched.network_policy = name
+        launched.egress_plan = EgressPlan(hosts=hosts, cidrs=live, host_addresses=current)
+        launched.allowed = AllowedAddresses(
+            written=written,
+            current=current,
+            retiring=tuple((c, now) for c in live if c not in written),
+        )
+        launched.adopted_egress = egress
+        launched.adopted_rule = index
+        launched.egress_refreshed_at = float("-inf")
+
+    async def _lookup(self, host: str, now: float) -> tuple[str, ...] | None:
+        """One name's addresses through the resolution cache (`resolve_ttl_seconds`): the
+        cached answer while it is fresh, a new lookup otherwise. None when the lookup
+        failed or answered nothing, which is not an answer a policy should follow."""
+        cached = self._resolved.get(host)
+        if cached is not None and now - cached[0] < self.config.resolve_ttl_seconds:
+            return cached[1] or None
+        try:
+            addresses = tuple(await self._call(self.resolve, host))
+        except OSError as exc:
+            log.warning(
+                "looking %s up again failed (%s); its addresses stay as they are", host, exc
+            )
+            return None
+        self._resolved[host] = (now, addresses)
+        return addresses or None
 
     async def _start_failure_observation(
         self, pod: Mapping[str, Any], code: int, reason: str, message: str
@@ -2875,6 +3085,9 @@ class KubernetesProvider:
                     limits_source="pod" if pod_spec is live_spec else "template",
                 )
             launched = self._launched[attempt_id]
+            if launched.egress_plan is None and launched.network_policy is None:
+                # hades #205: an adopted worker's addresses keep following its names.
+                await self._adopt_egress(launched, attempt_id, pod_spec)
             if pod is not None and not launched.pod_name:
                 # So a Pod that vanishes between this reconcile and the first `observe`
                 # reads as lost, not as one the Job controller never created (103).

@@ -364,6 +364,52 @@ probe reach example.com, which no policy names).
 Both are restart-bound settings, set like `kubernetes.probe_image` and shown on
 the admin UI's settings page. (Made concrete 2026-09-25, issue 61.)
 
+**A running worker's addresses follow its names (hades #205).** A worker runs
+for hours, and the addresses its allowlist resolved to at launch need not last
+that long: a CDN rotates an address out, or a name's answer moves. Its Pod's
+`hostAliases` cannot change once it runs, and until #205 its NetworkPolicy did
+not change either. Now the provider looks every allowlisted name of a running
+worker up again on each observation once `kubernetes.resolve_ttl_seconds` has
+passed since the last lookup, through the same resolution cache a launch uses,
+and when an answer differs it patches the attempt's worker NetworkPolicy (one
+merge patch of its egress rules; the object's name, labels and annotation are
+untouched):
+
+- a new address joins the policy at once;
+- an address that has left a name's answer stays beside the new one for
+  `kubernetes.address_overlap_window_seconds` (default 120, twice the 60 second
+  TTL github.com answers with, so a client that cached the old answer has had
+  that cache expire and reconnected) and is then dropped, unless the name
+  answers it again first;
+- the addresses the policy was written with are never dropped while the Pod
+  runs. They are what `hostAliases` pins the Pod to, and a Pod pinned to an
+  address its policy no longer allows could reach nothing. What the refresh
+  serves is the client that resolves a name itself rather than through the
+  hosts file, and the name whose answer the alias could not pin.
+
+An answer that falls into a denied range is never added (26's denials hold for
+a running attempt as they do at launch; the attempt keeps the network it has and
+the log says which name moved). A lookup that fails or answers nothing leaves
+that name's addresses as they are: a resolver that did not answer is no reason
+to narrow a running attempt's network. A patch that fails is tried again on the
+next observation. The refresh applies to the worker role, whose Pod is the
+long-running one; the git, login and verifier Jobs end in minutes, under the
+addresses they were written with. An attempt adopted after a supervisor restart
+keeps being refreshed: its names are read back from the policy's egress
+annotation, the addresses it allows from its allowlist rule, and the addresses
+the Pod is pinned to from its `hostAliases` (kept for the Pod's life, as at
+launch). Any other address the policy allows, a previous process's refresh, is
+treated as retiring from the moment of adoption, and the first lookup is due at
+once, so an address still answered stays and one that is not gets the overlap
+window. A refresh of an adopted attempt replaces the peers of that one rule and
+leaves every other rule as written; a policy that cannot be read is left as it
+is. The resolve interval restarts only once a lookup's result is in the policy:
+a patch that fails is tried again on the next observation from the cached
+answer, not a whole interval later. The rule itself is `refresh_addresses` in
+`crucible/domain/cluster_egress.py`, pure, and the window setting is
+restart-bound like the two above. (Chosen 2026-10-07, Foundry on the operator's
+delegation.)
+
 **How a worker reaches an allowlisted host (hades #425).** On this provider
 the path is direct. There is no proxy and no proxy variable in the worker's
 environment: `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` are the Docker
@@ -586,7 +632,10 @@ the namespace. A deployment therefore names one exact, pullable reference in
   anything is resolved, so their number does not add to the listing's cost (111);
   the Images page says so. This provider prunes nothing itself: a daily scheduled
   workflow deletes the accumulated `ci-*` versions instead (140, 24).
-- `observe`: read the Job and its Pod.
+- `observe`: read the Job and its Pod. First, for a running worker (launched
+  by this process or adopted), look its allowlisted names up again when the
+  resolve interval has passed and patch its NetworkPolicy to follow them (hades #205, above); a
+  refresh that fails is logged and never fails the observation.
 
   | Job | Pod | Result |
   |---|---|---|
