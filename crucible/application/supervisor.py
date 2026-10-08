@@ -6581,7 +6581,10 @@ class Supervisor:
         if context is None:
             return
         routing = context[0]
-        entry = routing.model(execution.model, execution.harness)
+        entry = routing.model(
+            attempt.selected_model or execution.model,
+            attempt.selected_harness or execution.harness,
+        )
         if entry is None or entry.endpoint != "local":
             return
         since = self._clock.now() - timedelta(

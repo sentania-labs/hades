@@ -627,7 +627,9 @@ def _one_session(database: sqlite3.Connection, session_id: str) -> dict[str, obj
     return dict(row) if row is not None else None
 
 
-def _fill_from_session(usage: dict[str, object], session: dict[str, object]) -> None:
+def _fill_from_session(
+    usage: dict[str, object], session: dict[str, object], *, aggregate: bool = False
+) -> None:
     """#387: fill what the usage record lacks from Hermes's saved session state.
 
     Hermes 0.19 writes its usage file from the agent's result, which is empty when the
@@ -643,12 +645,12 @@ def _fill_from_session(usage: dict[str, object], session: dict[str, object]) -> 
     if usage.get("session_id") is None and session["id"] is not None:
         usage["session_id"] = session["id"]
     for field, column in SESSION_FIELDS:
-        if usage.get(field) is None and session[column] is not None:
+        if (aggregate or usage.get(field) is None) and session[column] is not None:
             usage[field] = session[column]
-    if all(usage.get(field) is None for field in TOKEN_FIELDS):
+    if aggregate or all(usage.get(field) is None for field in TOKEN_FIELDS):
         for field in TOKEN_FIELDS:
             usage[field] = _integer(session[field])
-    if usage.get("total_tokens") is None:
+    if aggregate or usage.get("total_tokens") is None:
         parts = [_integer(usage.get(field)) for field in TOTAL_PARTS]
         if any(part is not None for part in parts):
             usage["total_tokens"] = sum(part for part in parts if part is not None)
@@ -692,9 +694,12 @@ def _enrich_usage(
             # #387: Hermes 0.19 writes `completed: null` when its agent raised.
             usage["completed"] = False
         try:
-            session = _session(home, usage.get("session_id"))
+            # Every relaunch uses the same fresh home and creates another top-level
+            # session. Once a transport retry happened, aggregate every row so the
+            # discarded launches' duration, tools, tokens and cost are not lost.
+            session = _session(home, None if transport_retries > 0 else usage.get("session_id"))
             if session is not None:
-                _fill_from_session(usage, session)
+                _fill_from_session(usage, session, aggregate=transport_retries > 0)
         except SessionSchemaChanged as error:
             print(error, file=sys.stderr, flush=True)
         temporary = usage_path.with_suffix(".tmp")
@@ -780,6 +785,8 @@ def run_with_retry(
             flush=True,
         )
         pause(delay)
+        if stopped():
+            return code, number
     return code, retries
 
 

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 import subprocess
 import sys
 from datetime import timedelta
@@ -147,6 +148,24 @@ def test_an_answer_the_gateway_gave_is_not_retried_and_a_signal_stops_retrying(
         lambda _n: (143, "connection reset"), sleep=slept.append, stopped=lambda: True
     ) == (143, 0)
     assert slept == []
+
+
+@pytest.mark.parametrize("wrapper", [_qwen, _hermes])
+def test_a_signal_during_backoff_does_not_launch_again(wrapper: Any) -> None:
+    module = wrapper()
+    launched: list[int] = []
+    stopped = False
+
+    def launch(number: int) -> tuple[int, str | None]:
+        launched.append(number)
+        return 75, "connection reset"
+
+    def pause(_delay: float) -> None:
+        nonlocal stopped
+        stopped = True
+
+    assert module.run_with_retry(launch, sleep=pause, stopped=lambda: stopped) == (75, 0)
+    assert launched == [0]
 
 
 @pytest.mark.parametrize(
@@ -449,6 +468,59 @@ def test_the_hermes_wrapper_gives_up_after_three_retries_with_hermes_own_exit(
     assert record["transport_retries"] == 3
 
 
+def test_hermes_usage_aggregates_every_relaunched_session(tmp_path: Path) -> None:
+    module = _hermes()
+    home = tmp_path / "home"
+    home.mkdir()
+    with sqlite3.connect(home / "state.db") as database:
+        database.execute(
+            """CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, parent_session_id TEXT, started_at REAL,
+                ended_at REAL, tool_call_count INTEGER, model TEXT,
+                billing_provider TEXT, estimated_cost_usd REAL,
+                input_tokens INTEGER, output_tokens INTEGER,
+                cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+                reasoning_tokens INTEGER
+            )"""
+        )
+        database.executemany(
+            "INSERT INTO sessions VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("dropped", 10.0, 12.0, 1, "fast", "local", 0.25, 10, 2, 3, 4, 5),
+                ("answered", 20.0, 24.0, 2, "fast", "local", 0.75, 20, 6, 7, 8, 9),
+            ],
+        )
+    usage_path = tmp_path / USAGE_NAME
+    usage_path.write_text(
+        json.dumps(
+            {
+                "session_id": "answered",
+                "estimated_cost_usd": 0.75,
+                "input_tokens": 20,
+                "output_tokens": 6,
+                "cache_read_tokens": 7,
+                "cache_write_tokens": 8,
+                "reasoning_tokens": 9,
+                "total_tokens": 41,
+                "tool_calls": 2,
+                "duration_ms": 4000,
+            }
+        )
+    )
+    module._enrich_usage(usage_path, home, transport_retries=1)
+    record = json.loads(usage_path.read_text())
+    assert record["transport_retries"] == 1
+    assert record["duration_ms"] == 14000
+    assert record["tool_calls"] == 3
+    assert record["estimated_cost_usd"] == pytest.approx(1.0)
+    assert record["input_tokens"] == 30
+    assert record["output_tokens"] == 8
+    assert record["cache_read_tokens"] == 10
+    assert record["cache_write_tokens"] == 12
+    assert record["reasoning_tokens"] == 14
+    assert record["total_tokens"] == 60
+
+
 # ----- AC2: a provider_error exit reroutes to the next eligible candidate --------------
 
 
@@ -685,6 +757,39 @@ def test_a_second_failure_in_a_row_still_marks_the_pool_and_reroutes_past_it(
     selection = _selection(supervisor, uow, pending, attempts[-1])
     assert selection.selected is not None and selection.selected.id == CODEX_FALLBACK
     assert any("pool exhausted" in reason for reason in _candidate(selection, HERMES)["excluded"])
+
+
+def test_a_rerouted_subscription_provider_error_does_not_mark_its_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Endpoint health belongs to the route that actually ran, not the execution's
+    original local route. A subscription provider error therefore marks no pool."""
+    supervisor, pending, uow, attempts, marks = _qwen_on_the_gateway(
+        monkeypatch,
+        models=[
+            _local_entry(QWEN, "qwen_code"),
+            _model(CODEX_FALLBACK, harness="codex", pool="openai-sub"),
+        ],
+    )
+    _finish(supervisor, pending.attempt, _dropped_past_the_retries(), exit_code=1)
+    rerouted = attempts[-1]
+    rerouted.selected_model = CODEX_FALLBACK
+    rerouted.selected_harness = "codex"
+    rerouted.selected_pool = "openai-sub"
+    uow.attempt_metrics.list_since.return_value = [
+        AttemptMetrics(
+            attempt_id=pending.attempt.id,
+            task_id=pending.task.id,
+            model=QWEN,
+            harness="qwen_code",
+            endpoint_kind="local",
+            pool=POOL,
+            exit_class=ExitClass.PROVIDER_ERROR.value,
+            created_at=NOW - timedelta(minutes=1),
+        )
+    ]
+    supervisor._mark_local_endpoint_down(uow, rerouted, pending.execution)
+    assert marks == {}
 
 
 def test_a_provider_error_consumes_no_retry_and_its_bundle_is_the_resume_source() -> None:

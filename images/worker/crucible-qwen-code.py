@@ -193,6 +193,8 @@ def run_with_retry(
             flush=True,
         )
         pause(delay)
+        if stopped():
+            return code, number
     return code, retries
 
 
