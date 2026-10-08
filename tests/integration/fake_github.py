@@ -97,10 +97,13 @@ class FakeGitHub:
         self.merge_refusal: tuple[int, str] | None = None
         self.merge_response_failure_once = False
         self.workflow_log = b"fake workflow log: the required check failed\n"
-        # The signed log URLs GitHub redirects to, and whether any request for one carried
+        # Signed log URLs GitHub redirects to, and whether any request for one carried
         # an Authorization header (it must not: the URL is its own credential).
         self.log_downloads: list[str] = []
         self.log_download_authorized = False
+        # Issue 435: grant Actions write to installation tokens.
+        self.actions_write_permissions = False
+        self.rerun_attempts: dict[str, int] = {}
         self.lock = threading.Lock()
         # A real git remote standing in for the repository's branches (the kind tier's
         # pushable git host): when set, a branch head is read from it, so what Crucible
@@ -678,6 +681,30 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+            return
+        # Issue 435: rerun-failed-jobs endpoint.
+        if (
+            method == "POST"
+            and rest[:2] == ["actions", "runs"]
+            and rest[3:] == ["rerun-failed-jobs"]
+        ):
+            run_id = rest[2]
+            if self.state.actions_write_permissions:
+                self.state.rerun_attempts[run_id] = self.state.rerun_attempts.get(run_id, 0) + 1
+                new_attempt = self.state.rerun_attempts[run_id]
+                self._send(
+                    200,
+                    {
+                        "id": int(run_id),
+                        "name": "CI",
+                        "run_attempt_number": new_attempt,
+                        "status": "in_progress",
+                        "conclusion": None,
+                        "html_url": f"https://github.com/owner/repo/actions/runs/{run_id}",
+                    },
+                )
+            else:
+                self._send(403, {"message": "Must have the 'actions: write' permission"})
             return
         if rest[:1] == ["branches"] and rest[2:] == [
             "protection",

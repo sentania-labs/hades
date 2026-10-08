@@ -2,8 +2,9 @@
 
 `ci-decision` and `head-decision` are the two places where Crucible has recorded facts,
 stopped, and needs judgment. Crucible records the judgment and performs its mechanical
-consequence. It never re-runs a workflow (that needs Actions write, which the App does
-not hold) or closes a pull request. Hades merges a certified head when policy enables it.
+consequence. When the App holds Actions write it re-runs failed jobs through the
+GitHub API (issue 435); otherwise it records the intent and raises a wake for the
+operator. Hades merges a certified head when policy enables it.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from crucible.contracts.api import CIDecisionRequest, HeadDecisionRequest
 from crucible.contracts.wake import WakeReason
 from crucible.domain.entities import (
     CIAction,
+    CICertification,
     CIDecision,
     HeadAction,
     Principal,
@@ -33,6 +35,7 @@ from crucible.domain.events import EventKind
 from crucible.domain.ids import new_id
 from crucible.domain.lifecycle import TaskState
 from crucible.ports.clock import Clock
+from crucible.ports.github import GitHubClient, GitHubError, InstallationToken
 from crucible.ports.repository import UnitOfWork
 
 
@@ -48,8 +51,15 @@ def record_ci_decision(
     principal: Principal,
     task_id: str,
     request: CIDecisionRequest,
+    github_client: GitHubClient | None = None,
 ) -> Task:
-    """23: the cause from the fixed enum and the action. No automatic retry ever."""
+    """23: the cause from the fixed enum and the action.
+
+    When the action is ``rerun`` and the installation grants Actions write,
+    Hades re-runs the failed jobs through the App API and records the new
+    attempt (issue 435).  When the installation lacks that permission the
+    intent is recorded and a wake is raised for the operator (the legacy
+    hand-off path)."""
     _orchestrator(principal, "a CI decision")
     task = uow.tasks.get(task_id, for_update=True)
     if task is None:
@@ -99,8 +109,24 @@ def record_ci_decision(
         },
     )
     if request.action is CIAction.RERUN:
-        # Re-running a workflow needs Actions write, which ADR 0007 does not grant. The
-        # intent is recorded and the operator performs it on GitHub (23, 22).
+        # Issue 435: when the installation grants Actions write, Hades re-runs the
+        # failed jobs itself and records the attempt it started; otherwise the wake is
+        # the hand-off to the operator, as before (23, 22).
+        attempt = _rerun_through_app(uow, task, certification, github_client)
+        if attempt is not None:
+            assert certification is not None
+            certification.failure["rerun_attempt"] = attempt
+            certification.failure["rerun_decision"] = decision.id
+            uow.ci_certifications.put(certification)
+            note = (
+                f"re-run requested, attempt {attempt} running; Hades re-ran the failed "
+                "jobs through the App (Actions write)"
+            )
+        else:
+            note = (
+                f"waiting on a re-run: a CI re-run was decided for {task.head_sha}; "
+                "re-run it on GitHub, Hades cannot (no Actions write)"
+            )
         move_task(
             uow,
             clock,
@@ -111,21 +137,18 @@ def record_ci_decision(
             payload={
                 "ci_decision_id": decision.id,
                 "head_sha": task.head_sha,
-                "note": (
-                    "rerun recorded; the operator re-runs it on GitHub, because the App "
-                    "holds no Actions write (23)"
-                ),
+                "note": note,
+                "rerun_attempt": attempt,
             },
         )
+        # The wake carries the line the Board and the task page show while the task
+        # waits: the hand-off itself without Actions write, the running attempt with it.
         create_wake(
             uow,
             clock,
             principal_id=task.principal_id,
             reason=WakeReason.CI_RERUN_NEEDED,
-            summary=(
-                f"a CI re-run was decided for {task.head_sha}; re-run it on GitHub, "
-                "Crucible cannot (no Actions write)"
-            ),
+            summary=note,
             task=task,
             raised_by=principal.name,
         )
@@ -250,3 +273,100 @@ def record_head_decision(
         },
     )
     return task
+
+
+def _rerun_through_app(
+    uow: UnitOfWork,
+    task: Task,
+    certification: CICertification | None,
+    github_client: GitHubClient | None,
+) -> int | None:
+    """Re-run the failed jobs of the decided head's workflow runs, once, when the
+    installation grants Actions write (issue 435). Returns the attempt now running, or
+    None when Hades did not re-run anything and the operator hand-off stands.
+
+    The grant is read from GitHub on every decision, never assumed. A refusal from
+    GitHub (a run too old to re-run, one already running) is not an error for the
+    decision: it falls back to the hand-off rather than losing the recorded decision."""
+    if github_client is None or certification is None:
+        return None
+    repo = uow.repositories.get(task.repository_id)
+    if repo is None or repo.installation_id is None:
+        return None
+    try:
+        granted = github_client.get_installation_permissions(installation_id=repo.installation_id)
+    except GitHubError:
+        return None
+    if granted.get("actions") != "write":
+        return None
+    try:
+        token = github_client.installation_token(
+            installation_id=repo.installation_id,
+            repository=repo.name,
+            permissions={"actions": "write", "metadata": "read"},
+        )
+    except GitHubError:
+        return None
+    try:
+        attempts: list[int] = []
+        for run_id in _failed_workflow_runs(github_client, token, repo.name, certification):
+            try:
+                github_client.rerun_failed_jobs(token, repository=repo.name, run_id=run_id)
+            except GitHubError:
+                continue
+            # The endpoint answers 201 with no body; the run says which attempt started.
+            try:
+                run = github_client.get_workflow_run(token, repository=repo.name, run_id=run_id)
+            except GitHubError:
+                run = {}
+            number = run.get("run_attempt")
+            if isinstance(number, int) and not isinstance(number, bool):
+                attempts.append(number)
+            else:
+                attempts.append(_previous_attempt(certification) + 1)
+        return max(attempts) if attempts else None
+    finally:
+        github_client.revoke_token(token)
+
+
+def _previous_attempt(certification: CICertification) -> int:
+    value = certification.failure.get("rerun_attempt")
+    return value if isinstance(value, int) and not isinstance(value, bool) else 1
+
+
+def _failed_workflow_runs(
+    github_client: GitHubClient,
+    token: InstallationToken,
+    repository: str,
+    certification: CICertification,
+) -> list[int]:
+    """The distinct workflow run ids behind the certification's failures, in order.
+
+    A failure observed as a workflow run carries the run id; one observed as a check run
+    from Actions carries the job id, which is resolved to its run. A row recorded before
+    issue 435 has no source of its own; only the first failure's source is known then."""
+    failure = certification.failure
+    rows = [row for row in failure.get("all") or [] if isinstance(row, dict)]
+    if not rows:
+        rows = [{"run_id": failure.get("run_id"), "source": failure.get("source")}]
+    elif "source" not in rows[0]:
+        rows[0] = {**rows[0], "source": failure.get("source")}
+    runs: list[int] = []
+    for row in rows:
+        raw = row.get("run_id")
+        if raw is None or not str(raw).isdigit():
+            continue
+        if row.get("source") == "workflow_run":
+            run_id: int | None = int(str(raw))
+        elif row.get("source") == "check_run":
+            try:
+                run_id = github_client.workflow_run_for_job(
+                    token, repository=repository, job_id=int(str(raw))
+                )
+            except GitHubError:
+                run_id = None
+        else:
+            run_id = None
+        if run_id is not None and run_id not in runs:
+            runs.append(run_id)
+    return runs

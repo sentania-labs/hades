@@ -12,7 +12,8 @@ This module contains four acceptance criteria, each as a separate test:
 
   AC3  _ac3_no_workflow_cancel        — static check that no code in the
        repository calls a GitHub API endpoint that cancels or reruns a
-       workflow run.
+       whole workflow run. Issue 435 permits decision-driven failed-job
+       reruns in application code, but not in kind scripts.
 
   AC4  _ac4_shard_exclusivity         — reads every shard file under
        tools/kind/shards and proves that every test_* function in
@@ -190,6 +191,8 @@ class TestNoWorkflowCancel:
 
     The repository must not contain any of these patterns in application
     code or tests (except the test file itself, which documents the absence).
+    Issue 435 explicitly permits the distinct rerun-failed-jobs endpoint
+    for an operator's CI decision; it does not cancel a workflow run.
     """
 
     # Specific patterns that indicate GitHub Actions workflow run cancellation,
@@ -197,9 +200,20 @@ class TestNoWorkflowCancel:
     # workflow concurrency canceling older runs).
     _CANCEL_PATTERNS: ClassVar[list[str]] = [
         r"/actions/runs/[^/]*/cancel",  # POST to cancel a specific run
-        r"/actions/runs/[^/]*/rerun",  # POST to rerun a specific run
+        r"/actions/runs/[^/]*/rerun(?!-failed-jobs\b)",  # POST to rerun a whole run
         r"DELETE.*actions/runs/",  # DELETE workflow run endpoint
     ]
+
+    def test_failed_job_rerun_is_distinct_from_whole_run_mutations(self) -> None:
+        """Keep the cancellation guard while allowing issue 435's endpoint."""
+        for endpoint in (
+            "POST /repos/owner/repo/actions/runs/123/cancel",
+            "POST /repos/owner/repo/actions/runs/123/rerun",
+            "DELETE /repos/owner/repo/actions/runs/123",
+        ):
+            assert any(re.search(pattern, endpoint) for pattern in self._CANCEL_PATTERNS)
+        failed_jobs = "POST /repos/owner/repo/actions/runs/123/rerun-failed-jobs"
+        assert not any(re.search(pattern, failed_jobs) for pattern in self._CANCEL_PATTERNS)
 
     def test_no_workflow_cancel_in_application(self) -> None:
         """No application code cancels workflow runs."""
@@ -224,7 +238,7 @@ class TestNoWorkflowCancel:
             if fpath.is_dir():
                 continue
             text = fpath.read_text(encoding="utf-8", errors="replace")
-            for pattern in self._CANCEL_PATTERNS:
+            for pattern in [*self._CANCEL_PATTERNS, r"/actions/runs/[^/]*/rerun-failed-jobs"]:
                 assert re.search(pattern, text, re.IGNORECASE) is None, (
                     f"{fpath} contains workflow cancel pattern: {pattern}"
                 )

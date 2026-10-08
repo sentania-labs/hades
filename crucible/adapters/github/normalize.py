@@ -190,7 +190,12 @@ def workflow_run(payload: Any) -> CheckRecord:
             if payload.get("conclusion") and payload.get("updated_at")
             else None
         ),
+        run_attempt=_attempt(payload.get("run_attempt")),
     )
+
+
+def _attempt(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def check_suite(payload: Any) -> CheckRecord:

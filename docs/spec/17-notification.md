@@ -19,7 +19,7 @@ Only when judgment is required or work has stopped needing it:
 | `external_review_trigger_needed` | `awaiting_external_review` on a head whose cycle needs the orchestrator's trigger under the operator's account (23) |
 | `ci_certification_failed` | `ci_certification_failed` |
 | `ci_certification_overdue` | repeat, no state change; one open wake per task (see "Repeating notices") |
-| `ci_rerun_needed` | after a `ci-decision rerun`: Crucible records the intent, the operator re-runs it on GitHub (the App holds no Actions write) |
+| `ci_rerun_needed` | after a `ci-decision rerun`: without Actions write on the installation, the operator re-runs it on GitHub; with it, Hades has re-run the failed jobs and the wake names the attempt running (23, hades #435) |
 | `head_diverged` | `head_diverged` (decision required) |
 | conflicting pull request, head Crucible pushed or adopted | `pull_request_conflicting`, once per head; the summary names the next action: Crucible merges main itself, and when git reports conflicts launches a merge-main correction from the remote branch tip. A dirty head pushed out of band raises `head_diverged` instead |
 | `ready_for_merge` | `ready_for_merge` |

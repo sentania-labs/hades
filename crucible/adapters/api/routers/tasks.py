@@ -587,7 +587,12 @@ async def ci_decision(
 
     async def produce(uow: UnitOfWork) -> tuple[int, dict[str, Any]]:
         task = record_ci_decision(
-            uow, ctx.clock, principal=principal, task_id=task_id, request=body
+            uow,
+            ctx.clock,
+            principal=principal,
+            task_id=task_id,
+            request=body,
+            github_client=ctx.github_client,
         )
         return 200, task_view(uow, task.id).model_dump(mode="json")
 

@@ -648,6 +648,88 @@ class RestGitHubClient:
             body={"state": "closed"},
         )
 
+    def rerun_failed_jobs(
+        self, token: InstallationToken, *, repository: str, run_id: int
+    ) -> dict[str, Any]:
+        """POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs (Actions write,
+        issue 435).
+
+        Returns the raw GitHub response payload.
+        """
+        status, payload, _ = self._http.request(
+            "POST",
+            f"/repos/{repository}/actions/runs/{run_id}/rerun-failed-jobs",
+            bearer=token.reveal(),
+        )
+        if status >= 400:
+            message = _message(payload)
+            raise GitHubError(
+                status,
+                message,
+                path=f"/repos/{repository}/actions/runs/{run_id}/rerun-failed-jobs",
+            )
+        # GitHub returns 201 Created with an empty body for this endpoint.
+        # A successful response may be ``None``; treat it as success.
+        return payload if isinstance(payload, dict) else {}
+
+    def get_installation_permissions(self, *, installation_id: int) -> dict[str, str]:
+        """The permissions the installation grants, as GitHub reports them (issue 435).
+
+        `GET /app/installations/{installation_id}` with the App JWT: its `permissions`
+        object is what the installation holds right now, which is what decides whether
+        Hades can re-run failed jobs itself. Reading it needs no repository permission.
+        An answer that cannot be read is an empty grant, so the caller falls back to the
+        operator hand-off rather than assuming a permission.
+        """
+        try:
+            payload = self._http.get(
+                f"/app/installations/{int(installation_id)}", bearer=self._auth.app_jwt()
+            )
+        except GitHubError:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        granted = payload.get("permissions")
+        if not isinstance(granted, dict):
+            return {}
+        return {str(k): str(v) for k, v in granted.items()}
+
+    def workflow_run_for_job(
+        self, token: InstallationToken, *, repository: str, job_id: int
+    ) -> int | None:
+        """The workflow run a job belongs to (Actions read, issue 435).
+
+        A failed check run from Actions is a job, and its id is the job id; re-running
+        needs the run's id, which `GET /repos/{owner}/{repo}/actions/jobs/{job_id}`
+        carries. A check run that is not an Actions job answers 404: None."""
+        try:
+            payload = self._http.get(
+                f"/repos/{repository}/actions/jobs/{int(job_id)}", bearer=token.reveal()
+            )
+        except GitHubError as exc:
+            if exc.status == 404:
+                return None
+            raise
+        run_id = payload.get("run_id") if isinstance(payload, dict) else None
+        return run_id if isinstance(run_id, int) and not isinstance(run_id, bool) else None
+
+    def get_workflow_run(
+        self, token: InstallationToken, *, repository: str, run_id: int
+    ) -> dict[str, Any]:
+        """GET /repos/{owner}/{repo}/actions/runs/{run_id} (issue 435).
+
+        Returns the workflow run object including the current ``run_attempt``
+        after a rerun.
+        """
+        status, payload, _ = self._http.request(
+            "GET",
+            f"/repos/{repository}/actions/runs/{run_id}",
+            bearer=token.reveal(),
+        )
+        if status == 200 and isinstance(payload, dict):
+            return payload
+        return {}
+
 
 def _message(payload: Any) -> str:
     if isinstance(payload, dict) and "message" in payload:
