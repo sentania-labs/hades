@@ -10,6 +10,7 @@ from typing import Annotated, Literal
 
 from fastapi import Header, Query, Request, Response
 from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 
 from crucible.adapters.api.deps import Admin, Ctx, Orchestrator, Reader, UoW
 from crucible.adapters.api.problems import problem_response
@@ -114,10 +115,8 @@ async def get_attempt_logs(
             },
         )
 
-    # Guard against a disconnect that arrives between authentication/acquire and
-    # the first generator iteration: without this, the permit is permanently leaked
-    # because aclose() on an unstarted async generator does not execute its finally
-    # body (Starlette races the disconnect signal against the first __anext__).
+    # A client that already disconnected before admission control runs does not
+    # need a stream opened at all; this is an optimization, not the leak fix below.
     if await request.is_disconnected():
         return Response(status_code=499, media_type="text/plain")
 
@@ -131,51 +130,54 @@ async def get_attempt_logs(
             headers={"Retry-After": "1"},
         )
 
-    # Second disconnect check covers the brief window between try_acquire and the
-    # StreamingResponse constructor; the ASGI server may have delivered a disconnect
-    # signal that is_disconnected() now reflects.
+    # Same optimization for the brief window between try_acquire and here; the
+    # permit is still released explicitly because no StreamingResponse (and so no
+    # BackgroundTask) has been created yet.
     if await request.is_disconnected():
         ctx.sse_tail_limiter.release()
         return Response(status_code=499, media_type="text/plain")
 
     async def events() -> AsyncIterator[str]:
-        try:
-            cursor = offset
-            while True:
-                with ctx.uow_factory() as fresh:
-                    current = fresh.attempts.get(attempt_id)
-                    if current is None:
-                        return
-                    chunks = list(
-                        fresh.logs.list_from_offset(attempt_id, offset=cursor, stream=stream)
-                    )
-                    drained = current.logs_drained_at is not None
-                for chunk in chunks:
-                    start = max(cursor, chunk.offset_start)
-                    content = chunk.content[start - chunk.offset_start :].decode("utf-8", "replace")
-                    cursor = max(cursor, chunk.offset_end)
-                    data = json.dumps(
-                        {
-                            "offset_start": start,
-                            "offset_end": chunk.offset_end,
-                            "content": content,
-                        },
-                        separators=(",", ":"),
-                    )
-                    yield f"id: {cursor}\nevent: {chunk.stream}\ndata: {data}\n\n"
-                if drained and not chunks:
-                    yield f'id: {cursor}\nevent: end\ndata: {{"offset":{cursor}}}\n\n'
+        cursor = offset
+        while True:
+            with ctx.uow_factory() as fresh:
+                current = fresh.attempts.get(attempt_id)
+                if current is None:
                     return
-                if await request.is_disconnected():
-                    return
-                await asyncio.sleep(0.25)
-        finally:
-            ctx.sse_tail_limiter.release()
+                chunks = list(fresh.logs.list_from_offset(attempt_id, offset=cursor, stream=stream))
+                drained = current.logs_drained_at is not None
+            for chunk in chunks:
+                start = max(cursor, chunk.offset_start)
+                content = chunk.content[start - chunk.offset_start :].decode("utf-8", "replace")
+                cursor = max(cursor, chunk.offset_end)
+                data = json.dumps(
+                    {
+                        "offset_start": start,
+                        "offset_end": chunk.offset_end,
+                        "content": content,
+                    },
+                    separators=(",", ":"),
+                )
+                yield f"id: {cursor}\nevent: {chunk.stream}\ndata: {data}\n\n"
+            if drained and not chunks:
+                yield f'id: {cursor}\nevent: end\ndata: {{"offset":{cursor}}}\n\n'
+                return
+            if await request.is_disconnected():
+                return
+            await asyncio.sleep(0.25)
 
+    # The permit is released by a BackgroundTask, not a try/finally in events(),
+    # because the pinned Uvicorn stack advertises ASGI 2.3: Starlette races
+    # stream_response against listen_for_disconnect, and a disconnect that wins
+    # before the body iterator's first __anext__ call means events() never starts
+    # running, so a finally inside it would never execute and the permit would
+    # leak permanently. Response.__call__ awaits background after that race
+    # regardless of which side won, so this always runs exactly once per acquire.
     return StreamingResponse(
         events(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        background=BackgroundTask(ctx.sse_tail_limiter.release),
     )
 
 
