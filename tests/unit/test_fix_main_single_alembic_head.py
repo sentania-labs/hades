@@ -30,7 +30,8 @@ MERGED = {"0044_attempt_stall_shape", "0044_editor_leftovers_policy", "0044_merg
 # 0047_attempt_egress_probe so the graph stays linear. hades #176 adds 0048 on top,
 # hades #265 adds 0049 for persisted batch outcomes, then #485 adds 0050 for the cache TTL,
 # #437 adds 0051 for routing model references, and #343 adds 0052 for the repository's
-# own Codex connector refusal.
+# own Codex connector refusal. #476's correction adds 0053 for the certification's
+# change class.
 ABOVE = "0046_blocked_reason"
 PROBE = "0047_attempt_egress_probe"
 LAUNCH = "0047_successful_launch_time"
@@ -38,7 +39,7 @@ REBOUND = "0048_repository_rebound"
 BATCH = "0049_repository_batch"
 CACHE = "0050_status_cache"
 ROUTING_REFS = "0051_routing_model_references"
-HEAD = "0052_codex_review_refused"
+HEAD = "0053_cert_change_class"
 
 
 def _script() -> ScriptDirectory:
@@ -65,7 +66,6 @@ def test_the_0045_merge_joins_the_three_0044_heads() -> None:
     assert probe is not None and probe.down_revision == ABOVE
     launch = script.get_revision(LAUNCH)
     assert launch is not None and launch.down_revision == PROBE
-    head = script.get_revision(HEAD)
     rebound = script.get_revision(REBOUND)
     assert rebound is not None and rebound.down_revision == LAUNCH
     batch = script.get_revision(BATCH)
@@ -74,6 +74,7 @@ def test_the_0045_merge_joins_the_three_0044_heads() -> None:
     assert cache is not None and cache.down_revision == BATCH
     routing_refs = script.get_revision(ROUTING_REFS)
     assert routing_refs is not None and routing_refs.down_revision == CACHE
+    head = script.get_revision(HEAD)
     assert head is not None and head.down_revision == ROUTING_REFS
 
 
@@ -111,6 +112,7 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
             BATCH,
             CACHE,
             ROUTING_REFS,
+            "0052_codex_review_refused",
             HEAD,
         ]
 

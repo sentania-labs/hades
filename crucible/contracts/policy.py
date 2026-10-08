@@ -433,11 +433,22 @@ class ChatTemplateKwargs(StrictModel):
 
 class RoutingModel(StrictModel):
     # Full engine window for Qwen Code; absent uses its documented 131072 default.
+    # Hades #354: Codex's local provider config reads it too, instead of the Hermes
+    # default, when this entry's harness is codex.
     context_length: int | None = Field(default=None, gt=0, strict=True)
+    # Hades #354: the model's own output-token allowance. Codex's local provider config
+    # reads it instead of the Hermes default; absent keeps that default.
+    max_output_tokens: int | None = Field(default=None, gt=0, strict=True)
     # The exact model name sent to the endpoint.  A routing entry is identified by the
     # (harness, model) pair; there is deliberately no second, operator-visible route id.
     model: str = Field(min_length=1)
     harness: str = Field(min_length=1)
+    # Hades #354: the name this entry's harness is launched with, when it differs from
+    # `model` (for example a gateway alias the harness's own catalog recognises, while
+    # `model` stays the gateway-discovered lane name). Absent sends `model` unchanged.
+    # Routing, pools and evidence always read `model`; only the launch argv and the
+    # Codex provider config read this.
+    harness_model_name: str | None = Field(default=None, min_length=1)
     endpoint: Literal["subscription", "local"]
     endpoint_url: str | None = None
     capability: Literal["small", "mid", "frontier"]
@@ -449,6 +460,11 @@ class RoutingModel(StrictModel):
     disabled_reason: str | None = None
     vanished_at: datetime | None = None
     chat_template_kwargs: ChatTemplateKwargs = Field(default_factory=ChatTemplateKwargs)
+
+    @property
+    def sent_model_name(self) -> str:
+        """Hades #354: the name a launch passes to this entry's harness."""
+        return self.harness_model_name or self.model
 
     @model_validator(mode="before")
     @classmethod

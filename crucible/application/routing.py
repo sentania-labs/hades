@@ -18,6 +18,28 @@ from crucible.ports.repository import UnitOfWork
 Problem = dict[str, Any]
 
 
+# hades #373: a model-only refusal excludes one model, not its pool. The exclusion is a
+# row of the pool_exhaustions table keyed by the route (the harness and model pair a
+# routing entry is identified by) under this prefix, so it is written, listed, expired
+# and cleared exactly as a pool mark is (05b, 25), and no pool can carry the name.
+MODEL_MARK_PREFIX = "model:"
+
+
+def model_mark_key(model_id: str, harness: str) -> str:
+    """The pool_exhaustions key of a route's own exclusion mark (hades #373)."""
+    return f"{MODEL_MARK_PREFIX}{harness}:{model_id}"
+
+
+def model_excluded_until(
+    uow: UnitOfWork, model_id: str, harness: str, now: datetime
+) -> datetime | None:
+    """The reset of a live model-only exclusion (hades #373), or None."""
+    mark = uow.pool_exhaustions.get(model_mark_key(model_id, harness))
+    if mark is not None and mark.cleared_at is None and mark.reset_at > now:
+        return mark.reset_at
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class PoolUsage:
     pool: str
@@ -45,6 +67,13 @@ class PoolUsage:
             "exhausted_until": self.exhausted_until.isoformat() if self.exhausted_until else None,
             "exhaustion_reason": self.exhaustion_reason,
         }
+
+
+def launch_model_name(route: RoutingModel | None, model_id: str) -> str:
+    """Hades #354: the name a launch passes to the harness - a routing entry's own
+    `harness_model_name` when it carries one, else the lane name routing, pools and
+    evidence always use. With no entry (an unrouted execution) the lane name itself."""
+    return route.sent_model_name if route is not None else model_id
 
 
 def routing_ref(policy_document: dict[str, Any]) -> tuple[str, int] | None:
@@ -344,6 +373,9 @@ def select_model(
             reasons.append("pool is at its soft limit")
         if usage.exhausted_until is not None:
             reasons.append(f"pool exhausted until {usage.exhausted_until.isoformat()}")
+        model_until = model_excluded_until(uow, entry.model, entry.harness, now)
+        if model_until is not None:
+            reasons.append(f"model excluded until {model_until.isoformat()}")
         if excluded_routes and (entry.harness, entry.model) in excluded_routes:
             reasons.append("model refused capacity for this retry")
         if excluded_pools and entry.pool in excluded_pools:
