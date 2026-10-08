@@ -80,7 +80,7 @@ from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
 from crucible.domain.exit_class import ExitClass
 from crucible.domain.external_review import completed_rounds
 from crucible.domain.ids import new_id
-from crucible.domain.lifecycle import CORRECTION_STATES, TaskState
+from crucible.domain.lifecycle import CORRECTION_STATES, ExecutionState, TaskState
 from crucible.domain.publication import body_sha256
 from crucible.domain.secrets import redact
 from crucible.domain.time import parse_rfc3339
@@ -176,6 +176,7 @@ class PollPlan:
     base_ref: str
     attempt_id: str
     with_reactions: bool
+    created_at: datetime
     # The failed check whose log excerpt is still to be fetched: (source, GitHub id).
     failed_check: tuple[str, str] | None = None
 
@@ -189,6 +190,7 @@ class MergePlan:
     installation_id: int | None
     certified_head_sha: str
     base_ref: str
+    created_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1458,11 +1460,9 @@ class DeliveryCoordinator:
                     pull_request is None
                     or pull_request.state is not PullRequestState.OPEN
                     or pull_request.head_sha != task.head_sha
-                    # hades #411: GitHub's word on mergeability is the only gate; a head
-                    # behind current main is merged without a re-test against it. Only
-                    # a conflict holds the merge, and the poll resolves that.
+                    # #319: a stale head is updated and certified before final merge.
                     or pull_request.mergeable is False
-                    or pull_request.mergeable_state == "dirty"
+                    or pull_request.mergeable_state in ("dirty", "behind")
                 ):
                     continue
                 certification = uow.ci_certifications.get_for_head(
@@ -1496,10 +1496,13 @@ class DeliveryCoordinator:
                         installation_id=repository.installation_id,
                         certified_head_sha=task.head_sha,
                         base_ref=pull_request.base_ref,
+                        created_at=getattr(task, "created_at", None),
                     )
                 )
             uow.commit()
-        return out
+        # One tick may stop part way through for a rate limit. Delivery age, rather
+        # than lifecycle state's spelling or task id, decides who gets that chance.
+        return sorted(out, key=lambda plan: (plan.created_at or self._clock.now(), plan.task_id))
 
     async def _merge_one(self, plan: MergePlan) -> bool:
         """Compare the live head, then immediately merge with the same SHA precondition."""
@@ -1778,6 +1781,7 @@ class DeliveryCoordinator:
                             base_ref=pull_request.base_ref,
                             attempt_id=work[0].id,
                             with_reactions=with_reactions and not correcting,
+                            created_at=task.created_at,
                             failed_check=(
                                 None
                                 if correcting
@@ -1786,7 +1790,9 @@ class DeliveryCoordinator:
                         )
                     )
             uow.commit()
-        return out
+        # One tick may stop part way through for a rate limit. Delivery age, rather
+        # than lifecycle state's spelling or task id, decides who gets that chance.
+        return sorted(out, key=lambda plan: (plan.created_at, plan.task_id))
 
     def _forced_pull_requests(self, uow: UnitOfWork) -> dict[str, bool]:
         """Pull requests a webhook delivery says to look at now, and whether its subject
@@ -1884,7 +1890,9 @@ class DeliveryCoordinator:
         fetched = plan.failed_check is not None
         await self._host._db(lambda: self._apply(plan, observation, excerpt, fetched))
         ref = observation.pull_request
-        if ref.state == "open" and (ref.mergeable is False or ref.mergeable_state == "dirty"):
+        if ref.state == "open" and (
+            ref.mergeable is False or ref.mergeable_state in ("dirty", "behind")
+        ):
             await self._resolve_conflicting_pull_request(plan, ref.head_sha)
         return True
 
@@ -1896,8 +1904,12 @@ class DeliveryCoordinator:
         request = await self._host._db(lambda: self._conflict_request(plan, head_sha))
         if request is None:
             return
-        await self._host._db(lambda: self._record_conflict_wake(plan, head_sha))
         if self._publisher is None or self._github is None:
+            await self._host._db(
+                lambda: self._record_merge_main_wake(
+                    plan, head_sha, (), "no publisher is configured to merge the base"
+                )
+            )
             await self._host._db(
                 lambda: self._schedule_merge_main_correction(
                     plan, head_sha, (), "no publisher is configured to merge main"
@@ -1922,6 +1934,14 @@ class DeliveryCoordinator:
             await self._host._db(lambda: self._record_merge_main_push(plan, head_sha, outcome))
         else:
             await self._host._db(
+                lambda: self._record_merge_main_wake(
+                    plan,
+                    head_sha,
+                    outcome.conflicting_files,
+                    outcome.detail or outcome.step,
+                )
+            )
+            await self._host._db(
                 lambda: self._schedule_merge_main_correction(
                     plan, head_sha, outcome.conflicting_files, outcome.detail or outcome.step
                 )
@@ -1945,6 +1965,10 @@ class DeliveryCoordinator:
                 or pull_request.head_sha != head_sha
                 or task.head_sha != head_sha
                 or not self._trusted_head(uow, task, pull_request.id, head_sha)
+                or any(
+                    execution.state is ExecutionState.ACTIVE
+                    for execution in uow.executions.list_for_task(task.id)
+                )
             ):
                 return None
             attempt = uow.attempts.get(plan.attempt_id)
@@ -1980,7 +2004,13 @@ class DeliveryCoordinator:
             and decision.payload.get("observed_head") == head_sha
         )
 
-    def _record_conflict_wake(self, plan: PollPlan, head_sha: str) -> None:
+    def _record_merge_main_wake(
+        self,
+        plan: PollPlan,
+        head_sha: str,
+        conflicting_files: tuple[str, ...],
+        detail: str,
+    ) -> None:
         with self._host._fenced() as uow:
             task = uow.tasks.get(plan.task_id, for_update=True)
             pull_request = uow.pull_requests.get(plan.pull_request_id, for_update=True)
@@ -1998,17 +2028,20 @@ class DeliveryCoordinator:
             ):
                 uow.commit()
                 return
+            named = (
+                " Conflicting files: " + ", ".join(conflicting_files) + "."
+                if conflicting_files
+                else f" Merge attempt failed: {detail}."
+            )
             create_wake(
                 uow,
                 self._clock,
                 principal_id=task.principal_id,
                 reason=WakeReason.PULL_REQUEST_CONFLICTING,
                 summary=(
-                    f"pull request #{pull_request.number} at {head_sha} conflicts with "
-                    f"{pull_request.base_ref}. Next: Crucible merges {pull_request.base_ref} "
-                    "into the branch itself; if git reports conflicts it launches a "
-                    "merge-main correction from the remote branch tip"
-                ),
+                    f"pull request #{pull_request.number} at {head_sha} could not merge "
+                    f"{pull_request.base_ref}." + named
+                )[:500],
                 task=task,
                 attempt_id=plan.attempt_id,
                 extra_links={"pull_request": f"/v1/tasks/{task.id}/pull-request"},

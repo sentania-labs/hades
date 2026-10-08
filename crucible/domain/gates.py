@@ -387,7 +387,13 @@ def scope_contained(gi: GateInput) -> GateOutcome:
     scope = gi.contract.get("scope", {})
     allowed = [str(p) for p in scope.get("allowed_paths", [])]
     prohibited = [str(p) for p in scope.get("prohibited_paths", [])]
-    paths = [str(p) for p in item.payload.get("paths", [])]
+    bundle = gi.one("bundle_head")
+    if bundle is None:
+        return _missing("bundle_head")
+    # The collector builds commit_paths from BASE..HEAD. That records the worker's
+    # complete contribution (including paths later reverted) while excluding commits
+    # reachable from the trusted prepared base, including a merge of that base.
+    paths = list(dict.fromkeys(str(p) for p in bundle.payload.get("commit_paths", [])))
     outside = [p for p in paths if not _matches_any(p, allowed)]
     forbidden = [p for p in paths if _matches_any(p, prohibited)]
     if outside or forbidden:
@@ -397,10 +403,15 @@ def scope_contained(gi: GateInput) -> GateOutcome:
         if outside:
             parts.append(f"outside allowed_paths: {sorted(outside)[:10]}")
         return GateOutcome(
-            GateResult.FAIL, "; ".join(parts), (item.id,), always_blocks=bool(forbidden)
+            GateResult.FAIL,
+            "; ".join(parts),
+            (item.id, bundle.id),
+            always_blocks=bool(forbidden),
         )
     return GateOutcome(
-        GateResult.PASS, f"all {len(paths)} changed path(s) inside allowed_paths", (item.id,)
+        GateResult.PASS,
+        f"all {len(paths)} worker commit path(s) inside allowed_paths",
+        (item.id, bundle.id),
     )
 
 

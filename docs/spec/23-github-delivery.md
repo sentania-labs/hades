@@ -186,34 +186,42 @@ After publication Crucible watches the PR until the task is terminal.
 Polling is the complete observation path; webhooks only shorten latency.
 
 Every poll records GitHub's `mergeable` result and `mergeable_state` on the pull
-request row. A conflicting pull request (`mergeable` false or `mergeable_state` `dirty`)
-does not wait in CI certification. When its head is one Crucible pushed or adopted and
+request row. A pull request that conflicts (`mergeable` false or `mergeable_state`
+`dirty`) or is merely `behind` does not advance on that stale base. When its head is one
+Crucible pushed or adopted and
 the task is in `awaiting_external_review`, `external_feedback_received`,
 `awaiting_ci_certification`, `ci_certification_failed` or `ready_for_merge`, Crucible
-raises one `pull_request_conflicting` wake per head, whose summary names the next
-action, and asks the publisher to merge main itself: `merge_main` on the publisher port
+asks the publisher to merge the base itself: `merge_main` on the publisher port
 runs the publisher's container (Docker) or Job (Kubernetes) with the same token handling
 and egress, fetches the remote work branch, refuses unless it is still at the known tip,
 and runs `git merge origin/<base_ref>` with no conflict resolution. A clean merge is
 committed as Crucible and pushed with `--force-with-lease` against the known tip; the
 coordinator records `branch_pushed` (reason `merge_main`) and the new head as pushed by
-Crucible, and the task waits for that head's own checks (`awaiting_ci_certification`).
+Crucible, and the task waits for that head's own checks (`awaiting_ci_certification`). A
+clean mechanical merge is silent. Delivery work is considered oldest first within a
+tick, so a rate limit cannot repeatedly put a newer open delivery ahead of an older one.
 When git stops on conflicts, the publisher reports the conflicting paths and leaves the
-branch untouched; the coordinator then attaches a correction under the task's policy
+branch untouched; the coordinator raises a `pull_request_conflicting` wake naming those
+paths and then attaches a correction under the task's policy
 whose instruction is to merge `origin/<base_ref>`, resolve every conflict keeping both
 behaviours, run the required checks, commit, and report, naming the conflicting files.
 That correction starts from the remote branch tip (`resume_from_work_branch`), never
 from the previous attempt's bundle, so the head it publishes fast-forwards the one on the
 pull request. Only a failed correction reaches the orchestrator.
 
+The coordinator performs this check throughout delivery, including the pre-PR and
+correction path while an existing pull request remains open, CI certification, and
+`ready_for_merge`. It never starts merge-main while an execution for the task is active;
+the worker owns the branch until that attempt ends.
+
 A dirty head someone else pushed is not acted on: the same poll moves the task to
 `head_diverged`, and nothing is merged into that head or launched against it until the
 head decision. `adopt` (legacy name `recollect`) re-runs the task from the remote branch
 tip; once that run publishes, the head is Crucible's and is certified and merged as any.
 
-A `ready_for_merge` task merges as soon as GitHub says it is mergeable and every check
-run on its accepted head passed. It does not re-test that head against current main: a
-head that is only behind main is merged. After Crucible merges it, the merge commit is
+A `ready_for_merge` task first brings a behind head up to date and certifies the new
+head. It merges only when GitHub says that head is current and mergeable and every check
+run on it passed. After Crucible merges it, the merge commit is
 added to the watch list of the `release.main_ci_hold` setting and the supervisor judges
 its checks on main once they complete. Red main opens one fix-main task, on a branch of
 its own, carrying the failed jobs, the failing job's log tail, and the pull request
