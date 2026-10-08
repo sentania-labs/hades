@@ -665,8 +665,16 @@ def test_the_privileged_workflow_executes_only_the_default_branchs_script() -> N
     assert '--head-message "$HEAD_MESSAGE"' in may["run"]
     assert job["env"]["HEAD_MESSAGE"] == "${{ github.event.workflow_run.head_commit.message }}"
 
+    # hades #476: also gated on the images job having actually run in the triggering
+    # CI run, so this workflow does nothing when ci.yml's classifier skipped it.
+    images_ran = step(job, "decide whether the images class ran")
+    assert images_ran["if"] == "steps.allowed.outputs.value == '1'"
+    assert "images" in images_ran["run"]
+
     download = step(job, "download the built digests, if the images job uploaded any")
-    assert download["if"] == "steps.allowed.outputs.value == '1'"
+    assert download["if"] == (
+        "steps.allowed.outputs.value == '1' && steps.images_ran.outputs.value == '1'"
+    )
     assert 'gh run download "$RUN_ID"' in download["run"]
     assert "--name images-digests" in download["run"]
 

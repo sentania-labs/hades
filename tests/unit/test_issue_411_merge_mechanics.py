@@ -303,7 +303,7 @@ def _events(store: _Store, kind: EventKind, task_id: str = TASK_ID) -> list[Any]
 # ----- a conflicting pull request -----------------------------------------------
 
 
-def test_a_dirty_pull_request_is_recorded_woken_once_and_merged_by_crucible(
+def test_a_dirty_pull_request_is_merged_by_crucible_without_a_wake(
     tmp_path: Path,
 ) -> None:
     store, clock, supervisor, client, publisher = _world(tmp_path)
@@ -326,9 +326,8 @@ def test_a_dirty_pull_request_is_recorded_woken_once_and_merged_by_crucible(
     task = _task(store)
     assert task.state is TaskState.AWAITING_CI_CERTIFICATION
     assert task.head_sha == pull_request.head_sha == MERGED_HEAD
-    conflicting = _wakes(store, WakeReason.PULL_REQUEST_CONFLICTING)
-    assert len(conflicting) == 1
-    assert "Next: Crucible merges main" in conflicting[0].payload["summary"]
+    # A mechanical merge that needs no person is silent.
+    assert _wakes(store, WakeReason.PULL_REQUEST_CONFLICTING) == []
     assert task.contract_version == 1
 
     # The next poll sees the merged head as Crucible's own push: no divergence, no
@@ -336,7 +335,7 @@ def test_a_dirty_pull_request_is_recorded_woken_once_and_merged_by_crucible(
     client.pull().mergeable_state, client.pull().mergeable = "clean", True
     _poll(store, clock, supervisor)
     assert _task(store).state is TaskState.AWAITING_CI_CERTIFICATION
-    assert len(_wakes(store, WakeReason.PULL_REQUEST_CONFLICTING)) == 1
+    assert _wakes(store, WakeReason.PULL_REQUEST_CONFLICTING) == []
     assert _wakes(store, WakeReason.HEAD_DIVERGED) == []
     assert len(publisher.merges) == 1
 
@@ -436,7 +435,7 @@ def test_adopt_recollects_the_out_of_band_head_from_the_remote_tip(tmp_path: Pat
     assert corrects[0].resume_from_remote is True
 
 
-def test_ready_for_merge_merges_a_mergeable_head_behind_main_without_a_retest(
+def test_ready_for_merge_first_brings_a_mergeable_head_up_to_date(
     tmp_path: Path,
 ) -> None:
     store, _clock, supervisor, client, _publisher = _world(tmp_path)
@@ -462,12 +461,9 @@ def test_ready_for_merge_merges_a_mergeable_head_behind_main_without_a_retest(
 
     asyncio.run(supervisor.delivery.observe())
 
-    assert client.merged_numbers == [PR_NUMBER]
-    assert _task(store).state is TaskState.MERGED
-    # The merge commit is now watched on main.
-    document = hold_document(store.uow())
-    assert [e["merge_sha"] for e in document["watching"]] == [MAIN_NEWER]
-    assert document["merged_pull_requests"] == [PR_NUMBER]
+    assert client.merged_numbers == []
+    assert client.repo.branches[WORK_BRANCH] == MERGED_HEAD
+    assert _task(store).state is TaskState.AWAITING_CI_CERTIFICATION
 
 
 # ----- red main -----------------------------------------------------------------
