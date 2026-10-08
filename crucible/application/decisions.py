@@ -100,7 +100,10 @@ def open_escalation(
 
 
 def repeat_stale_escalation_wakes(uow: UnitOfWork, clock: Clock, *, stale_hours: int) -> int:
-    """An escalation older than `escalation_stale_hours` produces a repeat wake (09)."""
+    """An escalation older than `escalation_stale_hours` produces a repeat wake (09).
+
+    Only one open wake per task per cause is kept (FDY-0508). While the existing wake is
+    unacknowledged no copy is created."""
     now = clock.now()
     repeated = 0
     for escalation in uow.escalations.list_open():
@@ -113,6 +116,14 @@ def repeat_stale_escalation_wakes(uow: UnitOfWork, clock: Clock, *, stale_hours:
         # Skip escalations on tasks that are in a terminal state.
         if task.state in (TaskState.CANCELLED, TaskState.REJECTED, TaskState.CLOSED):
             continue
+
+        # Collapse: if an unacked wake already exists for this task+cause, skip.
+        existing_open = _find_open_wake_for_task_cause(
+            uow, task.principal_id, task.id, WakeReason.ESCALATION_STALE.value
+        )
+        if existing_open:
+            continue
+
         create_wake(
             uow,
             clock,
@@ -301,3 +312,15 @@ def store_disposition(
         },
     )
     return disposition
+
+
+def _find_open_wake_for_task_cause(
+    uow: UnitOfWork, principal_id: str, task_id: str, reason: str
+) -> bool:
+    """Return True when an unacked wake matching task+cause exists (FDY-0508)."""
+    for wake in uow.wakes.list_for_principal(
+        principal_id, since=None, include_acked=False, limit=200
+    ):
+        if wake.task_id == task_id and wake.reason == reason:
+            return True
+    return False

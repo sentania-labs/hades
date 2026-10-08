@@ -700,11 +700,20 @@ class Wakes:
         )
 
     def list_for_principal(
-        self, principal_id: str, *, since: datetime | None, include_acked: bool, limit: int
+        self,
+        principal_id: str,
+        *,
+        since: datetime | None,
+        include_acked: bool,
+        limit: int,
+        cursor: str | None = None,
     ) -> Sequence[Wake]:
         stmt = select(WakeRow).where(WakeRow.principal_id == principal_id)
         if not include_acked:
             stmt = stmt.where(WakeRow.acked_at.is_(None))
+        if cursor is not None:
+            # ULIDs are ordered; resume strictly after the cursor id.
+            stmt = stmt.where(WakeRow.id > cursor)
         if since is not None:
             stmt = stmt.where(WakeRow.created_at >= since)
         rows = self._s.scalars(stmt.order_by(WakeRow.id).limit(limit)).all()

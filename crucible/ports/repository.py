@@ -524,7 +524,13 @@ class WakeRepository(Protocol):
     def save(self, wake: Wake) -> None: ...
 
     def list_for_principal(
-        self, principal_id: str, *, since: datetime | None, include_acked: bool, limit: int
+        self,
+        principal_id: str,
+        *,
+        since: datetime | None,
+        include_acked: bool,
+        limit: int,
+        cursor: str | None = None,
     ) -> Sequence[Wake]: ...
 
     def list_undelivered(self, now: datetime) -> Sequence[Wake]: ...

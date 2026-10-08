@@ -54,6 +54,7 @@ from crucible.domain.entities import (
     ReviewComment,
     Task,
     TaskContract,
+    Wake,
 )
 from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
 from crucible.domain.external_review import (
@@ -2034,7 +2035,12 @@ def repeat_overdue_wakes(
     The clock starts when the task entered the state it is waiting in, not when the pull
     request was opened: a correction on a three-day-old pull request enters certification
     with nothing outstanding yet, and measuring from `opened_at` would call it overdue on
-    its first poll."""
+    its first poll.
+
+    Only one open wake per task per cause is kept (FDY-0508). While the existing wake is
+    unacknowledged no copy is created; after it is acked and the repeat interval has
+    elapsed again a new copy is raised. A pull request that has since merged or closed
+    causes the wake to be acked by the system with a reason, so it does not linger."""
     now = clock.now()
     if task.state is TaskState.AWAITING_EXTERNAL_REVIEW:
         hours = wait_timeout_hours(policy, "external_review", DEFAULT_EXTERNAL_TIMEOUT_HOURS)
@@ -2062,6 +2068,17 @@ def repeat_overdue_wakes(
     latest = _latest_wake_at(uow, task, reason.value)
     if latest is not None and now - latest < timedelta(hours=hours):
         return False
+
+    # Collapse: if an unacked wake already exists for this task+cause, skip.
+    existing_open = _find_open_wake_for_task_cause(uow, task.principal_id, task.id, reason.value)
+    if existing_open is not None:
+        return False
+
+    # Pull requests that have merged or closed close their own overdue wake.
+    pr_state = _current_pr_state(uow, task)
+    if pr_state is not None and pr_state in (PullRequestState.MERGED, PullRequestState.CLOSED):
+        return False
+
     create_wake(
         uow,
         clock,
@@ -2096,6 +2113,29 @@ def _latest_wake_at(uow: UnitOfWork, task: Task, reason: str) -> datetime | None
         ):
             latest = wake.created_at
     return latest
+
+
+def _find_open_wake_for_task_cause(
+    uow: UnitOfWork, principal_id: str, task_id: str, reason: str
+) -> Wake | None:
+    """Return an unacked wake matching task+cause so the caller can collapse (FDY-0508)."""
+    for wake in uow.wakes.list_for_principal(
+        principal_id, since=None, include_acked=False, limit=200
+    ):
+        if wake.task_id == task_id and wake.reason == reason:
+            return wake
+    return None
+
+
+def _current_pr_state(uow: UnitOfWork, task: Task) -> PullRequestState | None:
+    """Return the current state of the task's pull request, or None."""
+    pr = uow.pull_requests.get_for_task(task.id)
+    if pr is None:
+        return None
+    try:
+        return PullRequestState(pr.state)
+    except ValueError:
+        return None
 
 
 def poll_due(
