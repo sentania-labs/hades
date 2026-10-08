@@ -85,6 +85,7 @@ from crucible.application.transitions import (
     record_rejected_transition,
 )
 from crucible.application.wakes import (
+    close_wakes_for_finished_pull_requests,
     create_pool_exhausted_wake,
     create_wake,
     environment_failure_summary,
@@ -112,6 +113,18 @@ from crucible.contracts.policy import RoutingPolicyV1, routing_model_name, windo
 from crucible.contracts.task_contract import TaskContractV1
 from crucible.contracts.wake import WakeReason
 from crucible.domain.command_timeout import effective_command_timeout_ms
+from crucible.domain.completion_record import (
+    WORKER_REPORT_ABSENT,
+    WORKER_REPORT_PARSED,
+    WORKER_REPORT_REDACTED,
+    WORKER_REPORT_UNPARSED,
+    BranchFacts,
+    CheckRun,
+    ReviewFinding,
+    compose_completion_record,
+    disposition_notes,
+    problem_text,
+)
 from crucible.domain.egress_probe import (
     PROBE_MARKER,
     find_probe_line,
@@ -148,8 +161,8 @@ from crucible.domain.exit_class import (
 )
 from crucible.domain.gates import GateName, GateResult, evaluate_gate
 from crucible.domain.harness_settings import (
-    DEFAULT_QWEN_CONTEXT_LENGTH,
     effective_settings,
+    qwen_effective_settings,
     setting_name,
 )
 from crucible.domain.ids import new_id
@@ -171,6 +184,7 @@ from crucible.ports.execution import (
     IDENTITY_MOUNT,
     REPO_MOUNT,
     REPORT_MOUNT,
+    BranchBundle,
     CancelCheck,
     CleanupPolicy,
     CollectedOutputs,
@@ -186,6 +200,7 @@ from crucible.ports.execution import (
     Observation,
     ObservationState,
     PrepareFailedError,
+    PrepareJobPodsTimeoutError,
     ProviderError,
     ProviderUnavailableError,
     VerificationRun,
@@ -247,14 +262,34 @@ SLOT_HOLDING_STATES: tuple[AttemptState, ...] = (
 def local_cap_kind(
     endpoint: str | None, exit_class: ExitClass, turn_cap_reached: bool
 ) -> Literal["turns", "time"] | None:
-    """Name a size cap only when the attempt was routed to a local endpoint."""
-    if endpoint != "local" or exit_class in {ExitClass.INFRASTRUCTURE, ExitClass.QUOTA_EXHAUSTED}:
+    """Name a size cap only when the attempt was routed to a local endpoint. A budget
+    end with commits on the branch (hades #498) is a normal end, never a cap."""
+    if endpoint != "local" or exit_class in {
+        ExitClass.INFRASTRUCTURE,
+        ExitClass.QUOTA_EXHAUSTED,
+        ExitClass.ENDED_BY_BUDGET,
+    }:
         return None
     if turn_cap_reached:
         return "turns"
     if exit_class is ExitClass.TIMEOUT:
         return "time"
     return None
+
+
+def branch_facts(bundle: BranchBundle | None) -> BranchFacts | None:
+    """What the collected bundle says about the branch, for the completion record
+    (hades #498). None when nothing was collected."""
+    if bundle is None or not bundle.head_sha:
+        return None
+    return BranchFacts(
+        head_sha=bundle.head_sha,
+        commits=bundle.commits,
+        work_branch=bundle.work_branch,
+        commit_messages=tuple(bundle.commit_messages),
+        commit_paths=tuple(bundle.commit_paths),
+        attempt_commit_paths=tuple(bundle.attempt_commit_paths),
+    )
 
 
 def retryable_exit(exit_class: ExitClass, retry_on: Sequence[str]) -> bool:
@@ -338,6 +373,12 @@ LOOP_COMMAND_QUOTE = 200
 # Hades #353: infrastructure interruptions retried per contract version before the task
 # blocks for the endpoint.
 INFRASTRUCTURE_RETRY_BUDGET = 3
+# hades #503: how many times one attempt's prepare runs again after the preparer Job's
+# Pods outlived the provider's deletion wait (26), before the attempt ends as the
+# environment. None of them costs the task an attempt, and each waits longer than the
+# last before the next prepare: the delay below, doubled on every retry.
+PREPARE_POD_WAIT_RETRY_BUDGET = 3
+PREPARE_POD_WAIT_RETRY_DELAY_SECONDS = 30
 
 
 def worker_stall_action(
@@ -628,21 +669,21 @@ def workspace_release_reason(
     # Once a correction is materialized it becomes `latest_work_attempt`, but its
     # preparer still needs the immediately preceding unpublished attempt's bundle.
     # Keep that source across a supervisor restart until preparation has produced the
-    # correction's own workspace.
+    # correction's own workspace. hades #503: the same holds for any implementing or
+    # correcting attempt whose prepare has produced no workspace, whether it is still
+    # pending, was sent back to pending because the preparer's Pods outlived the
+    # deletion wait, or failed there: a prepare failure never discards the bundle the
+    # next correction resumes from, which is the newest earlier attempt that has one.
     if work is not None:
-        latest_attempt, latest_execution = work
-        if (
-            latest_execution.role is ExecutionRole.CORRECT
-            and not latest_attempt.resume_from_remote
-            and not latest_attempt.workspace_path
-        ):
+        latest_attempt, _latest_execution = work
+        if not latest_attempt.resume_from_remote and not latest_attempt.workspace_path:
             preceding = max(
                 (
                     candidate
                     for candidate_execution in uow.executions.list_for_task(task.id)
-                    if candidate_execution.id != latest_execution.id
-                    and candidate_execution.role is not ExecutionRole.REVIEW
+                    if candidate_execution.role is not ExecutionRole.REVIEW
                     for candidate in uow.attempts.list_for_execution(candidate_execution.id)
+                    if candidate.id < latest_attempt.id and candidate.workspace_path
                 ),
                 key=lambda candidate: candidate.id,
                 default=None,
@@ -1014,6 +1055,7 @@ class Supervisor:
             await self._retention_step()
             await self._db(self._refresh_attempt_metrics)
             await self._db(self._repeat_stale_escalations)
+            await self._db(self._close_wakes_for_finished_pull_requests)
             result.wakes_delivered = await self._deliver_wakes()
             result.counts = await self._db(partial(self._status_step, started))
         except LeaseLostError:
@@ -1600,6 +1642,13 @@ class Supervisor:
             )
             uow.commit()
 
+    def _close_wakes_for_finished_pull_requests(self) -> None:
+        """hades #502: an overdue notice about a pull request that has since merged or
+        closed is acked by the system with a reason, on the pass after the observation."""
+        with self._fenced() as uow:
+            close_wakes_for_finished_pull_requests(uow, self._clock)
+            uow.commit()
+
     def _escalation_stale_hours(self, uow: UnitOfWork) -> int:
         for escalation in uow.escalations.list_open():
             task = uow.tasks.get(escalation.task_id)
@@ -1946,6 +1995,27 @@ class Supervisor:
                 # to pending; a later tick launches it.
                 await self._db(partial(self._return_to_pending, attempt.id, "prepare", str(exc)))
                 return False
+            except PrepareJobPodsTimeoutError as exc:
+                # hades #503: the preparer Job's Pods outlived the provider's deletion
+                # wait. The prepare runs again a bounded number of times, each after a
+                # longer pause and none charged to the task; past that budget the attempt
+                # ends as the environment, with the provider's message saying what the
+                # Job had done when the wait gave up.
+                detail = str(exc)
+                if await self._db(
+                    partial(self._defer_prepare_pod_wait, attempt.id, "prepare", detail)
+                ):
+                    return False
+                await self._db(
+                    partial(
+                        self._environment_failure,
+                        attempt.id,
+                        "prepare",
+                        f"{detail}; the prepare was tried {PREPARE_POD_WAIT_RETRY_BUDGET} "
+                        "more times and the Pods stayed",
+                    )
+                )
+                return False
             except ProviderError as exc:
                 # hades #370: a preparer that ran and failed carries its stdout and
                 # stderr, which the attempt keeps as evidence beside the detail.
@@ -2229,11 +2299,12 @@ class Supervisor:
                             f"input budget in its {window}-token context window"
                         )
         if selected_harness == "qwen_code":
-            effective = attempt.effective_settings or {
-                "context_length": route.context_length
-                if route and route.context_length
-                else DEFAULT_QWEN_CONTEXT_LENGTH
-            }
+            # hades #498: recorded as the Hermes values are; an attempt launched before
+            # the cap and thinking were recorded keeps its record and takes the defaults.
+            effective = attempt.effective_settings or qwen_effective_settings(
+                harness_settings,
+                context_length=route.context_length if route else None,
+            )
         if effective is not None:
             harness_settings.update(effective)
         # Issue 128: the policy default, narrowed by the contract, capped at the attempt.
@@ -3579,58 +3650,147 @@ class Supervisor:
                 return
             # hades #370: the refusal is the API server's own words (the quota 403 body,
             # or the Job's FailedCreate event) and is recorded as they came, uncut.
-            reason = redact(detail)
-            attempt.workspace_path = None
-            attempt.identity_sha256 = None
-            attempt.handle = None
-            move_attempt(
+            reason = self._pending_again(
                 uow,
-                self._clock,
                 attempt,
-                AttemptState.PENDING,
-                EventKind.HARNESS_LAUNCH_DEFERRED,
-                payload={
-                    "attempt_id": attempt.id,
-                    "stage": stage,
-                    "detail": reason,
-                    "quota_wait": True,
-                },
+                task,
+                stage,
+                detail,
+                reason="quota_wait",
+                mark={"quota_wait": True},
+                uncut=True,
             )
-            self._release_checkout_leases(uow, attempt)
-            execution = uow.executions.get(attempt.execution_id)
-            if (
-                task.state is TaskState.RUNNING
-                and execution is not None
-                and execution.role is not ExecutionRole.REVIEW
-            ):
-                # The task returns to the queue where it stood: the queue reads the
-                # newest scheduling event, and a head adoption's resume flag rides along.
-                scheduled = uow.events.latest_for_task_kind(task.id, EventKind.TASK_SCHEDULED.value)
-                move_task(
-                    uow,
-                    self._clock,
-                    task,
-                    TaskState.SCHEDULED,
-                    EventKind.TASK_SCHEDULED,
-                    execution_id=attempt.execution_id,
-                    attempt_id=attempt.id,
-                    payload={
-                        "reason": "quota_wait",
-                        "stage": stage,
-                        "detail": reason,
-                        **(
-                            {"resume_from_work_branch": True}
-                            if scheduled is not None
-                            and scheduled.payload.get("resume_from_work_branch") is True
-                            else {}
-                        ),
-                    },
-                )
             log.info(
                 "launch waits for room; the attempt is pending again",
                 extra={"stage": stage, "detail": reason},
             )
             uow.commit()
+
+    def _defer_prepare_pod_wait(self, attempt_id: str, stage: str, detail: str) -> bool:
+        """hades #503: the preparer Job's Pods outlived the provider's deletion wait.
+        Nothing of the attempt ran, so the prepare is tried again: the attempt goes back
+        to pending with the provider's message, the task back to scheduled with a resume
+        time that doubles on each retry, and no attempt is charged (the attempt is the
+        same row, never terminal, so the retry count in `_classify_and_finish` does not
+        see it). The retries are counted from the attempt's own deferral events, so a
+        supervisor restart does not reset them. True when the attempt was deferred (or a
+        cancel settled it); False once the budget is spent, and the caller then ends the
+        attempt as the environment."""
+        with self._fenced() as uow:
+            attempt = uow.attempts.get(attempt_id, for_update=True)
+            assert attempt is not None
+            task = uow.tasks.get(attempt.task_id, for_update=True)
+            assert task is not None
+            if attempt.state not in (AttemptState.PREPARING, AttemptState.LAUNCHING):
+                # Another supervisor already settled it (a stranded launch, 10).
+                return True
+            if task.state in ENDS_ATTEMPTS:
+                self._end_cancelled_launch(uow, attempt, task, stage)
+                uow.commit()
+                return True
+            retries = self._prepare_pod_wait_retries(uow, attempt)
+            if retries >= PREPARE_POD_WAIT_RETRY_BUDGET:
+                return False
+            delay = PREPARE_POD_WAIT_RETRY_DELAY_SECONDS * 2**retries
+            task.resume_at = self._clock.now() + timedelta(seconds=delay)
+            reason = self._pending_again(
+                uow,
+                attempt,
+                task,
+                stage,
+                detail,
+                reason="prepare_pod_wait",
+                mark={
+                    "prepare_pod_wait": True,
+                    "retry": retries + 1,
+                    "retry_budget": PREPARE_POD_WAIT_RETRY_BUDGET,
+                    "retry_delay_seconds": delay,
+                },
+            )
+            uow.tasks.save(task)
+            log.warning(
+                "the preparer's Pods outlived the deletion wait; the prepare runs again "
+                "in %ds (retry %d of %d) and no attempt is charged: %s",
+                delay,
+                retries + 1,
+                PREPARE_POD_WAIT_RETRY_BUDGET,
+                reason,
+                extra={"stage": stage, "detail": reason},
+            )
+            uow.commit()
+            return True
+
+    @staticmethod
+    def _prepare_pod_wait_retries(uow: UnitOfWork, attempt: Attempt) -> int:
+        """How many times this attempt's prepare was already sent back to pending because
+        the preparer's Pods outlived the deletion wait (hades #503)."""
+        return sum(
+            row.kind == EventKind.HARNESS_LAUNCH_DEFERRED.value
+            and row.attempt_id == attempt.id
+            and row.payload.get("prepare_pod_wait") is True
+            for row in Supervisor._all_task_events(uow, attempt.task_id)
+        )
+
+    def _pending_again(
+        self,
+        uow: UnitOfWork,
+        attempt: Attempt,
+        task: Task,
+        stage: str,
+        detail: str,
+        *,
+        reason: str,
+        mark: dict[str, Any],
+        uncut: bool = False,
+    ) -> str:
+        """Send a preparing or launching attempt back to pending with nothing recorded
+        against it, and its task back to the queue where it stood; `reason` names why on
+        the scheduling event and `mark` rides on the deferral event. Returns the redacted
+        detail, cut to the usual bound unless `uncut` (hades #370: a quota refusal is the
+        API server's own words and is recorded as they came)."""
+        redacted = redact(detail) if uncut else redact(detail)[:1000]
+        attempt.workspace_path = None
+        attempt.identity_sha256 = None
+        attempt.handle = None
+        move_attempt(
+            uow,
+            self._clock,
+            attempt,
+            AttemptState.PENDING,
+            EventKind.HARNESS_LAUNCH_DEFERRED,
+            payload={"attempt_id": attempt.id, "stage": stage, "detail": redacted, **mark},
+        )
+        self._release_checkout_leases(uow, attempt)
+        execution = uow.executions.get(attempt.execution_id)
+        if (
+            task.state is TaskState.RUNNING
+            and execution is not None
+            and execution.role is not ExecutionRole.REVIEW
+        ):
+            # The task returns to the queue where it stood: the queue reads the
+            # newest scheduling event, and a head adoption's resume flag rides along.
+            scheduled = uow.events.latest_for_task_kind(task.id, EventKind.TASK_SCHEDULED.value)
+            move_task(
+                uow,
+                self._clock,
+                task,
+                TaskState.SCHEDULED,
+                EventKind.TASK_SCHEDULED,
+                execution_id=attempt.execution_id,
+                attempt_id=attempt.id,
+                payload={
+                    "reason": reason,
+                    "stage": stage,
+                    "detail": redacted,
+                    **(
+                        {"resume_from_work_branch": True}
+                        if scheduled is not None
+                        and scheduled.payload.get("resume_from_work_branch") is True
+                        else {}
+                    ),
+                },
+            )
+        return redacted
 
     def _start_failure(self, attempt_id: str, observation: Observation) -> None:
         """The launch's runtime refused to start the worker (hades #346). The attempt is
@@ -5547,6 +5707,37 @@ class Supervisor:
             parsed: ParsedReport | None = None
             if adapter is not None and report_dir is not None and report_dir.is_dir():
                 parsed = adapter.parse_report(report_dir, exit_info)
+            limit_reached = parsed.limit_reached if parsed is not None else None
+            has_commits = (
+                collection_error is None
+                and outputs.checkpoint_refusal is None
+                and outputs.bundle is not None
+                and outputs.bundle.commits > 0
+            )
+            if (
+                has_commits
+                and not killed
+                and not oom_killed
+                and execution.role is not (ExecutionRole.REVIEW)
+            ):
+                # hades #498: the gates judge the work, not the paperwork. A clean exit
+                # that left commits and no report is `completed`; the missing report is
+                # for the reviewer. A stop on the attempt's time limit or the harness's
+                # turn limit with commits is `ended_by_budget`: a normal end, collected
+                # and gated like a completed run, never scored as a failure.
+                if attempt.exit_class is ExitClass.COMPLETED_WITHOUT_REPORT:
+                    attempt.exit_class = ExitClass.COMPLETED
+                timed_out_on_budget = (
+                    attempt.termination_reason == TERMINATION_TIMEOUT
+                    and attempt.exit_class is ExitClass.TIMEOUT
+                )
+                turn_limit = limit_reached is not None and attempt.exit_class in {
+                    ExitClass.COMPLETED,
+                    ExitClass.INCOMPLETE,
+                    ExitClass.TIMEOUT,
+                }
+                if timed_out_on_budget or turn_limit:
+                    attempt.exit_class = ExitClass.ENDED_BY_BUDGET
             self._record_credential_sync(uow, attempt, execution, outputs)
             if collection_error is not None:
                 # Preserve the original interruption even if sealing also failed.
@@ -5665,7 +5856,21 @@ class Supervisor:
                 )
             completed: CompletedClaim | None = None
             claim = None
-            expected_findings: set[str] = set()
+            errors: list[dict[str, Any]] = []
+            # hades #498: what Hades noticed about the report that is for the reviewer
+            # and never a failure (a finding left without a disposition, a duplicate).
+            advisory_notes: list[str] = []
+            duplicate_ids: list[str] = []
+            correction = (stored.document.get("correction") if stored else None) or {}
+            expected_findings: set[str] = {
+                str(address.get("id"))
+                for address in correction.get("addresses", [])
+                if isinstance(address, dict) and address.get("kind") == "review_comment"
+            }
+            worker_document: dict[str, Any] | None = None
+            worker_status = WORKER_REPORT_ABSENT
+            if unparsed_errors is not None:
+                worker_status = WORKER_REPORT_UNPARSED
             if outputs.report is not None and not cancelled:
                 # hades #215: Crucible's own facts in place of the worker's, then parse.
                 completed = complete_claim(outputs.report, claim_facts(task, outputs))
@@ -5676,12 +5881,7 @@ class Supervisor:
                     else None,
                 )
                 claim_ok = claim is not None
-                correction = (stored.document.get("correction") if stored else None) or {}
-                expected_findings = {
-                    str(address.get("id"))
-                    for address in correction.get("addresses", [])
-                    if isinstance(address, dict) and address.get("kind") == "review_comment"
-                }
+                worker_status = WORKER_REPORT_PARSED if claim_ok else WORKER_REPORT_UNPARSED
                 finding_counts = (
                     Counter(item.review_comment_id for item in claim.finding_dispositions)
                     if claim is not None
@@ -5690,26 +5890,13 @@ class Supervisor:
                 duplicate_ids = sorted(
                     finding_id for finding_id, count in finding_counts.items() if count > 1
                 )
-                if expected_findings and (
-                    set(finding_counts) != expected_findings or duplicate_ids
-                ):
-                    errors.append(
-                        {
-                            "loc": ["finding_dispositions"],
-                            "msg": (
-                                "the correction report must disposition exactly its review "
-                                "findings; expected "
-                                + ", ".join(sorted(expected_findings))
-                                + (
-                                    "; duplicate ids: " + ", ".join(duplicate_ids)
-                                    if duplicate_ids
-                                    else ""
-                                )
-                            ),
-                            "type": "value_error",
-                        }
+                if claim is not None and expected_findings:
+                    # hades #498: disposition completeness is advisory. The worker
+                    # instructions never asked for `finding_dispositions`; the diff says
+                    # what the correction touched, and the reviewer weighs the rest.
+                    advisory_notes.extend(
+                        disposition_notes(expected_findings, finding_counts, duplicate_ids)
                     )
-                    claim_ok = False
                 # The worker's document and the completed one: Crucible's facts carry
                 # names the worker chose (changed paths, report file names).
                 secret_hits = find_secrets(outputs.report) + find_secrets(completed.document)
@@ -5719,17 +5906,9 @@ class Supervisor:
                         for m in secret_hits
                     ]
                     claim_ok = False
-                    document: dict[str, Any] = {"redacted": True}
+                    worker_status = WORKER_REPORT_REDACTED
                 else:
-                    document = completed.document
-                uow.claims.put(
-                    CompletionClaimRecord(
-                        attempt_id=attempt.id,
-                        document=document,
-                        parsed_ok=claim_ok,
-                        parse_errors=errors,
-                    )
-                )
+                    worker_document = completed.document
                 record_event(
                     uow,
                     self._clock,
@@ -5743,6 +5922,60 @@ class Supervisor:
                         "filled_by_crucible": list(completed.filled),
                         "differences": [dict(d) for d in completed.differences],
                     },
+                )
+            record: dict[str, Any] | None = None
+            if not cancelled:
+                # hades #498: the completion record is Hades's own, from the commits on
+                # the branch, its re-run of the required checks and the diff against
+                # each review finding's path. The worker's report adds to it.
+                record = compose_completion_record(
+                    exit_class=attempt.exit_class,
+                    exit_code=exit_code,
+                    termination_reason=attempt.termination_reason,
+                    limit_reached=limit_reached,
+                    branch=branch_facts(outputs.bundle),
+                    diff_paths=outputs.diff_paths,
+                    checks=tuple(
+                        CheckRun(
+                            id=run.id,
+                            command=run.command,
+                            exit_code=run.exit_code,
+                            expect_exit=run.expect_exit,
+                            ran=run.ran,
+                            detail=run.detail,
+                        )
+                        for run in outputs.verifications
+                    ),
+                    findings=tuple(
+                        ReviewFinding(
+                            review_comment_id=finding_id,
+                            path=getattr(uow.review_comments.get(finding_id), "path", None),
+                        )
+                        for finding_id in sorted(expected_findings)
+                    ),
+                    worker_report=worker_document,
+                    worker_report_status=worker_status,
+                    worker_report_problems=[
+                        problem_text(e)
+                        for e in (errors or unparsed_errors or [])
+                        if isinstance(e, dict)
+                    ],
+                )
+                if worker_status == WORKER_REPORT_REDACTED:
+                    record = {"redacted": True, **record}
+                uow.claims.put(
+                    CompletionClaimRecord(
+                        attempt_id=attempt.id,
+                        document=record,
+                        parsed_ok=claim_ok,
+                        parse_errors=errors
+                        or unparsed_errors
+                        or (
+                            []
+                            if report_present
+                            else [{"loc": [], "msg": "no report was written", "type": "missing"}]
+                        ),
+                    )
                 )
             blocked_reason, blocked_text = blocked_note(outputs.blocked_md)
             if attempt.exit_class is ExitClass.BLOCKED:
@@ -5781,8 +6014,6 @@ class Supervisor:
             )
             uow.leases.release_attempt_lease(attempt.id)
             claim_document = outputs.report if (outputs.report and not cancelled) else None
-            stored_claim = uow.claims.get(attempt.id) if claim_document else None
-            errors = list(stored_claim.parse_errors) if stored_claim else []
             head = record_collection_evidence(
                 uow,
                 self._clock,
@@ -5796,6 +6027,8 @@ class Supervisor:
                 parsed_report=parsed,
                 completed=completed,
                 unparsed_errors=unparsed_errors,
+                record=record,
+                advisory=advisory_notes,
             )
             # hades #360: a correction ended by a merge never reaches the PR, so its head
             # is evidence on the attempt and not the merged task's head.
@@ -5831,13 +6064,16 @@ class Supervisor:
                 blocked_reason=blocked_reason,
                 claim_ok=claim_ok,
                 defer_quota=defer_quota,
-                turn_cap_reached=parsed is not None and parsed.limit_reached is not None,
+                turn_cap_reached=limit_reached is not None,
                 has_commits=outputs.bundle is not None and outputs.bundle.commits > 0,
                 pool_mark=pool_mark,
                 excluded_routes=excluded_routes,
             )
             # A valid report from a failed or locally capped attempt is evidence,
             # but its dispositions must not settle findings or queue public replies.
+            # hades #498: a disposition the worker wrote is recorded for the finding it
+            # names; one named twice, or one this correction does not address, is left
+            # to the reviewer with the advisory note.
             if (
                 attempt.state is AttemptState.SUCCEEDED
                 and claim_ok
@@ -5845,6 +6081,11 @@ class Supervisor:
                 and expected_findings
             ):
                 for finding in claim.finding_dispositions:
+                    if (
+                        finding.review_comment_id in duplicate_ids
+                        or finding.review_comment_id not in expected_findings
+                    ):
+                        continue
                     comment = uow.review_comments.get(finding.review_comment_id)
                     if (
                         comment is None
@@ -6807,7 +7048,10 @@ class Supervisor:
                 EventKind.ATTEMPT_FAILED,
                 payload={"exit_class": exit_class.value, "local_cap": local_cap},
             )
-        elif exit_class is ExitClass.COMPLETED and claim_ok:
+        elif exit_class in {ExitClass.COMPLETED, ExitClass.ENDED_BY_BUDGET}:
+            # hades #498: the worker returned work; whether its paperwork parsed is for
+            # the reviewer, and the gates judge the work. A budget end with commits is
+            # a normal end.
             move_attempt(
                 uow, self._clock, attempt, AttemptState.SUCCEEDED, EventKind.ATTEMPT_SUCCEEDED
             )
@@ -6823,9 +7067,6 @@ class Supervisor:
                 payload={"blocked_reason": blocked_reason} if blocked_reason else None,
             )
         else:
-            if exit_class is ExitClass.COMPLETED and not claim_ok:
-                attempt.exit_class = ExitClass.COMPLETED_WITHOUT_REPORT
-                exit_class = attempt.exit_class
             move_attempt(
                 uow,
                 self._clock,

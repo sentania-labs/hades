@@ -92,7 +92,7 @@ gates:
     - feedback_dispositions_complete
     - ci_green_for_head
   skipped: []                          # release gates live on the release contract (24)
-                                       # commit_policy is never listed: it always runs, always advisory (11)
+                                       # commit_policy and report_present are never listed: they always run, always advisory (11, hades #498)
   advisory:                            # ADR 0024: a failure of these goes to the internal reviewer instead of stopping the task
     - criteria_mapped                  # absent (every version written before 2026-09-29): this default set
     - report_present
@@ -130,6 +130,7 @@ external_review:
   components: ["code"]                 # review components in one cycle; ["code", "security"] where the repo runs both
   round_counting: "completed_cycles"   # a round is one completed cycle (all components terminal) on a published head
   wait_timeout_hours: 24               # then wake Foundry with reason external_review_overdue
+  automatic: true                      # false: Crucible never posts the App's trigger comment; it wakes Foundry to ask a person instead (hades #343)
 
 ci_certification:
   require_green_on_final_sha: true
@@ -208,6 +209,19 @@ retention:
 - `external_review.components` lists the components one cycle expects and
   defaults to `["code"]`. The cycle logic depends on it being present, so
   a repository running code and security review sets both.
+- `external_review.automatic` (hades #343) is whether this repository's
+  provider review starts on its own once the App's trigger is posted.
+  Absent reads as `true`, which is what every policy before hades #343
+  assumed. `false`, or a refusal already observed on the repository (the
+  connector's reply began "To use Codex here", which GitHub exposes no
+  other way to predict), stops Crucible from posting the trigger comment
+  at publication: the provider only refuses the App's comment again, so
+  Crucible wakes the orchestrator with reason
+  `external_review_trigger_needed` instead, asking a person to request
+  the round under their own account. The refusal is remembered on the
+  repository (`repositories.codex_review_refused_at`), not the task, so
+  every later task against that repository skips the App's trigger too,
+  until an operator clears it.
 - `ci_certification.allow_no_ci: true` and `deliverables.allow_branch_only:
   true` may only be set by an `operator` or `admin` principal and are
   recorded as decisions.

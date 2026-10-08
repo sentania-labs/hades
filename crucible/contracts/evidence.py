@@ -40,6 +40,8 @@ class EvidenceSource(StrEnum):
 # Roles that narrow `artifact_present`, so the fixed kind list of 11 stays fixed.
 ROLE_COMPLETION_CLAIM = "completion_claim"
 ROLE_WORKER_CLAIM = "worker_claim"
+# hades #498: the completion record Hades composed from its own evidence.
+ROLE_COMPLETION_RECORD = "completion_record"
 ROLE_RUN_EVIDENCE = "run_evidence"
 ROLE_REVIEW_REPORT = "review_report"
 # hades #344: the collector's `git diff <base>...HEAD` for the internal review. Its own

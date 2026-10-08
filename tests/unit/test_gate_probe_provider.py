@@ -18,6 +18,7 @@ from crucible.adapters.execution.k8sapi import LogFrame
 from crucible.ports.execution import ProviderError
 from crucible.ports.github import InstallationToken
 from tests.unit.kubernetes_fixtures import build, created, pod_of, spec
+from tests.wait import async_wait_until
 
 
 async def test_probe_job_is_uncredentialed_bounded_and_removed(
@@ -164,10 +165,10 @@ async def test_probe_spanning_two_ticks_adopts_job_and_records_exit(
     monkeypatch.setattr(provider, "_await_job", first_wait)
     checks = [{"id": "V4", "command": "test -f made-by-the-worker"}]
     first = asyncio.create_task(provider.probe_checks(spec(), checks))
-    for _ in range(20):
-        if await provider.gate_probe_exists(spec().attempt_id):
-            break
-        await asyncio.sleep(0)
+    await async_wait_until(
+        lambda: provider.gate_probe_exists(spec().attempt_id),
+        describe="gate probe to be created",
+    )
     assert await provider.gate_probe_exists(spec().attempt_id)
     first.cancel()
     with pytest.raises(asyncio.CancelledError):

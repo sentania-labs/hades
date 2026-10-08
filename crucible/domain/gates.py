@@ -21,7 +21,7 @@ from functools import lru_cache
 from typing import Any
 
 from crucible.domain import injected
-from crucible.domain.exit_class import CLEAN_EXIT_CLASSES
+from crucible.domain.exit_class import CLEAN_EXIT_CLASSES, ExitClass
 from crucible.domain.injected import (
     injected_prefix as _injected_prefix,
 )
@@ -85,12 +85,39 @@ PRE_PR_GATES: frozenset[str] = frozenset(
     }
 )
 # These gates always run, even when a stored policy omits them. Commit authorship is
-# advisory (FDY-0143); the complete report and self-review block publication (#402).
+# advisory (FDY-0143); the report gate always runs so its gaps are always listed for the
+# reviewer (#402, hades #498).
 ENFORCED_PRE_PR_GATES: frozenset[str] = frozenset({GateName.COMMIT_POLICY, GateName.REPORT_PRESENT})
+
+# hades #498, the operator on 2026-10-06: the pre-PR gates judge whether the worker
+# returned work and whether it passes, never whether the paperwork is complete. These
+# are the gates about the work; for an attempt with commits they are the ones that stop
+# it. `scope_contained` is among them for a prohibited path (ADR 0024) and advisory for
+# a path merely outside `allowed_paths`.
+WORK_GATES: frozenset[str] = frozenset(
+    {
+        GateName.COMMITS_PRESENT,
+        GateName.VERIFICATION_RAN,
+        GateName.SCOPE_CONTAINED,
+        GateName.NO_INJECTED_FILES,
+        GateName.NO_SECRETS,
+        GateName.DEPENDENCIES_UNCHANGED,
+        GateName.CI_UNCHANGED,
+        GateName.WORKSPACE_CLEAN,
+        GateName.EDITOR_LEFTOVERS,
+        GateName.EXIT_CLEAN,
+    }
+)
+# The gates about the paperwork: whether the worker wrote a report, whether it parsed,
+# whether every finding has a disposition in it, whether every criterion is mapped. They
+# are listed for the reviewer with a plain detail and never fail the attempt.
+PAPERWORK_GATES: frozenset[str] = frozenset(
+    {GateName.REPORT_PRESENT, GateName.CRITERIA_MAPPED, GateName.RUN_EVIDENCE_PRESENT}
+)
 
 # ADR 0024, the operator on 2026-09-29: "We need to let the review be our enforcement
 # rather then dictating behavior". Hard gates stay where the damage is real or a claim is
-# false; these three are information for the reviewer unless a policy says otherwise.
+# false; these are information for the reviewer unless a policy says otherwise.
 DEFAULT_ADVISORY_GATES: frozenset[str] = frozenset(
     {
         GateName.SCOPE_CONTAINED,
@@ -98,12 +125,13 @@ DEFAULT_ADVISORY_GATES: frozenset[str] = frozenset(
         GateName.RUN_EVIDENCE_PRESENT,
     }
 )
-# The complete report, including self-review, is required for acceptance. A secret, once pushed,
-# cannot be taken back, so no policy may send one to the reviewer instead of stopping.
-ALWAYS_BLOCKING_GATES: frozenset[str] = frozenset({GateName.REPORT_PRESENT, GateName.NO_SECRETS})
+# A secret, once pushed, cannot be taken back, so no policy may send one to the reviewer
+# instead of stopping.
+ALWAYS_BLOCKING_GATES: frozenset[str] = frozenset({GateName.NO_SECRETS})
 # FDY-0143: the commit author is for the reviewer and the trailer is not checked at all,
-# so no policy can make commit_policy stop a task.
-ALWAYS_ADVISORY_GATES: frozenset[str] = frozenset({GateName.COMMIT_POLICY})
+# so no policy can make commit_policy stop a task. hades #498: nor can one make the
+# worker's paperwork stop it; a report gap is for the reviewer whatever the policy says.
+ALWAYS_ADVISORY_GATES: frozenset[str] = frozenset({GateName.COMMIT_POLICY, GateName.REPORT_PRESENT})
 
 
 class GateClass(StrEnum):
@@ -305,13 +333,31 @@ def _parse_problems(errors: list[dict[str, Any]], shown: int = 3) -> str:
     return ": " + "; ".join(parts) + more
 
 
+def _advisory_notes(payload: dict[str, Any]) -> tuple[str, ...]:
+    """hades #498: what Hades noticed about the worker's report that is for the reviewer
+    and never a failure, such as a finding the correction report left without a
+    disposition. Written by Hades; it repeats only review comment ids."""
+    return tuple(str(note) for note in payload.get("advisory") or [] if note)
+
+
+NO_REPORT_DETAIL = (
+    "the worker wrote no report; Hades composed the completion record from the branch, "
+    "its own re-run of the required checks and the diff"
+)
+
+
 def report_present(gi: GateInput) -> GateOutcome:
-    """A complete report including the worker self-review is required to publish."""
+    """Whether the worker wrote a report that parses, for the reviewer (hades #498).
+
+    The gate is advisory: a missing report, one that does not parse, one without a
+    self-review and one that leaves a finding without a disposition are each listed for
+    the reviewer with a plain detail, and none of them fails the attempt. The work gates
+    decide; Hades composes the completion record from its own evidence either way."""
     item = gi.one("artifact_present", role="completion_claim")
     if item is None:
-        missing = _missing("artifact_present", role="completion_claim")
-        return GateOutcome(missing.result, missing.detail, always_blocks=True)
+        return GateOutcome(GateResult.FAIL, NO_REPORT_DETAIL)
     notes = _claim_notes(item.payload)
+    findings = _advisory_notes(item.payload)
     if not item.payload.get("parsed_ok"):
         errors = [e for e in item.payload.get("parse_errors") or [] if isinstance(e, dict)]
         # Keep the missing review visible even when other schema problems fill the
@@ -321,18 +367,22 @@ def report_present(gi: GateInput) -> GateOutcome:
             GateResult.FAIL,
             f"the report did not parse as CompletionClaimV1 ({len(errors)} problems)"
             + _parse_problems(errors)
-            + notes,
+            + notes
+            + "; Hades composed the completion record from its own evidence",
             (item.id,),
-            always_blocks=True,
+            findings=findings,
         )
     if item.payload.get("self_review_checked") is not True:
         return GateOutcome(
             GateResult.FAIL,
-            "the report has no validated self_review section; write self_review and rerun",
+            "the report has no validated self_review section; "
+            "Hades composed the completion record from its own evidence",
             (item.id,),
-            always_blocks=True,
+            findings=findings,
         )
-    return GateOutcome(GateResult.PASS, "CompletionClaimV1 parsed" + notes, (item.id,))
+    return GateOutcome(
+        GateResult.PASS, "CompletionClaimV1 parsed" + notes, (item.id,), findings=findings
+    )
 
 
 def exit_clean(gi: GateInput) -> GateOutcome:
@@ -340,8 +390,17 @@ def exit_clean(gi: GateInput) -> GateOutcome:
     if item is None:
         return _missing("exit_info")
     code = item.payload.get("exit_code")
+    exit_class = item.payload.get("exit_class")
+    if exit_class == ExitClass.ENDED_BY_BUDGET:
+        # hades #498: a budget stop with commits is a normal end. The code is whatever
+        # the stop left (a kill, a turn-limit exit), so the class decides.
+        return GateOutcome(
+            GateResult.PASS,
+            "the run ended on its budget with commits on the branch; a normal end",
+            (item.id,),
+        )
     # Issue 128: an `incomplete` attempt exits 0 too, so the class must also be clean.
-    if code == 0 and item.payload.get("exit_class") in CLEAN_EXIT_CLASSES:
+    if code == 0 and exit_class in CLEAN_EXIT_CLASSES:
         return GateOutcome(GateResult.PASS, "the worker exited 0 and completed", (item.id,))
     return GateOutcome(
         GateResult.FAIL,
@@ -471,28 +530,44 @@ def _injected_hits(
     commit_paths: Sequence[str],
     commit_changes: list[tuple[str, str, str, str]] | None,
     base_paths: frozenset[str] = frozenset(),
-) -> set[str]:
+) -> tuple[set[str], set[str]]:
     """hades #369: an injected-name path fails when the branch adds it relative to the
     base ref, or commits the shim's content into it. Deleting or editing a file the base
     already has is the repository's own work. A file turned into a symlink or back (T)
-    counts as an add, since a link to the identity mount is a shim by another name. A
-    path under an injected prefix always fails, and so does any path the evidence carries
-    no status for, as before #369."""
+    counts as an add, since a link to the identity mount is a shim by another name.
+    hades #446: a path under an injected prefix that the base already has may be edited
+    or deleted; adding a new entry under a harness directory, turning an entry into a
+    symlink or back, or committing the shim's content still fails.
+
+    Returns a set of human-readable reason strings, each naming the rule that fired.
+    """
     shim = _shim_blob_ids()
     hits: set[str] = set()
-    for path in (*paths, *commit_paths):
-        if error := instruction_name_error(path):
-            hits.add(f"{path!a}: {error}")
-    for path, _, _, classification in (diff_changes or []) + (commit_changes or []):
-        if classification.startswith("error:"):
-            hits.add(f"{path!r}: {classification}")
+    allowed: set[str] = set()
+
+    def _record(path: str, rule: str, blob: str = "") -> None:
+        if blob in shim:
+            hits.add(f"{path!r}: shim content")
+        else:
+            hits.add(f"{path!r}: {rule}")
+
     diff_status: dict[str, str] = {}
     for path, status, blob, classification in diff_changes or []:
         diff_status[path] = status
-        if _injected(path) and (
-            status not in ("M", "D") or blob in shim or classification == "shim"
-        ):
-            hits.add(path)
+        # Classifications from the collector that start with "error:" capture bad names
+        # (surrogates in path) and unreadable blobs.  These may reference an ASCII-encoded
+        # path that no longer satisfies `_injected`, so check unconditionally before
+        # narrowing to injected names.
+        if classification.startswith("error:"):
+            hits.add(f"{path!r}: {classification}")
+        elif _injected(path):
+            if status not in ("M", "D"):
+                if status == "T":
+                    _record(path, "symlink", blob)
+                else:
+                    _record(path, "new entry added", blob)
+            elif blob in shim or classification == "shim":
+                _record(path, "shim content", blob)
     # Commits in `git log --diff-merges=separate --topo-order` order, every commit before
     # its parents and a merge once per parent: the last record of a path is the oldest,
     # and says whether the base had it, since only a path the base lacks starts with an
@@ -500,26 +575,72 @@ def _injected_hits(
     oldest_status: dict[str, str] = {}
     for path, status, blob, classification in commit_changes or []:
         oldest_status[path] = status
-        if _injected(path) and (status == "T" or blob in shim or classification == "shim"):
-            hits.add(path)
+        if classification.startswith("error:"):
+            hits.add(f"{path!r}: {classification}")
+        elif _injected(path):
+            if status == "T":
+                _record(path, "symlink", blob)
+            elif blob in shim or classification == "shim":
+                _record(path, "shim content", blob)
     for path, status in oldest_status.items():
-        existed = diff_status.get(path) in ("M", "D") or status in ("M", "D") or path in base_paths
-        if _injected(path) and not existed:
-            hits.add(path)
+        if _injected(path):
+            existed = (
+                diff_status.get(path) in ("M", "D") or status in ("M", "D") or path in base_paths
+            )
+            if not existed:
+                _record(path, "new entry added")
+    # Harness directory entries (paths under an injected prefix) that the base has may be
+    # edited or deleted; new additions and symlink flips still fail.
     for path in paths:
-        if _injected(path) and (
-            _injected_prefix(path) or diff_changes is None or path not in diff_status
-        ):
+        if _injected(path) and _injected_prefix(path):
+            if diff_changes is None or path not in diff_status:
+                hits.add(f"{path!r}: path under injected prefix")
+            elif path in base_paths and diff_status[path] in ("M", "D"):
+                allowed.add(f"{path!r}: existing harness-directory file edited or deleted")
+            else:
+                status = diff_status.get(path, "")
+                if status == "T":
+                    _record(path, "symlink", "")
+                else:
+                    _record(path, "new entry added", "")
+        elif _injected(path) and (diff_changes is None or path not in diff_status):
+            # Instruction-name path where the evidence carries no status (pre-#369).
             hits.add(path)
     for path in commit_paths:
-        if _injected(path) and (
-            _injected_prefix(path) or commit_changes is None or path not in oldest_status
-        ):
-            hits.add(path)
+        if _injected(path) and _injected_prefix(path):
+            if commit_changes is None:
+                # No commit info available; allow if base has it and the diff says M/D.
+                if path in base_paths and diff_status.get(path) in ("M", "D"):
+                    allowed.add(f"{path!r}: existing harness-directory file edited or deleted")
+                else:
+                    hits.add(f"{path!r}: path under injected prefix")
+            elif path not in oldest_status:
+                hits.add(f"{path!r}: path under injected prefix")
+            elif path in base_paths and oldest_status[path] in ("M", "D"):
+                allowed.add(f"{path!r}: existing harness-directory file edited or deleted")
+            else:
+                status = oldest_status.get(path, "")
+                if status == "T":
+                    _record(path, "symlink", "")
+                else:
+                    _record(path, "new entry added", "")
+        elif _injected(path):
+            if commit_changes is None:
+                # No commit info available; allow if base has it and the diff says M/D.
+                if path in base_paths and diff_status.get(path) in ("M", "D"):
+                    pass
+                else:
+                    hits.add(path)
+            elif path not in oldest_status:
+                hits.add(path)
     for path in (*diff_status, *oldest_status):
-        if _injected_prefix(path):
-            hits.add(path)
-    return hits
+        if _injected_prefix(path) and path not in base_paths:
+            hits.add(f"{path!r}: path under injected prefix")
+    # Instruction-name errors and unclassifiable blobs.
+    for path in (*paths, *commit_paths):
+        if error := instruction_name_error(path):
+            hits.add(f"{path!a}: {error}")
+    return hits, allowed
 
 
 def no_injected_files(gi: GateInput) -> GateOutcome:
@@ -527,13 +648,15 @@ def no_injected_files(gi: GateInput) -> GateOutcome:
 
     Names use casefold, NFC, removal of invisible format characters and common
     Cyrillic/Greek lookalikes. AGENTS*.md, CLAUDE*.md and GEMINI*.md match at any
-    depth. Harness directory entries (including symlinks) and descendants always
-    fail. The diff and every commit are checked. Existing repository instruction
-    files may be edited or deleted (#369), unless their content normalizes to the
-    shim after removing trailing whitespace and normalizing line endings/newlines.
-    Unclassifiable names, instruction blobs or records fail closed with the collected
-    reason. Empty lists and ordinary paths pass; the service classifies the shell
-    collector's exported records without a Python dependency in worker images.
+    depth. Harness directory entries (including symlinks) that the base did not
+    provide always fail. Existing repository instruction files may be edited or
+    deleted (#369), and so may existing harness-directory files (#446), unless their
+    content normalizes to the shim after removing trailing whitespace and normalizing
+    line endings/newlines. A path under an injected prefix that the base lacks still
+    fails, as does turning an entry into a symlink or back. The diff and every commit
+    are checked. Unclassifiable names, instruction blobs or records fail closed with the
+    collected reason. Empty lists and ordinary paths pass; the service classifies the
+    shell collector's exported records without a Python dependency in worker images.
 
     Known limit: a base ancestor older than the merge base that once had an injected-name
     file excuses a history-only add of that path that is not the shim's content (a merge
@@ -555,20 +678,20 @@ def no_injected_files(gi: GateInput) -> GateOutcome:
         return GateOutcome(
             GateResult.FAIL, f"path lists over their read limit, not fully read: {over}", ids
         )
-    hits = sorted(
-        _injected_hits(
-            [str(p) for p in diff.payload.get("paths", [])],
-            _changes(diff.payload.get("changes")),
-            [str(p) for p in bundle.payload.get("commit_paths", [])],
-            _changes(bundle.payload.get("commit_changes")),
-            _base_paths(diff.payload.get("base_paths")),
-        )
+    hit_set, allowed_set = _injected_hits(
+        [str(p) for p in diff.payload.get("paths", [])],
+        _changes(diff.payload.get("changes")),
+        [str(p) for p in bundle.payload.get("commit_paths", [])],
+        _changes(bundle.payload.get("commit_changes")),
+        _base_paths(diff.payload.get("base_paths")),
     )
+    hits = sorted(hit_set)
     if hits:
         return GateOutcome(GateResult.FAIL, f"injected paths in the branch: {hits[:10]}", ids)
-    return GateOutcome(
-        GateResult.PASS, "no injected instruction, harness, or identity path in the branch", ids
-    )
+    detail = "no injected instruction, harness, or identity path in the branch"
+    if allowed_set:
+        detail += f"; allowed by existing harness-directory file rule: {sorted(allowed_set)[:10]}"
+    return GateOutcome(GateResult.PASS, detail, ids)
 
 
 def no_secrets(gi: GateInput) -> GateOutcome:

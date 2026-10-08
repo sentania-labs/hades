@@ -916,6 +916,9 @@ class FakeKubernetesApi:
             paths, behavior
         ).encode()
         claim["output/commit-paths.txt"] = ("\n".join(paths) + "\n").encode()
+        claim["output/attempt-commit-paths.txt"] = (
+            b"" if behavior == "no-commits" else ("\n".join(paths) + "\n").encode()
+        )
         claim["output/log.txt"] = (
             b"" if behavior == "no-commits" else f"{head}\x1fa fake commit\x1ffake\x1e".encode()
         )

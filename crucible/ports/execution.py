@@ -284,6 +284,9 @@ class BranchBundle:
     # finish it; otherwise the commits whose author email is not the policy's, as
     # (sha, email). Information for the reviewer, not a refusal (FDY-0143).
     commit_policy: CommitPolicyCheck | None = None
+    # Paths touched only by commits after the preparer's trusted head. Branch-wide
+    # paths include earlier attempts and cannot establish correction coverage (#498).
+    attempt_commit_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -537,6 +540,14 @@ class ProviderUnavailableError(ProviderError):
     connection, or a server that said it is overloaded). Nothing about the attempt was
     decided by it: a caller that can wait, such as collection, asks again later rather
     than failing the attempt."""
+
+
+class PrepareJobPodsTimeoutError(ProviderError):
+    """hades #503: the preparer Job's Pods were still present when the provider's
+    bounded, backed-off deletion wait ran out. The message says what the Job had done
+    when the wait gave up (completed with an exit code, not finished in time, or still
+    running). The supervisor prepares the same attempt again a bounded number of times,
+    charging the task no attempt, before it classes the failure as the environment."""
 
 
 class CollectionPendingError(ProviderUnavailableError):

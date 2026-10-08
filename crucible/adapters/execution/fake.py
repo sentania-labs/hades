@@ -626,6 +626,7 @@ class FakeProvider:
                 verified=True,
                 sha256=hashlib.sha256(f"fake-bundle:{head}".encode()).hexdigest(),
                 commit_paths=quota_paths,
+                attempt_commit_paths=quota_paths,
                 commit_messages=(f"wip(crucible): attempt {spec.attempt_id}",),
                 commit_policy=fake_commit_policy(behavior, head),
             )
@@ -663,6 +664,7 @@ class FakeProvider:
                 verified=True,
                 sha256=hashlib.sha256(f"fake-bundle:{head}".encode()).hexdigest(),
                 commit_paths=paths,
+                attempt_commit_paths=paths if commits else (),
                 commit_messages=(f"Fake commit for {spec.external_id}",) if commits else (),
                 commit_policy=fake_commit_policy(behavior, head),
             )

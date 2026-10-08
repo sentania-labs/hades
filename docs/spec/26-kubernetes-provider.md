@@ -540,6 +540,29 @@ the namespace. A deployment therefore names one exact, pullable reference in
   what 08's Docker `prepare` performs. `prepare` returns
   when the Job completes; a failed Job is a prepare failure with the Job's
   log excerpt as detail.
+
+  After the preparer Job ends (completed, failed, timed out or cancelled) the
+  provider deletes it in the background and waits for its Pod to disappear.
+  The wait is `prepare_pod_deletion_wait_seconds` in `[kubernetes]` (15 s by
+  default), clipped to `prepare_timeout_seconds`: the Pods are listed, and
+  while any remains the provider pauses 2 s, then 4 s, then 8 s and so on,
+  every pause clipped to what is left of the wait, so the whole wait never
+  exceeds the setting (the default is four tries: 2, 4, 8 and 1 s). An API
+  server that cannot answer a listing is asked again after the next pause.
+  Pods that clear during the wait let `prepare` go on and the attempt
+  launches. Pods still present when the wait runs out are
+  `PrepareJobPodsTimeoutError`, whose message says how long it waited and how
+  many times it tried again, what the Job had done when the wait gave up
+  (completed with its exit code, not finished within the prepare timeout,
+  still running because a cancel or an API error ended the wait for it, or
+  still running and ended for a stall, naming the stall bound), and
+  the lingering Pod's name, phase and whether its deletion was under way
+  (hades #503; recording the preparer's own output as evidence is hades #370).
+  The supervisor prepares the same attempt again for that error up to three
+  times, after 30 s, 60 s and 120 s, charging the task no attempt, and
+  classes the fourth as `environment` (16). A cancel or an API error raised
+  while the Job ran is the error reported, and a Pod lingering behind it is
+  only logged, as for every other role.
 - `launch`: resolve the worker image to a digest through the image registry
   (11, 25) and record it; refuse an unsupported harness version; create the
   NetworkPolicy and the worker Job; return the Job name as the handle. The
@@ -561,7 +584,8 @@ the namespace. A deployment therefore names one exact, pullable reference in
   running is killed, and tags not resolved in time are left out of that listing.
   Tags starting `ci-` are CI proof pushes, never promotable, and are skipped before
   anything is resolved, so their number does not add to the listing's cost (111);
-  the Images page says so. Nothing on the registry is pruned.
+  the Images page says so. This provider prunes nothing itself: a daily scheduled
+  workflow deletes the accumulated `ci-*` versions instead (140, 24).
 - `observe`: read the Job and its Pod.
 
   | Job | Pod | Result |
@@ -610,7 +634,10 @@ the namespace. A deployment therefore names one exact, pullable reference in
   claim, which still holds the work, rather than failing the attempt (10); a
   credential copy already synced is not synced twice. A failed status look
   while a Pod starts is asked again until the deadline, never taken as the
-  answer.
+  answer. The bounded retry counts and unavailable-provider retry window are
+  supervisor memory, not attempt state: after a supervisor restart collection
+  begins a fresh window and receives its full retry count. The workspace stays
+  in place, so this can extend, but cannot discard, a pending collection.
 - `terminate`: `drain` deletes the Pod with the policy grace period, read
   off the Pod itself (SIGTERM, then SIGKILL by the kubelet); `kill` deletes
   with grace zero.
@@ -686,6 +713,10 @@ back from there through the reader Pod and writes it into the harness Secret
 whenever the attempt reaches collection, whether the worker exited successfully
 or not. This matches the Docker provider: a valid newer refresh is durable state
 even when the task itself fails.
+That credential read-back deliberately uses the collection reader wait, rather
+than the preparer's short wait: a reader Pod that is still terminating can hold
+the only newly rotated credential, and the supervisor must retry collection
+instead of treating that state as a launch failure.
 (Made concrete 2026-09-21 during C8a.)
 The per-attempt Secret is deleted under every cleanup policy. The admin
 login flow (25) runs the harness's login in a login Job and captures the device

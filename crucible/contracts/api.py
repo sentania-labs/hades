@@ -117,6 +117,7 @@ class TaskView(Response):
     resume_at: Rfc3339 | None = None
     reroute_chain: list[dict[str, Any]] = Field(default_factory=list)
     gate_probes: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class TaskListItem(Response):
@@ -377,6 +378,7 @@ class RepositoryView(Response):
     attested_by: str | None = None
     attested_at: Rfc3339 | None = None
     private: bool = False
+    codex_review_refused_at: Rfc3339 | None = None
 
 
 # ----- C2: review, acceptance, corrections, decisions, wakes, policies, artifacts ----

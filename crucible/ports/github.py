@@ -186,6 +186,15 @@ class CheckRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class CommitDiffRecord:
+    """A single changed-file summary from ``git diff`` (hades #443)."""
+
+    path: str
+    additions: int = 0
+    deletions: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class Observation:
     """One poll of a pull request: everything 23 asks the supervisor to fetch."""
 
@@ -198,6 +207,9 @@ class Observation:
     reactions_detail: str = ""
     checks: tuple[CheckRecord, ...] = ()
     required_checks: tuple[str, ...] = ()
+    head_commit_author: str = ""
+    head_commit_message: str = ""
+    head_commit_diff: tuple[CommitDiffRecord, ...] = ()
     observed_at: datetime | None = None
     rate_limit_remaining: int | None = None
     notes: tuple[str, ...] = field(default=())
@@ -346,6 +358,23 @@ class GitHubClient(Protocol):
     def checks_for_commit(
         self, token: InstallationToken, *, repository: str, head_sha: str
     ) -> Sequence[CheckRecord]: ...
+
+    def diff_commits(
+        self,
+        token: InstallationToken,
+        *,
+        repository: str,
+        base_sha: str,
+        head_sha: str,
+    ) -> Sequence[CommitDiffRecord]:
+        """The diff stats between ``base_sha`` and ``head_sha`` (contents read).
+
+        Returns a list of changed-file summaries so the observer can verify that only
+        the expected lines in a file changed (hades #443).  Returns an empty list when
+        the two SHAs are identical.
+        """
+
+        ...
 
 
 # ----- the App credential the service owns (ADR 0017) ----------------------------------

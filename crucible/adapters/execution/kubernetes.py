@@ -124,6 +124,7 @@ from crucible.ports.execution import (
     Observation,
     ObservationState,
     PrepareFailedError,
+    PrepareJobPodsTimeoutError,
     ProbeRequest,
     ProbeResult,
     ProviderCapabilities,
@@ -214,6 +215,8 @@ LAUNCH_POD_POLLS = 5
 
 POD_DELETION_MARGIN_SECONDS = 5
 DEFAULT_POD_GRACE_SECONDS = 30
+# hades #503: the first pause of the preparer's pod-gone wait; each later pause doubles.
+PREPARE_POD_WAIT_BACKOFF_SECONDS = 2.0
 COLLECTION_ROLES = (k8sspec.ROLE_COLLECTOR, k8sspec.ROLE_BUNDLE, k8sspec.ROLE_VERIFIER)
 
 # Deleting a Pod is the only way to signal one. Kubernetes sends SIGTERM, waits the
@@ -369,6 +372,11 @@ class KubernetesConfig:
     # progress, so a large repository that is still transferring is not a stall. Well
     # below the prepare timeout; 0 turns the bound off.
     preparer_stall_seconds: int = 300
+    # hades #503: the whole wait, in seconds, for a preparer Job's Pods to disappear
+    # after the Job is deleted; the provider polls with backoff (2 s, 4 s, 8 s, ...),
+    # each pause clipped to what is left of it, and clips the setting itself to
+    # `prepare_timeout_seconds`. Seeded by `[kubernetes] prepare_pod_deletion_wait_seconds`.
+    prepare_pod_deletion_wait_seconds: float = 15.0
     collector_timeout_seconds: int = 900
     verifier_timeout_seconds: int = 3600
     # The short roles' own time, counted from when their Pod is Running (the image pull
@@ -638,6 +646,17 @@ class _CacheGate:
                 self._writing = False
                 self._refreshed_at = time.monotonic()
                 self._condition.notify_all()
+
+
+def _pod_words(pod: Mapping[str, Any]) -> str:
+    """hades #503: one lingering Pod as the pod-gone wait's message names it: its name,
+    its phase, and whether its deletion was already under way."""
+    metadata = pod.get("metadata") or {}
+    status = pod.get("status") or {}
+    name = str(metadata.get("name") or "?")
+    phase = str(status.get("phase") or "unknown phase")
+    terminating = ", deletion under way" if metadata.get("deletionTimestamp") else ""
+    return f"Pod {name} was {phase}{terminating}"
 
 
 class KubernetesProvider:
@@ -4755,6 +4774,11 @@ class KubernetesProvider:
                     await self._call(self.client.delete, "networkpolicies", policy_name)
             return JOB_API_ERROR
         self.role_errors.pop((role, spec.attempt_id), None)
+        # hades #503: what the Job had done by the time it is deleted, for the preparer's
+        # pod-gone wait to report. Set before the wait so that a cancel or an API error
+        # raised while the Job ran still reaches the `finally` with an answer: the Job
+        # was still running when the wait for it ended.
+        job_outcome = "the Job was still running when the wait for it ended"
         try:
             code = await self._await_job(
                 name,
@@ -4778,7 +4802,16 @@ class KubernetesProvider:
                     f"{stall}; its last output: {tail}" if tail else f"{stall}; it wrote nothing",
                 )
                 log.warning("%s Job stalled: %s", role, stall)
+                # hades #503's pod-gone wait names what the Job had done: it was still
+                # running, ended by Crucible for the stall.
+                job_outcome = f"the Job was still running, ended for a stall ({stall})"
                 return JOB_STALLED
+            if code is None:
+                job_outcome = f"the Job had not finished within {timeout}s of running"
+            elif code >= 0:
+                job_outcome = f"the Job had completed with exit {code}"
+            else:
+                job_outcome = "the Job had ended without an exit code (its Pod failed)"
             if code is None:
                 if name in self._job_unanswered:
                     self._job_unanswered.discard(name)
@@ -4846,9 +4879,15 @@ class KubernetesProvider:
                         grace_period_seconds=0 if role == k8sspec.ROLE_VERIFIER else None,
                     )
                 try:
-                    await self._await_job_pods_gone(
-                        name, force=role == k8sspec.ROLE_VERIFIER, collection=collection
-                    )
+                    # hades #503: the preparer's Pods get a bounded wait with backoff, and
+                    # running out of it is `PrepareJobPodsTimeoutError`, which the
+                    # supervisor retries without charging the attempt.
+                    if role == k8sspec.ROLE_PREPARER:
+                        await self._await_preparer_job_pods_gone(name, job_outcome=job_outcome)
+                    else:
+                        await self._await_job_pods_gone(
+                            name, force=role == k8sspec.ROLE_VERIFIER, collection=collection
+                        )
                 except (ProviderError, KubernetesApiError) as exc:
                     # An error already in flight is the one to report, not the Pod.
                     if not (tolerate_lingering_pod or failed):
@@ -5389,6 +5428,63 @@ class KubernetesProvider:
         return (
             float(grace if grace is not None else DEFAULT_POD_GRACE_SECONDS)
             + POD_DELETION_MARGIN_SECONDS
+        )
+
+    async def _await_preparer_job_pods_gone(self, job_name: str, *, job_outcome: str) -> None:
+        """hades #503: wait for a deleted preparer Job's Pods to go, with backoff.
+
+        The whole wait is `prepare_pod_deletion_wait_seconds`, clipped to
+        `prepare_timeout_seconds`. The Pods are listed, and while any remains the wait
+        pauses 2 s, then 4 s, then 8 s and so on, every pause clipped to what is left of
+        the wait, so the total never exceeds the setting. Running out raises
+        `PrepareJobPodsTimeoutError`, whose message says how long the wait was, how many
+        times it tried again, what the Job had done when the wait gave up (`job_outcome`:
+        completed with an exit code, still running, or not finished in time) and what the
+        lingering Pod looked like. An API server that cannot answer a listing is tried
+        again on the next pause, not treated as an answer."""
+        total = min(
+            float(self.config.prepare_pod_deletion_wait_seconds),
+            float(self.config.prepare_timeout_seconds),
+        )
+        started = time.monotonic()
+        deadline = started + total
+        backoff = PREPARE_POD_WAIT_BACKOFF_SECONDS
+        retries = 0
+        unavailable = False
+        rows: list[dict[str, Any]] = []
+        while True:
+            try:
+                rows = await self._call(
+                    self.client.list_objects, "pods", label_selector=f"job-name={job_name}"
+                )
+                unavailable = False
+                if not rows:
+                    return
+            except KubernetesUnavailableError:
+                unavailable = True
+            # Measured again right before every pause: the listing took time too, and
+            # the pause is never longer than what is left of the wait.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            pause = min(backoff, remaining)
+            retries += 1
+            log.info(
+                "preparer Job %s Pods still present (%s); trying again in %.1f s (retry %d)",
+                job_name,
+                "the API was unavailable" if unavailable else f"{len(rows)} Pod(s)",
+                pause,
+                retries,
+            )
+            await asyncio.sleep(pause)
+            backoff *= 2
+        if unavailable:
+            seen = "the API was unavailable for the last look"
+        else:
+            seen = "; ".join(_pod_words(row) for row in rows) or "no Pod was listed"
+        raise PrepareJobPodsTimeoutError(
+            f"Pods for Job {job_name!r} were still present after {total:g} seconds "
+            f"({retries} retries with backoff): {job_outcome}; {seen}"
         )
 
     async def _await_pod_gone(
@@ -6585,4 +6681,5 @@ __all__ = [
     "KubernetesConfig",
     "KubernetesProvider",
     "NamespaceProbe",
+    "PrepareJobPodsTimeoutError",
 ]

@@ -5,6 +5,7 @@ fallback Foundry polls on every start of session."""
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -12,7 +13,7 @@ from crucible.application.errors import ConflictError, ForbiddenError, NotFoundE
 from crucible.application.transitions import record_event
 from crucible.contracts.common import to_document
 from crucible.contracts.wake import WakeReason, WakeTask, WakeV1
-from crucible.domain.entities import Principal, Task, Wake
+from crucible.domain.entities import Principal, PullRequestState, Task, Wake
 from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
 from crucible.domain.ids import new_id
 from crucible.ports.clock import Clock
@@ -22,6 +23,13 @@ from crucible.ports.repository import UnitOfWork
 # from policy stops the retries and leaves the row for poll (17).
 RETRY_BACKOFF_SECONDS: tuple[int, ...] = (30, 60, 120, 300, 600, 1800, 3600)
 DEFAULT_WAKE_RETRY_HOURS = 24
+
+# hades #502: the repeating notices about a pull request. One about a pull request that
+# has since merged or closed is about nothing, and the system acks it.
+PULL_REQUEST_OVERDUE_REASONS: tuple[WakeReason, ...] = (
+    WakeReason.EXTERNAL_REVIEW_OVERDUE,
+    WakeReason.CI_CERTIFICATION_OVERDUE,
+)
 
 
 def wake_document(wake: Wake, *, principal_name: str) -> dict[str, Any]:
@@ -247,6 +255,73 @@ def ack_wake(
         payload={"wake_id": wake.id, "note": note},
     )
     return wake
+
+
+def system_ack_wake(uow: UnitOfWork, clock: Clock, *, wake: Wake, reason: str) -> Wake:
+    """Crucible closes a wake of its own (hades #502): the ack note is the reason, and
+    the `wake_acked` event is written under the `crucible` principal so the record shows
+    the system, not Foundry, dealt with it. An already acked wake is left as it is."""
+    if wake.acked_at is not None:
+        return wake
+    wake.acked_at = clock.now()
+    wake.ack_note = reason
+    uow.wakes.save(wake)
+    record_event(
+        uow,
+        clock,
+        EventKind.WAKE_ACKED,
+        principal=PRINCIPAL_CRUCIBLE,
+        task_id=wake.task_id,
+        payload={"wake_id": wake.id, "note": reason, "acked_by": PRINCIPAL_CRUCIBLE},
+    )
+    return wake
+
+
+def repeat_allowed(previous: Sequence[Wake], *, now: datetime, interval: timedelta) -> bool:
+    """Whether a repeating notice may raise another wake for one task and one cause
+    (hades #502). `previous` is every wake already raised for that pair. An unacked one
+    blocks the repeat outright: exactly one open wake per task per cause, however long
+    the condition persists. Once every one of them is acked, the repeat waits `interval`
+    from the latest ack, so the notice comes back only when the condition still holds a
+    full interval after Foundry last dealt with it."""
+    acks: list[datetime] = []
+    for wake in previous:
+        if wake.acked_at is None:
+            return False
+        acks.append(wake.acked_at)
+    return not acks or now - max(acks) >= interval
+
+
+def close_wakes_for_finished_pull_requests(uow: UnitOfWork, clock: Clock) -> int:
+    """hades #502: every unacked `external_review_overdue` or `ci_certification_overdue`
+    wake whose pull request has since merged or closed is acked by the system with a
+    reason. The supervisor runs this every tick, so the pass after the merge is observed
+    closes the notice. Returns how many it closed."""
+    closed = 0
+    reasons = [reason.value for reason in PULL_REQUEST_OVERDUE_REASONS]
+    for wake in uow.wakes.list_unacked_for_reasons(reasons):
+        if wake.task_id is None:
+            continue
+        pull_request = uow.pull_requests.get_for_task(wake.task_id)
+        if pull_request is None:
+            continue
+        if pull_request.state is PullRequestState.MERGED:
+            outcome = "merged"
+        elif pull_request.state is PullRequestState.CLOSED:
+            outcome = "closed without being merged"
+        else:
+            continue
+        system_ack_wake(
+            uow,
+            clock,
+            wake=wake,
+            reason=(
+                f"closed by Crucible: pull request #{pull_request.number} has {outcome}, "
+                f"so the {wake.reason} notice no longer applies (hades #502)"
+            ),
+        )
+        closed += 1
+    return closed
 
 
 def retry_hours_from_policy(policy_document: dict[str, Any] | None) -> int:
