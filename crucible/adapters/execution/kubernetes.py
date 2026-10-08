@@ -123,10 +123,10 @@ from crucible.ports.execution import (
     LogOffset,
     Observation,
     ObservationState,
+    PrepareJobPodsTimeoutError,
     ProbeRequest,
     ProbeResult,
     ProviderCapabilities,
-    PrepareJobPodsTimeoutError,
     ProviderError,
     ProviderHealth,
     ProviderUnavailableError,
@@ -4646,6 +4646,13 @@ class KubernetesProvider:
                 self._role_error(role, spec.attempt_id, refusal, True)
                 return JOB_API_ERROR
             job_completed = code is not None and code >= 0
+            job_completed_reason: str | None = None
+            if code is not None and code < 0:
+                # Derive the reason from the Job's conditions so the error message
+                # at prepare can say whether the Job had completed or was still running.
+                reason = await self._job_termination_reason(name)
+                if reason is not None:
+                    job_completed_reason = reason
             if log_output is not None:
                 pod = await self._pod_of(name)
                 if pod is not None:
@@ -5043,6 +5050,24 @@ class KubernetesProvider:
                 return f"the namespace quota refused the Pod: {message}"
         return None
 
+    async def _job_termination_reason(self, name: str) -> str | None:
+        """Return a human-readable reason for the Job's failure, or None."""
+        try:
+            job = await self._call(self.client.get, "jobs", name)
+        except KubernetesApiError:
+            return None
+        for condition in (job.get("status") or {}).get("conditions") or []:
+            if not isinstance(condition, dict):
+                continue
+            if str(condition.get("status")) != "True":
+                continue
+            ctype = str(condition.get("type", ""))
+            reason = str(condition.get("reason", ""))
+            message = str(condition.get("message", ""))
+            if ctype in ("Failed", "FailureTarget"):
+                return f"{reason}: {message}".strip() if message else reason
+        return None
+
     async def _job_deadline_exceeded(self, name: str) -> bool:
         """Whether the Job controller ended this Job for running past its
         `activeDeadlineSeconds`. The controller records the condition before it removes
@@ -5249,7 +5274,7 @@ class KubernetesProvider:
                     raise PrepareJobPodsTimeoutError(
                         f"Pods for Job {job_name!r} were still present after "
                         f"{elapsed:.1f} seconds: {completed_label}"
-                    )
+                    ) from None
                 attempt += 1
                 log.info(
                     "preparer Job %s pods query unavailable (attempt %d); retrying in %.1f s",
@@ -6449,4 +6474,5 @@ __all__ = [
     "KubernetesConfig",
     "KubernetesProvider",
     "NamespaceProbe",
+    "PrepareJobPodsTimeoutError",
 ]

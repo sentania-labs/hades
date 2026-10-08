@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from types import MethodType
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -27,14 +30,15 @@ from crucible.domain.entities import (  # noqa: E402  # isort: skip
     Attempt,
     Execution,
     ExecutionRole,
-    ExecutionState,
     Task,
 )
 from crucible.domain.lifecycle import (  # noqa: E402  # isort: skip
     AttemptState,
+    ExecutionState,
     TaskState,
 )
-from tests.fixtures import FakeClock, UTC  # noqa: E402  # isort: skip
+from tests.fixtures import FakeClock  # noqa: E402  # isort: skip type: ignore[attr-defined]
+from tests.fixtures import UTC  # type: ignore[attr-defined]  # noqa: E402  # isort: skip
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +122,7 @@ def _make_provider(
 
 
 # ---------------------------------------------------------------------------
-# AC1 – backoff retry succeeds, pods clear
+# AC1 - backoff retry succeeds, pods clear
 # ---------------------------------------------------------------------------
 
 
@@ -132,7 +136,7 @@ async def test_ac1_pods_clear_after_two_retries() -> None:
 
     call_count = 0
 
-    async def fake_call(*args, **kwargs):
+    async def fake_call(*args: Any, **kwargs: Any) -> list[dict[str, Any]] | None:
         nonlocal call_count
         call_count += 1
         if "list_objects" in str(args):
@@ -156,7 +160,7 @@ async def test_ac1_pods_still_present_times_out() -> None:
     PrepareJobPodsTimeoutError is raised."""
     prov = _make_provider(wait_seconds=3.0, prepare_timeout=900)
 
-    async def always_pods(*args, **kwargs):
+    async def always_pods(*args: Any, **kwargs: Any) -> list[dict[str, Any]] | None:
         if "list_objects" in str(args):
             return [{"metadata": {"name": "stuck-pod"}}]
         return None
@@ -180,7 +184,7 @@ async def test_ac1_job_still_running_reason_in_message() -> None:
     """The error message states the Job was still running with a reason."""
     prov = _make_provider(wait_seconds=2.0, prepare_timeout=900)
 
-    async def always_pods(*args, **kwargs):
+    async def always_pods(*args: Any, **kwargs: Any) -> list[dict[str, Any]] | None:
         if "list_objects" in str(args):
             return [{"metadata": {"name": "running-job-pod"}}]
         return None
@@ -202,7 +206,7 @@ async def test_ac1_job_still_running_reason_in_message() -> None:
 async def test_ac1_unavailable_transient_is_ignored() -> None:
     """A KubernetesUnavailableError during list is silently ignored and the
     loop continues (the provider retries)."""
-    from crucible.adapters.execution.k8sapi import (  # noqa: E402  # isort: skip
+    from crucible.adapters.execution.k8sapi import (  # noqa: PLC0415 isort: skip
         KubernetesUnavailableError,
     )
 
@@ -211,7 +215,7 @@ async def test_ac1_unavailable_transient_is_ignored() -> None:
 
     call_count = 0
 
-    async def sometimes_unavailable(*args, **kwargs):
+    async def sometimes_unavailable(*args: Any, **kwargs: Any) -> list[dict[str, Any]] | None:
         nonlocal call_count
         call_count += 1
         if "list_objects" not in str(args):
@@ -224,7 +228,7 @@ async def test_ac1_unavailable_transient_is_ignored() -> None:
 
     prov._call = sometimes_unavailable
 
-    async def fake_sleep(seconds):
+    async def fake_sleep(seconds: float) -> None:
         pass  # skip actual sleeps
 
     with patch("asyncio.sleep", fake_sleep):
@@ -235,7 +239,7 @@ async def test_ac1_unavailable_transient_is_ignored() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC2 – previous_attempt_bundle_gone is NOT raised after prepare failure
+# AC2 - previous_attempt_bundle_gone is NOT raised after prepare failure
 # ---------------------------------------------------------------------------
 
 
@@ -243,13 +247,13 @@ def test_ac2_workspace_path_none_lets_corrections_resume() -> None:
     """When the latest work attempt has workspace_path=None (a prepare failure),
     _unpublished_bundle_problem skips it and uses the previous attempt's
     bundle instead, returning None (resumable)."""
-    from crucible.application.corrections import (  # noqa: E402  # isort: skip
+    from crucible.application.corrections import (  # noqa: PLC0415 isort: skip
         _unpublished_bundle_problem,
     )
-    from crucible.domain.entities import (  # noqa: E402  # isort: skip
+    from crucible.domain.entities import (  # noqa: PLC0415 isort: skip
         EvidenceRecord,
     )
-    from crucible.domain.lifecycle import AttemptState
+    from crucible.domain.lifecycle import AttemptState  # noqa: PLC0415 isort: skip
 
     clock = FakeClock()
     task = _make_task(TaskState.RUNNING)
@@ -290,22 +294,23 @@ def test_ac2_workspace_path_none_lets_corrections_resume() -> None:
     uow_mock = MagicMock()
     uow_mock.retention = retention_mock
 
-    def _list_for_task(tid):
+    def _list_for_task(tid: str) -> list[Attempt]:
         return [good_attempt, failed_attempt] if tid == task.id else []
 
-    def _list_for_execution(eid):
+    def _list_for_execution(eid: str) -> list[Attempt]:
         return [good_attempt, failed_attempt] if eid == _EXEC_ID else []
 
     uow_mock.attempts.list_for_task = _list_for_task
     uow_mock.attempts.list_for_execution = _list_for_execution
     uow_mock.executions.get = lambda eid: execution if eid == _EXEC_ID else None
 
-    def _list_for_attempt(aid):
+    def _list_for_attempt(aid: str) -> list[EvidenceRecord]:
         if aid == "attempt-good":
             return [
                 EvidenceRecord(
                     id=1,
                     attempt_id=aid,
+                    task_id=task.id,
                     kind="bundle_head",
                     verified=True,
                     payload={"bundle_verified": True, "bundle_sha256": "abc123"},
@@ -318,9 +323,8 @@ def test_ac2_workspace_path_none_lets_corrections_resume() -> None:
     uow_mock.evidence.list_for_attempt = _list_for_attempt
 
     # Also need to handle latest_work_attempt - it should find the failed_attempt
-    from crucible.application.review import latest_work_attempt  # noqa: E402  # isort: skip
 
-    def _mock_latest_work(uow_local, task_local):
+    def _mock_latest_work(uow_local: Any, task_local: str) -> tuple[Attempt, Execution] | None:
         # Return the failed attempt (latest)
         return (failed_attempt, execution)
 
@@ -339,14 +343,14 @@ def test_ac2_workspace_path_none_lets_corrections_resume() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC3 – prepare failure does NOT consume the attempt budget
+# AC3 - prepare failure does NOT consume the attempt budget
 # ---------------------------------------------------------------------------
 
 
 def test_ac3_retry_with_backoff_does_not_count_against_budget() -> None:
     """_retry_with_backoff moves the attempt to PENDING without incrementing
     the exit count.  The budget is preserved."""
-    from crucible.application.supervisor import Supervisor  # noqa: E402  # isort: skip
+    from crucible.application.supervisor import Supervisor  # noqa: PLC0415 isort: skip
 
     clock = FakeClock()
     task = _make_task(TaskState.RUNNING)
@@ -374,32 +378,38 @@ def test_ac3_retry_with_backoff_does_not_count_against_budget() -> None:
     uow_mock.tasks.get.return_value = task
     uow_mock.executions.get.return_value = execution
 
-    called_save = []
+    called_save: list[bool] = []
 
-    def fake_commit():
+    def fake_commit() -> None:
         called_save.append(True)
         assert attempt.state == AttemptState.PENDING
 
     uow_mock.commit = fake_commit
 
-    supervisor._fenced = MagicMock()
-    supervisor._fenced.return_value.__enter__ = (
-        lambda self: uow_mock  # type: ignore
-    )
-    supervisor._fenced.return_value.__exit__ = MagicMock(return_value=None)
+    @contextmanager
+    def _fenced_cm() -> Generator[Any, None, None]:
+        yield uow_mock
 
-    supervisor._release_checkout_leases = MagicMock()
+    with patch.object(supervisor, "_fenced", _fenced_cm):
+        captured_payload: dict[str, Any] = {}
 
-    captured_payload = {}
+        def fake_move(
+            uow: Any,
+            clock_local: Any,
+            att: Any,
+            new_state: Any,
+            kind: Any,
+            payload: Any = None,
+        ) -> None:
+            att.state = new_state
+            captured_payload.update(payload or {})
 
-    def fake_move(uow, clock_local, att, new_state, kind, payload=None):
-        att.state = new_state
-        captured_payload.update(payload or {})
-
-    with patch("crucible.application.supervisor.move_attempt", side_effect=fake_move):
-        with patch(
-            "crucible.application.supervisor.move_task",
-            return_value=None,
+        with (
+            patch("crucible.application.supervisor.move_attempt", side_effect=fake_move),
+            patch(
+                "crucible.application.supervisor.move_task",
+                return_value=None,
+            ),
         ):
             supervisor._retry_with_backoff("attempt-1", "prepare", "pods still present")
 
@@ -412,7 +422,7 @@ def test_ac3_retry_with_backoff_does_not_count_against_budget() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC4 – environment detail includes Job completed/running state
+# AC4 - environment detail includes Job completed/running state
 # ---------------------------------------------------------------------------
 
 
@@ -422,7 +432,7 @@ async def test_ac4_message_includes_job_completed_state() -> None:
     completed or was still running."""
     prov = _make_provider(wait_seconds=2.0, prepare_timeout=900)
 
-    async def always_pods(*args, **kwargs):
+    async def always_pods(*args: Any, **kwargs: Any) -> list[dict[str, Any]] | None:
         if "list_objects" in str(args):
             return [{"metadata": {"name": "pod"}}]
         return None
@@ -462,24 +472,23 @@ async def test_ac1_backoff_is_exponential() -> None:
     call_times: list[float] = []
     real_sleep = asyncio.sleep
 
-    async def fake_sleep(seconds):
+    async def fake_sleep(seconds: float) -> None:
         call_times.append(seconds)
         await real_sleep(0)
 
-    async def never_clear(*args, **kwargs):
+    async def never_clear(*args: Any, **kwargs: Any) -> list[dict[str, Any]] | None:
         if "list_objects" in str(args):
             return [{"metadata": {"name": "pod"}}]
         return None
 
     prov._call = never_clear
 
-    with patch("asyncio.sleep", fake_sleep):
-        with pytest.raises(PrepareJobPodsTimeoutError):
-            await prov._await_preparer_job_pods_gone(
-                "exp-job",
-                job_completed=True,
-                job_completed_reason=None,
-            )
+    with patch("asyncio.sleep", fake_sleep), pytest.raises(PrepareJobPodsTimeoutError):
+        await prov._await_preparer_job_pods_gone(
+            "exp-job",
+            job_completed=True,
+            job_completed_reason=None,
+        )
 
     # Backoff values should be: 2, 4, 8, 6 (last clipped by max_timeout)
     assert len(call_times) >= 3
