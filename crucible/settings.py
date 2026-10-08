@@ -112,6 +112,10 @@ class KubernetesSettings(BaseModel):
     # as the detail, never a stall.
     launch_timeout_seconds: int = 300
     prepare_timeout_seconds: int = 900
+    # hades #370: a preparer whose Pod writes no log line for this long is ended as a
+    # stall with that as the detail, instead of waiting out `prepare_timeout_seconds`.
+    # Well below the prepare timeout; 0 turns the bound off.
+    preparer_stall_seconds: int = 300
     # hades #503: the whole wait for a preparer Job's Pods to disappear after the Job is
     # deleted, polled with backoff (26); the provider clips it to prepare_timeout_seconds.
     prepare_pod_deletion_wait_seconds: float = 15.0

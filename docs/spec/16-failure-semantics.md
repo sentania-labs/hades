@@ -6,7 +6,7 @@
 |---|---|---|
 | `completed` | exit 0 and report present | gates |
 | `blocked` | `blocked.md` present on a clean exit: exit 0, or 75 where the harness does not use 75 itself (a model cannot set its harness's exit code, FDY-0140). The file's reason line, `missing_capability` or `ambiguous_contract`, and its statement verbatim go on the attempt and the escalation (hades #393) | escalation carrying the reason and the statement, wake, task `blocked`; never retried, no retry consumed, no pool marked |
-| `environment` | exit 70, the provider failed before the harness ran, the kernel killed the worker out of memory (exit 137 with the daemon's OOM flag), or the harness was refused | retry if attempts remain; else `failed`. A harness refusal (07, 25) is the exception: it is never retried, because the same refusal would come back. A preparer Job whose Pods outlive the Kubernetes provider's deletion wait (26, hades #503) is not an environment failure yet: the attempt goes back to `pending` with the provider's message on `harness_launch_deferred` (`prepare_pod_wait`, the retry number and its delay), the task back to `scheduled` with a `resume_at` 30 s, then 60 s, then 120 s away, and the same attempt row is prepared again, so none of those retries counts against `max_attempts`. The fourth such failure ends the attempt `environment`, its detail saying whether the Job had completed or was still running when the wait gave up, and the rule above applies from there. The bundle the next correction resumes from survives every one of those failures (retention, below) |
+| `environment` | exit 70, the provider failed before the harness ran, the kernel killed the worker out of memory (exit 137 with the daemon's OOM flag), or the harness was refused | retry if attempts remain; else `failed`. A harness refusal (07, 25) is the exception: it is never retried, because the same refusal would come back. A preparer Job whose Pods outlive the Kubernetes provider's deletion wait (26, hades #503) is not an environment failure yet: the attempt goes back to `pending` with the provider's message on `harness_launch_deferred` (`prepare_pod_wait`, the retry number and its delay), the task back to `scheduled` with a `resume_at` 30 s, then 60 s, then 120 s away, and the same attempt row is prepared again, so none of those retries counts against `max_attempts`. The fourth such failure ends the attempt `environment`, its detail saying whether the Job had completed or was still running when the wait gave up, and the rule above applies from there. The bundle the next correction resumes from survives every one of those failures (retention, below). An attempt that dies before launch records why (below, hades #370) |
 | `auth_failure` | harness reported auth problem (adapter classified) | retry per policy (`retry.auth_failure_max`, after `auth_retry_delay_seconds`); wake regardless |
 | `quota_exhausted` | harness reported rate or quota limit | reroute (below): mark the pool (or, for a model-only refusal, exclude the model and leave the pool open, hades #373), commit WIP, new attempt on the next candidate in the tier; if none, `awaiting_quota` until the earliest reset; caps exceeded or task pinned to the exhausted pool: task `reported` with the class visible, wake |
 | `timeout` | contract timeout with no commit on the branch; with commits the exit is `ended_by_budget` (hades #498) | no retry; gates run on what exists; wake |
@@ -53,6 +53,49 @@ fresh workspace. A correction execution starts from the remote
 abandoned or force-pushed over; a plain retry of an unpublished attempt
 starts from `base_ref`, because nothing of the failed attempt was ever
 pushed.
+
+## An attempt that dies before launch records why (hades #370)
+
+A prepare or launch the provider could not carry out ends the attempt
+`environment` at once, `collected` with `stage` (`prepare` or `launch`) and
+the provider's words as `detail` on `attempt_collected`, the same words as
+`termination_detail` ("prepare: ..."), an `exit_info` evidence row, and the
+wake's summary when no retry remains ("attempt N ended environment at
+prepare: ...; no retry remaining", `wakes.environment_failure_summary`). The
+cases of 2026-10-02 showed the words were not enough on their own, so since
+hades #370 the record says:
+
+- **what the preparer said.** A preparer that exits non-zero, times out or
+  stalls ends with its last output lines in the detail and the wake, and its
+  whole stdout and stderr (uncut, a timed-out preparer's included) kept as the attempt's `crucible/preparer.log`
+  artifact (type `preparer_log`) with an `artifact_present` evidence row of
+  role `preparer_log`; a secret pattern in it is redacted first (14). The
+  Kubernetes provider's path is in 26; the Docker provider keeps the tail in
+  the detail as before.
+- **a stall is named as one.** A preparer whose log does not change for the
+  provider's stall bound (26: `preparer_stall_seconds`, 300 by default, well
+  below the 900 s prepare timeout) is ended there with "the preparer Job
+  could not build the checkout (stalled): ... wrote no log output for 300s
+  while it ran" and its last output, not after the full prepare timeout with
+  "(timed out): ... did not finish". Every form of the preparer's failure
+  begins with the words the detail had before hades #370, "the preparer Job
+  could not build the checkout", and names the cause in the parenthesis: the
+  exit code, "stalled", "timed out" or "its Pod never ran".
+- **a quota refusal is a wait, never the attempt's failure.** A worker or
+  preparer Job the namespace quota refuses at admission, and any other object
+  of the preparation a quota 403 refuses, raises `LaunchWaitError`: the
+  attempt returns to `pending` and the task to `scheduled`, no exit class,
+  end time or termination detail is recorded, no retry is consumed, and the
+  refusal (the 403 body or the `FailedCreate` event's message) is the
+  `detail` of the `harness_launch_deferred` event verbatim. A later tick
+  launches it again (hades #423 for the claim and the Jobs; #370 for the
+  rest). Deleting the orphan claims that filled the quota is hades #394.
+- **a correction names its resume source.** When a correction's preparer
+  fails, the detail and the wake say what it was resuming from, the remote
+  work branch (`crucible/<id>`) or the preceding attempt's sealed bundle
+  (naming the attempt), before the preparer's words, so a bundle that is gone
+  or a branch that could not be fetched is told apart from a failed clone of
+  the base.
 
 ## Quota reroute and resume (C6b)
 

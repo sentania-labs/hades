@@ -99,6 +99,7 @@ Behavior = Literal[
     "immortal",
     "vanish",
     "prepare-fails",
+    "prepare-hangs",
     "review",
     "review-disapprove",
     "out-of-scope",
@@ -126,6 +127,9 @@ BEHAVIORS: frozenset[str] = frozenset(
         "immortal",
         "vanish",
         "prepare-fails",
+        # hades #370: the Kubernetes fake's preparer stays Running and silent, for the
+        # stall bound; the Docker fake prepares as `succeed` does.
+        "prepare-hangs",
         "review",
         "review-disapprove",
         "out-of-scope",
