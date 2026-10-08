@@ -66,7 +66,7 @@ CRUCIBLE_DEPLOY_PORT ?= 8080
 .PHONY: up dev down reset lint check-image-manifest scan scan-tree scan-history smoke test test-unit test-unit-in-image \
 	test-integration e2e e2e-github e2e-live e2e-admin e2e-image build proxy-config proxies preflight \
 	e2e-kind e2e-kind-self-hosting e2e-command-timeout registry-check manifests deploy-kind first-run-kind release-images-classify release-images-pull release-images-verify \
-	deploy-local deploy-local-down images images-check images-policy-check release-notes
+	deploy-local deploy-local-down images images-check images-policy-check release-notes flakes
 
 up: preflight proxy-config ## normal mode: postgres, proxies, migrate, crucible
 	@test -f .env || cp .env.example .env
@@ -127,9 +127,9 @@ reset: ## DESTRUCTIVE: down plus postgres, artifact, and credential volumes
 
 lint: check-image-manifest
 	$(UV) sync --frozen --quiet
-	$(UV) run ruff format --check crucible tests tools/release tools/smoke tools/registry tools/images
-	$(UV) run ruff check crucible tests tools/release tools/smoke tools/registry tools/images
-	$(UV) run mypy crucible tests tools/release tools/smoke tools/registry tools/images
+	$(UV) run ruff format --check crucible tests tools/release tools/smoke tools/registry tools/images tools/ci
+	$(UV) run ruff check crucible tests tools/release tools/smoke tools/registry tools/images tools/ci
+	$(UV) run mypy crucible tests tools/release tools/smoke tools/registry tools/images tools/ci
 	$(UV) run lint-imports
 
 check-image-manifest: ## fail when a declared worker-image tag is stale
@@ -207,6 +207,16 @@ scan-history: ## commits in SCAN_RANGE (default origin/main..HEAD)
 	  || { echo "scan-history: no origin/main in this clone; set SCAN_RANGE" >&2; exit 2; }
 	gitleaks detect --redact --no-banner --source . --log-opts="$${SCAN_RANGE:-origin/main..HEAD}"
 
+# REPO (hades #196): owner/repo for tools/ci/flakes.py. GitHub Actions sets
+# GITHUB_REPOSITORY automatically; set REPO locally. CRUCIBLE_FLAKES_APPLY=1 files or
+# updates the `flaky` issues and the weekly summary instead of only printing the
+# report; .github/workflows/flakes.yml passes --apply directly.
+REPO ?= $(GITHUB_REPOSITORY)
+flakes: ## scan recent CI runs for flaky tests and report; needs `gh` authenticated and REPO=owner/repo
+	$(UV) sync --frozen --quiet
+	@test -n "$(REPO)" || { echo "flakes: set REPO=owner/repo"; exit 2; }
+	$(UV) run python tools/ci/flakes.py scan --repo "$(REPO)" $(if $(CRUCIBLE_FLAKES_APPLY),--apply)
+
 smoke: ## drive one task end to end through a running stack; `make up` first
 	@test -f .env || cp .env.example .env
 	@$(COMPOSE) exec -T crucible sh -c "touch /var/lib/crucible/credentials/github/.write-test && rm -f /var/lib/crucible/credentials/github/.write-test" \
@@ -240,24 +250,32 @@ E2E_DUMP_SECONDS ?= 660
 KIND_DUMP_SECONDS ?= 960
 LIVE_DUMP_SECONDS ?= 3660
 
+# JUNIT_XML_DIR (hades #196): when set, test-unit and test-integration each write their
+# own JUnit XML there (unit.xml, integration.xml); ci.yml sets it and uploads the
+# directory as the `junit-test` artifact so a weekly flake scan can read attempt-1's
+# failing tests. Empty by default: a local run writes nothing extra.
+JUNIT_XML_DIR ?=
 test: test-unit test-integration
 
 test-unit:
 	$(UV) sync --frozen --quiet
-	$(UV) run pytest tests/unit -q -n $(PYTEST_WORKERS)
+	$(UV) run pytest tests/unit -q -n $(PYTEST_WORKERS) $(if $(JUNIT_XML_DIR),--junitxml=$(JUNIT_XML_DIR)/unit.xml)
 
 test-integration: ## needs Docker for postgres:16 (testcontainers) or CRUCIBLE_TEST_DATABASE_URL
 	$(UV) sync --frozen --quiet
-	$(UV) run pytest tests/integration -q -m integration -n $(PYTEST_WORKERS)
+	$(UV) run pytest tests/integration -q -m integration -n $(PYTEST_WORKERS) $(if $(JUNIT_XML_DIR),--junitxml=$(JUNIT_XML_DIR)/integration.xml)
 
 e2e-image: ## build the e2e worker image (18) on whichever daemon DOCKER names
 	DOCKER_HOST=$${DOCKER_HOST:-} images/build.sh script-harness
 
+# E2E_JUNIT_XML (hades #196): when set, writes the e2e tier's JUnit XML there; ci.yml
+# sets it and uploads the file as the `junit-e2e` artifact (see JUNIT_XML_DIR above).
+E2E_JUNIT_XML ?=
 e2e: check-image-manifest ## the Docker-provider end-to-end tier (18): real containers, no model
 	$(UV) sync --frozen --quiet
 	CRUCIBLE_E2E_DOCKER="$(DOCKER)" \
 	CRUCIBLE_E2E_DOCKER_SOCKET="$(CRUCIBLE_DOCKER_SOCKET)" \
-	$(UV) run pytest tests/e2e -q -m e2e -o faulthandler_timeout=$(E2E_DUMP_SECONDS)
+	$(UV) run pytest tests/e2e -q -m e2e -o faulthandler_timeout=$(E2E_DUMP_SECONDS) $(if $(E2E_JUNIT_XML),--junitxml=$(E2E_JUNIT_XML))
 
 e2e-kind: check-image-manifest ## Kubernetes-provider e2e on a disposable kind cluster (18, 26)
 	CRUCIBLE_E2E_DOCKER="$(DOCKER)" \

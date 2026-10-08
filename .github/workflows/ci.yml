@@ -85,11 +85,23 @@ jobs:
       - uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c # v7.0.0
         with:
           enable-cache: true
+      - name: where the JUnit XML goes
+        run: mkdir -p "$RUNNER_TEMP/junit"
       # The runner has the Docker CLI, so the compose-rendering unit cases must run here,
       # not skip as they do in the worker image (hades #184).
-      - run: make test
+      - run: make test JUNIT_XML_DIR="$RUNNER_TEMP/junit"
         env:
           CRUCIBLE_COMPOSE_REQUIRED: "1"
+      # hades #196: kept even when this attempt failed, so the weekly flake scan can
+      # read the failing tests of an attempt that failed and a later one that passed.
+      - name: upload the unit and integration JUnit XML
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: junit-test
+          path: ${{ runner.temp }}/junit
+          retention-days: 14
+          if-no-files-found: error
 
   # The end-to-end tier (18) on the runner's own rootful daemon. The local run is on
   # the dedicated rootless daemon (13, S9); this is the same tier, same targets, on the
@@ -104,12 +116,23 @@ jobs:
           enable-cache: true
       - name: build the script-harness worker image
         run: make e2e-image
-      - run: make e2e
+      - name: where the JUnit XML goes
+        run: mkdir -p "$RUNNER_TEMP/junit"
+      - run: make e2e E2E_JUNIT_XML="$RUNNER_TEMP/junit/e2e.xml"
       - name: what the daemon was left holding, on failure
         if: failure()
         run: |
           docker ps -a --filter label=crucible.attempt
           docker network ls
+      # hades #196: kept even when this attempt failed; see the `test` job above.
+      - name: upload the e2e JUnit XML
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: junit-e2e
+          path: ${{ runner.temp }}/junit
+          retention-days: 14
+          if-no-files-found: error
 
   # The worker images (13, C11): the worker image carrying Claude Code, Codex, AGY and
   # Hermes, and the script-harness image, built from the pinned inputs with the same
@@ -296,8 +319,21 @@ jobs:
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - name: build the script-harness worker image
         run: make e2e-image
+      - name: where the JUnit XML goes
+        run: mkdir -p "$RUNNER_TEMP/junit"
       - name: run the kind tier
         run: make e2e-kind
+        env:
+          CRUCIBLE_E2E_KIND_PYTEST_ARGS: --junitxml=${{ runner.temp }}/junit/e2e-kind-${{ matrix.shard }}.xml
+      # hades #196: kept even when this attempt failed; see the `test` job above.
+      - name: upload the kind tier's JUnit XML
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: junit-e2e-kind-${{ matrix.shard }}
+          path: ${{ runner.temp }}/junit
+          retention-days: 14
+          if-no-files-found: error
 
   # The registry adapter through the real crane the service image ships (108): a stub
   # registry that redirects its blobs to another host, then an anonymous resolve of the
