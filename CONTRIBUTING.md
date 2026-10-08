@@ -112,7 +112,10 @@ shutdown after the workers finish.
 Each worker creates and drops its own database using `worker_database_name`;
 a serial run uses one container and one database. `CRUCIBLE_TEST_DATABASE_URL`
 uses an existing server instead, with the same database isolation and without
-starting or stopping a container.
+starting or stopping a container. When no database is reachable (no Docker daemon
+and no `CRUCIBLE_TEST_DATABASE_URL`), the tier fails rather than silently
+skipping. On a developer machine without Docker or Postgres, set
+`CRUCIBLE_ALLOW_NO_DATABASE=1` to opt out and allow the tier to skip.
 
 ## The kind tier runs as shards
 

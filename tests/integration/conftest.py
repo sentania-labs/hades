@@ -4,6 +4,7 @@ API client, and fake provider of one test share that database."""
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -126,9 +127,17 @@ def own_database(server_url: str, name: str) -> Iterator[str]:
 def database_url(worker_id: str, testrun_uid: str, pytestconfig: pytest.Config) -> Iterator[str]:
     # The URL's role needs CREATEDB. Only the server is shared: each worker still
     # creates, migrates and drops its own database (issue 195).
-    url = pytestconfig.stash[SERVER_URL]
+    url = pytestconfig.stash.get(SERVER_URL, None)
     if not url:
-        pytest.skip("Docker daemon not available")
+        if os.environ.get("CRUCIBLE_ALLOW_NO_DATABASE"):
+            pytest.skip(
+                "Docker daemon not available and no CRUCIBLE_TEST_DATABASE_URL; "
+                "opted out via CRUCIBLE_ALLOW_NO_DATABASE"
+            )
+        pytest.fail(
+            "Integration tier requires a database: Docker for postgres:16 (testcontainers) "
+            "or CRUCIBLE_TEST_DATABASE_URL. Set CRUCIBLE_ALLOW_NO_DATABASE=1 to opt out."
+        )
     with own_database(url, worker_database_name(worker_id, testrun_uid)) as own:
         yield own
 
