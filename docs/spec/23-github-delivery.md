@@ -198,8 +198,10 @@ and runs `git merge origin/<base_ref>` with no conflict resolution. A clean merg
 committed as Crucible and pushed with `--force-with-lease` against the known tip; the
 coordinator records `branch_pushed` (reason `merge_main`) and the new head as pushed by
 Crucible, and the task waits for that head's own checks (`awaiting_ci_certification`). A
-clean mechanical merge is silent. Delivery work is considered oldest first within a
-tick, so a rate limit cannot repeatedly put a newer open delivery ahead of an older one.
+clean mechanical merge is silent. Delivery work is advanced oldest first within a tick
+(hades #319): due polls and ready merges form one queue ordered by the task's creation
+time, a task due a poll is polled before its merge is tried, and a rate limit met part
+way stops the queue, so a newer delivery's poll never costs an older one its merge.
 When git stops on conflicts, the publisher reports the conflicting paths and leaves the
 branch untouched; the coordinator raises a `pull_request_conflicting` wake naming those
 paths and then attaches a correction under the task's policy
@@ -209,10 +211,22 @@ That correction starts from the remote branch tip (`resume_from_work_branch`), n
 from the previous attempt's bundle, so the head it publishes fast-forwards the one on the
 pull request. Only a failed correction reaches the orchestrator.
 
-The coordinator performs this check throughout delivery, including the pre-PR and
-correction path while an existing pull request remains open, CI certification, and
-`ready_for_merge`. It never starts merge-main while an execution for the task is active;
-the worker owns the branch until that attempt ends.
+The coordinator performs this check at every delivery step where a push to the branch
+lasts (hades #319): external review, CI certification and `ready_for_merge` as above,
+and a correction attached to an open pull request that has not launched yet
+(`scheduled`, `awaiting_quota`). Such a correction starts from the remote branch tip, so
+the base merged there is the base its worker starts on; its accepted head stays unset
+until it is collected. It is merged into only when its contract resumes from
+`remote_branch` and its execution has no attempt yet (a retried attempt resumes the
+interrupted attempt's bundle), not when it is itself the merge-main correction, and
+once per head: a failed merge leaves only the wake naming the files, since the
+correction is already scheduled. Once a correction has run (`reported` through
+`publish_failed`) nothing is merged: its collected head replaces Crucible's own tip at
+publication (issue 403), which would discard the merge, and the pre-PR gates do not need
+the base because `scope_contained` excludes commits reachable from it (11). The first
+poll after that publication merges the base. The coordinator never starts merge-main
+while an execution for the task is active; the worker owns the branch until that
+attempt ends.
 
 A dirty head someone else pushed is not acted on: the same poll moves the task to
 `head_diverged`, and nothing is merged into that head or launched against it until the
@@ -221,7 +235,9 @@ tip; once that run publishes, the head is Crucible's and is certified and merged
 
 A `ready_for_merge` task first brings a behind head up to date and certifies the new
 head. It merges only when GitHub says that head is current and mergeable and every check
-run on it passed. After Crucible merges it, the merge commit is
+run on it passed. If GitHub's live read just before the merge says `behind`, the merge
+is not attempted and not recorded as a refusal: the row is marked `behind` and polled
+on the next tick, which merges the base in. After Crucible merges it, the merge commit is
 added to the watch list of the `release.main_ci_hold` setting and the supervisor judges
 its checks on main once they complete. Red main opens one fix-main task, on a branch of
 its own, carrying the failed jobs, the failing job's log tail, and the pull request
