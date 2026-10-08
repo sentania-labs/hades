@@ -323,7 +323,7 @@ class Repositories:
         self._s.flush()
         return True
 
-    def get(self, repository_id: str) -> Repository | None:
+    def get(self, repository_id: str, *, for_update: bool = False) -> Repository | None:
         row = self._s.get(RepositoryRow, repository_id)
         return self._to_entity(row) if row else None
 

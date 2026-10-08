@@ -18,13 +18,12 @@ protocol so the domain and application layers never see HTTP.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import TracebackType
 from typing import Any
 
 from crucible.application.admin import github_manifest
-from crucible.application.delivery_decisions import (
-    CIDecisionRequest,
-    record_ci_decision,
-)
+from crucible.application.delivery_decisions import record_ci_decision
+from crucible.contracts.api import CIDecisionRequest
 from crucible.contracts.wake import WakeReason
 from crucible.domain.entities import (
     CIAction,
@@ -396,13 +395,60 @@ class _FakeEvents:
 
 
 class FakeUnitOfWork:
+    """A minimal ``UnitOfWork`` that satisfies the protocol for issue 435 tests.
+
+    Every attribute required by the ``UnitOfWork`` protocol is present; the ones
+    not used by the ci-decision path are ``SimpleNamespace`` stubs with no-op
+    methods so mypy can type-check calls against the real protocol.
+    """
+
+    # Protocol-required repositories with real implementations
     tasks: _FakeTasks
     ci_certifications: _FakeCICerts
-    ci_actions: _FakeCIActions
     ci_decisions: _FakeCIDecisions
     repositories: _FakeRepoRegistry
     wakes: _FakeWakes
     events: _FakeEvents
+    ci_actions: _FakeCIActions
+
+    # Remaining protocol attributes (no-op stubs) - use Any so mypy
+    # does not enforce the full protocol structure on this test fixture.
+    principals: Any
+    ui_sessions: Any
+    contracts: Any
+    executions: Any
+    attempts: Any
+    leases: Any
+    claims: Any
+    logs: Any
+    heartbeats: Any
+    retention: Any
+    supervisor_status: Any
+    idempotency: Any
+    routing_policies: Any
+    pool_exhaustions: Any
+    artifacts: Any
+    evidence: Any
+    review_reports: Any
+    gate_results: Any
+    acceptance: Any
+    decisions: Any
+    escalations: Any
+    dispositions: Any
+    attempt_metrics: Any
+    pull_requests: Any
+    pull_request_heads: Any
+    review_cycles: Any
+    external_reviews: Any
+    review_comments: Any
+    reactions: Any
+    github_deliveries: Any
+    harnesses: Any
+    harness_images: Any
+    bootstrap_imports: Any
+    provider_settings: Any
+    github_manifest_states: Any
+    policies: Any
 
     def __init__(self, task: Task) -> None:
         self.tasks = _FakeTasks(task)
@@ -412,6 +458,43 @@ class FakeUnitOfWork:
         self.repositories = _FakeRepoRegistry(_FakeRepo())
         self.wakes = _FakeWakes()
         self.events = _FakeEvents()
+        # No-op stubs for every remaining repository required by UnitOfWork
+        self.principals = _stub_repo()
+        self.ui_sessions = _stub_repo()
+        self.contracts = _stub_repo()
+        self.executions = _stub_repo()
+        self.attempts = _stub_repo()
+        self.leases = _stub_repo()
+        self.claims = _stub_repo()
+        self.logs = _stub_repo()
+        self.heartbeats = _stub_repo()
+        self.retention = _stub_repo()
+        self.supervisor_status = _stub_repo()
+        self.idempotency = _stub_repo()
+        self.routing_policies = _stub_repo()
+        self.pool_exhaustions = _stub_repo()
+        self.artifacts = _stub_repo()
+        self.evidence = _stub_repo()
+        self.review_reports = _stub_repo()
+        self.gate_results = _stub_repo()
+        self.acceptance = _stub_repo()
+        self.decisions = _stub_repo()
+        self.escalations = _stub_repo()
+        self.dispositions = _stub_repo()
+        self.attempt_metrics = _stub_repo()
+        self.pull_requests = _stub_repo()
+        self.pull_request_heads = _stub_repo()
+        self.review_cycles = _stub_repo()
+        self.external_reviews = _stub_repo()
+        self.review_comments = _stub_repo()
+        self.reactions = _stub_repo()
+        self.github_deliveries = _stub_repo()
+        self.harnesses = _stub_repo()
+        self.harness_images = _stub_repo()
+        self.bootstrap_imports = _stub_repo()
+        self.provider_settings = _stub_repo()
+        self.github_manifest_states = _stub_repo()
+        self.policies = _stub_repo()
 
     def commit(self) -> None:
         pass
@@ -419,8 +502,24 @@ class FakeUnitOfWork:
     def __enter__(self) -> FakeUnitOfWork:
         return self
 
-    def __exit__(self, *exc: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         pass
+
+    def rollback(self) -> None:
+        pass
+
+    def set_fenced_token(self, fenced_token: int) -> None:
+        pass
+
+
+def _stub_repo() -> Any:
+    """A SimpleNamespace that satisfies any repository protocol for no-op stubs."""
+    return __import__("types").SimpleNamespace()
 
 
 def _build_task(state: TaskState = TaskState.CI_CERTIFICATION_FAILED) -> Task:
@@ -482,7 +581,7 @@ def test_ac1_rerun_via_actions_write_records_attempt_and_moves_state() -> None:
     task = _build_task()
     uow = FakeUnitOfWork(task)
     cert = _cert(TASK_ID)
-    uow.ci_certifications.put(cert)  # type: ignore[attr-defined]
+    uow.ci_certifications.put(cert)
     clock = FakeClock()
     gh = FakeGitHubClient(actions_write=True)
     principal = Principal(
@@ -493,7 +592,7 @@ def test_ac1_rerun_via_actions_write_records_attempt_and_moves_state() -> None:
     )
 
     record_ci_decision(
-        uow,
+        uow,  # type: ignore[arg-type]
         clock,
         principal=principal,
         task_id=TASK_ID,
@@ -505,9 +604,9 @@ def test_ac1_rerun_via_actions_write_records_attempt_and_moves_state() -> None:
     assert gh.rerun_calls == [{"repository": TASK_REPOSITORY, "run_id": 5150}]
 
     # The certification records the new attempt number.
-    cert = uow.ci_certifications.last
-    assert cert is not None
-    assert cert.failure["rerun_attempt"] == 1
+    latest_cert = uow.ci_certifications.last
+    assert latest_cert is not None
+    assert latest_cert.failure["rerun_attempt"] == 1
 
     # The task remains in AWAITING_CI_CERTIFICATION (the re-run is in progress).
     assert task.state == TaskState.AWAITING_CI_CERTIFICATION
@@ -523,7 +622,7 @@ def test_ac2_actions_read_only_raises_handoff_wake() -> None:
     the task remains in AWAITING_CI_CERTIFICATION waiting on the operator."""
     task = _build_task()
     uow = FakeUnitOfWork(task)
-    uow.ci_certifications.put(_cert(TASK_ID))  # type: ignore[attr-defined]
+    uow.ci_certifications.put(_cert(TASK_ID))
     clock = FakeClock()
     gh = FakeGitHubClient(actions_write=False)
     principal = Principal(
@@ -534,7 +633,7 @@ def test_ac2_actions_read_only_raises_handoff_wake() -> None:
     )
 
     record_ci_decision(
-        uow,
+        uow,  # type: ignore[arg-type]
         clock,
         principal=principal,
         task_id=TASK_ID,
@@ -563,10 +662,10 @@ def test_ac3_second_failure_requires_new_decision() -> None:
     """AC3: After a rerun attempt has been recorded, a second failure of the same
     job does not trigger another auto-rerun; it requires a new ci-decision."""
     task = _build_task()  # state=CI_CERTIFICATION_FAILED by default
-    cert = _cert(TASK_ID)
-    cert.failure["rerun_attempt"] = 1  # already had one rerun
+    cert_obj = _cert(TASK_ID)
+    cert_obj.failure["rerun_attempt"] = 1  # already had one rerun
     uow = FakeUnitOfWork(task)
-    uow.ci_certifications.put(cert)  # type: ignore[attr-defined]
+    uow.ci_certifications.put(cert_obj)
     clock = FakeClock()
     gh = FakeGitHubClient(actions_write=True)
     principal = Principal(
@@ -577,7 +676,7 @@ def test_ac3_second_failure_requires_new_decision() -> None:
     )
 
     record_ci_decision(
-        uow,
+        uow,  # type: ignore[arg-type]
         clock,
         principal=principal,
         task_id=TASK_ID,
