@@ -15,6 +15,7 @@ from crucible.application.acceptance import (
     deliverable_kinds,
     record_gate_acceptance,
 )
+from crucible.application.routing import load_attempt_routing
 from crucible.application.transitions import move_task, record_event
 from crucible.application.wakes import create_wake
 from crucible.contracts.wake import WakeReason
@@ -89,7 +90,18 @@ def gate_input(uow: UnitOfWork, *, task: Task, attempt: Attempt, execution: Exec
         head_sha=task.head_sha,
         evidence=evidence_items(uow, attempt.id, task.id),
         internal_review_required=internal_review_required(policy, stored.document, execution.role),
+        lab_local=ran_on_lab_local_pool(uow, attempt, policy),
     )
+
+
+def ran_on_lab_local_pool(uow: UnitOfWork, attempt: Attempt, policy: dict[str, Any]) -> bool:
+    """hades #449: the attempt ran on a pool holding a model on a local endpoint, by the
+    routing version it was routed with. An attempt with no pool, or one whose routing
+    cannot be read, is not lab-local, and its acceptance checks are advisory."""
+    if attempt.selected_pool is None:
+        return False
+    routing = load_attempt_routing(uow, policy, attempt.routing_version)
+    return routing is not None and attempt.selected_pool in routing.local_pools()
 
 
 def configured_pre_pr_gates(policy: dict[str, Any]) -> list[str]:

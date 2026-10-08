@@ -122,6 +122,15 @@ class TestWatchdogFires:
         )
 
 
+def _alive(pid: int) -> bool:
+    """Whether a process is still running; a zombie awaiting its reaper is not."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as stat:
+            return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except FileNotFoundError:
+        return False
+
+
 class TestWatchdogScript:
     """Direct tests on watchdog.sh logic."""
 
@@ -165,6 +174,12 @@ class TestWatchdogScript:
         child.kill()
         child.wait()
 
+        # Wait for the watchdog's background process to finish its 3-second timer.
+        wait_until(
+            lambda: not _alive(watchdog_pid),
+            timeout=10,
+            describe="the watchdog's background process to exit",
+        )
         # Wait for the watchdog's background job to finish its 3-second timer.
         wait_until(
             lambda: _process_gone(watchdog_pid),

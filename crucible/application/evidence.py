@@ -24,6 +24,7 @@ from crucible.contracts.evidence import (
     EvidenceKind,
     EvidenceSource,
 )
+from crucible.domain.acceptance_checks import ACCEPTANCE_CHECK_PREFIX
 from crucible.domain.entities import Artifact, Attempt, EvidenceRecord, Task
 from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
 from crucible.domain.gates import injected_name
@@ -173,7 +174,9 @@ def claim_facts(task: Task, outputs: CollectedOutputs) -> ClaimFacts:
                 "log": f"verify/{run.id}.log",
             }
             for run in outputs.verifications
-            if run.ran
+            # hades #449: a criterion check's run is the acceptance_checks gate's
+            # evidence, not one of the report's required checks.
+            if run.ran and not run.id.startswith(ACCEPTANCE_CHECK_PREFIX)
         ),
         run_evidence=tuple(a.name for a in outputs.artifacts if a.type == "run_evidence"),
     )

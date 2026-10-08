@@ -10,9 +10,10 @@ import shlex
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 
 from crucible.contracts.common import StrictModel, check_major_version
+from crucible.domain.acceptance_checks import ACCEPTANCE_CHECK_PREFIX
 from crucible.domain.exit_class import ExitClass
 from crucible.domain.refs import ref_problem
 from crucible.domain.secrets import find_secrets
@@ -100,9 +101,52 @@ class ProjectInstruction(StrictModel):
     ref: str = Field(min_length=1)
 
 
+class AcceptanceCriterionCheck(StrictModel):
+    """hades #449: an executable check on an acceptance criterion, the shape of a
+    `required_verification` command. Foundry writes it when it scopes; Crucible's
+    verifier re-runs it from the collected tree and the `acceptance_checks` gate judges
+    the exit, blocking on a lab-local pool and advisory elsewhere."""
+
+    command: str = Field(min_length=1)
+    expect_exit: int = 0
+
+    @field_validator("command")
+    @classmethod
+    def _runs_in_a_worker(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("is blank")
+        program = worker_absent_program(value)
+        if program is not None:
+            raise ValueError(
+                f"runs `{value}`, which needs {program}: no worker image has docker, kind "
+                "or kubectl (ADR 0020)"
+            )
+        return value
+
+
 class AcceptanceCriterion(StrictModel):
     id: str = Field(min_length=1)
     text: str = Field(min_length=1)
+    check: AcceptanceCriterionCheck | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _check_names_the_criterion(cls, data: Any) -> Any:
+        """A malformed check is refused with a reason that names its criterion, so the
+        422 says which one rather than only a list index."""
+        if not isinstance(data, dict) or data.get("check") is None:
+            return data
+        try:
+            AcceptanceCriterionCheck.model_validate(data["check"])
+        except ValidationError as exc:
+            reasons = "; ".join(
+                ".".join(["check", *(str(p) for p in err["loc"])]) + f": {err['msg']}"
+                for err in exc.errors(include_url=False, include_input=False)
+            )
+            raise ValueError(
+                f"criterion {data.get('id')!r} has a malformed check: {reasons}"
+            ) from None
+        return data
 
 
 # hades #429: the programs no worker image has and never will (ADR 0020: the worker
@@ -375,6 +419,20 @@ class TaskContractV1(StrictModel):
         rv_ids = [v.id for v in self.required_verification]
         if len(set(rv_ids)) != len(rv_ids):
             raise ValueError("required_verification ids must be unique")
+        # hades #449: criterion checks are run under the id
+        # `acceptance:<criterion id>` (domain/acceptance_checks); a required
+        # verification must not use a prefixed id or it would collide on the
+        # collected tree (01M4CS2Q6CD3D8QECEYKRQW503).
+        if any(str(v.id).startswith(ACCEPTANCE_CHECK_PREFIX) for v in self.required_verification):
+            raised = [
+                str(v.id)
+                for v in self.required_verification
+                if str(v.id).startswith(ACCEPTANCE_CHECK_PREFIX)
+            ]
+            raise ValueError(
+                f"required_verification ids must not start with {ACCEPTANCE_CHECK_PREFIX!r}; "
+                f"these collide with criterion checks: {raised}"
+            )
         return self
 
     @model_validator(mode="after")
