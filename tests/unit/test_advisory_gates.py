@@ -51,11 +51,15 @@ def _without_review(evidence: list[EvidenceItem]) -> list[EvidenceItem]:
 
 
 def _out_of_scope() -> list[EvidenceItem]:
-    return _replace(
+    evidence = _replace(
         _passing_evidence(),
         3,
         _ev("diff_paths", {"paths": ["src/ledger/a.py", "infrastructure/out.txt"]}, ident=4),
     )
+    bundle = dict(evidence[2].payload)
+    bundle["commit_paths"] = ["src/ledger/a.py", "infrastructure/out.txt"]
+    evidence[2] = _ev("bundle_head", bundle, ident=3)
+    return evidence
 
 
 # ----- classification ------------------------------------------------------------
@@ -241,9 +245,10 @@ def test_no_report_at_all_still_blocks() -> None:
 
 
 def test_an_advisory_gate_that_errors_goes_to_the_reviewer() -> None:
-    evidence = _replace(
-        _passing_evidence(), 3, _ev("diff_paths", {"paths": None}, ident=4)
-    )  # a payload the evaluator cannot iterate
+    evidence = _passing_evidence()
+    bundle = dict(evidence[2].payload)
+    bundle["commit_paths"] = None
+    evidence[2] = _ev("bundle_head", bundle, ident=3)  # a payload the evaluator cannot iterate
     outcomes = evaluate_pre_pr([GateName.SCOPE_CONTAINED], _gi(evidence))
     assert outcomes[GateName.SCOPE_CONTAINED].result is GateResult.ERROR
     assert blocking(outcomes, DEFAULT) == []
