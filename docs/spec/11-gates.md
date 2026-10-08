@@ -8,8 +8,8 @@ is carried to the reviewer.
 
 | Gate | Class | Purpose |
 |---|---|---|
-| `report_present` | blocking | The worker submitted a parseable report with self-review |
-| `exit_clean` | blocking | The worker exited with a clean class |
+| `report_present` | advisory (always, hades #498) | The worker submitted a parseable report with self-review; a gap is listed for the reviewer and Hades composes the completion record itself |
+| `exit_clean` | blocking | The worker exited with a clean class; a budget end with commits (`ended_by_budget`) is clean whatever the code |
 | `commits_present` | blocking | The branch has at least one commit |
 | `scope_contained` | blocking (prohibited paths) / advisory | Worker commit paths are inside `allowed_paths` |
 | `no_injected_files` | blocking | No injected-name or harness paths appear on the branch |

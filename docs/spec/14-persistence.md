@@ -4,9 +4,11 @@ The worker self-review is the internal review. The required `self_review` sectio
 names where documentation was updated (or why no update was needed), maps every
 acceptance criterion with evidence, and lists anything knowingly left out and why.
 
-A missing or incomplete section fails `report_present`, naming `self_review`.
-When every blocking gate passes and the report is complete, Hades records acceptance
-and publishes without an orchestrator review or acceptance call, for first attempts
+A missing or incomplete section is listed for the reviewer under `report_present`,
+naming `self_review`; it never fails the attempt (hades #498: the gates judge the
+work, not the paperwork, and Hades composes the completion record itself).
+When every blocking gate passes and nothing is listed for the reviewer, Hades records
+acceptance and publishes without an orchestrator review or acceptance call, for first attempts
 and corrections alike. Publication sends one informational `published, PR #N` wake.
 An advisory gate failure still requires an orchestrator review before automatic acceptance.
 The orchestrator can still cancel or attach a correction after publication. The

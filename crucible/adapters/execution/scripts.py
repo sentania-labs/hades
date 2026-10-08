@@ -292,7 +292,8 @@ _COLLECTOR_OUTPUTS = (
     "base.txt head.txt branch.txt diffstat.txt diff.patch changed.txt log.txt "
     "diff-raw.txt commit-raw.txt base-injected.txt injected-blobs "
     "injected-blob-ids.txt injected-blob-ids.sorted injected-error.txt "
-    "commit-paths.txt work_branch.bundle bundle.log commits.txt commit-policy tree "
+    "commit-paths.txt attempt-commit-paths.txt work_branch.bundle bundle.log commits.txt "
+    "commit-policy tree "
     "clone.log report copy-rejections.tsv collection-failed.txt checkpoint-refusal.txt "
     "leftover-committed.txt leftover-refusal.txt collector.ok attr-text.patch "
     f"{CHANGED_BLOBS_DIR} changed-blob-ids.txt {REVIEW_DIFF_DIR}"
@@ -830,6 +831,18 @@ fi
 printf '%s\\n' "$BASE" > "$OUT/base.txt"
 {GIT} -C "$REPO" rev-parse HEAD > "$OUT/head.txt"
 {GIT} -C "$REPO" rev-parse --abbrev-ref HEAD > "$OUT/branch.txt"
+# Finding coverage is about this attempt, not the whole branch. The preparer records
+# HEAD after resuming a bundle or remote branch, outside the worker's writable tree.
+# Missing or invalid evidence must not fall back to the original branch changes.
+: > "$OUT/attempt-commit-paths.txt"
+ATTEMPT_BASE=$(cat "$OUT/prepared-head.txt" 2>/dev/null || true)
+if printf '%s\\n' "$ATTEMPT_BASE" | grep -Eq '^([0-9a-f]{{40}}|[0-9a-f]{{64}})$' \\
+  && {GIT} -C "$REPO" merge-base --is-ancestor "$ATTEMPT_BASE" HEAD 2>/dev/null; then
+  if ! {GIT} -C "$REPO" log {_DIFF_FLAGS} --no-renames --diff-merges=separate \\
+    --name-only -z --format='' "$ATTEMPT_BASE"..HEAD > "$OUT/attempt-commit-paths.txt"; then
+    : > "$OUT/attempt-commit-paths.txt"
+  fi
+fi
 if [ -n "$BASE" ]; then
   if ! MB=$({GIT} -C "$REPO" merge-base "$BASE" HEAD); then
     printf '%s\\n' "collection failed: cannot resolve merge base between $BASE and HEAD" \
