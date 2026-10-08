@@ -22,7 +22,9 @@ from crucible.domain.gates import (
     evaluate_gate,
     injected_shim_text,
 )
-from tests.fixtures import contract_document
+from tests.fixtures import FakeClock, contract_document
+from tests.unit.test_issue_360_ready_for_merge_correction import NOW
+from tests.unit.test_issue_424_proposed_tasks import ORCHESTRATOR, _api, _store
 
 ZERO = "0" * 40
 SHIM_BLOB = hashlib.sha1(
@@ -106,6 +108,7 @@ def test_editing_harness_existing_file_passes() -> None:
     base_paths = [".claude/hooks/check-review-passed.sh"]
     result, _ = _judge(changes, base_paths=base_paths)
     assert result.result is GateResult.PASS
+    assert "existing harness-directory file edited or deleted" in result.detail
 
 
 def test_deleting_harness_existing_file_passes() -> None:
@@ -258,3 +261,51 @@ def test_non_harness_allowed_paths_no_warning() -> None:
     )
     warning = _harness_path_warning(contract)
     assert warning is None
+
+
+def test_broad_allowed_path_globs_return_warning() -> None:
+    for pattern in ("**", "src/**"):
+        contract = MagicMock(spec=TaskContractV1)
+        contract.scope = Scope(
+            allowed_paths=[pattern],
+            prohibited_paths=[],
+            may_add_dependencies=False,
+            may_modify_ci=False,
+        )
+        warning = _harness_path_warning(contract)
+        assert warning is not None
+        assert pattern in warning
+
+
+def test_commit_classification_error_always_fails() -> None:
+    path = ".claude/hooks/check-review-passed.sh"
+    outcome = _outcome(
+        {"paths": [path], "changes": [_change(path, "D")]},
+        [path],
+        [
+            {
+                "path": path,
+                "status": "M",
+                "blob": "b" * 40,
+                "classification": "error: blob over limit",
+            },
+            _change(path, "D"),
+        ],
+        base_paths=[path],
+    )
+    assert outcome.result is GateResult.FAIL
+    assert "error: blob over limit" in outcome.detail
+
+
+def test_submission_response_returns_harness_warning() -> None:
+    # Reuse the in-memory API fixture that exercises the real POST /tasks route.
+    store = _store()
+    body = contract_document()
+    body["scope"]["allowed_paths"] = ["src/**"]
+    with _api(store, FakeClock(NOW), ORCHESTRATOR) as client:
+        response = client.post("/v1/tasks?proposed=true", json=body)
+
+    assert response.status_code == 201, response.text
+    [warning] = response.json()["warnings"]
+    assert "src/**" in warning
+    assert "harness directory" in warning

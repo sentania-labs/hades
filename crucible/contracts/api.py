@@ -117,6 +117,7 @@ class TaskView(Response):
     resume_at: Rfc3339 | None = None
     reroute_chain: list[dict[str, Any]] = Field(default_factory=list)
     gate_probes: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class TaskListItem(Response):

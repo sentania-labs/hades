@@ -48,9 +48,14 @@ The gate output names the rule that fired, for example:
 - `.claude/hooks/check.sh: shim content`
 - `CLAUDE.md: error: undecodable name (invalid UTF-8)`
 
-When the merge base already has a harness-directory file, the gate reports no finding
-for that path (the edit or deletion is allowed).  When a harness path is added or
+When the merge base already has a harness-directory file, the passing detail names the
+``existing harness-directory file edited or deleted`` rule. When a harness path is added or
 turned into a symlink, the detail names `"new entry added"` or `"symlink"` respectively.
+
+Task submission also returns an entry in ``TaskView.warnings`` when an
+``allowed_paths`` entry can reach a harness directory. This includes direct paths and
+broad globs such as ``**`` and ``src/**``; the warning is also retained on later task
+views.
 
 ## Editor and merge leftovers (`editor_leftovers`)
 

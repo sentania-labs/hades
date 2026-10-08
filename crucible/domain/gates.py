@@ -460,7 +460,7 @@ def _injected_hits(
     commit_paths: Sequence[str],
     commit_changes: list[tuple[str, str, str, str]] | None,
     base_paths: frozenset[str] = frozenset(),
-) -> set[str]:
+) -> tuple[set[str], set[str]]:
     """hades #369: an injected-name path fails when the branch adds it relative to the
     base ref, or commits the shim's content into it. Deleting or editing a file the base
     already has is the repository's own work. A file turned into a symlink or back (T)
@@ -473,6 +473,7 @@ def _injected_hits(
     """
     shim = _shim_blob_ids()
     hits: set[str] = set()
+    allowed: set[str] = set()
 
     def _record(path: str, rule: str, blob: str = "") -> None:
         if blob in shim:
@@ -504,7 +505,9 @@ def _injected_hits(
     oldest_status: dict[str, str] = {}
     for path, status, blob, classification in commit_changes or []:
         oldest_status[path] = status
-        if _injected(path):
+        if classification.startswith("error:"):
+            hits.add(f"{path!r}: {classification}")
+        elif _injected(path):
             if status == "T":
                 _record(path, "symlink", blob)
             elif blob in shim or classification == "shim":
@@ -523,8 +526,7 @@ def _injected_hits(
             if diff_changes is None or path not in diff_status:
                 hits.add(f"{path!r}: path under injected prefix")
             elif path in base_paths and diff_status[path] in ("M", "D"):
-                # base has this harness-directory file and it is edited or deleted — allowed
-                pass
+                allowed.add(f"{path!r}: existing harness-directory file edited or deleted")
             else:
                 status = diff_status.get(path, "")
                 if status == "T":
@@ -539,13 +541,13 @@ def _injected_hits(
             if commit_changes is None:
                 # No commit info available; allow if base has it and the diff says M/D.
                 if path in base_paths and diff_status.get(path) in ("M", "D"):
-                    pass
+                    allowed.add(f"{path!r}: existing harness-directory file edited or deleted")
                 else:
                     hits.add(f"{path!r}: path under injected prefix")
             elif path not in oldest_status:
                 hits.add(f"{path!r}: path under injected prefix")
             elif path in base_paths and oldest_status[path] in ("M", "D"):
-                pass
+                allowed.add(f"{path!r}: existing harness-directory file edited or deleted")
             else:
                 status = oldest_status.get(path, "")
                 if status == "T":
@@ -568,7 +570,7 @@ def _injected_hits(
     for path in (*paths, *commit_paths):
         if error := instruction_name_error(path):
             hits.add(f"{path!a}: {error}")
-    return hits
+    return hits, allowed
 
 
 def no_injected_files(gi: GateInput) -> GateOutcome:
@@ -606,20 +608,20 @@ def no_injected_files(gi: GateInput) -> GateOutcome:
         return GateOutcome(
             GateResult.FAIL, f"path lists over their read limit, not fully read: {over}", ids
         )
-    hits = sorted(
-        _injected_hits(
-            [str(p) for p in diff.payload.get("paths", [])],
-            _changes(diff.payload.get("changes")),
-            [str(p) for p in bundle.payload.get("commit_paths", [])],
-            _changes(bundle.payload.get("commit_changes")),
-            _base_paths(diff.payload.get("base_paths")),
-        )
+    hit_set, allowed_set = _injected_hits(
+        [str(p) for p in diff.payload.get("paths", [])],
+        _changes(diff.payload.get("changes")),
+        [str(p) for p in bundle.payload.get("commit_paths", [])],
+        _changes(bundle.payload.get("commit_changes")),
+        _base_paths(diff.payload.get("base_paths")),
     )
+    hits = sorted(hit_set)
     if hits:
         return GateOutcome(GateResult.FAIL, f"injected paths in the branch: {hits[:10]}", ids)
-    return GateOutcome(
-        GateResult.PASS, "no injected instruction, harness, or identity path in the branch", ids
-    )
+    detail = "no injected instruction, harness, or identity path in the branch"
+    if allowed_set:
+        detail += f"; allowed by existing harness-directory file rule: {sorted(allowed_set)[:10]}"
+    return GateOutcome(GateResult.PASS, detail, ids)
 
 
 def no_secrets(gi: GateInput) -> GateOutcome:
