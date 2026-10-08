@@ -68,6 +68,14 @@ jobs:
         env:
           BEFORE: ${{ github.event.before }}
           SHA: ${{ github.sha }}
+          # A no-cache dispatch (114) advertises a from-scratch image build; `before` is
+          # absent on a dispatch, so without this the range falls back to
+          # `origin/main..$SHA`, which is empty or core-only on a dispatch from main (or a
+          # core-only branch) and would silently skip the images job the dispatch exists
+          # to force. `images` and `kind` are forced regardless of what the diff says;
+          # `class` still names the diff's own classification, since this is an
+          # operational override of which jobs run, not a reclassification of the change.
+          DISPATCH_NO_CACHE: ${{ github.event_name == 'workflow_dispatch' && inputs.no_cache }}
         run: |
           set -euo pipefail
           if git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
@@ -77,6 +85,10 @@ jobs:
           fi
           uv sync --frozen --quiet
           git diff --name-only "$RANGE" | uv run python3 tools/ci/changes.py >> "$GITHUB_OUTPUT"
+          if [ "$DISPATCH_NO_CACHE" = "true" ]; then
+            echo "images=true" >> "$GITHUB_OUTPUT"
+            echo "kind=true" >> "$GITHUB_OUTPUT"
+          fi
 
   lint:
     runs-on: ubuntu-24.04

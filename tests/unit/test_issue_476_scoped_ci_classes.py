@@ -20,15 +20,20 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 import yaml
 
+from crucible.application.observation import PHASE_POST_PR, evaluate_delivery_gates
 from crucible.domain.certification import CertificationState, CheckSource, ObservedCheck, certify
 from crucible.domain.change_class import classify
-from crucible.domain.gates import DeliveryInput, GateResult, ci_green_for_head
+from crucible.domain.entities import CICertification
+from crucible.domain.gates import DeliveryInput, GateName, GateResult, ci_green_for_head
+from tests.fixtures import FakeClock
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 CI_YML = REPOSITORY / ".github" / "workflows" / "ci.yml"
@@ -139,6 +144,22 @@ def test_ci_yml_has_a_classify_job_running_the_classifier_script() -> None:
     assert outputs["kind"] == "${{ steps.classify.outputs.kind }}"
 
 
+def test_a_no_cache_dispatch_forces_the_images_output_on() -> None:
+    """Finding 01M4CG0K22MC0760ZZ3JVFJHEC: `github.event.before` is absent on a
+    workflow_dispatch, so the range falls back to `origin/main..$SHA`; dispatching on
+    main (or a core-only branch) would otherwise classify as core-only and skip the
+    very images job the `no_cache=true` escape hatch exists to force from scratch."""
+    jobs = _ci_jobs()
+    run = str(jobs["classify"]["steps"][-1]["run"])
+    env = jobs["classify"]["steps"][-1]["env"]
+    assert env["DISPATCH_NO_CACHE"] == (
+        "${{ github.event_name == 'workflow_dispatch' && inputs.no_cache }}"
+    )
+    assert 'DISPATCH_NO_CACHE" = "true"' in run
+    assert 'echo "images=true" >> "$GITHUB_OUTPUT"' in run
+    assert 'echo "kind=true" >> "$GITHUB_OUTPUT"' in run
+
+
 @pytest.mark.parametrize("job_name", ["images", "registry"])
 def test_images_and_registry_jobs_gate_on_the_images_output(job_name: str) -> None:
     jobs = _ci_jobs()
@@ -196,10 +217,41 @@ def test_worker_tag_unchanged_reuses_the_published_image_by_digest() -> None:
 
 
 def test_worker_tag_changed_rebuilds_and_pushes() -> None:
-    current = "WORKER=crucible-worker:20261001-def\n"
-    previous = "WORKER=crucible-worker:20260916-abc\n"
+    current = "WORKER=crucible-worker:20261001-def\nSCRIPT_HARNESS=x\n"
+    previous = "WORKER=crucible-worker:20260916-abc\nSCRIPT_HARNESS=x\n"
     decision = worker_decision.decide(current, previous)
     assert decision.reuse is False
+
+
+def test_harness_tag_changed_alone_still_rebuilds_the_harness() -> None:
+    """Finding 01M4CG0K1TQH50GM73R9H9CQRB: WORKER unchanged but SCRIPT_HARNESS moved
+    must not reuse the harness by digest -- that would silently republish the
+    previous release's harness under the new version, never building the one the
+    current manifest declares."""
+    current = (
+        "WORKER=crucible-worker:20260916-abc\nSCRIPT_HARNESS=crucible-worker:script-harness-2\n"
+    )
+    previous = (
+        "WORKER=crucible-worker:20260916-abc\nSCRIPT_HARNESS=crucible-worker:script-harness-1\n"
+    )
+    decision = worker_decision.decide(current, previous)
+    assert decision.reuse is True
+    assert decision.harness_reuse is False
+
+
+def test_both_tags_unchanged_reuse_both() -> None:
+    current = "WORKER=crucible-worker:same\nSCRIPT_HARNESS=crucible-worker:script-harness-same\n"
+    previous = "WORKER=crucible-worker:same\nSCRIPT_HARNESS=crucible-worker:script-harness-same\n"
+    decision = worker_decision.decide(current, previous)
+    assert decision.reuse is True
+    assert decision.harness_reuse is True
+
+
+def test_a_manifest_with_no_script_harness_line_is_an_error() -> None:
+    with pytest.raises(worker_decision.ManifestError):
+        worker_decision.decide(
+            "WORKER=crucible-worker:1\n", "WORKER=crucible-worker:1\nSCRIPT_HARNESS=x\n"
+        )
 
 
 def test_a_manifest_with_no_worker_line_is_an_error_not_a_reuse() -> None:
@@ -212,13 +264,15 @@ def test_worker_decision_cli_prints_the_reuse_decision(
 ) -> None:
     current = tmp_path / "current.env"
     previous = tmp_path / "previous.env"
-    current.write_text("WORKER=crucible-worker:same\n")
-    previous.write_text("WORKER=crucible-worker:same\n")
+    current.write_text("WORKER=crucible-worker:same\nSCRIPT_HARNESS=crucible-worker:h-same\n")
+    previous.write_text("WORKER=crucible-worker:same\nSCRIPT_HARNESS=crucible-worker:h-same\n")
     code = worker_decision.main(["--current", str(current), "--previous", str(previous)])
     out, _ = capsys.readouterr()
     assert code == 0
     assert "reuse=true" in out
     assert "previous_worker_tag=crucible-worker:same" in out
+    assert "harness_reuse=true" in out
+    assert "previous_harness_tag=crucible-worker:h-same" in out
 
 
 def test_version_previous_picks_the_highest_tag_below_the_candidate() -> None:
@@ -291,14 +345,25 @@ def test_release_yml_reuse_wiring_names_the_decision_and_skips_the_build() -> No
     assert "previous" in by_id
     assert "version.py --previous" in str(by_id["previous"]["run"])
     by_name = {step.get("name"): step for step in steps if step.get("name")}
+    # Finding 01M4CG0K1TQH50GM73R9H9CQRB: the worker tag alone no longer decides
+    # whether the build runs; a harness-only change must still rebuild, since
+    # images.sh builds both images together and there is no way to build only one.
+    build_if = (
+        "steps.worker_decision.outputs.reuse != 'true' || "
+        "steps.worker_decision.outputs.harness_reuse != 'true'"
+    )
     build_step = by_name["build and prove the worker images"]
-    assert build_step["if"] == "steps.worker_decision.outputs.reuse != 'true'"
+    assert build_step["if"] == build_if
     push_step = by_name["push the worker images, never over an existing version"]
-    assert push_step["if"] == "steps.worker_decision.outputs.reuse != 'true'"
+    assert push_step["if"] == build_if
     reuse_step = by_name["re-publish the previous release's worker images by digest"]
-    assert reuse_step["if"] == "steps.worker_decision.outputs.reuse == 'true'"
+    assert reuse_step["if"] == (
+        "steps.worker_decision.outputs.reuse == 'true' && "
+        "steps.worker_decision.outputs.harness_reuse == 'true'"
+    )
     notes_step = by_name["render the release notes with the published digests"]
     assert "WORKER_REUSED_FROM" in notes_step["env"]
+    assert "harness_reuse" in notes_step["env"]["WORKER_REUSED_FROM"]
 
 
 # ----- AC4: certification records the change class, and a filtered job is not missing
@@ -389,3 +454,44 @@ def test_ci_green_for_head_omits_the_change_class_when_none_is_known() -> None:
     )
     assert outcome.result is GateResult.PASS
     assert outcome.detail == "9 of 9 jobs succeeded"
+
+
+def test_evaluate_delivery_gates_threads_the_certifications_change_class() -> None:
+    """Finding 01M4CG0K1Z72QKBVMXJRHWK5KK: `evaluate_delivery_gates` must carry a
+    stored certification's `change_class` onto `DeliveryInput`, not just the direct
+    unit calls onto `ci_green_for_head`; otherwise live gate evaluation never reports
+    the class."""
+    task = SimpleNamespace(id="task", head_sha=HEAD, principal_id="foundry")
+    uow = SimpleNamespace(
+        decisions=SimpleNamespace(list_for_task=lambda _task_id: []),
+        dispositions=SimpleNamespace(list_for_comments=lambda _ids, _hashes: []),
+        gate_results=SimpleNamespace(
+            list_for_attempt=lambda _attempt_id: [], put=lambda _row: None
+        ),
+        events=SimpleNamespace(append=lambda event: event),
+    )
+    certification = CICertification(
+        id="cert",
+        pull_request_id="pr",
+        task_id="task",
+        head_sha=HEAD,
+        state="green",
+        required_checks=["lint"],
+        check_runs=[],
+        failure={},
+        detail="1 of 1 jobs succeeded",
+        evaluated_at=datetime(2026, 10, 6, tzinfo=UTC),
+        change_class="images",
+    )
+    result = evaluate_delivery_gates(
+        uow,
+        FakeClock(datetime(2026, 10, 6, tzinfo=UTC)),
+        task=cast(Any, task),
+        attempt_id="attempt-1",
+        pull_request=None,
+        policy={"gates": {"post_pr": [GateName.CI_GREEN_FOR_HEAD.value]}},
+        certification=certification,
+        branch_pushed_sha=HEAD,
+        phases=(PHASE_POST_PR,),
+    )
+    assert "change class: images" in result["details"][GateName.CI_GREEN_FOR_HEAD.value]

@@ -111,24 +111,28 @@ release notes say plainly. The release body records all three images as
 `name:<version>@<digest>`, read back from the registry after the push, so a
 deployer pins from the release, never from a local guess.
 
-**The worker image is rebuilt only when it changed (hades #476, the operator's
-design of 2026-10-06).** Before building, the tag workflow finds the previous
-release (the highest `vMAJOR.MINOR.PATCH` tag below this one; `tools/release/
-version.py --previous`) and reads that release's own committed
-`images/manifest.env`. `tools/release/worker_decision.py` compares its `WORKER`
-tag with this release's: unchanged, the release skips the worker image build and
-push entirely and instead copies the previous release's already-published worker
-and script-harness images to this version's tags with `docker buildx imagetools
-create`, by digest, the same way the "move latest" step above moves tags without
-pushing from a local build; changed, it builds and pushes as before. Either way
-the candidate's own crane still resolves the published worker image (Gate 3,
-part three) before anything is tagged. The release notes name a reused image
-explicitly (`- the worker image is unchanged since ...; republished ... by
-digest, not rebuilt`), so a reader never mistakes a copy for a fresh build. This
-does not change what a job tests, and it is not the per-harness promotion flow
-on Images; both are explicitly out of scope for #476. Known limit: `tools/images/
-images.sh` builds the worker and script-harness images together and is not
-split by this change, so a release that reuses the worker image (by its `WORKER`
-tag alone) also skips rebuilding script-harness, even on the rare release where
-only `SCRIPT_HARNESS` changed. Proven directly at `tests/unit/
-test_issue_476_scoped_ci_classes.py`.
+**The worker and script-harness images are rebuilt only when their own tag
+changed (hades #476, the operator's design of 2026-10-06, corrected per finding
+01M4CG0K1TQH50GM73R9H9CQRB).** Before building, the tag workflow finds the
+previous release (the highest `vMAJOR.MINOR.PATCH` tag below this one;
+`tools/release/version.py --previous`) and reads that release's own committed
+`images/manifest.env`. `tools/release/worker_decision.py` compares both the
+`WORKER` tag and the `SCRIPT_HARNESS` tag with this release's, independently:
+when both are unchanged, the release skips the image build and push entirely
+and instead copies the previous release's already-published worker and
+script-harness images to this version's tags with `docker buildx imagetools
+create`, by digest, the same way the "move latest" step above moves tags
+without pushing from a local build; when either tag changed, it builds and
+pushes both. `tools/images/images.sh` builds the two images together and is
+not split by this change, so a harness-only change still rebuilds the worker
+alongside it rather than silently republishing the previous release's
+script-harness image under a new version -- there is no way to build only one
+of the two without editing `tools/images/images.sh`, which is out of scope for
+this contract. Either way the candidate's own crane still resolves the
+published worker image (Gate 3, part three) before anything is tagged. The
+release notes name a reused image explicitly (`- the worker image is unchanged
+since ...; republished ... by digest, not rebuilt`), so a reader never mistakes
+a copy for a fresh build; that note, like the reuse decision itself, only fires
+when both tags are unchanged. This does not change what a job tests, and it is
+not the per-harness promotion flow on Images; both are explicitly out of scope
+for #476. Proven directly at `tests/unit/test_issue_476_scoped_ci_classes.py`.

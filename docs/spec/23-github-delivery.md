@@ -525,6 +525,25 @@ the task cannot wait silently (hades #343).
   outcome sees which classification explains what ran. Both are proven directly at
   `tests/unit/test_issue_476_scoped_ci_classes.py`; changing what the jobs test, and
   the per-harness promotion flow (Images), are explicitly out of scope for this.
+  Live wiring (corrected per finding 01M4CG0K1Z72QKBVMXJRHWK5KK): `certify_head`
+  (`crucible.application.observation`) reads the polled attempt's own collected
+  `diff_paths` evidence (the same evidence `scope_contained` reads) through
+  `change_class_for_attempt`, classifies it, and passes the label into `certify`;
+  `evaluate_delivery_gates` carries the stored `CICertification.change_class` onto
+  `DeliveryInput` for `ci_green_for_head`. The class is persisted on
+  `ci_certifications.change_class` (migration `0052_cert_change_class`) and exposed
+  on `CICertificationView`, empty for a certification computed before #476 or for an
+  attempt that collected no diff.
+- **A no-cache dispatch forces the images tier on (finding
+  01M4CG0K22MC0760ZZ3JVFJHEC).** `github.event.before` is absent on a
+  `workflow_dispatch`, so the classify job's diff range falls back to
+  `origin/main..$SHA`; dispatching the escape hatch (above) from `main`, or from a
+  core-only branch, would otherwise classify as core-only and skip the very `images`
+  job `no_cache=true` exists to force from scratch. The classify job's `images` and
+  `kind` outputs are therefore forced to `true` whenever the dispatch set
+  `no_cache=true`, regardless of what the path diff says; the recorded `class` output
+  still names the diff's own classification, since this is an operational override of
+  which jobs run, not a reclassification of the change.
 
 ## Merge
 

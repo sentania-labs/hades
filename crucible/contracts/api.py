@@ -561,6 +561,7 @@ class CICertificationView(Response):
     check_runs: list[Any]
     failure: dict[str, Any]
     evaluated_at: Rfc3339
+    change_class: str
 
 
 class CIDecisionView(Response):
