@@ -105,7 +105,7 @@ Per attempt the provider creates, in `crucible-workers`, all labelled
 | Secret `cred-<attempt>` | the per-attempt copy of one harness credential directory, seeded from the harness's dedicated Secret in `crucible-workers`, `rw-narrow` where the adapter declares it (12) | attempt, deleted under every cleanup policy |
 | Secret `checkout-<attempt>` | a private repository's read-only installation token (ADR 0019), key `token`, mounted mode 0400 at `/run/crucible-token` into the refresher and the preparer Jobs and nothing else | created just before the refresher, deleted once the preparer's Pod is gone, on every path; a deletion that fails fails the prepare, and `discard`, `cleanup` and the retention sweep retry it |
 | Job `refresh-cache-<attempt>` | the reference cache's only writer: fetches the repository's bare mirror on the cache PVC (or clones it when absent), with git egress only and no workspace or identity bundle; for a private repository it also mounts `checkout-<attempt>` and fetches with it. It gives the remote 20 seconds to answer a ref listing and otherwise leaves the mirror as it is, so a refresh that cannot connect costs seconds, not the kernel's two-minute connect timeout (hades #191) | until complete, then deleted, before the preparer starts |
-| Job `prepare-<attempt>` | the preparer: clone into the PVC from the reference cache, mounted read-only, then branch, shims, author identity, `origin` placeholder (08) | until complete, then deleted |
+| Job `prepare-<attempt>` | the preparer: clone into the PVC from the reference cache, mounted read-only, then branch, shims, author identity, `origin` placeholder (08). Its stdout and stderr are read before it is deleted; when it failed they are kept as the attempt's `crucible/preparer.log` artifact (hades #370) | until complete, then deleted |
 | Job `worker-<attempt>` | the worker, one Pod, `backoffLimit: 0`, `restartPolicy: Never` | until terminal, then deleted after `logs_drained` |
 | Job `collect-<attempt>` | the collector, no network, repo and report read-only, output read-write (08) | until complete |
 | Job `verify-bundle-<attempt>` | `git bundle verify`, no network | until complete |
@@ -139,6 +139,34 @@ push), and whose timeout then names the quota. For the gate probe and the
 preparer that end is a `LaunchWaitError` the supervisor answers by launching
 the attempt again later; for a collection role it is the unavailable path the
 supervisor collects again from (hades #423).
+
+The preparer alone has a stall bound beside its timeout (hades #370):
+`kubernetes.preparer_stall_seconds` in the settings file, 300 by default and
+0 to turn it off, well below `prepare_timeout_seconds` (900). Once its Pod is
+Running the provider reads the Pod log's last line on every poll; a preparer
+whose last line has not changed for the bound is ended there, its Job
+deleted, and the attempt ends `environment` with a detail that names the
+stall ("wrote no log output for 300s while it ran"), the bound and the
+preparer's last output, instead of waiting out the whole prepare timeout to
+say only that it did not finish. The clone runs with `--progress`, so a large
+repository still transferring writes a line and is not a stall; a log read
+that fails is neither progress nor its absence. Before hades #370 (the cases
+of 2026-10-02) a preparer stuck behind a full claim quota waited the full
+fifteen minutes and left nothing but the exit class.
+
+When the preparer exits non-zero, times out or stalls, the provider raises
+`PrepareFailedError` (08's `ProviderError`, hades #370): its message ends
+with the preparer's last output lines (the last twelve, capped), which become
+the attempt's `termination_detail` ("prepare: ...") and the wake's summary;
+its `output` is the whole tail the provider read, which the supervisor keeps
+as the `crucible/preparer.log` artifact (type `preparer_log`) with an
+`artifact_present` evidence row of role `preparer_log`, redacted first if a
+secret pattern matches; and for a correction its `resume_source` names what
+the correction was resuming from, the remote work branch or the preceding
+attempt's sealed bundle, so the detail and the wake read "the correction
+resumes from the sealed bundle of attempt <id>, and the preparer Job could
+not build the checkout (exit 4): previous attempt bundle is gone". An
+implementing attempt names no source.
 
 ## Pod shape (every role)
 
@@ -750,7 +778,16 @@ the quota's words as the reason, the attempt unconsumed and without an exit
 class. The gate probe and the preparer raise the same when the quota refuses
 their Pod, and a `persistentvolumeclaims` quota refusing the workspace claim
 does too; a refused gate probe is therefore retried on a later tick rather
-than recorded as `check_cannot_run`. A refusal `observe` sees after the launch
+than recorded as `check_cannot_run`. Since hades #370 this holds for every
+quota resource the preparation touches, not only the claim and the Jobs: a
+403 naming the quota on the identity ConfigMap, the credential or checkout
+Secret, or the preparer's NetworkPolicy (a `count/configmaps`,
+`count/secrets` or `count/networkpolicies` limit) is the same
+`LaunchWaitError`. The refusal is recorded as the API server or the Job
+controller said it: the 403 body, or the `FailedCreate` event's message, is
+the `detail` of the `harness_launch_deferred` event on the attempt, uncut,
+and the attempt itself carries no exit class, no end time and no
+termination detail from it. A refusal `observe` sees after the launch
 window keeps the attempt running while the controller retries the Pod, and
 the launch timeout counts from the last refusal. Any other create refusal (a
 webhook that denied the Pod, a policy that rejected the spec) ends the

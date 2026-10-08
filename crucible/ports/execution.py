@@ -558,6 +558,30 @@ class LaunchWaitError(ProviderError):
     not consumed and no exit class is recorded."""
 
 
+class PrepareFailedError(ProviderError):
+    """The preparer ran and could not build the checkout (hades #370). The message is
+    the environment detail and the wake's summary, so it carries the preparer's last
+    output lines; `output` is the preparer's whole stdout and stderr tail, verbatim,
+    which the supervisor keeps as attempt evidence; `exit_code` is the preparer's own
+    exit, or the provider's sentinel for a wait that ran out or a stall; and
+    `resume_source` names what a correction was resuming from (the remote work branch
+    or the preceding attempt's sealed bundle), None for an attempt that starts from the
+    base ref."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        output: str = "",
+        exit_code: int | None = None,
+        resume_source: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.output = output
+        self.exit_code = exit_code
+        self.resume_source = resume_source
+
+
 class WorkerStartError(ProviderError):
     """Hades #346: the runtime accepted the worker but could not start its process (a
     mount that is not a directory, an executable not found, an exec format error). The

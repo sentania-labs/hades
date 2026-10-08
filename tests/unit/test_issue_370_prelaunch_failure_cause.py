@@ -1,305 +1,538 @@
-"""Issue 370: an attempt that dies before launch records why.
+"""hades #370: an attempt that dies before launch records why.
 
-This module verifies the four acceptance criteria:
+The 2026-10-02 cases ended `environment` with nothing but the exit class: the preparer's
+output was gone with its Pod, a quota refusal looked like the attempt's failure, a clone
+that made no progress waited out the whole prepare timeout, and a correction that could
+not fetch its resume source did not say which source. This module proves the four asks:
 
-- AC1  An attempt whose preparer exits non-zero ends the environment with the
-       preparer's last output lines on the attempt and in the wake.
-- AC2  A worker or preparer Job refused at admission for quota is retried as a
-       wait (LaunchWaitError) and not counted as the attempt's failure, with the
-       refusal text recorded.
-- AC3  A preparer that logs nothing for longer than the stall bound is ended
-       with a detail naming the stall, before ``prepare_timeout_seconds``.
-- AC4  A correction whose resume source cannot be fetched names that source
-       (remote branch or bundle) in the wake text.
+- AC1: a preparer that exits non-zero ends environment with its last output lines on the
+  attempt (detail, artifact, evidence) and in the wake.
+- AC2: a worker or preparer Job the quota refused at admission is a wait, not the
+  attempt's failure, with the refusal text recorded as it came.
+- AC3: a preparer that logs nothing for the stall bound is ended with a detail naming the
+  stall, before `prepare_timeout_seconds`.
+- AC4: a correction whose resume source cannot be fetched names that source in the wake.
 """
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
+from hashlib import sha256
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
-from crucible.adapters.execution import k8sfake
 from crucible.adapters.execution import k8sspec
+from crucible.adapters.execution import kubernetes as kubernetes_module
+from crucible.adapters.execution.k8sapi import KubernetesApiError
 from crucible.adapters.execution.kubernetes import (
+    JOB_STALLED,
+    JOB_TIMED_OUT,
     KubernetesConfig,
-    KubernetesProvider,
-    LaunchSpec,
-    LaunchWaitError,
-    ProviderError,
-    _names_quota,
+    _last_lines,
 )
-from crucible.ports.execution import WORK_MOUNT
-from tests.fixtures import contract_document
-from tests.unit.kubernetes_fixtures import (
-    ATTEMPT,
-    IMAGE,
-    TASK,
-    build,
+from crucible.adapters.execution.scripts import preparer_script
+from crucible.application.wakes import environment_failure_summary
+from crucible.cli.wiring import kubernetes_config
+from crucible.contracts.evidence import PREPARER_LOG_NAME, PREPARER_LOG_TYPE, ROLE_PREPARER_LOG
+from crucible.domain.events import EventKind
+from crucible.domain.exit_class import ExitClass
+from crucible.domain.lifecycle import AttemptState, TaskState
+from crucible.ports.artifacts import StoredBlob
+from crucible.ports.execution import LaunchWaitError, PrepareFailedError, ProviderError
+from crucible.settings import Settings
+from tests.unit.kubernetes_fixtures import build, spec
+from tests.unit.test_issue_423_quota_capacity_waits import _events, _finishing
+
+PREVIOUS = "01PREVIOUS000000000000000A"
+
+# The fake's FailedCreate event, word for word (k8sfake `_start_job`).
+FAILED_CREATE = (
+    "exceeded quota: crucible-workers, requested: limits.memory=4Gi, used: "
+    "limits.memory=12Gi, limited: limits.memory=12Gi"
+)
+# A 403 body the API server itself answers a create with when a count quota is full.
+FORBIDDEN = (
+    'jobs.batch "prepare-01attempt0000000000000000a" is forbidden: exceeded quota: '
+    "hades-workers, requested: count/jobs.batch=1, used: count/jobs.batch=60, "
+    "limited: count/jobs.batch=60"
+)
+CLONE_FAILURE = (
+    "Cloning into '/crucible/work/repo'...\n"
+    "fatal: unable to access 'https://github.com/acme/example.git/': "
+    "Could not resolve host: github.com"
 )
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _make_provider(**config_overrides: object) -> tuple[k8sfake.FakeKubernetesApi, KubernetesProvider]:
-    """Return a provider backed by :class:`FakeKubernetesApi`."""
-    config = KubernetesConfig(
-        poll_interval_seconds=0,
-        launch_timeout_seconds=5,
-        storage_class="lab-ssd",
-        preparer_stall_seconds=config_overrides.pop("preparer_stall_seconds", 120),
-        prepare_timeout_seconds=config_overrides.pop(
-            "prepare_timeout_seconds", 900
-        ),
-        **config_overrides,
-    )
-    api, registry, provider = build(config=config)
-    return api, provider
-
-
-def _build_spec(
-    *,
-    attempt_id: str = ATTEMPT,
-    role: str = "implement",
-    **overrides: Any,
-) -> LaunchSpec:
-    """Build a LaunchSpec, overriding the role (unlike the fixture)."""
-    document = contract_document()
-    document["repository"]["work_branch"] = "crucible/EX-0001"
-    return LaunchSpec(
-        attempt_id=attempt_id,
-        task_id=TASK,
-        external_id="EX-0001",
-        role=role,
-        harness="script-harness",
-        model="none",
-        image=IMAGE,
-        timeout_seconds=600,
-        contract=document,
-        network="policy",
-        endpoint="subscription",
-        policy={
-            "images": {"allowlist": ["crucible-worker:*"]},
-            "network": {"mode": "egress-proxy", "egress_allowlist": ["pypi.org", "github.com"]},
-            "resources": {"cpus": 2, "memory": "4GiB"},
-            "limits": {"grace_seconds": 30},
-        },
-        repository_url="https://github.com/acme/example.git",
+def _config(**overrides: Any) -> KubernetesConfig:
+    values: dict[str, Any] = {
+        "poll_interval_seconds": 0,
+        "launch_timeout_seconds": 5,
+        "storage_class": "lab-ssd",
         **overrides,
+    }
+    return KubernetesConfig(**values)
+
+
+def _correction(**overrides: Any) -> Any:
+    launch = spec(**overrides)
+    return replace(launch, role="correct")
+
+
+def _refusing(
+    api: Any, kind: str, body_text: str, *, status: int = 403, role: str | None = None
+) -> None:
+    """Make the fake API server refuse every create of `kind` (of `role`'s objects only,
+    when given) with `body_text`."""
+    original = api.create
+
+    def refuse(created_kind: str, body: Any) -> Any:
+        labels = (body.get("metadata") or {}).get("labels") or {}
+        if created_kind == kind and (role is None or labels.get(k8sspec.LABEL_ROLE) == role):
+            raise KubernetesApiError(status, body_text, path=f"/namespaces/x/{kind}")
+        return original(created_kind, body)
+
+    api.create = refuse
+
+
+class _MemoryStore:
+    """An artifact store that keeps what it was given, so a test reads it back."""
+
+    def __init__(self) -> None:
+        self.blobs: dict[str, bytes] = {}
+
+    def put(self, content: bytes) -> StoredBlob:
+        digest = sha256(content).hexdigest()
+        self.blobs[digest] = content
+        return StoredBlob(path=f"blobs/{digest}", sha256=digest, size=len(content))
+
+    def get(self, path: str) -> bytes:
+        return self.blobs[path.removeprefix("blobs/")]
+
+    def exists(self, path: str) -> bool:
+        return path.removeprefix("blobs/") in self.blobs
+
+
+def _supervisor_prepare_fails(
+    monkeypatch: pytest.MonkeyPatch, error: ProviderError
+) -> tuple[Any, Any, Any, _MemoryStore]:
+    """A preparing attempt whose provider `prepare` raises `error`, with the evidence
+    and classification steps real enough to read what they wrote."""
+    supervisor, item, uow, _provider, _launch = _finishing(monkeypatch)
+    monkeypatch.setattr(supervisor, "_prepare", AsyncMock(side_effect=error))
+    store = _MemoryStore()
+    supervisor._artifacts = store
+    uow.artifacts.find_by_sha256.return_value = None
+    return supervisor, item, uow, store
+
+
+# ----- AC1: the preparer's output is the detail, the evidence and the wake -------------
+
+
+async def test_a_failed_preparer_raises_with_its_output_and_exit() -> None:
+    api, _registry, provider = build(config=_config())
+    launch = spec()
+    api.script(launch.attempt_id, "prepare-fails")
+
+    with pytest.raises(PrepareFailedError) as raised:
+        await provider.prepare(launch)
+
+    error = raised.value
+    assert "the preparer Job could not build the checkout (exit 3)" in str(error)
+    assert "the fake preparer could not clone" in str(error)
+    assert error.exit_code == 3
+    assert error.output.strip() == "the fake preparer could not clone"
+    assert error.resume_source is None
+    # The preparer's words are also what the provider keeps for the role.
+    assert "the fake preparer could not clone" in provider.last_error[k8sspec.ROLE_PREPARER]
+
+
+def test_the_message_keeps_the_last_lines_of_a_long_output() -> None:
+    """A clone's log can run to thousands of characters; the detail and the wake are
+    capped, so what survives the cap is the end of it, where git says what went wrong."""
+    output = "\n".join(f"Receiving objects: {i}% ({i}/100)" for i in range(100))
+    output += "\nfatal: the remote end hung up unexpectedly"
+
+    kept = _last_lines(output)
+
+    assert kept.endswith("fatal: the remote end hung up unexpectedly")
+    assert "Receiving objects: 0%" not in kept
+    assert len(kept) <= 803
+    assert _last_lines("one line") == "one line"
+
+
+async def test_the_supervisor_keeps_the_output_as_evidence_and_puts_the_last_lines_in_the_wake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = PrepareFailedError(
+        f"the preparer Job could not build the checkout (exit 128): {CLONE_FAILURE}",
+        output=CLONE_FAILURE,
+        exit_code=128,
+    )
+    supervisor, item, uow, store = _supervisor_prepare_fails(monkeypatch, error)
+
+    assert not await supervisor._finish_launch(item, supervisor._providers.get("fake"))
+
+    attempt = item.attempt
+    assert attempt.exit_class is ExitClass.ENVIRONMENT
+    assert attempt.state is AttemptState.COLLECTED
+    assert attempt.termination_detail is not None
+    assert attempt.termination_detail.startswith("prepare: ")
+    assert "Could not resolve host: github.com" in attempt.termination_detail
+    # The whole output is an artifact of the attempt, and an evidence row points at it.
+    (artifact,) = [call.args[0] for call in uow.artifacts.add.call_args_list]
+    assert artifact.type == PREPARER_LOG_TYPE
+    assert artifact.filename == PREPARER_LOG_NAME
+    assert artifact.attempt_id == attempt.id
+    assert store.get(artifact.path).decode("utf-8") == CLONE_FAILURE
+    rows = [call.args[0] for call in uow.evidence.add.call_args_list]
+    (evidence,) = [row for row in rows if row.payload.get("role") == ROLE_PREPARER_LOG]
+    assert evidence.kind == "artifact_present"
+    assert evidence.verified is True
+    assert evidence.artifact_id == artifact.id
+    assert evidence.payload["lines"] == 2
+    # The wake carries the same last lines.
+    finish = supervisor._classify_and_finish
+    finish.assert_called_once()
+    summary = finish.call_args.kwargs["wake_summary"]
+    assert summary.startswith("attempt 1 ended environment at prepare: ")
+    assert "Could not resolve host: github.com" in summary
+    assert summary == environment_failure_summary(
+        1, "prepare", attempt.termination_detail.removeprefix("prepare: ")
     )
 
 
-# ---------------------------------------------------------------------------
-# AC1 – preparer non-zero exit leaves last output in the wake
-# ---------------------------------------------------------------------------
+async def test_a_launch_failure_without_output_stores_no_preparer_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a preparer that ran has output. Any other environment end records its detail
+    as before and no empty artifact."""
+    supervisor, item, uow, _store = _supervisor_prepare_fails(
+        monkeypatch, ProviderError("the preparer produced no HEAD")
+    )
 
-class TestAC1PreparerLastOutput:
-    """An attempt whose preparer exits non-zero ends the environment with the
-    preparer's last output lines on the attempt and in the wake."""
+    assert not await supervisor._finish_launch(item, supervisor._providers.get("fake"))
 
-    async def test_nonzero_preparer_exit_includes_last_lines(self) -> None:
-        api, provider = _make_provider()
-        spec_obj = _build_spec()
-
-        api.script(spec_obj.attempt_id, "prepare-fails")
-
-        with pytest.raises(ProviderError) as exc_info:
-            await provider.prepare(spec_obj)
-
-        error_text = str(exc_info.value)
-        assert "exit 3" in error_text
-        assert "the fake preparer could not clone" in error_text
-
-    async def test_last_error_includes_preparer_output(self) -> None:
-        """The provider's ``last_error`` dict carries the preparer's output."""
-        api, provider = _make_provider()
-        spec_obj = _build_spec()
-
-        api.script(spec_obj.attempt_id, "prepare-fails")
-
-        with pytest.raises(ProviderError):
-            await provider.prepare(spec_obj)
-
-        detail = provider.last_error.get(k8sspec.ROLE_PREPARER, "")
-        assert "the fake preparer could not clone" in detail
+    assert item.attempt.termination_detail == "prepare: the preparer produced no HEAD"
+    uow.artifacts.add.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# AC2 – quota admission refusal -> wait-and-retry, not failure
-# ---------------------------------------------------------------------------
-
-class TestAC2QuotaRefusalWaitAndRetry:
-    """A worker or preparer Job refused at admission for quota is retried as a
-    wait (LaunchWaitError) and not counted as the attempt's failure."""
-
-    def test_names_quota_predicate(self) -> None:
-        """The private predicate ``_names_quota`` recognises quota errors."""
-        assert _names_quota("exceeded quota: cpu")
-        assert _names_quota("failed quota: memory")
-        assert not _names_quota("the namespace has no room for the preparer")
-        assert _names_quota("EXCEEDED QUOTA: cpu")
-        assert _names_quota("some message exceeded quota: memory")
-
-    async def test_preparer_quota_refusal_is_launch_wait_error(self) -> None:
-        """A preparer whose Job is refused by quota raises LaunchWaitError."""
-        api, provider = _make_provider()
-        spec_obj = _build_spec()
-
-        api.script(spec_obj.attempt_id, "prepare-fails")
-        api.quota_refused_roles.add(k8sspec.ROLE_PREPARER)
-
-        with pytest.raises(LaunchWaitError) as exc_info:
-            await provider.prepare(spec_obj)
-
-        detail = str(exc_info.value)
-        assert "quota" in detail
-        assert "no room for the preparer" in detail
-        assert "exceeded quota" in detail
-
-    async def test_worker_quota_refusal_is_launch_wait_error(self) -> None:
-        """A worker Job whose execution fails due to a quota refusal raises
-        LaunchWaitError, not ProviderError."""
-        api, provider = _make_provider()
-        spec_obj = _build_spec()
-
-        # Successful prepare
-        workspace = await provider.prepare(spec_obj)
-        assert workspace is not None
-
-        # Quota refusal on worker.
-        api.quota_refused_roles.add(k8sspec.ROLE_WORKER)
-
-        spec2 = _build_spec(attempt_id=spec_obj.attempt_id)
-
-        with pytest.raises(LaunchWaitError) as exc_info:
-            await provider.launch(workspace, spec2)
-
-        assert "quota" in str(exc_info.value)
+# ----- AC2: a quota refusal at admission is a wait, with the refusal recorded ---------
 
 
-# ---------------------------------------------------------------------------
-# AC3 – preparer stall detection
-# ---------------------------------------------------------------------------
+async def test_a_preparer_pod_the_quota_refused_is_a_wait_with_the_event_verbatim() -> None:
+    """The Job controller could not create the preparer's Pod: its FailedCreate event
+    names the quota. The attempt waits for room, and the event's words are the reason."""
+    api, _registry, provider = build(config=_config())
+    launch = spec()
+    api.quota_refused_roles.add(k8sspec.ROLE_PREPARER)
 
-class TestAC3PreparerStallDetection:
-    """A preparer that logs nothing for longer than the stall bound is ended
-    with a detail naming the stall, before ``prepare_timeout_seconds``."""
+    with pytest.raises(LaunchWaitError) as raised:
+        await provider.prepare(launch)
 
-    async def test_stall_bound_catches_zero_output(self) -> None:
-        """A preparer Pod that produces no log output for >
-        ``preparer_stall_seconds`` is ended as a stall.
-
-        We achieve this by back-dating the fake's creationTimestamp so the
-        pod is treated as older than the 120-s stall bound, and we force the
-        pod's logs to be empty so the _check_stall path fires the error
-        (the provider sees a non-zero exit and enters the error path where
-        _check_stall is called)."""
-        api, provider = _make_provider(preparer_stall_seconds=120)
-        api.backdate_creation_seconds = 300
-        spec_obj = _build_spec()
-
-        # The fake preparer normally writes nothing and exits 0.  We need the
-        # exit code to be non-zero so that _check_stall is consulted inside the
-        # error path.  We force the fake to produce an empty output for the
-        # preparer Pod and give it a non-zero exit by making the claim-suppress
-        # path raise the claim-not-ready sentinel (which maps to exit 70).
-        #
-        # A simpler route: use the real k8sfake "prepare-fails" behavior but
-        # wipe its output line so _check_stall sees an empty log.
-        api.script(spec_obj.attempt_id, "prepare-fails")
-        # Find the preparer Pod name and wipe its logs.
-        pod_name = None
-        for (kind, name), _obj in list(api.objects.items()):
-            if kind == "pods":
-                labels = (_obj.body.get("metadata") or {}).get("labels") or {}
-                if labels.get(k8sspec.LABEL_ROLE) == k8sspec.ROLE_PREPARER:
-                    pod_name = name
-                    break
-        if pod_name is not None:
-            api.logs[pod_name] = []
-
-        with pytest.raises(ProviderError) as exc_info:
-            await provider.prepare(spec_obj)
-
-        error_text = str(exc_info.value)
-        assert "produced no log output" in error_text.lower()
-
-    async def test_stall_error_recorded_in_last_error(self) -> None:
-        """The stall message is recorded in the provider's ``last_error`` dict."""
-        api, provider = _make_provider(preparer_stall_seconds=120)
-        api.backdate_creation_seconds = 300
-        spec_obj = _build_spec()
-        api.script(spec_obj.attempt_id, "prepare-fails")
-        pod_name = None
-        for (kind, name), _obj in list(api.objects.items()):
-            if kind == "pods":
-                labels = (_obj.body.get("metadata") or {}).get("labels") or {}
-                if labels.get(k8sspec.LABEL_ROLE) == k8sspec.ROLE_PREPARER:
-                    pod_name = name
-                    break
-        if pod_name is not None:
-            api.logs[pod_name] = []
-
-        with pytest.raises(ProviderError):
-            await provider.prepare(spec_obj)
-
-        detail = provider.last_error.get(k8sspec.ROLE_PREPARER, "")
-        assert "produced no log output" in detail
-
-    async def test_preparer_with_output_passes_stall_check(self) -> None:
-        """A preparer that writes log output is not ended as a stall."""
-        api, provider = _make_provider(preparer_stall_seconds=120)
-        spec_obj = _build_spec()
-
-        api.script(spec_obj.attempt_id, "prepare-fails")
-
-        # The "prepare-fails" behavior writes output, so stall should NOT fire.
-        with pytest.raises(ProviderError) as exc_info:
-            await provider.prepare(spec_obj)
-
-        error_text = str(exc_info.value)
-        # Because there IS output, the stall check returns JOB_NO_STALL and the
-        # normal error path takes over (not stall, just "could not clone").
-        assert "the fake preparer could not clone" in error_text
+    assert str(raised.value).startswith("the namespace quota has no room for the preparer: ")
+    assert FAILED_CREATE in str(raised.value)
+    assert not isinstance(raised.value, PrepareFailedError)
+    # Nothing of the preparer stays behind to count against the quota again.
+    assert not any(kind == "jobs" for kind, _ in api.objects)
 
 
-# ---------------------------------------------------------------------------
-# AC4 – correction resume source failure names the source in the wake
-# ---------------------------------------------------------------------------
+async def test_a_preparer_job_the_api_server_refused_for_the_quota_is_a_wait() -> None:
+    """A `count/jobs.batch` quota refuses the Job itself with a 403; the body is kept."""
+    api, _registry, provider = build(config=_config())
+    _refusing(api, "jobs", FORBIDDEN)
 
-class TestAC4CorrectionResumeSource:
-    """A correction whose resume source cannot be fetched names that source
-    (remote branch or bundle) in the wake text."""
+    with pytest.raises(LaunchWaitError) as raised:
+        await provider.prepare(spec())
 
-    async def test_correction_bundle_failures_name_source(self) -> None:
-        """A correction whose bundle fetch fails names 'bundle' in the error."""
-        api, provider = _make_provider()
-        spec_obj = _build_spec(role="correct")
-        spec_obj.contract["repository"] = {"resume_from_work_branch": False}
+    assert FORBIDDEN in str(raised.value)
 
-        api.script(spec_obj.attempt_id, "prepare-fails")
 
-        with pytest.raises(ProviderError) as exc_info:
-            await provider.prepare(spec_obj)
+@pytest.mark.parametrize(
+    ("kind", "role"),
+    [("configmaps", None), ("networkpolicies", k8sspec.ROLE_PREPARER)],
+    ids=["identity-configmap", "preparer-networkpolicy"],
+)
+async def test_any_quota_resource_refusing_a_prepare_create_is_a_wait(
+    kind: str, role: str | None
+) -> None:
+    """hades #423 made the claim and the preparer Job wait. Every other object the
+    preparation creates counts against some quota resource too, and a 403 naming the
+    quota on any of them is the same wait."""
+    api, _registry, provider = build(config=_config())
+    body = (
+        f'{kind} "x" is forbidden: exceeded quota: hades-workers, requested: count/{kind}=1, '
+        f"used: count/{kind}=20, limited: count/{kind}=20"
+    )
+    _refusing(api, kind, body, role=role)
 
-        error_text = str(exc_info.value)
-        assert "bundle" in error_text
-        assert "checkout failed" in error_text
-        assert "the fake preparer could not clone" in error_text
+    with pytest.raises(LaunchWaitError) as raised:
+        await provider.prepare(spec())
 
-    async def test_last_error_names_source_for_corrections(self) -> None:
-        """The provider error for a correction carries source info for the wake."""
-        api, provider = _make_provider()
-        spec_obj = _build_spec(role="correct")
-        spec_obj.contract["repository"] = {"resume_from_work_branch": False}
+    assert body in str(raised.value)
 
-        api.script(spec_obj.attempt_id, "prepare-fails")
 
-        with pytest.raises(ProviderError) as exc_info:
-            await provider.prepare(spec_obj)
+async def test_a_refusal_that_is_not_the_quota_still_ends_the_attempt() -> None:
+    """Only the quota is a wait. A webhook that denied the object is the attempt's
+    environment failure with the API server's words, as hades #423 left it."""
+    api, _registry, provider = build(config=_config())
+    _refusing(api, "configmaps", 'admission webhook "policy.lab" denied the request')
 
-        error_text = str(exc_info.value)
-        # Correction's preparer error names the source (bundle) in the message.
-        assert "bundle" in error_text
+    with pytest.raises(ProviderError, match=r'webhook "policy\.lab" denied') as raised:
+        await provider.prepare(spec())
+
+    assert not isinstance(raised.value, LaunchWaitError)
+
+
+async def test_a_worker_pod_the_quota_refused_is_a_wait_with_the_event_verbatim() -> None:
+    api, _registry, provider = build(config=_config())
+    launch = spec()
+    workspace = await provider.prepare(launch)
+    api.quota_refused_roles.add(k8sspec.ROLE_WORKER)
+
+    with pytest.raises(LaunchWaitError) as raised:
+        await provider.launch(workspace, launch)
+
+    assert FAILED_CREATE in str(raised.value)
+    assert launch.attempt_id not in provider._launched
+
+
+async def test_the_supervisor_returns_a_refused_attempt_to_pending_with_the_refusal_uncut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal is recorded as it came: a long one is not cut to the detail cap."""
+    refusal = FORBIDDEN + "; " + ", ".join(f"pod-{i} holds limits.cpu=3" for i in range(60))
+    assert len(refusal) > 1000
+    supervisor, item, uow, _provider, _launch = _finishing(monkeypatch)
+    monkeypatch.setattr(
+        supervisor,
+        "_prepare",
+        AsyncMock(
+            side_effect=LaunchWaitError(
+                f"the namespace quota has no room for the preparer: {refusal}"
+            )
+        ),
+    )
+
+    assert not await supervisor._finish_launch(item, supervisor._providers.get("fake"))
+
+    attempt = item.attempt
+    assert attempt.state is AttemptState.PENDING
+    assert item.task.state is TaskState.SCHEDULED
+    assert attempt.exit_class is None
+    assert attempt.termination_detail is None
+    assert attempt.ended_at is None
+    supervisor._classify_and_finish.assert_not_called()
+    uow.artifacts.add.assert_not_called()
+    (deferred,) = _events(uow, EventKind.HARNESS_LAUNCH_DEFERRED)
+    assert deferred.payload["quota_wait"] is True
+    assert deferred.payload["stage"] == "prepare"
+    assert deferred.payload["detail"].endswith(refusal)
+
+
+# ----- AC3: a silent preparer is ended at the stall bound -----------------------------
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> dict[str, float]:
+    """The provider's monotonic clock, advanced one second per poll, so a wait of
+    minutes takes no time and the test reads how long the provider waited."""
+    state = {"now": 0.0}
+
+    async def sleep(seconds: float) -> None:
+        state["now"] += max(seconds, 1.0)
+
+    monkeypatch.setattr(
+        kubernetes_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: state["now"], time=lambda: 1_760_000_000.0),
+    )
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    return state
+
+
+async def test_a_silent_preparer_is_ended_at_the_stall_bound_before_the_prepare_timeout(
+    clock: dict[str, float],
+) -> None:
+    api, _registry, provider = build(
+        config=_config(
+            launch_timeout_seconds=300, prepare_timeout_seconds=900, preparer_stall_seconds=60
+        )
+    )
+    launch = spec()
+    api.script(launch.attempt_id, "prepare-hangs")
+
+    with pytest.raises(PrepareFailedError) as raised:
+        await provider.prepare(launch)
+
+    error = raised.value
+    assert error.exit_code == JOB_STALLED
+    assert str(error).startswith("the preparer stalled: ")
+    assert "wrote no log output for 60s while it ran" in str(error)
+    assert "below its 900s timeout" in str(error)
+    assert "its last output: Cloning into '/crucible/work/repo'..." in str(error)
+    # Ended at the bound, not at the prepare timeout.
+    assert 60 <= clock["now"] < 120
+    # The stalled Job is gone, as a finished one would be.
+    assert not any(kind == "jobs" for kind, _ in api.objects)
+    assert "wrote no log output" in provider.last_error[k8sspec.ROLE_PREPARER]
+
+
+async def test_a_preparer_that_keeps_writing_is_not_a_stall(
+    clock: dict[str, float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Progress is a log that changes. A clone still receiving objects for longer than
+    the bound is left alone; the bound counts from its last line."""
+    api, _registry, provider = build(
+        config=_config(
+            launch_timeout_seconds=300, prepare_timeout_seconds=900, preparer_stall_seconds=60
+        )
+    )
+    launch = spec()
+    api.script(launch.attempt_id, "prepare-hangs")
+    original = api.pod_log
+    reads = {"n": 0}
+
+    def progressing(name: str, **kwargs: Any) -> Any:
+        if name.startswith("prepare-") and reads["n"] < 150:
+            reads["n"] += 1
+            api.logs[name] = [
+                f"2026-10-02T00:{reads['n'] // 60:02d}:{reads['n'] % 60:02d}.000000000Z "
+                f"Receiving objects: {reads['n'] // 2}%"
+            ]
+        return original(name, **kwargs)
+
+    monkeypatch.setattr(api, "pod_log", progressing)
+
+    with pytest.raises(PrepareFailedError, match="the preparer stalled"):
+        await provider.prepare(launch)
+
+    # About 150 polls of progress, then the 60 s bound: well past the bound alone.
+    assert clock["now"] >= 200
+
+
+async def test_without_a_stall_bound_the_silent_preparer_waits_out_the_prepare_timeout(
+    clock: dict[str, float],
+) -> None:
+    """The bound is what ends it early: with the setting off, the same preparer runs to
+    the prepare timeout and is reported as such."""
+    api, _registry, provider = build(
+        config=_config(
+            launch_timeout_seconds=300, prepare_timeout_seconds=900, preparer_stall_seconds=0
+        )
+    )
+    launch = spec()
+    api.script(launch.attempt_id, "prepare-hangs")
+
+    with pytest.raises(PrepareFailedError) as raised:
+        await provider.prepare(launch)
+
+    assert raised.value.exit_code == JOB_TIMED_OUT
+    assert str(raised.value).startswith("the preparer timed out: ")
+    # A wait that ran out is Crucible's words, not preparer output: nothing to keep.
+    assert raised.value.output == ""
+    assert clock["now"] >= 900
+
+
+def test_the_stall_bound_has_a_default_well_below_the_prepare_timeout() -> None:
+    config = KubernetesConfig()
+    assert config.preparer_stall_seconds == 300
+    assert config.preparer_stall_seconds * 3 <= config.prepare_timeout_seconds
+    # The settings file seeds it, and the wiring passes it through.
+    assert Settings().kubernetes.preparer_stall_seconds == 300
+    wired = kubernetes_config(Settings(kubernetes={"preparer_stall_seconds": 45}))
+    assert wired.preparer_stall_seconds == 45
+
+
+def test_the_clone_reports_its_progress_so_a_large_transfer_is_not_a_stall() -> None:
+    script = preparer_script(
+        url="https://github.com/acme/example.git",
+        base_ref="main",
+        work_branch="crucible/EX-0001",
+        from_remote_branch=False,
+        cache_name=None,
+        author_name="crucible-worker",
+        author_email="crucible-worker@users.noreply.github.com",
+        origin_placeholder="crucible://origin",
+        claude_md_wins=False,
+        shims=(),
+        exclude_entries=(),
+        identity_mount="/crucible/identity",
+    )
+    assert "clone --progress --no-hardlinks --no-checkout" in script
+
+
+# ----- AC4: a correction names the resume source it could not fetch -------------------
+
+
+async def test_a_correction_resuming_from_the_remote_branch_names_it() -> None:
+    api, _registry, provider = build(config=_config())
+    launch = _correction()
+    api.script(launch.attempt_id, "prepare-fails")
+
+    with pytest.raises(PrepareFailedError) as raised:
+        await provider.prepare(launch)
+
+    assert raised.value.resume_source == "the remote work branch 'crucible/EX-0001'"
+    assert str(raised.value).startswith(
+        "the correction resumes from the remote work branch 'crucible/EX-0001', and the "
+        "preparer Job could not build the checkout (exit 3): "
+    )
+    assert "the fake preparer could not clone" in str(raised.value)
+
+
+async def test_a_correction_resuming_from_a_bundle_names_the_bundle() -> None:
+    api, _registry, provider = build(config=_config())
+    launch = _correction(
+        resume_bundle_path="/workspace/previous/output/work_branch.bundle",
+        resume_bundle_attempt_id=PREVIOUS,
+        resume_bundle_head="a" * 40,
+        resume_bundle_sha256="b" * 64,
+        resume_bundle_ancestor="c" * 40,
+    )
+    api.script(launch.attempt_id, "prepare-fails")
+
+    with pytest.raises(PrepareFailedError) as raised:
+        await provider.prepare(launch)
+
+    assert raised.value.resume_source == f"the sealed bundle of attempt {PREVIOUS}"
+    assert f"the correction resumes from the sealed bundle of attempt {PREVIOUS}" in str(
+        raised.value
+    )
+
+
+async def test_an_implementing_attempt_names_no_resume_source() -> None:
+    api, _registry, provider = build(config=_config())
+    launch = spec()
+    api.script(launch.attempt_id, "prepare-fails")
+
+    with pytest.raises(PrepareFailedError) as raised:
+        await provider.prepare(launch)
+
+    assert raised.value.resume_source is None
+    assert "resumes from" not in str(raised.value)
+
+
+async def test_the_wake_names_the_resume_source_the_correction_could_not_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = "previous attempt bundle is gone"
+    error = PrepareFailedError(
+        f"the correction resumes from the sealed bundle of attempt {PREVIOUS}, and the "
+        f"preparer Job could not build the checkout (exit 4): {output}",
+        output=output,
+        exit_code=4,
+        resume_source=f"the sealed bundle of attempt {PREVIOUS}",
+    )
+    supervisor, item, _uow, _store = _supervisor_prepare_fails(monkeypatch, error)
+
+    assert not await supervisor._finish_launch(item, supervisor._providers.get("fake"))
+
+    summary = supervisor._classify_and_finish.call_args.kwargs["wake_summary"]
+    assert f"resumes from the sealed bundle of attempt {PREVIOUS}" in summary
+    assert "previous attempt bundle is gone" in summary
+    assert item.attempt.termination_detail is not None
+    assert f"sealed bundle of attempt {PREVIOUS}" in item.attempt.termination_detail

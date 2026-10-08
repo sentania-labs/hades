@@ -24,7 +24,7 @@ import tarfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import IO, Any
 
 from crucible.adapters.execution.fake import (
@@ -274,9 +274,6 @@ class FakeKubernetesApi:
     # Pod is removed (or left terminated with 137 when `deadline_keeps_pod`).
     job_deadline_fires: bool = False
     deadline_keeps_pod: bool = False
-    # FakeKubernetesApi back-dates all object creationTimestamps by this many seconds,
-    # so that stall-checks (120 s) fire without a clock-spy (120).
-    backdate_creation_seconds: int = 0
     # The publisher (23): each push it acted out, with the remote, the branch, the head
     # and the token it found in its Secret, so a test sees what reached the push without
     # the token ever being anywhere else.
@@ -423,11 +420,6 @@ class FakeKubernetesApi:
             # and a Job's events name it.
             self._uids += 1
             stored["metadata"]["uid"] = f"uid-{self._uids}"
-        # Every real Kubernetes object gets a creationTimestamp (00, 07).
-        base_ts = (datetime.now(UTC) - timedelta(seconds=self.backdate_creation_seconds)).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
-        stored.setdefault("metadata", {})["creationTimestamp"] = base_ts
         self.objects[(kind, name)] = _Object(kind, name, stored)
         self.created.append({"kind": kind, "name": name, "body": stored})
         if kind == "persistentvolumeclaims":
@@ -879,6 +871,11 @@ class FakeKubernetesApi:
         if behavior == "prepare-fails":
             self.logs[obj.name] = ["the fake preparer could not clone"]
             self._finish(obj, 3, reason="Error")
+            return
+        if behavior == "prepare-hangs":
+            # hades #370: a clone that makes no progress. The Pod stays Running with the
+            # clone's first line as its whole log, so only the stall bound ends it.
+            self.logs[obj.name] = [f"{_stamp(0)} Cloning into '/crucible/work/repo'..."]
             return
         if not self.claims_suppress_head:
             claim["output/prepared-head.txt"] = (synthetic_head_sha(attempt_id) + "\n").encode()

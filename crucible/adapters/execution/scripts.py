@@ -506,8 +506,11 @@ mkdir -p "$OUT"
 rm -rf "$REPO"
 {credential}REFERENCE=""
 {refresh}
+# hades #370: `--progress` makes the clone report its transfer without a terminal, so
+# the provider's stall bound on the preparer's log sees a large clone moving and ends
+# only one that is not.
 # shellcheck disable=SC2086
-{GIT} clone --no-hardlinks --no-checkout $REFERENCE -- "$CLONE_URL" "$REPO"
+{GIT} clone --progress --no-hardlinks --no-checkout $REFERENCE -- "$CLONE_URL" "$REPO"
 {drop}cd "$REPO"
 # Record the trusted base before the worker can move refs. Output is mounted only
 # into Crucible-owned containers, never into the worker.
