@@ -1,4 +1,5 @@
 import contextlib
+import json
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -122,8 +123,6 @@ def test_ac1_migration_renumbered_past_main_highest(tmp_path: Path) -> None:
     assert outcome.merged is True
     assert outcome.exit_code == 0
     assert "schema.json" in files
-
-    import json
 
     schema = json.loads(files["schema.json"])
     assert "branch_table" in schema["tables"]

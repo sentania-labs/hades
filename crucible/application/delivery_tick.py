@@ -1639,15 +1639,18 @@ class DeliveryCoordinator:
             for other in open_prs:
                 if other.id == pr.id:
                     continue
-                if getattr(other, "schema_tables", ()):
-                    if set(other.schema_tables).intersection(pr.schema_tables):
-                        if other.number < pr.number:
-                            return (other.number, True)
+                if (
+                    other.id != pr.id
+                    and getattr(other, "schema_tables", ())
+                    and set(other.schema_tables).intersection(pr.schema_tables)
+                    and other.number < pr.number
+                ):
+                    return (other.number, True)
             return None
 
     def _hold_for_overlap(self, plan: MergePlan, other_number: int) -> None:
-        from crucible.application.delivery_decisions import create_wake
-        from crucible.contracts.wake import WakeReason
+        from crucible.application.delivery_decisions import create_wake  # noqa: PLC0415
+        from crucible.contracts.wake import WakeReason  # noqa: PLC0415
 
         with self._host._fenced() as uow:
             task = uow.tasks.get(plan.task_id, for_update=True)
@@ -1668,7 +1671,7 @@ class DeliveryCoordinator:
             return bool(pr and getattr(pr, "schema_tables", ()))
 
     def _get_merge_main_request(self, plan: MergePlan):
-        from crucible.contracts.api import MergeMainRequest
+        from crucible.contracts.api import MergeMainRequest  # noqa: PLC0415
 
         with self._host._fenced() as uow:
             pr = uow.pull_requests.get(plan.pull_request_id)
