@@ -203,50 +203,33 @@ recursion depth limit entirely.
 
 Each live log tail polls its attempt and log chunks in a short-lived database
 unit of work every 250 ms. The service now admits at most 20 concurrent tails
-per process by default (`service.max_sse_log_tails`). The next request receives
-the `sse-tail-limit-exceeded` RFC 9457 problem with `429` and `Retry-After: 1`.
+per process by default (`service.max_sse_log_tails`). The next tail receives
+the `sse-tail-limit-exceeded` RFC 9457 problem with `429` and `Retry-After: 1`;
+plain (non-streaming) log reads are not limited.
 
 Measured with `uv run python tools/benchmarks/issue_37_sse_tail_concurrency.py
-20 2` against its SQLite test database on 2026-10-08, after moving the tail
-permit's release to a `BackgroundTask` tied to the response lifecycle (see
-below):
+<tails> 2` against its SQLite test database on 2026-10-08:
 
 | Tails | Elapsed | Queries | Queries/s | Connection checkouts | Peak connections in use |
 |---:|---:|---:|---:|---:|---:|
-| 20 | 2.027 s | 360 | 177.63 | 180 | 1 |
+| 1 | 2.016 s | 18 | 8.93 | 9 | 1 |
+| 20 | 2.025 s | 360 | 177.74 | 180 | 1 |
 
-The benchmark counts SQL statements and pool checkout/checkin events while all
-tails remain open. SQLite serializes this local workload, so the one-connection
-peak is a property of this measurement, not a production database capacity
-claim; the 20-tail process-local cap prevents unbounded polling load.
+Load is linear in tails: each poll is two statements (attempt, log chunks) on one
+pool checkout, about 4.5 checkouts and 9 queries per second per tail, so the
+20-tail cap bounds a process at roughly 180 queries per second from tails. The
+benchmark counts SQL statements and pool checkout/checkin events only over the
+timed interval, after every tail's initial snapshot. The poll's unit of work is
+synchronous inside the async route, so tails never hold more than one connection
+at a time in this measurement; that is a property of this local SQLite run, not
+a production database capacity claim.
 
-### Review finding: the permit leaked on an early disconnect
-
-A non-author review of the first implementation (PR #527, commit `4de48bf`)
-found that a client disconnecting after the permit was acquired but before the
-SSE generator began its first iteration would leak the permit permanently:
-`aclose()` on an async generator that never started running executes none of
-its body, so a `try/finally: ctx.sse_tail_limiter.release()` inside the
-generator never ran. The pinned Uvicorn stack advertises ASGI 2.3, under which
-Starlette races `stream_response` against `listen_for_disconnect` in a task
-group; a disconnect that wins that race before the body iterator's first
-`__anext__` call leaves the generator unstarted. Enough aborted handshakes
-would exhaust the configured limit and strand every later tail on `429` until
-the process restarted. A second finding on the same commit, against
-`tools/benchmarks/issue_37_sse_tail_concurrency.py`, noted that the query and
-checkout counters started before the elapsed-time denominator, inflating the
-reported queries-per-second and checkout counts.
-
-Both were fixed before this branch's current head:
-
-- The permit is now released by a `starlette.background.BackgroundTask`
-  attached to the `StreamingResponse`, not by a `try/finally` inside the
-  generator body. `Response.__call__` awaits `background` after the
-  `stream_response`/`listen_for_disconnect` race resolves regardless of which
-  side won, so the release always runs exactly once per successful
-  `try_acquire()` — including when the generator never started.
-- The benchmark resets its counters immediately before starting the timed
-  polling phase (after `get_attempt_logs` has already taken its initial
-  per-tail database snapshot), so `queries_per_second` and the checkout counts
-  describe only the timed interval. The table above reflects this corrected
-  measurement.
+The limiter only gates admission. An admitted tail streams exactly as before
+and returns its slot in the generator's `finally`, after the `event: end` it
+sends when the attempt's logs are drained. A client that disconnects before the
+generator first runs never reaches that `finally` (closing an unstarted async
+generator runs none of its body), so the `StreamingResponse` also carries a
+background task that releases the same permit; a permit releases only once.
+An earlier revision of this branch released only from the background task and
+wrapped the generator in handlers that swallowed cancellation, and the live tail
+end-to-end test stopped seeing `event: end`; that revision was replaced.

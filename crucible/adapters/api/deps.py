@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import secrets
 import threading
 from collections.abc import Iterator
@@ -27,43 +26,47 @@ from crucible.ports.harness import CredentialSource, HarnessGate
 from crucible.ports.repository import UnitOfWork, UnitOfWorkFactory
 
 
+class SseTailPermit:
+    """One admitted live tail; releasing it more than once is a no-op."""
+
+    __slots__ = ("_limiter", "_released")
+
+    def __init__(self, limiter: SseTailLimiter) -> None:
+        self._limiter = limiter
+        self._released = False
+
+    def release(self) -> None:
+        with self._limiter._lock:
+            if self._released:
+                return
+            self._released = True
+            self._limiter._count -= 1
+
+
 @dataclass(slots=True)
 class SseTailLimiter:
-    """Process-local admission control for database-polling SSE log tails.
+    """Process-local admission control for database-polling SSE log tails (#37).
 
-    Uses a plain int counter protected by a threading.Lock so that the limit
-    works correctly regardless of which event loop calls it.  No asyncio
-    primitive (Semaphore, Lock, Event, Condition) is ever created at import
-    time or at constructor time, so a shared limiter instance can safely cross
-    event-loop boundaries without ``RuntimeError: ... is bound to a different
-    event loop``.
+    It only gates admission: a tail that is admitted streams exactly as before and
+    gives its slot back when it ends. A threading lock, not an asyncio primitive,
+    guards the count so one instance can serve any event loop.
     """
 
     limit: int = 20
     _count: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    async def try_acquire(self) -> bool:
-        """Acquire a permit.  Returns False when the limit is already reached."""
-        asyncio.get_running_loop()
+    @property
+    def in_use(self) -> int:
+        return self._count
+
+    def try_acquire(self) -> SseTailPermit | None:
+        """A permit for one more tail, or None when the limit is already in use."""
         with self._lock:
             if self._count >= self.limit:
-                return False
+                return None
             self._count += 1
-            return True
-
-    async def release_acquired(self) -> None:
-        asyncio.get_running_loop()
-        self.release()
-
-    def release(self) -> None:
-        """Release a permit (sync and async callers both work).
-
-        May be called from a thread pool (e.g. Starlette BackgroundTask) or
-        directly from async code; the shared ``_lock`` serialises both.
-        """
-        with self._lock:
-            self._count -= 1
+        return SseTailPermit(self)
 
 
 @dataclass(slots=True)
