@@ -147,10 +147,10 @@ def _collected(
     attempt.exit_class = ExitClass.COMPLETED
     execution.state = ExecutionState.SUCCEEDED
     # Exercise all real gates, including a legacy policy that required an orchestrator
-    # review and attempted to make report_present advisory.
+    # review and listed report_present as advisory (hades #498 made it always so).
     execution.policy_snapshot["gates"] = {
         "pre_pr": sorted(PRE_PR_GATES),
-        "advisory": ["report_present", "scope_contained"],
+        "advisory": ["report_present", "scope_contained", "criteria_mapped"],
     }
     execution.policy_snapshot["internal_review"] = {"required": True, "executor": "orchestrator"}
     execution.policy_snapshot["external_review"].update(
@@ -192,7 +192,11 @@ def _collected(
             commits=1,
             verified=True,
             sha256="f" * 64,
-            commit_paths=("src/ledger/change.py",),
+            commit_paths=(
+                ("infrastructure/outside-the-contract.txt",)
+                if advisory_failed
+                else ("src/ledger/change.py",)
+            ),
             commit_messages=("Return 409",),
             commit_policy=CommitPolicyCheck(),
         ),
@@ -265,12 +269,15 @@ def test_self_review_publishes_through_supervisor_without_orchestrator_acceptanc
     assert len(store.acceptance.rows) == len(store.wakes.rows) == 1
 
 
-def test_missing_self_review_fails_real_report_present_and_names_section(tmp_path: Path) -> None:
+def test_missing_self_review_is_for_the_reviewer_and_names_section(tmp_path: Path) -> None:
+    """hades #498: the report gate is advisory. A report without its self-review is
+    listed for the reviewer, named by section, and the task waits for that review
+    rather than failing its gates."""
     store, supervisor, _github, publisher = _collected(tmp_path, missing_review=True)
     supervisor._evaluate_pending_gates()
-    assert _task(store).state is TaskState.PRE_PR_GATES_FAILED
+    assert _task(store).state is TaskState.AWAITING_INTERNAL_REVIEW
     outcome = next(r for r in store.gate_results.rows if r.gate == "report_present")
-    assert outcome.result == GateResult.FAIL and outcome.blocking
+    assert outcome.result == GateResult.FAIL and not outcome.blocking
     assert "self_review" in outcome.detail
     assert store.acceptance.rows == []
     assert asyncio.run(supervisor.delivery.publish()) == 0
@@ -448,12 +455,15 @@ def test_orchestrator_can_cancel_after_acceptance(state: TaskState) -> None:
 
 
 def test_report_gate_cannot_be_omitted_by_policy(tmp_path: Path) -> None:
+    """The report gate always runs, so its gaps always reach the reviewer (hades #498)."""
     store, supervisor, _github, _publisher = _collected(tmp_path, missing_review=True)
     work = latest_work_attempt(store.uow(), _task(store))
     assert work is not None
     work[1].policy_snapshot["gates"]["pre_pr"] = []
     supervisor._evaluate_pending_gates()
-    assert _task(store).state is TaskState.PRE_PR_GATES_FAILED
+    assert _task(store).state is TaskState.AWAITING_INTERNAL_REVIEW
+    outcome = next(r for r in store.gate_results.rows if r.gate == "report_present")
+    assert outcome.result == GateResult.FAIL and not outcome.blocking
     assert store.acceptance.rows == []
 
 
@@ -485,9 +495,9 @@ def test_pre_upgrade_parsed_report_cannot_skip_self_review(
     assert report.payload["parsed_ok"]
     del report.payload["self_review_checked"]
     supervisor._evaluate_pending_gates()
-    assert _task(store).state is TaskState.PRE_PR_GATES_FAILED
+    assert _task(store).state is TaskState.AWAITING_INTERNAL_REVIEW
     outcome = next(row for row in store.gate_results.rows if row.gate == "report_present")
-    assert outcome.blocking and "self_review" in outcome.detail
+    assert not outcome.blocking and "self_review" in outcome.detail
     assert store.acceptance.rows == []
 
 

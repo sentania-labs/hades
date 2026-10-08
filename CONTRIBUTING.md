@@ -19,9 +19,12 @@ The project is Hades (the package, CLIs and images still say `crucible`).
    from the check runs on the head; there is no gate job and the ruleset on
    main names no required check. The worker's required report self-review
    covers documentation, every acceptance criterion with evidence, and anything
-   knowingly left out and why. Passing blocking gates and a complete report
-   let Hades record acceptance and publish. An advisory gate failure still requires an
-   orchestrator review before automatic acceptance. Codex reviews every PR once,
+   knowingly left out and why. Passing blocking gates let Hades record acceptance
+   and publish; the gates judge the work, not the paperwork (hades #498): a missing
+   or incomplete report is advisory, listed for the reviewer, and Hades composes the
+   completion record itself from the branch, its re-run checks and the diff. An
+   advisory gate failure still requires an orchestrator review before automatic
+   acceptance. Codex reviews every PR once,
    automatically, and its findings get
    a disposition (fix, or an explanation) before merge; Codex is not
    re-requested after a fix. Hades squash-merges the certified head; there is no
@@ -127,6 +130,22 @@ data for rebalancing. CI runs on every push, main included: the run on main prov
 squashed result and builds the images from scratch, saving the BuildKit cache branches
 restore.
 
+## Flaky tests
+
+A job that fails on attempt 1 and passes on a later attempt at the same commit is a
+flake, not a success: nothing about the code changed between attempts, only the
+result did. The `test`, `e2e` and `e2e-kind` jobs keep their JUnit XML as CI artifacts,
+and a weekly scheduled workflow (`.github/workflows/flakes.yml`, `tools/ci/flakes.py`,
+also runnable locally as `make flakes REPO=owner/repo`) reads them, names the tests
+that flaked, and opens or updates one issue per flaky test, labelled `flaky`, with the
+flake rate (reruns per 100 runs); it also keeps a weekly summary issue with the
+overall rate.
+
+Never mark a test flaky in code as a fix: not a retry wrapper, not a widened
+assertion, not a skip, not a rerun marker. A test that flakes gets fixed, or its wait
+or polling gets rewritten to wait on the real condition instead of a sleep. The
+tracking issue records the flake; it is not a substitute for fixing it.
+
 ## Harness changes
 
 The worker carries five production harnesses: Claude Code (`claude_code`), Codex
@@ -134,8 +153,12 @@ The worker carries five production harnesses: Claude Code (`claude_code`), Codex
 harness is only a test fixture. See the [README harness table](README.md#the-harnesses).
 Qwen Code 0.25.0 uses Node 22 and the same read-only gateway credential as Hermes.
 Its wrapper writes `model.maxToolCallsPerTurn: 0` and
-`model.generationConfig.contextWindowSize` in `~/.qwen/settings.json` before exec.
+`model.generationConfig.contextWindowSize` in `~/.qwen/settings.json` before the run.
 The latter is the routing entry's positive `context_length`, default 131072,
-so Qwen budgets output within the engine window. Keep settings and stream-json
-fixtures aligned with the pinned release. Image builds and version smoke checks
+so Qwen budgets output within the engine window. Mirroring Hermes (hades #498), it
+also restricts the tools to file and shell (no sub-agent, skill, memory, web or MCP
+tool), loads no context file as rules, sets thinking off and the response cap, and
+after the run writes a minimal `report.yaml` from the run log when the model left
+neither a report nor `blocked.md` (docs/spec/07-harness-adapters.md). Keep settings
+and stream-json fixtures aligned with the pinned release. Image builds and version smoke checks
 run in CI; leave digest lines to CI and promote each harness separately on Images.

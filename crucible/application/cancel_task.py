@@ -1,15 +1,20 @@
 """POST /tasks/{id}/cancel (16): record the verbatim reason; cancelling while an attempt
-runs (the supervisor terminates it), cancelled at once otherwise."""
+runs (the supervisor terminates it), cancelled at once otherwise.
+
+Internal closure decisions (task_cancelled) are written directly to the UoW
+to avoid the public DecisionRequest validator (which enforces a two-character
+minimum on verbatim).  Finding 01M4CFEK8DMF8V23ZB56ZC7S17.
+"""
 
 from __future__ import annotations
 
-from crucible.application.decisions import record_decision
 from crucible.application.errors import NotFoundError
 from crucible.application.task_access import require_task_principal
 from crucible.application.transitions import move_task, record_event
-from crucible.contracts.api import CancelRequest, DecisionRequest
-from crucible.domain.entities import EscalationState, Principal, Task
+from crucible.contracts.api import CancelRequest
+from crucible.domain.entities import Decision, EscalationState, Principal, Task
 from crucible.domain.events import EventKind
+from crucible.domain.ids import new_id
 from crucible.domain.lifecycle import TaskState
 from crucible.ports.clock import Clock
 from crucible.ports.repository import UnitOfWork
@@ -56,22 +61,54 @@ def cancel_task(
             payload=payload,
         )
     # Close any open escalations with the cancel reason as the decision.
+    # We create Decision entities directly (not DecisionRequest) so the
+    # public model validator's min_length=2 on verbatim does not apply
+    # to internal closure decisions.  (Finding 01M4CFEK8DMF8V23ZB56ZC7S17)
+    now = clock.now()
     for escalation in uow.escalations.list_for_task(task.id):
         if escalation.state is not EscalationState.OPEN:
             continue
-        # Create a decision to answer and close the escalation.
-        decision_request = DecisionRequest(
+        decision = Decision(
+            id=new_id(),
+            task_id=task.id,
+            escalation_id=escalation.id,
+            principal_id=principal.id,
             kind="task_cancelled",
             verbatim=request.verbatim,
             resolves=escalation.question,
-            escalation_id=escalation.id,
-            reschedule=False,
+            created_at=now,
         )
-        record_decision(
+        uow.decisions.add(decision)
+        record_event(
             uow,
             clock,
-            principal=principal,
+            EventKind.DECISION_RECORDED,
+            principal=principal.name,
             task_id=task.id,
-            request=decision_request,
+            payload={
+                "decision_id": decision.id,
+                "kind": decision.kind,
+                "escalation_id": decision.escalation_id,
+                "resolves": decision.resolves,
+                "verbatim": decision.verbatim,
+            },
         )
+        # Transition: OPEN -> ANSWERED -> CLOSED (matching record_decision).
+        for target_state, event_kind in (
+            (EscalationState.ANSWERED, EventKind.ESCALATION_ANSWERED),
+            (EscalationState.CLOSED, EventKind.ESCALATION_CLOSED),
+        ):
+            escalation.state = target_state
+            if target_state is EscalationState.CLOSED:
+                escalation.closed_at = now
+            escalation.decision_id = decision.id
+            uow.escalations.save(escalation)
+            record_event(
+                uow,
+                clock,
+                event_kind,
+                principal=principal.name,
+                task_id=task.id,
+                payload={"escalation_id": escalation.id, "decision_id": decision.id},
+            )
     return task

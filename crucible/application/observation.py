@@ -27,7 +27,7 @@ from crucible.application.publish import (
     reopen_or_cancel,
 )
 from crucible.application.transitions import move_task, record_event
-from crucible.application.wakes import create_wake
+from crucible.application.wakes import create_wake, repeat_allowed
 from crucible.contracts.evidence import EvidenceKind
 from crucible.contracts.task_contract import contract_sha256
 from crucible.contracts.wake import WakeReason
@@ -2054,7 +2054,13 @@ def repeat_overdue_wakes(
     The clock starts when the task entered the state it is waiting in, not when the pull
     request was opened: a correction on a three-day-old pull request enters certification
     with nothing outstanding yet, and measuring from `opened_at` would call it overdue on
-    its first poll."""
+    its first poll.
+
+    hades #502: exactly one open wake per task per cause. While the last one is unacked
+    no copy is raised, however long the condition persists; once it is acked the notice
+    comes back only when the condition still holds a full `wait_timeout_hours` after
+    the ack. A wake about a pull request that has since merged or closed is acked by
+    the system in the supervisor's sweep (`close_wakes_for_finished_pull_requests`)."""
     now = clock.now()
     if task.state is TaskState.AWAITING_EXTERNAL_REVIEW:
         hours = wait_timeout_hours(policy, "external_review", DEFAULT_EXTERNAL_TIMEOUT_HOURS)
@@ -2076,11 +2082,12 @@ def repeat_overdue_wakes(
         )
     else:
         return False
+    interval = timedelta(hours=hours)
     since = waiting_since(uow, task, entered, fallback=pull_request.opened_at)
-    if now - since < timedelta(hours=hours):
+    if now - since < interval:
         return False
-    latest = _latest_wake_at(uow, task, reason.value)
-    if latest is not None and now - latest < timedelta(hours=hours):
+    previous = uow.wakes.list_for_task(task.id, reason=reason.value)
+    if not repeat_allowed(previous, now=now, interval=interval):
         return False
     create_wake(
         uow,
@@ -2102,20 +2109,6 @@ def waiting_since(uow: UnitOfWork, task: Task, kind: EventKind, *, fallback: dat
     in the same transaction as the state change (09), so the event is the record."""
     event = uow.events.latest_for_task_kind(task.id, kind.value)
     return event.ts if event is not None else fallback
-
-
-def _latest_wake_at(uow: UnitOfWork, task: Task, reason: str) -> datetime | None:
-    latest: datetime | None = None
-    for wake in uow.wakes.list_for_principal(
-        task.principal_id, since=None, include_acked=True, limit=200
-    ):
-        if (
-            wake.task_id == task.id
-            and wake.reason == reason
-            and (latest is None or wake.created_at > latest)
-        ):
-            latest = wake.created_at
-    return latest
 
 
 def poll_due(

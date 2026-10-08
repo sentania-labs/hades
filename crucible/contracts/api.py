@@ -119,6 +119,7 @@ class TaskView(Response):
     gate_probes: list[dict[str, Any]] = Field(default_factory=list)
     # hades #489: the operator's notes, newest first: id, author, text, verbatim, created_at.
     notes: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class TaskListItem(Response):
@@ -415,10 +416,28 @@ class AcceptRequest(StrictModel):
 
 class DecisionRequest(StrictModel):
     kind: str = Field(min_length=1, max_length=48)
-    verbatim: str = Field(min_length=1, description="The deciding principal's own words.")
-    resolves: str = Field(min_length=1)
+    verbatim: str = Field(min_length=2, description="The deciding principal's own words.")
+    resolves: str = Field(min_length=2)
     escalation_id: str | None = None
     reschedule: bool = False
+
+    @model_validator(mode="after")
+    def _validate_kind(self) -> DecisionRequest:
+        """FDY-0509: kind must be in the public closed list accepted by the server.
+
+        Internal closure kinds (task_cancelled, task_closed) are excluded so
+        a task owner cannot fabricate lifecycle events.  Internal callers
+        (cancel_task, close_task) bypass the model and write to UoW directly.
+        (Finding 01M4CFEK8J8BXDEB0NETRX267E)
+        """
+        from crucible.domain.decisions import ACCEPTED_DECISION_KINDS  # noqa: PLC0415
+
+        if self.kind not in ACCEPTED_DECISION_KINDS:
+            raise ValueError(
+                f"decision kind {self.kind!r} is not accepted. "
+                f"Accepted kinds: {sorted(ACCEPTED_DECISION_KINDS)}"
+            )
+        return self
 
 
 class DispositionRequest(StrictModel):

@@ -1732,7 +1732,8 @@ class DockerProvider:
     async def cleanup(
         self, ws: Workspace, policy: CleanupPolicy, spec: LaunchSpec | None = None
     ) -> None:
-        """Only ever called for an attempt that recorded `logs_drained` (08)."""
+        """Only ever called for an attempt that recorded `logs_drained` (08), or for one
+        that ended before its worker launched (hades #394)."""
         for row in await self._containers_for(ws.attempt_id):
             await self._call(self.client.remove_container, str(row["Id"]), force=True)
         root = self._root(ws.attempt_id)

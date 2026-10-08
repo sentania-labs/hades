@@ -261,6 +261,16 @@ jobs:
         if: steps.worker_decision.outputs.reuse != 'true' || steps.worker_decision.outputs.harness_reuse != 'true'
         run: make images-check NO_CACHE=1
 
+      # hades #185: after building the worker images, prove the worker image carries
+      # every program a shipped policy's required check starts with or declares, so a
+      # release whose worker image and shipped policies disagree stops before anything
+      # is published.
+      - uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c # v7.0.0
+        with:
+          enable-cache: true
+      - name: check the worker image carries the policy programs
+        run: make images-policy-check
+
       # The worker images go out the way this image does, with `docker push` (the
       # operator's decision, 2026-09-23): <version> and script-harness-<version> on
       # WORKER_REGISTRY. The never-overwrite rule is the service image's: an existing

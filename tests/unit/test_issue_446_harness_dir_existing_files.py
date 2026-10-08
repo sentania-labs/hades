@@ -1,0 +1,311 @@
+"""hades #446: ``no_injected_files`` permits editing or deleting a file under an
+injected prefix (.claude/, .codex/, .hermes/, .gemini/, .crucible/,
+crucible/identity/, .crucible-shims/) that the merge base already has, while
+still blocking new additions, symlink flips, and shim content.  The pre-existing
+rule that instruction files (CLAUDE.md, AGENTS.md, GEMINI.md) are treated
+similarly still holds."""
+
+from __future__ import annotations
+
+import hashlib
+from typing import Any
+from unittest.mock import MagicMock
+
+from crucible.application.submit_task import _harness_path_warning
+from crucible.contracts.task_contract import Scope, TaskContractV1
+from crucible.domain.gates import (
+    EvidenceItem,
+    GateInput,
+    GateName,
+    GateOutcome,
+    GateResult,
+    evaluate_gate,
+    injected_shim_text,
+)
+from tests.fixtures import FakeClock, contract_document
+from tests.unit.test_issue_360_ready_for_merge_correction import NOW
+from tests.unit.test_issue_424_proposed_tasks import ORCHESTRATOR, _api, _store
+
+ZERO = "0" * 40
+SHIM_BLOB = hashlib.sha1(
+    b"blob %d\0" % len(injected_shim_text() + "\n") + (injected_shim_text() + "\n").encode()
+).hexdigest()
+
+
+def _change(path: str, status: str, blob: str = "b" * 40) -> dict[str, str]:
+    """Return a diff change record.  Status D always uses ZERO for the blob."""
+    return {"path": path, "status": status, "blob": ZERO if status == "D" else blob}
+
+
+def _outcome(
+    diff: dict[str, Any],
+    commit_paths: list[str],
+    commit_changes: list[dict[str, str]] | None,
+    base_paths: list[str] | None = None,
+) -> GateOutcome:
+    """Build a minimal ``GateInput`` that mirrors the collector's evidence shape.
+
+    *diff* may contain a ``base_paths`` list.  If ``base_paths`` is also
+    passed explicitly, the explicit list takes precedence.
+    """
+    if base_paths is None:
+        base_paths = list(diff.get("base_paths", []))
+    bundle: dict[str, Any] = {"head_sha": "a" * 40, "commits": 1, "commit_paths": commit_paths}
+    if commit_changes is not None:
+        bundle["commit_changes"] = commit_changes
+    evidence = (
+        EvidenceItem(
+            id=1,
+            kind="diff_paths",
+            source="crucible",
+            verified=True,
+            payload={**diff, "base_paths": base_paths},
+        ),
+        EvidenceItem(
+            id=2,
+            kind="bundle_head",
+            source="crucible",
+            verified=True,
+            payload=bundle,
+        ),
+    )
+    gi = GateInput(
+        contract=contract_document(),
+        policy={},
+        head_sha="a" * 40,
+        evidence=evidence,
+    )
+    outcome = evaluate_gate(GateName.NO_INJECTED_FILES, gi)
+    return outcome
+
+
+def _judge(
+    changes: list[dict[str, str]],
+    base_paths: list[str] | None = None,
+) -> tuple[GateOutcome, str]:
+    """Return ``(outcome, detail)`` for a *diff-only* scenario (no commit info
+    is provided so the gate falls back to the ``diff_status`` loop).
+    """
+    if base_paths is None:
+        base_paths = []
+    paths = [c["path"] for c in changes]
+    outcome = _outcome(
+        {"paths": paths, "changes": list(changes)},
+        sorted(paths),
+        None,
+        base_paths=base_paths,
+    )
+    return outcome, ""
+
+
+# ---------------------------------------------------------------------------
+# AC1: editing / deleting an existing harness-directory file passes
+# ---------------------------------------------------------------------------
+
+
+def test_editing_harness_existing_file_passes() -> None:
+    changes = [_change(".claude/hooks/check-review-passed.sh", "M")]
+    base_paths = [".claude/hooks/check-review-passed.sh"]
+    result, _ = _judge(changes, base_paths=base_paths)
+    assert result.result is GateResult.PASS
+    assert "existing harness-directory file edited or deleted" in result.detail
+
+
+def test_deleting_harness_existing_file_passes() -> None:
+    changes = [_change(".claude/hooks/check-review-passed.sh", "D")]
+    base_paths = [".claude/hooks/check-review-passed.sh"]
+    result, _ = _judge(changes, base_paths=base_paths)
+    assert result.result is GateResult.PASS
+
+
+def test_editing_under_codex_prefix_passes() -> None:
+    changes = [_change(".codex/rules.md", "M")]
+    base_paths = [".codex/rules.md"]
+    result, _ = _judge(changes, base_paths=base_paths)
+    assert result.result is GateResult.PASS
+
+
+def test_editing_under_hermes_prefix_passes() -> None:
+    changes = [_change(".hermes/config.yaml", "M")]
+    base_paths = [".hermes/config.yaml"]
+    result, _ = _judge(changes, base_paths=base_paths)
+    assert result.result is GateResult.PASS
+
+
+# ---------------------------------------------------------------------------
+# AC2: adding a new harness-directory file or turning an entry into a
+#      symlink still fails
+# ---------------------------------------------------------------------------
+
+
+def test_new_entry_under_claude_prefix_fails() -> None:
+    changes = [_change(".claude/hooks/new-hook.sh", "A")]
+    result, _ = _judge(changes)
+    assert result.result is GateResult.FAIL
+
+
+def test_new_entry_under_codex_prefix_fails() -> None:
+    changes = [_change(".codex/ai-config.toml", "A")]
+    result, _ = _judge(changes)
+    assert result.result is GateResult.FAIL
+
+
+def test_symlink_flip_under_claude_fails() -> None:
+    changes = [_change(".claude/scripts/tools.sh", "T", "b" * 40)]
+    result, _ = _judge(changes)
+    assert result.result is GateResult.FAIL
+
+
+def test_symlink_flip_under_hermes_fails() -> None:
+    changes = [_change(".hermes/tool.sh", "T", "b" * 40)]
+    result, _ = _judge(changes)
+    assert result.result is GateResult.FAIL
+
+
+def test_new_entry_under_crucible_prefix_fails() -> None:
+    changes = [_change(".crucible/shim.b64", "A")]
+    result, _ = _judge(changes)
+    assert result.result is GateResult.FAIL
+
+
+# ---------------------------------------------------------------------------
+# AC3: writing shim content into an existing harness-directory file still fails
+# ---------------------------------------------------------------------------
+
+
+def test_shim_content_in_harness_fails() -> None:
+    changes = [
+        _change(".claude/hooks/check-review-passed.sh", "M", SHIM_BLOB),
+    ]
+    base_paths = [".claude/hooks/check-review-passed.sh"]
+    result, _ = _judge(changes, base_paths=base_paths)
+    assert result.result is GateResult.FAIL
+
+
+def test_shim_content_in_codex_fails() -> None:
+    changes = [
+        _change(".codex/rules.md", "M", SHIM_BLOB),
+    ]
+    base_paths = [".codex/rules.md"]
+    result, _ = _judge(changes, base_paths=base_paths)
+    assert result.result is GateResult.FAIL
+
+
+# ---------------------------------------------------------------------------
+# Mixed: edit + new addition under the same harness prefix
+# ---------------------------------------------------------------------------
+
+
+def test_editing_harness_and_adding_new_harness_fails() -> None:
+    changes = [
+        _change(".claude/hooks/check-review-passed.sh", "M"),
+        _change(".claude/hooks/new-hook.sh", "A"),
+    ]
+    result, _ = _judge(changes, base_paths=[".claude/hooks/check-review-passed.sh"])
+    assert result.result is GateResult.FAIL
+
+
+# ---------------------------------------------------------------------------
+# Instruction-name files: editing/deleting base-harvest files still pass
+# ---------------------------------------------------------------------------
+
+
+def test_editing_instruction_name_passes() -> None:
+    changes = [_change("CLAUDE.md", "M")]
+    base_paths = ["CLAUDE.md"]
+    result, _ = _judge(changes, base_paths=base_paths)
+    assert result.result is GateResult.PASS
+
+
+def test_deleting_instruction_name_passes() -> None:
+    changes = [_change("AGENTS.md", "D")]
+    base_paths = ["AGENTS.md"]
+    result, _ = _judge(changes, base_paths=base_paths)
+    assert result.result is GateResult.PASS
+
+
+def test_adding_instruction_name_fails() -> None:
+    changes = [_change("CLAUDE.md", "A")]
+    result, _ = _judge(changes)
+    assert result.result is GateResult.FAIL
+
+
+# ---------------------------------------------------------------------------
+# AC4: harness directory in ``allowed_paths`` produces a warning (submit_task.py)
+# ---------------------------------------------------------------------------
+
+
+def test_harness_path_in_allowed_paths_returns_warning() -> None:
+    contract = MagicMock(spec=TaskContractV1)
+    contract.scope = Scope(
+        allowed_paths=["hades/.claude/", "hades/docs/"],
+        prohibited_paths=["src/test.py"],
+        may_add_dependencies=False,
+        may_modify_ci=False,
+    )
+    warning = _harness_path_warning(contract)
+    assert warning is not None
+    assert ".claude/" in warning
+    assert (
+        "allowed_paths contains 'hades/.claude/', which reaches into a harness directory" in warning
+    )
+
+
+def test_non_harness_allowed_paths_no_warning() -> None:
+    contract = MagicMock(spec=TaskContractV1)
+    contract.scope = Scope(
+        allowed_paths=["hades/docs/", "src/main.py"],
+        prohibited_paths=["src/test.py"],
+        may_add_dependencies=False,
+        may_modify_ci=False,
+    )
+    warning = _harness_path_warning(contract)
+    assert warning is None
+
+
+def test_broad_allowed_path_globs_return_warning() -> None:
+    for pattern in ("**", "src/**"):
+        contract = MagicMock(spec=TaskContractV1)
+        contract.scope = Scope(
+            allowed_paths=[pattern],
+            prohibited_paths=[],
+            may_add_dependencies=False,
+            may_modify_ci=False,
+        )
+        warning = _harness_path_warning(contract)
+        assert warning is not None
+        assert pattern in warning
+
+
+def test_commit_classification_error_always_fails() -> None:
+    path = ".claude/hooks/check-review-passed.sh"
+    outcome = _outcome(
+        {"paths": [path], "changes": [_change(path, "D")]},
+        [path],
+        [
+            {
+                "path": path,
+                "status": "M",
+                "blob": "b" * 40,
+                "classification": "error: blob over limit",
+            },
+            _change(path, "D"),
+        ],
+        base_paths=[path],
+    )
+    assert outcome.result is GateResult.FAIL
+    assert "error: blob over limit" in outcome.detail
+
+
+def test_submission_response_returns_harness_warning() -> None:
+    # Reuse the in-memory API fixture that exercises the real POST /tasks route.
+    store = _store()
+    body = contract_document()
+    body["scope"]["allowed_paths"] = ["src/**"]
+    with _api(store, FakeClock(NOW), ORCHESTRATOR) as client:
+        response = client.post("/v1/tasks?proposed=true", json=body)
+
+    assert response.status_code == 201, response.text
+    [warning] = response.json()["warnings"]
+    assert "src/**" in warning
+    assert "harness directory" in warning
