@@ -445,6 +445,10 @@ class Tasks:
             update(TaskRow).where(TaskRow.id == task_id).values(principal_id=principal_id)
         )
 
+    def list_for_repository(self, repository_id: str) -> Sequence[Task]:
+        stmt = select(TaskRow).where(TaskRow.repository_id == repository_id).order_by(TaskRow.id)
+        return [self._to_entity(r) for r in self._s.scalars(stmt).all()]
+
     def list_by_state(self, state: TaskState, *, for_update: bool = False) -> Sequence[Task]:
         stmt = select(TaskRow).where(TaskRow.state == state.value).order_by(TaskRow.id)
         if for_update:

@@ -391,3 +391,35 @@ def test_idempotency_key_is_scoped_by_route(client: TestClient) -> None:
     r2 = client.post(f"/v1/tasks/{idb}/cancel", json=body, headers={"Idempotency-Key": "same"})
     assert r2.status_code == 422, "the same key on another route must not replay task A"
     assert client.get(f"/v1/tasks/{idb}").json()["state"] == "submitted"
+
+
+def test_duplicate_work_branch_is_refused(client: TestClient) -> None:
+    """hades #564: submitting a contract whose work_branch is already another task's
+    branch on the same repository is refused with a 422 naming the owning task. The
+    check covers all states (submitted, merged, cancelled)."""
+    a = contract_document(external_id="EX-A")
+    a["repository"]["work_branch"] = "crucible/shared-branch"
+    r1 = client.post("/v1/tasks", json=a)
+    assert r1.status_code == 201
+    task_a_id = r1.json()["id"]
+
+    # Second task tries the same branch: should be refused.
+    b = contract_document(external_id="EX-B")
+    b["repository"]["work_branch"] = "crucible/shared-branch"
+    r2 = client.post("/v1/tasks", json=b)
+    assert r2.status_code == 422
+    body = r2.json()
+    assert body["type"] == "urn:crucible:problem:contract-invalid"
+    assert any("EX-A" in str(e.get("message", "")) for e in body["errors"])
+    assert any(e["path"] == "repository.work_branch" for e in body["errors"])
+
+    # Cancelling the first task still counts (branch still belongs to EX-A).
+    client.post(
+        f"/v1/tasks/{task_a_id}/cancel",
+        json={"reason": "test", "verbatim": "cancel", "decided_by": "test"},
+    )
+    c = contract_document(external_id="EX-C")
+    c["repository"]["work_branch"] = "crucible/shared-branch"
+    r3 = client.post("/v1/tasks", json=c)
+    assert r3.status_code == 422
+    assert any("EX-A" in str(e.get("message", "")) for e in r3.json()["errors"])

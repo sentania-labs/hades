@@ -31,7 +31,8 @@ parent_external_id: null
 repository:
   name: "example-service"          # a repository registered with Crucible (04); carries URL and auth
   base_ref: "main"                 # where the worker branches from
-  work_branch: "crucible/FDY-0042" # created by Crucible; worker must not rename
+  work_branch: "crucible/FDY-0042" # optional; when omitted, Crucible derives crucible/<external_id>
+                                  # at submit time (hades #564); worker must not rename
 
 scope:
   allowed_paths: ["src/ledger/**", "tests/ledger/**", "docs/ledger.md"]
@@ -163,8 +164,10 @@ recorded only after the correction attempt succeeds.
 - `schema_version` major supported.
 - `external_id` unique within the submitting principal's namespace.
 - `repository.name` is registered (04); `base_ref` exists on the remote at
-  validation time; `work_branch` matches the repository policy's branch
-  pattern and is not a protected branch; both refs contain only
+  validation time; `work_branch` is optional in the contract but is derived
+  at submit time when omitted (``crucible/<external_id>``) (hades #564). The
+  resolved branch matches the repository policy's branch pattern and is not a
+  protected branch; both refs contain only
   `[A-Za-z0-9._/-]` and do not start with `-`, because every ref reaches
   a command line eventually; submit-time validation also applies the
   rules of `git check-ref-format --branch` it can express without git

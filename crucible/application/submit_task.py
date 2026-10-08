@@ -266,12 +266,14 @@ def _check_against_registry(
             )
     git = doc.get("git", {})
     branch_pattern = str(git.get("work_branch_pattern", "*"))
-    if not fnmatch.fnmatchcase(contract.repository.work_branch, branch_pattern):
+    wb = contract.repository.work_branch
+    assert wb is not None
+    if not fnmatch.fnmatchcase(wb, branch_pattern):
         problems.append(
             _problem("repository.work_branch", f"does not match policy pattern {branch_pattern!r}")
         )
     for protected in git.get("protected_branches", []):
-        if fnmatch.fnmatchcase(contract.repository.work_branch, str(protected)):
+        if fnmatch.fnmatchcase(wb, str(protected)):
             problems.append(_problem("repository.work_branch", "names a protected branch"))
             break
     required_checks = [str(c) for c in doc.get("repository", {}).get("required_checks", [])]

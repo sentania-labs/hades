@@ -1336,6 +1336,9 @@ def publisher_script(
     token_source: str = "stdin",
     bundle_sha256: str = "",
     owned_remote_heads: tuple[str, ...] = (),
+    repo_owner: str = "",
+    repo_name: str = "",
+    own_pr_number: int | None = None,
 ) -> str:
     """Fetch the base from the remote and the branch from the bundle, then push (23).
 
@@ -1376,6 +1379,16 @@ EXPECTED={_quote(expected_head)}
 CLONE_URL={_quote(clone_url)}
 SEAL={_quote(bundle_sha256)}
 OWNED_HEADS={_quote(" ".join(owned_remote_heads))}
+# hades #564: open pull request on the work branch from another task.
+REPO_OWNER={_quote(repo_owner)}
+REPO_NAME={_quote(repo_name)}
+OWN_PR_NUMBER={own_pr_number if own_pr_number is not None else 0}
+# Derive owner/name from CLONE_URL if not provided explicitly by the adapter.
+if [ -z "$REPO_OWNER" ] && [ -n "$CLONE_URL" ]; then
+  REPO_SLUG=$(echo "$CLONE_URL" | sed -e 's|.*github.com[/:]||' -e 's|.git$||' -e 's|.git$||')
+  REPO_OWNER=$(echo "$REPO_SLUG" | cut -d'/' -f1)
+  REPO_NAME=$(echo "$REPO_SLUG" | cut -d'/' -f2)
+fi
 # hades #443: digest-commit author and message prefix for remote-branch checks.
 DIGEST_AUTHOR={_quote(DIGEST_AUTHOR_LOGIN)}
 DIGEST_MSG_PREFIX={_quote(DIGEST_MESSAGE_PREFIX)}
@@ -1456,6 +1469,35 @@ if [ -n "$REMOTE" ]; then
   if git show -s --format='%(trailers:key=Crucible-Attempt,valueonly)' "$REMOTE" \
       | grep -q '[^[:space:]]'; then
     OWNED=yes
+  fi
+  # hades #564: refuse when the remote branch is the head of an open pull request
+  # from another task; a Hades-pushed tip from another task is foreign for this
+  # purpose, so the trailer alone no longer proves ownership.
+  if [ -n "$REPO_OWNER" ] && [ -n "$REPO_NAME" ]; then
+    _AUTH_TOKEN=$(cat "$CRUCIBLE_TOKEN_FILE")
+    PR_URL="https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/pulls?state=open&head=$REPO_OWNER:$WORK_BRANCH"
+    PR_RESP=$(curl -s -f --max-time 10 \
+      -H "Authorization: token $_AUTH_TOKEN" \
+      "$PR_URL" 2>> "$OUT/publisher.log") || PR_RESP=""
+    if [ -n "$PR_RESP" ] && [ "$PR_RESP" != "[]" ]; then
+      # Check if any open PR on this branch is NOT our own.
+      FELLOW=$(echo "$PR_RESP" | python3 -c "
+import json,sys
+prs=json.loads(sys.stdin.read())
+own=$OWN_PR_NUMBER
+for p in prs:
+    num=p.get('number')
+    if num!=own:
+        print(str(num))
+        sys.exit(0)
+sys.exit(1)
+" 2>/dev/null) || FELLOW=""
+      if [ -n "$FELLOW" ]; then
+        printf 'foreign pull request %s on branch %s from another task\n' \
+          "$FELLOW" "$WORK_BRANCH" > "$OUT/error.txt"
+        drop_token; exit 5
+      fi
+    fi
   fi
   # hades #443: if the remote is ahead only by digest commits, treat it as owned.
   if [ "$OWNED" != yes ]; then

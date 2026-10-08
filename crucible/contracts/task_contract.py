@@ -49,7 +49,7 @@ class ProviderName(StrEnum):
 class RepositoryRef(StrictModel):
     name: str = Field(min_length=1)
     base_ref: str = Field(min_length=1)
-    work_branch: str = Field(min_length=1)
+    work_branch: str | None = None
 
     @field_validator("base_ref", "work_branch")
     @classmethod
@@ -446,7 +446,7 @@ class TaskContractV1(StrictModel):
             )
         return self
 
-    def external_identity_fields(self) -> tuple[str, str, str, str, int]:
+    def external_identity_fields(self) -> tuple[str, str, str | None, str, int]:
         """What a correction version must keep identical to the version it corrects."""
         return (
             self.external_id,
