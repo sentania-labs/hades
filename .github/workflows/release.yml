@@ -66,12 +66,12 @@ jobs:
           echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
 
       # hades #573 / #476: find the previous release, defined as the highest version
-      # below this one whose worker image is actually published on the registry.
-      # The previous tag's release may have failed (hades #570) — that tag is a git
+      # below this one whose worker and script-harness images are both published.
+      # The previous tag's release may have failed (hades #570): that tag is a git
       # release but has no published worker image, so re-pushing from it would fail.
       # `tools/release/published_versions.py` queries the GHCR registry API for the
       # worker package tags (anonymous, no credential, same pattern as the "move
-      # latest" step) and prints only bare version strings (N.N.N); those feed into
+      # latest" step) and prints versions with both image tags; those feed into
       # version.py --previous which picks the highest version below the candidate.
       # The later `git show v<previous>:images/manifest.env` still works because every
       # published version is also a git tag.  If the package has no published versions,
@@ -305,6 +305,8 @@ jobs:
       # already-published worker images are copied to this version's tags on the
       # registry, by digest, the same `docker buildx imagetools create` the "move
       # latest" step below uses to move `latest` without pushing from a local build.
+      # hades #573: the source has both published image tags, so a failed release's
+      # git tag or half-published worker cannot select a missing image for either copy.
       # The release notes name the reused image and digest (`make release-notes
       # WORKER_REUSED_FROM=`).
       - name: re-publish the previous release's worker images by digest

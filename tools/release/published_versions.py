@@ -31,6 +31,7 @@ import json
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
@@ -132,26 +133,15 @@ def published_versions(tags: list[str]) -> list[str]:
     it as the previous release would cause the reuse path to fail again when
     it tries to copy the missing harness tag.
 
-    A bare version has three decimal components with no leading zeros.
-    Tags like `latest` are excluded.  If no harness tags are present at all
-    in the full list, all bare versions are emitted (backwards-compatible
-    fallback when the registry only has the bare tags).
+    A bare version has three decimal components. Tags like `latest` are
+    excluded. Even when no harness tags exist, a bare tag alone is incomplete.
     """
-    bare: set[str] = set()
-    harness: set[str] = set()
-    for tag in tags:
-        if VERSION.fullmatch(tag) is not None:
-            bare.add(tag)
-        harness_match = re.match(r"^script-harness-(\d+\.\d+\.\d+)$", tag)
-        if harness_match:
-            harness.add(harness_match.group(1))
-
-    # If the full tag list contains zero harness tags, the package was
-    # published before the script-harness split; include all bare versions.
-    has_harness_tags = bool(harness)
-    if has_harness_tags:
-        return [tag for tag in tags if VERSION.fullmatch(tag) is not None and tag in harness]
-    return [tag for tag in tags if VERSION.fullmatch(tag) is not None]
+    available = set(tags)
+    return [
+        tag
+        for tag in tags
+        if VERSION.fullmatch(tag) is not None and f"script-harness-{tag}" in available
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -168,17 +158,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    # Split registry into domain and package path.
-    # "ghcr.io/sentania-labs/crucible-worker" -> domain="ghcr.io", package="crucible-worker"
-    parts = args.registry.split("/", 1)
-    domain = parts[0]
-    registry_pkg = parts[1] if len(parts) > 1 else ""
+    # Parse the optional scheme before separating the host from the package.
+    registry_url = args.registry
+    if "://" not in registry_url:
+        registry_url = f"https://{registry_url}"
+    parsed = urllib.parse.urlsplit(registry_url)
+    full_package = parsed.path.strip("/") or args.package
 
-    # Determine the actual package: if registry already includes the full
-    # path, use it as-is; otherwise prepend the package name.
-    full_package = registry_pkg or args.package
-
-    tags = fetch_tags(f"https://{domain}", full_package)
+    tags = fetch_tags(parsed.netloc, full_package)
     versions = published_versions(tags)
 
     for ver in versions:

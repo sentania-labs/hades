@@ -16,6 +16,9 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 
@@ -42,26 +45,25 @@ v = _load("version", _VERSION_PY)
 class TestPublishedVersionsFilter:
     """Filter tags from a raw API list to bare version strings (N.N.N)."""
 
-    def test_accepts_plain_versions_when_no_harness_tags_present(self) -> None:
-        """When the tag list contains zero harness tags (pre-harness packages),
-        all bare version tags are returned (backwards-compatible fallback)."""
+    def test_rejects_plain_versions_when_no_harness_tags_present(self) -> None:
+        """A first release can fail before publishing any harness tag."""
         tags = ["0.11.0", "0.11.1", "0.11.2", "0.11.4"]
-        assert pv.published_versions(tags) == tags
+        assert pv.published_versions(tags) == []
 
     def test_rejects_script_harness_prefix(self) -> None:
         tags = ["script-harness-0.11.3", "0.11.3", "script-harness-0.11.4"]
         assert pv.published_versions(tags) == ["0.11.3"]
 
     def test_rejects_latest(self) -> None:
-        tags = ["latest", "0.11.3"]
+        tags = ["latest", "0.11.3", "script-harness-0.11.3"]
         assert pv.published_versions(tags) == ["0.11.3"]
 
     def test_rejects_build_id_tags(self) -> None:
-        tags = ["20260916-aaaaaaaaaaaa", "0.11.2"]
+        tags = ["20260916-aaaaaaaaaaaa", "0.11.2", "script-harness-0.11.2"]
         assert pv.published_versions(tags) == ["0.11.2"]
 
     def test_rejects_partial_versions(self) -> None:
-        tags = ["0.11", "0.11.3", "0.11.3.1"]
+        tags = ["0.11", "0.11.3", "0.11.3.1", "script-harness-0.11.3"]
         assert pv.published_versions(tags) == ["0.11.3"]
 
     def test_empty_list_returns_empty(self) -> None:
@@ -224,8 +226,7 @@ class TestGhcrTagParsing:
         assert versions == ["0.11.0", "0.11.1", "0.11.2", "0.11.4"]
 
     def test_parses_realistic_ghcr_response_no_harness(self) -> None:
-        """When the response has only bare version tags (pre-harness package),
-        all bare versions are returned."""
+        """Bare tags without harness tags cannot be reused."""
         response_body = json.dumps(
             {
                 "tags": [
@@ -239,7 +240,7 @@ class TestGhcrTagParsing:
         parsed = json.loads(response_body)
         tags = parsed.get("tags") or []
         versions = pv.published_versions(tags)
-        assert versions == ["0.1.0", "0.2.0", "0.3.0"]
+        assert versions == []
 
     def test_empty_tags_array(self) -> None:
         response_body = json.dumps({"tags": []})
@@ -270,3 +271,66 @@ class TestCli:
         )
         assert result.returncode == 2
         assert "usage" in result.stderr.lower() or "required" in result.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "registry",
+    ["ghcr.io/sentania-labs/crucible-worker", "https://ghcr.io/sentania-labs/crucible-worker"],
+)
+def test_published_versions_cli_parses_registry_url(registry: str) -> None:
+    with patch.object(pv, "fetch_tags", return_value=[]) as fetch:
+        assert pv.main(["--registry", registry]) == 0
+    fetch.assert_called_once_with("ghcr.io", "sentania-labs/crucible-worker")
+
+
+def test_published_versions_fetches_authenticated_paginated_ghcr_fixture() -> None:
+    responses = []
+    for body, headers in [
+        ({"token": "anonymous-token"}, {}),
+        (
+            {"name": "sentania-labs/crucible-worker", "tags": ["0.11.2", "0.11.3"]},
+            {"Link": '</v2/sentania-labs/crucible-worker/tags/list?n=100&last=0.11.3>; rel="next"'},
+        ),
+        ({"name": "sentania-labs/crucible-worker", "tags": ["script-harness-0.11.2"]}, {}),
+    ]:
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = json.dumps(body).encode()
+        response.headers = headers
+        responses.append(response)
+    with patch.object(pv.urllib.request, "urlopen", side_effect=responses) as urlopen:
+        tags = pv.fetch_tags("ghcr.io", "sentania-labs/crucible-worker")
+    requests = [call.args[0] for call in urlopen.call_args_list]
+    assert requests[0].full_url == (
+        "https://ghcr.io/token?scope=repository:sentania-labs/crucible-worker:pull"
+    )
+    assert requests[0].get_header("Authorization") is None
+    assert requests[1].full_url == (
+        "https://ghcr.io/v2/sentania-labs/crucible-worker/tags/list?n=100"
+    )
+    assert requests[2].full_url == (
+        "https://ghcr.io/v2/sentania-labs/crucible-worker/tags/list?n=100&last=0.11.3"
+    )
+    assert all(req.get_header("Authorization") == "Bearer anonymous-token" for req in requests[1:])
+    assert pv.published_versions(tags) == ["0.11.2"]
+
+
+@pytest.mark.parametrize("body", [{"tags": []}, {"tags": None}, {}])
+def test_published_versions_empty_ghcr_response(body: dict[str, Any]) -> None:
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.read.return_value = json.dumps(body).encode()
+    response.headers = {}
+    with (
+        patch.object(pv, "_anonymous_token", return_value="anonymous-token"),
+        patch.object(pv.urllib.request, "urlopen", return_value=response),
+    ):
+        assert pv.fetch_tags("ghcr.io", "sentania-labs/crucible-worker") == []
+
+
+def test_previous_release_workflow_uses_published_versions() -> None:
+    workflow = (REPOSITORY / ".github/workflows/release.yml").read_text()
+    step = workflow.split("- name: find the previous release", 1)[1].split("- name:", 1)[0]
+    assert 'published_versions.py --registry "$WORKER_REGISTRY"' in step
+    assert '| python3 tools/release/version.py --previous "$VERSION"' in step
+    assert "git tag" not in step
