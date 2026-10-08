@@ -502,6 +502,29 @@ the task cannot wait silently (hades #343).
   path until Foundry decides.
 - `wait_timeout_hours` without a conclusion produces a wake with reason
   `ci_certification_overdue`.
+- **Scoped CI (hades #476, the operator's design of 2026-10-06).** `.github/workflows/
+  ci.yml` decides a change class once per run, from the paths it touches, with a
+  classify job whose outputs gate the non-core jobs (`tools/ci/changes.py`, wrapping
+  the single definition, `crucible.domain.change_class.classify`): core (`crucible/`,
+  `tests/unit`, `tests/integration`, `pyproject.toml`, `uv.lock`, `docs`) always runs
+  lint, scan, test, e2e, manifests and compose-smoke; a path under `images/` or
+  `tools/images/` adds images, registry and the kind tier; a path under `tools/kind/`,
+  `deploy/`, or the kind test file adds the kind tier on its own; a path under
+  `.github/`, or any path matching no class, runs every job, with no exceptions. A job
+  the classifier's `if:` skipped reports conclusion `skipped` and is excluded from the
+  counted set exactly as any other skipped run (above): **it is not a missing job**,
+  the same rule this section already stated for a path filter before #476 formalized
+  the classifier that decides it. `.github/workflows/images-digest.yml` only proceeds
+  past its existing `may-commit` check when the triggering run's `images` job actually
+  ran, since a core-only or kind-only change leaves nothing for it to do.
+  `crucible.domain.certification.certify` accepts the decided class as `change_class`
+  and records it on the `Certification` it returns, unchanged by anything about the
+  decision itself (it never affects which runs count or which state results);
+  `ci_green_for_head` (`crucible.domain.gates`) carries it on `DeliveryInput` and
+  names it in the gate's own detail text when known, so a reader of that gate's
+  outcome sees which classification explains what ran. Both are proven directly at
+  `tests/unit/test_issue_476_scoped_ci_classes.py`; changing what the jobs test, and
+  the per-harness promotion flow (Images), are explicitly out of scope for this.
 
 ## Merge
 
