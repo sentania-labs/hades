@@ -10,7 +10,6 @@ import os
 import re
 import socket
 import threading
-import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -26,6 +25,7 @@ from crucible.cli.main import run
 from crucible.client import next as nx
 from tests.fixtures import contract_document
 from tests.integration.test_admin import seed_credentials
+from tests.wait import wait_until
 
 pytestmark = pytest.mark.integration
 
@@ -58,10 +58,7 @@ def api_url(ctx: AppContext, admin_ctx: AdminContext) -> Iterator[str]:
     )
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
-    deadline = time.monotonic() + 20
-    while not server.started:
-        assert time.monotonic() < deadline, "the API did not start"
-        time.sleep(0.05)
+    wait_until(lambda: server.started, timeout=20, describe="the API server to start")
     try:
         yield f"http://127.0.0.1:{port}"
     finally:

@@ -12,9 +12,10 @@ from datetime import timedelta
 from crucible.application.errors import ForbiddenError, NotFoundError, TransitionNotAllowedError
 from crucible.application.task_access import require_task_principal
 from crucible.application.transitions import move_task, record_event, require_contract
-from crucible.application.wakes import create_wake
+from crucible.application.wakes import create_wake, repeat_allowed
 from crucible.contracts.api import DecisionRequest, DispositionRequest
 from crucible.contracts.wake import WakeReason
+from crucible.domain.decisions import OPERATOR_ONLY_DECISION_KINDS
 from crucible.domain.entities import (
     Decision,
     Escalation,
@@ -32,9 +33,6 @@ from crucible.ports.clock import Clock
 from crucible.ports.repository import UnitOfWork
 
 DEFAULT_ESCALATION_STALE_HOURS = 24
-# ADR 0025: waiving the remaining external review rounds, or accepting that a repository
-# has no CI, is the operator's call on one task, like authorizing a release.
-OPERATOR_ONLY_DECISION_KINDS = frozenset({"release_authorization", *WAIVER_KINDS})
 
 
 def open_escalation(
@@ -100,33 +98,61 @@ def open_escalation(
 
 
 def repeat_stale_escalation_wakes(uow: UnitOfWork, clock: Clock, *, stale_hours: int) -> int:
-    """An escalation older than `escalation_stale_hours` produces a repeat wake (09)."""
+    """An escalation older than `escalation_stale_hours` produces a repeat wake (09).
+
+    hades #502: exactly one open `escalation_stale` wake per task. While it is unacked
+    no copy is raised, however many stale escalations the task has or how long they
+    stay open; once it is acked the notice comes back only when an escalation is still
+    open a full `stale_hours` after the ack. One task's stale escalations share one
+    wake, whose summary names them all. Returns how many wakes were raised."""
     now = clock.now()
-    repeated = 0
+    interval = timedelta(hours=stale_hours)
+    tasks: dict[str, Task] = {}
+    stale: dict[str, list[Escalation]] = {}
     for escalation in uow.escalations.list_open():
         last = escalation.last_wake_at or escalation.opened_at
-        if now - last < timedelta(hours=stale_hours):
+        if now - last < interval:
             continue
-        task = uow.tasks.get(escalation.task_id)
+        task = tasks.get(escalation.task_id)
+        if task is None:
+            task = uow.tasks.get(escalation.task_id)
         if task is None:
             continue
         # Skip escalations on tasks that are in a terminal state.
         if task.state in (TaskState.CANCELLED, TaskState.REJECTED, TaskState.CLOSED):
             continue
+        tasks[task.id] = task
+        stale.setdefault(task.id, []).append(escalation)
+    repeated = 0
+    for task_id, escalations in stale.items():
+        task = tasks[task_id]
+        previous = uow.wakes.list_for_task(task.id, reason=WakeReason.ESCALATION_STALE.value)
+        if not repeat_allowed(previous, now=now, interval=interval):
+            continue
+        escalations.sort(key=lambda e: e.opened_at)
+        if len(escalations) == 1:
+            summary = (
+                f"escalation {escalations[0].id} has been open since "
+                f"{escalations[0].opened_at.isoformat()} with no decision"
+            )
+        else:
+            names = ", ".join(e.id for e in escalations)
+            summary = (
+                f"escalations {names} have been open since "
+                f"{escalations[0].opened_at.isoformat()} with no decision"
+            )
         create_wake(
             uow,
             clock,
             principal_id=task.principal_id,
             reason=WakeReason.ESCALATION_STALE,
-            summary=(
-                f"escalation {escalation.id} has been open since "
-                f"{escalation.opened_at.isoformat()} with no decision"
-            ),
+            summary=summary,
             task=task,
-            attempt_id=escalation.attempt_id,
+            attempt_id=escalations[-1].attempt_id,
         )
-        escalation.last_wake_at = now
-        uow.escalations.save(escalation)
+        for escalation in escalations:
+            escalation.last_wake_at = now
+            uow.escalations.save(escalation)
         repeated += 1
     return repeated
 

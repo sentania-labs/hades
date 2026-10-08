@@ -372,11 +372,32 @@ def kind_schemas() -> dict[str, dict[str, Any]]:
         # this command
         "schema": _obj(
             "this document",
-            {"envelope": ANY_OBJ, "kinds": ANY_OBJ},
+            {
+                "envelope": ANY_OBJ,
+                "kinds": ANY_OBJ,
+                "decision_kinds": {
+                    "type": "array",
+                    "description": "The closed list of accepted decision kinds (FDY-0509): the "
+                    "same set that the server validates against for "
+                    "`POST /tasks/{id}/decisions`.",
+                    "items": {"type": "string"},
+                },
+            },
         ),
         "error": {"type": "null", "description": "a failure carries no data; see `error`"},
     }
 
 
+def _decision_kinds() -> list[str]:
+    """Return the accepted decision kinds (FDY-0509) from the same constant the validator uses."""
+    from crucible.domain.decisions import ACCEPTED_DECISION_KINDS  # noqa: PLC0415
+
+    return sorted(ACCEPTED_DECISION_KINDS)
+
+
 def document() -> dict[str, Any]:
-    return {"envelope": envelope_schema(), "kinds": kind_schemas()}
+    return {
+        "envelope": envelope_schema(),
+        "kinds": kind_schemas(),
+        "decision_kinds": _decision_kinds(),
+    }

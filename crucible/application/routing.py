@@ -18,6 +18,28 @@ from crucible.ports.repository import UnitOfWork
 Problem = dict[str, Any]
 
 
+# hades #373: a model-only refusal excludes one model, not its pool. The exclusion is a
+# row of the pool_exhaustions table keyed by the route (the harness and model pair a
+# routing entry is identified by) under this prefix, so it is written, listed, expired
+# and cleared exactly as a pool mark is (05b, 25), and no pool can carry the name.
+MODEL_MARK_PREFIX = "model:"
+
+
+def model_mark_key(model_id: str, harness: str) -> str:
+    """The pool_exhaustions key of a route's own exclusion mark (hades #373)."""
+    return f"{MODEL_MARK_PREFIX}{harness}:{model_id}"
+
+
+def model_excluded_until(
+    uow: UnitOfWork, model_id: str, harness: str, now: datetime
+) -> datetime | None:
+    """The reset of a live model-only exclusion (hades #373), or None."""
+    mark = uow.pool_exhaustions.get(model_mark_key(model_id, harness))
+    if mark is not None and mark.cleared_at is None and mark.reset_at > now:
+        return mark.reset_at
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class PoolUsage:
     pool: str
@@ -45,6 +67,13 @@ class PoolUsage:
             "exhausted_until": self.exhausted_until.isoformat() if self.exhausted_until else None,
             "exhaustion_reason": self.exhaustion_reason,
         }
+
+
+def launch_model_name(route: RoutingModel | None, model_id: str) -> str:
+    """Hades #354: the name a launch passes to the harness - a routing entry's own
+    `harness_model_name` when it carries one, else the lane name routing, pools and
+    evidence always use. With no entry (an unrouted execution) the lane name itself."""
+    return route.sent_model_name if route is not None else model_id
 
 
 def routing_ref(policy_document: dict[str, Any]) -> tuple[str, int] | None:
@@ -129,7 +158,7 @@ def check_selection(
                 "message": f"tier {tier!r} is not in routing policy {routing.name}",
             }
         )
-    entry = routing.model(model_id)
+    entry = routing.model(model_id, harness)
     if entry is None:
         problems.append(
             {
@@ -141,13 +170,6 @@ def check_selection(
     if not entry.enabled:
         problems.append(
             {"path": "execution_request.model", "message": f"model {model_id!r} is disabled"}
-        )
-    if entry.harness != harness:
-        problems.append(
-            {
-                "path": "execution_request.harness",
-                "message": f"the routing policy pairs {model_id!r} with harness {entry.harness!r}",
-            }
         )
     if tier_rule is not None and entry.capability not in tier_rule.allowed_capability:
         problems.append(
@@ -165,11 +187,11 @@ def check_selection(
 def pool_usage(uow: UnitOfWork, routing: RoutingPolicyV1, pool: str, now: datetime) -> PoolUsage:
     spec = routing.pools[pool]
     since = now - timedelta(seconds=window_seconds(spec.window))
-    models = {m.id for m in routing.models if m.pool == pool}
+    routes = {(m.harness, m.model) for m in routing.models if m.pool == pool}
     rows = [
         m
         for m in uow.attempt_metrics.list_since(since=since, model=None, task_ids=None)
-        if m.model in models
+        if (m.harness, m.model) in routes
     ]
     attempts = len(rows)
     mark = uow.pool_exhaustions.get(pool)
@@ -223,9 +245,9 @@ def usage_report(uow: UnitOfWork, routing: RoutingPolicyV1, now: datetime) -> li
 
 
 def check_quota(
-    uow: UnitOfWork, routing: RoutingPolicyV1, *, model_id: str, now: datetime
+    uow: UnitOfWork, routing: RoutingPolicyV1, *, model_id: str, harness: str, now: datetime
 ) -> Problem | None:
-    entry = routing.model(model_id)
+    entry = routing.model(model_id, harness)
     if entry is None:
         return None
     usage = pool_usage(uow, routing, entry.pool, now)
@@ -308,7 +330,7 @@ def select_model(
     harnesses: HarnessRegistry | None = None,
     image_allowlist: list[str] | None = None,
     excluded_pools: set[str] | None = None,
-    excluded_models: set[str] | None = None,
+    excluded_routes: set[tuple[str, str]] | None = None,
     pinned_model: str | None = None,
     pinned_harness: str | None = None,
 ) -> Selection:
@@ -351,7 +373,10 @@ def select_model(
             reasons.append("pool is at its soft limit")
         if usage.exhausted_until is not None:
             reasons.append(f"pool exhausted until {usage.exhausted_until.isoformat()}")
-        if excluded_models and entry.id in excluded_models:
+        model_until = model_excluded_until(uow, entry.model, entry.harness, now)
+        if model_until is not None:
+            reasons.append(f"model excluded until {model_until.isoformat()}")
+        if excluded_routes and (entry.harness, entry.model) in excluded_routes:
             reasons.append("model refused capacity for this retry")
         if excluded_pools and entry.pool in excluded_pools:
             reasons.append("pool excluded for the current quota reroute")
@@ -419,7 +444,9 @@ def select_model(
             "image": image or None,
             "eligible": not reasons,
             "excluded": reasons,
-            "capacity_refused": bool(excluded_models and entry.id in excluded_models),
+            "capacity_refused": bool(
+                excluded_routes and (entry.harness, entry.model) in excluded_routes
+            ),
             "preferred_pool": entry.pool in preferred,
             "quality": quality.as_dict(),
         }
@@ -511,7 +538,7 @@ def reserve(
     transaction that moves the attempt to `launching`, against the routing version the
     attempt was routed with (hades #254)."""
     routing = load_attempt_routing(uow, policy_document, routing_version)
-    entry: RoutingModel | None = routing.model(model_id) if routing else None
+    entry: RoutingModel | None = routing.model(model_id, harness) if routing else None
     if routing is None or entry is None:
         return Reservation(
             model=model_id,
@@ -521,7 +548,7 @@ def reserve(
             ok=True,
             detail="no routing policy entry; nothing to reserve",
         )
-    problem = check_quota(uow, routing, model_id=model_id, now=now)
+    problem = check_quota(uow, routing, model_id=model_id, harness=harness, now=now)
     if problem is not None:
         return Reservation(
             model=model_id,

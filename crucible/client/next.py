@@ -637,14 +637,18 @@ def local_endpoint_actions(document: Any, prefix: Sequence[str]) -> list[dict[st
         return []
     out: list[dict[str, Any]] = []
     for model in models:
-        if not isinstance(model, dict) or not model.get("id"):
+        if not isinstance(model, dict) or not (model.get("model") or model.get("id")):
             continue
-        model_id = str(model["id"])
+        model_id = str(model.get("model") or model["id"])
+        harness = str(model.get("harness") or "")
         verb = "disable" if model.get("enabled") is True else "enable"
+        label = f"{harness} / {model_id}" if harness else model_id
         out.append(
             action(
-                f"set-local-endpoint:{model_id}",
-                f"{verb} the {model_id} model on the local endpoint",
+                f"set-local-endpoint:{harness}:{model_id}"
+                if harness
+                else f"set-local-endpoint:{model_id}",
+                f"{verb} the {label} route on the local endpoint",
                 [
                     *prefix,
                     "routing",
@@ -652,6 +656,7 @@ def local_endpoint_actions(document: Any, prefix: Sequence[str]) -> list[dict[st
                     "--endpoint-url",
                     "{endpoint_url}",
                     f"--model={model_id}",
+                    *([f"--harness={harness}"] if harness else []),
                     f"--{verb}",
                 ],
                 needs={"endpoint_url": "the local endpoint's base URL"},

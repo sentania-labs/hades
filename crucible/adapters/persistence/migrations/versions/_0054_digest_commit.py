@@ -1,7 +1,7 @@
 """Allow the images-digest digest commit event kind (hades #443).
 
-Revision ID: 0051_digest_commit
-Revises: 0050_status_cache
+Revision ID: 0054_digest_commit
+Revises: 0053_cert_change_class (number provisional, hades #447)
 """
 
 from __future__ import annotations
@@ -13,13 +13,13 @@ from crucible.adapters.persistence.migrations.versions._0050_status_cache import
     _event_kinds as _previous_event_kinds,
 )
 
-revision = "0051_digest_commit"
-down_revision = "0050_status_cache"
+revision = "0054_digest_commit"
+down_revision = "0053_cert_change_class"
 branch_labels = None
 depends_on = None
 
 EVENT_KINDS = ("digest_commit_observed",)
-EVENT_ARCHIVE = "events_0051_archive"
+EVENT_ARCHIVE = "events_0054_archive"
 
 
 def _event_kinds() -> list[str]:

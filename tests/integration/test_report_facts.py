@@ -133,11 +133,11 @@ async def test_a_report_missing_judgement_fails_report_present_in_its_own_words(
     task_id = submit_and_start(
         client, "crucible-worker:fake-succeed", deliverables=ARTIFACTS_DELIVERABLE
     )
-    # A complete report is required for automatic acceptance.
-    assert await run_to_settled(supervisor, client, task_id) == "pre_pr_gates_failed"
+    # hades #498: an incomplete report is for the reviewer, never a failed gate.
+    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
     attempt_id, rows = gate_rows(client, task_id)
     assert rows[GateName.REPORT_PRESENT]["result"] == "fail"
-    assert rows[GateName.REPORT_PRESENT]["classification"] == "blocking"
+    assert rows[GateName.REPORT_PRESENT]["classification"] == "advisory"
     errors = client.get(f"/v1/attempts/{attempt_id}").json()["report"]["parse_errors"]
     assert sorted(".".join(e["loc"]) for e in errors) == ["limitations", "summary"]
 

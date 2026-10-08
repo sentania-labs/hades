@@ -352,7 +352,11 @@ def test_a_newer_valid_file_is_written_back_atomically_mode_600(tmp_path: Path) 
     assert result.changed and result.valid and result.synced
     assert (source / "auth.json").read_bytes() == rotated
     assert oct(os.stat(source / "auth.json").st_mode & 0o777) == "0o600"
-    assert not (source / "auth.json.crucible-sync").exists()
+    # hades #315: the per-attempt temporary name is gone once the replace lands; only
+    # the shared lock file (never a credential) may remain.
+    assert [p.name for p in source.glob("auth.json.crucible-sync*")] == [
+        "auth.json.crucible-sync.lock"
+    ]
 
 
 def test_an_older_file_never_overwrites_a_newer_source(tmp_path: Path) -> None:

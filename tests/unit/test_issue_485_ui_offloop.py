@@ -33,6 +33,7 @@ from crucible.cli.wiring import wire
 from crucible.domain.lifecycle import TaskState
 from crucible.ports.execution import ImageInfo
 from crucible.settings import Settings
+from tests.wait import async_wait_until
 
 
 def test_every_ui_and_api_handler_is_a_threadpool_entry_point() -> None:
@@ -145,7 +146,9 @@ def test_streamed_body_is_received_on_server_loop() -> None:
         async def receive() -> dict[str, Any]:
             nonlocal remaining
             assert asyncio.get_running_loop() is server_loop
-            await asyncio.sleep(0.001)
+            await async_wait_until(
+                lambda: remaining > 0, timeout=5.0, describe="to still have chunks"
+            )
             remaining -= 1
             return {
                 "type": "http.request",

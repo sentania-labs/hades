@@ -78,6 +78,14 @@ class Certification:
     failures: tuple[ObservedCheck, ...] = ()
     pending: tuple[str, ...] = ()
     observed: tuple[ObservedCheck, ...] = field(default=())
+    # hades #476: the class `crucible.domain.change_class.classify` assigned to this
+    # run's changed paths, recorded here for the record, not read by `certify` itself.
+    # A job the classifier's `if:` skipped is excluded from `counted` by `_counts`
+    # below, the same as any other skipped run, so it is never a missing job; this
+    # field only names which classification explains that skip. Empty when the caller
+    # does not know it (every caller before #476, and a certification with nothing
+    # observed yet).
+    change_class: str = ""
 
 
 def required_checks_from_policy(policy: dict[str, object]) -> tuple[str, ...]:
@@ -119,8 +127,13 @@ def certify(
     *,
     head_sha: str,
     observed: Sequence[ObservedCheck],
+    change_class: str = "",
 ) -> Certification:
-    """Green, failed, pending, or skipped for one head. Never green on an empty set."""
+    """Green, failed, pending, or skipped for one head. Never green on an empty set.
+
+    `change_class` (hades #476) is recorded on the returned `Certification` as-is; it
+    never changes which runs count or which state results, so the caller may pass the
+    empty default when it has not computed one."""
     on_head = tuple(check for check in observed if check.head_sha == head_sha)
     narrowing = required_checks_from_policy(policy)
     counted = tuple(
@@ -135,6 +148,7 @@ def certify(
                 "(ci_certification.allow_no_ci)",
                 source=source,
                 observed=on_head,
+                change_class=change_class,
             )
         return Certification(
             CertificationState.PENDING,
@@ -142,6 +156,7 @@ def certify(
             "required-check set is pending, never green (23)",
             source=source,
             observed=on_head,
+            change_class=change_class,
         )
     failures = [check for check in counted if check.failed]
     pending = [check.name for check in counted if not check.failed and not check.succeeded]
@@ -158,6 +173,7 @@ def certify(
             failures=tuple(failures),
             pending=tuple(pending),
             observed=on_head,
+            change_class=change_class,
         )
     if pending:
         return Certification(
@@ -168,6 +184,7 @@ def certify(
             source=source,
             pending=tuple(pending),
             observed=on_head,
+            change_class=change_class,
         )
     return Certification(
         CertificationState.GREEN,
@@ -175,4 +192,5 @@ def certify(
         required=required,
         source=source,
         observed=on_head,
+        change_class=change_class,
     )

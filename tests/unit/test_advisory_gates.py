@@ -19,6 +19,7 @@ from crucible.domain.entities import GateResultRecord
 from crucible.domain.gates import (
     ALWAYS_BLOCKING_GATES,
     DEFAULT_ADVISORY_GATES,
+    NO_REPORT_DETAIL,
     PRE_PR_GATES,
     EvidenceItem,
     GateClass,
@@ -51,22 +52,28 @@ def _without_review(evidence: list[EvidenceItem]) -> list[EvidenceItem]:
 
 
 def _out_of_scope() -> list[EvidenceItem]:
-    return _replace(
+    evidence = _replace(
         _passing_evidence(),
         3,
         _ev("diff_paths", {"paths": ["src/ledger/a.py", "infrastructure/out.txt"]}, ident=4),
     )
+    bundle = dict(evidence[2].payload)
+    bundle["commit_paths"] = ["src/ledger/a.py", "infrastructure/out.txt"]
+    evidence[2] = _ev("bundle_head", bundle, ident=3)
+    return evidence
 
 
 # ----- classification ------------------------------------------------------------
 
 
 def test_the_default_classification_is_the_operators() -> None:
+    """ADR 0024, amended by hades #498: the report gate is advisory too."""
     assert {
         GateName.SCOPE_CONTAINED,
         GateName.CRITERIA_MAPPED,
         GateName.RUN_EVIDENCE_PRESENT,
         GateName.COMMIT_POLICY,
+        GateName.REPORT_PRESENT,
     } == DEFAULT
     for gate in (
         GateName.VERIFICATION_RAN,
@@ -77,7 +84,6 @@ def test_the_default_classification_is_the_operators() -> None:
         GateName.NO_INJECTED_FILES,
         GateName.WORKSPACE_CLEAN,
         GateName.EXIT_CLEAN,
-        GateName.REPORT_PRESENT,
         GateName.INTERNAL_REVIEW_RECORDED,
     ):
         assert gate_class(gate, DEFAULT) is GateClass.BLOCKING, gate
@@ -87,18 +93,20 @@ def test_a_policy_without_the_field_takes_the_default() -> None:
     """The lab's default-software v8 and hades-self-hosting v1 carry no list."""
     seeded = seeded_policy_v3()
     assert "advisory" not in seeded["gates"]
-    assert advisory_gates(seeded) == DEFAULT_ADVISORY_GATES | {GateName.COMMIT_POLICY}
-    assert advisory_gates({"gates": {"advisory": None}}) == DEFAULT_ADVISORY_GATES | {
-        GateName.COMMIT_POLICY
-    }
+    always = {GateName.COMMIT_POLICY, GateName.REPORT_PRESENT}
+    assert advisory_gates(seeded) == DEFAULT_ADVISORY_GATES | always
+    assert advisory_gates({"gates": {"advisory": None}}) == DEFAULT_ADVISORY_GATES | always
 
 
-def test_a_policy_list_decides_and_the_report_always_blocks() -> None:
-    assert advisory_gates({"gates": {"advisory": []}}) == {GateName.COMMIT_POLICY}
+def test_a_policy_list_decides_and_the_secret_gate_always_blocks() -> None:
+    """hades #498: the report gate is always advisory, as commit_policy is; no_secrets
+    always blocks."""
+    always = {GateName.COMMIT_POLICY, GateName.REPORT_PRESENT}
+    assert advisory_gates({"gates": {"advisory": []}}) == always
     chosen = advisory_gates(
         {"gates": {"advisory": ["ci_unchanged", "no_secrets", "report_present"]}}
     )
-    assert chosen == {GateName.CI_UNCHANGED, GateName.COMMIT_POLICY}
+    assert chosen == {GateName.CI_UNCHANGED} | always
 
 
 # ----- the verdict ----------------------------------------------------------------
@@ -163,8 +171,9 @@ def test_a_path_merely_outside_allowed_paths_does_not_always_block() -> None:
     assert not outcomes[GateName.SCOPE_CONTAINED].always_blocks
 
 
-def test_a_missing_judgement_field_blocks_publication() -> None:
-    """report_present: a report without `risks` did not parse, and publication stops."""
+def test_a_missing_judgement_field_is_for_the_reviewer() -> None:
+    """report_present (hades #498): a report without `risks` did not parse; the gap is
+    listed for the reviewer and the task goes on."""
     claim = _claim_payload(
         parsed_ok=False,
         parse_errors=[{"loc": ["risks"], "msg": "Field required", "type": "missing"}],
@@ -172,14 +181,17 @@ def test_a_missing_judgement_field_blocks_publication() -> None:
     evidence = _without_review(_replace(_passing_evidence(), 1, _ev("artifact_present", claim)))
     outcomes = evaluate_pre_pr(sorted(PRE_PR_GATES), _gi(evidence))
     assert outcomes[GateName.REPORT_PRESENT].result is GateResult.FAIL
+    assert not outcomes[GateName.REPORT_PRESENT].always_blocks
     assert outcomes[GateName.CRITERIA_MAPPED].result is GateResult.FAIL
-    assert pre_pr_verdict(outcomes, DEFAULT) is PrePrVerdict.FAILED
+    assert blocking(outcomes, DEFAULT) == []
+    assert pre_pr_verdict(outcomes, DEFAULT) is PrePrVerdict.PASSED
     assert {i["gate"] for i in for_reviewer(outcomes, DEFAULT)} == {
         GateName.CRITERIA_MAPPED,
+        GateName.REPORT_PRESENT,
     }
 
 
-def test_a_report_that_is_not_yaml_blocks_with_its_parse_error() -> None:
+def test_a_report_that_is_not_yaml_goes_to_the_reviewer_with_its_parse_error() -> None:
     """The correction to FDY-0138: a report file that is there but is not YAML is recorded
     as present and unparsed (only a message and position, no fact fields), and goes to
     the reviewer with the parser's problem."""
@@ -188,10 +200,13 @@ def test_a_report_that_is_not_yaml_blocks_with_its_parse_error() -> None:
     evidence = _without_review(_replace(_passing_evidence(), 1, _ev("artifact_present", claim)))
     outcomes = evaluate_pre_pr(sorted(PRE_PR_GATES), _gi(evidence))
     report = outcomes[GateName.REPORT_PRESENT]
-    assert report.result is GateResult.FAIL and report.always_blocks
+    assert report.result is GateResult.FAIL and not report.always_blocks
     assert "report.yaml is not YAML: mapping values are not allowed here" in report.detail
     assert "at line 1, column 12" in report.detail
-    assert pre_pr_verdict(outcomes, DEFAULT) is PrePrVerdict.FAILED
+    assert pre_pr_verdict(outcomes, DEFAULT) is PrePrVerdict.PASSED
+    assert {"gate": GateName.REPORT_PRESENT, "detail": report.detail} in for_reviewer(
+        outcomes, DEFAULT
+    )
 
 
 def test_the_parse_problems_shown_are_few_redacted_and_short() -> None:
@@ -205,7 +220,7 @@ def test_the_parse_problems_shown_are_few_redacted_and_short() -> None:
         GateName.REPORT_PRESENT
     ].detail
     assert token not in detail and "x.0: bad [redacted:" in detail
-    assert "m" * 201 not in detail and detail.endswith("; and 2 more")
+    assert "m" * 201 not in detail and "; and 2 more" in detail
 
 
 @pytest.mark.parametrize(
@@ -229,21 +244,28 @@ def test_a_secret_in_a_report_that_is_not_yaml_is_still_found() -> None:
     assert [f["where"] for f in _scanner_findings(outputs, None)] == ["report"]
 
 
-def test_no_report_at_all_still_blocks() -> None:
+def test_no_report_at_all_is_for_the_reviewer() -> None:
+    """hades #498: the gates judge the work. With the work gates passing, a missing
+    report is listed for the reviewer in plain words and never stops the task."""
     evidence = _without_review(
         [e for e in _passing_evidence() if e.payload.get("role") != "completion_claim"]
     )
     outcomes = evaluate_pre_pr(sorted(PRE_PR_GATES), _gi(evidence))
     report = outcomes[GateName.REPORT_PRESENT]
-    assert report.result is GateResult.FAIL and report.always_blocks
-    assert blocking(outcomes, DEFAULT) == [GateName.REPORT_PRESENT]
-    assert pre_pr_verdict(outcomes, DEFAULT) is PrePrVerdict.FAILED
+    assert report.result is GateResult.FAIL and not report.always_blocks
+    assert report.detail == NO_REPORT_DETAIL
+    assert blocking(outcomes, DEFAULT) == []
+    assert pre_pr_verdict(outcomes, DEFAULT) is PrePrVerdict.PASSED
+    assert {"gate": GateName.REPORT_PRESENT, "detail": NO_REPORT_DETAIL} in for_reviewer(
+        outcomes, DEFAULT
+    )
 
 
 def test_an_advisory_gate_that_errors_goes_to_the_reviewer() -> None:
-    evidence = _replace(
-        _passing_evidence(), 3, _ev("diff_paths", {"paths": None}, ident=4)
-    )  # a payload the evaluator cannot iterate
+    evidence = _passing_evidence()
+    bundle = dict(evidence[2].payload)
+    bundle["commit_paths"] = None
+    evidence[2] = _ev("bundle_head", bundle, ident=3)  # a payload the evaluator cannot iterate
     outcomes = evaluate_pre_pr([GateName.SCOPE_CONTAINED], _gi(evidence))
     assert outcomes[GateName.SCOPE_CONTAINED].result is GateResult.ERROR
     assert blocking(outcomes, DEFAULT) == []
@@ -355,7 +377,7 @@ def test_the_policy_field_is_optional_and_validated() -> None:
     for bad, words in (
         (["ci_green_for_head"], "not pre-PR gates"),
         (["no_such_gate"], "not pre-PR gates"),
-        (["report_present"], "always block"),
+        (["report_present"], "always advisory"),
         (["no_secrets"], "always block"),
         (["commit_policy"], "always advisory"),
         (["scope_contained", "scope_contained"], "duplicate"),
