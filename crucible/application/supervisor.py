@@ -2829,6 +2829,10 @@ class Supervisor:
                     break
                 candidate["busy"] = busy
                 skipped_busy.append({"model": model.id, "harness": model.harness, "reason": busy})
+                # The route event must not describe a candidate skipped here as eligible.
+                candidate["eligible"] = False
+                if busy not in candidate["excluded"]:
+                    candidate["excluded"] = [*list(candidate["excluded"]), busy]
             assert chosen is not None or skipped_busy
             attempt.ordered_candidates = candidates
             if chosen is None:
