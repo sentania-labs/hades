@@ -89,7 +89,7 @@ from crucible.domain.waivers import (
     waiver_words,
 )
 from crucible.ports.clock import Clock
-from crucible.ports.github import CheckRecord, CommitDiffRecord, Observation
+from crucible.ports.github import CommitDiffRecord, Observation
 from crucible.ports.repository import UnitOfWork
 
 log = logging.getLogger("crucible.observation")
@@ -256,9 +256,7 @@ def _is_digest_commit(commit_diff: tuple[CommitDiffRecord, ...]) -> bool:
     if not commit_diff:
         return False
     # Every changed file must be the manifest.
-    if not all(d.path == DIGEST_FILE for d in commit_diff):
-        return False
-    return True
+    return all(d.path == DIGEST_FILE for d in commit_diff)
 
 
 def _is_digest_move(
@@ -276,9 +274,7 @@ def _is_digest_move(
         return False
     if not message.startswith(DIGEST_MESSAGE_PREFIX):
         return False
-    if not _is_digest_commit(diff):
-        return False
-    return True
+    return _is_digest_commit(diff)
 
 
 def _record_digest_commit(
@@ -291,7 +287,6 @@ def _record_digest_commit(
     result: ObservationResult,
 ) -> None:
     """Record a digest commit: no divergence, carry dispositions forward, certify CI."""
-    now = clock.now()
     record_event(
         uow,
         clock,
@@ -302,7 +297,9 @@ def _record_digest_commit(
             "pull_request": pull_request.number,
             "old_head": task.head_sha,  # the head_sha on the task was already updated
             "new_head": observed_sha,
-            "message": "images-digest workflow moved the head; acceptance and dispositions carry forward",
+            "message": (
+                "images-digest workflow moved the head; acceptance and dispositions carry forward"
+            ),
         },
     )
     # Update the task's head_sha to the new observed SHA.
@@ -326,7 +323,7 @@ def observe_head(
     Hades #443: if the head moved from the accepted head to *observed_sha* because
     the images-digest workflow committed a *digest commit* (author ``github-actions[bot]``,
     message prefix ``Record the CI-built digest``, diff touches only ``*_DIGEST`` lines of
-    ``images/manifest.env``), the move is treated as **Hades's own head move** – the task
+    ``images/manifest.env``), the move is treated as **Hades's own head move** — the task
     stays in its current state, acceptance and dispositions carry forward, and CI on the
     new head is recorded without a new head decision.
     """

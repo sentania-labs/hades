@@ -15,8 +15,10 @@ Proves the four acceptance criteria from FDY-0505:
 
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime
 
+from crucible.adapters.execution import scripts
 from crucible.application.observation import (
     DIGEST_AUTHOR,
     DIGEST_FILE,
@@ -29,6 +31,7 @@ from crucible.domain.entities import (
     PullRequest,
     PullRequestHead,
     PullRequestState,
+    Repository,
     RoutingPolicyRecord,
     Task,
 )
@@ -36,7 +39,7 @@ from crucible.domain.events import EventKind
 from crucible.domain.lifecycle import TaskState
 from crucible.ports.github import CommitDiffRecord, Observation, PullRequestRef
 from tests.fixtures import REPOSITORY_URL, FakeClock
-import inspect
+from tests.unit.test_issue_360_ready_for_merge_correction import _Store
 
 NOW = datetime(2026, 9, 26, 12, 0, 0, tzinfo=UTC)
 OLD_HEAD = "a" * 40
@@ -67,7 +70,7 @@ class _Acceptance:
         pass
 
 
-def _policy():
+def _policy() -> Policy:
     return Policy(
         name="default",
         version=1,
@@ -76,7 +79,7 @@ def _policy():
     )
 
 
-def _routing():
+def _routing() -> RoutingPolicyRecord:
     document = {
         "schema_version": "1.0",
         "name": "default-routing",
@@ -86,11 +89,8 @@ def _routing():
     return RoutingPolicyRecord(name="default-routing", version=3, document=document, created_at=NOW)
 
 
-def _make_store():
+def _make_store() -> _Store:
     """Build the _Store the #360 module expects."""
-    from tests.unit.test_issue_360_ready_for_merge_correction import _Store
-    from crucible.domain.entities import Repository
-
     store = _Store(
         Repository(
             id="repo",
@@ -107,16 +107,16 @@ def _make_store():
         _routing(),
     )
     # replace the pull_request_heads mock with one that supports add()
-    store.pull_request_heads = _PullRequestHeads()
-    store.acceptance = _Acceptance()
+    store.pull_request_heads = _PullRequestHeads()  # type: ignore[assignment]
+    store.acceptance = _Acceptance()  # type: ignore[attr-defined]
     return store
 
 
 def _make_task(
     head_sha: str = OLD_HEAD,
     state: TaskState = TaskState.READY_FOR_MERGE,
-    **kwargs,
-):
+    **kwargs: object,
+) -> Task:
     """Return a minimal task row that the unit of work can return."""
     return Task(
         id=TASK_ID,
@@ -132,11 +132,11 @@ def _make_task(
         created_at=NOW,
         updated_at=NOW,
         head_sha=head_sha,
-        **kwargs,
+        **kwargs,  # type: ignore[arg-type]
     )
 
 
-def _make_pr(pull_request_id: str = "pr-443", head_sha: str = OLD_HEAD):
+def _make_pr(pull_request_id: str = "pr-443", head_sha: str = OLD_HEAD) -> PullRequest:
     """Return a minimal PR row."""
     return PullRequest(
         id=pull_request_id,
@@ -155,13 +155,13 @@ def _make_pr(pull_request_id: str = "pr-443", head_sha: str = OLD_HEAD):
 # ---- _is_digest_commit unit tests ---------------------------------------------
 
 
-def test_is_digest_commit_returns_true_for_manifest_only():
+def test_is_digest_commit_returns_true_for_manifest_only() -> None:
     """AC1: a diff touching only images/manifest.env is a digest commit."""
     diffs = (CommitDiffRecord(path="images/manifest.env", additions=3, deletions=3),)
     assert _is_digest_commit(diffs) is True
 
 
-def test_is_digest_commit_returns_true_for_multiple_manifest_entries():
+def test_is_digest_commit_returns_true_for_multiple_manifest_entries() -> None:
     """AC1: multiple entries all in manifest.env are still a digest commit."""
     diffs = (
         CommitDiffRecord(path="images/manifest.env", additions=2, deletions=1),
@@ -170,18 +170,18 @@ def test_is_digest_commit_returns_true_for_multiple_manifest_entries():
     assert _is_digest_commit(diffs) is True
 
 
-def test_is_digest_commit_returns_false_for_empty_diff():
+def test_is_digest_commit_returns_false_for_empty_diff() -> None:
     """Edge case: an empty diff is NOT a digest commit."""
     assert _is_digest_commit(()) is False
 
 
-def test_is_digest_commit_returns_false_for_non_manifest_file():
+def test_is_digest_commit_returns_false_for_non_manifest_file() -> None:
     """AC2: a diff touching any file other than images/manifest.env is NOT a digest commit."""
     diffs = (CommitDiffRecord(path="src/main.py", additions=1, deletions=0),)
     assert _is_digest_commit(diffs) is False
 
 
-def test_is_digest_commit_returns_false_for_mixed_files():
+def test_is_digest_commit_returns_false_for_mixed_files() -> None:
     """AC2: mixed manifest + non-manifest files is NOT a digest commit."""
     diffs = (
         CommitDiffRecord(path="images/manifest.env", additions=2, deletions=2),
@@ -190,23 +190,23 @@ def test_is_digest_commit_returns_false_for_mixed_files():
     assert _is_digest_commit(diffs) is False
 
 
-def test_is_digest_commit_returns_false_for_manifest_env_not_in_root():
+def test_is_digest_commit_returns_false_for_manifest_env_not_in_root() -> None:
     """AC2: a file named images/manifest.env in a subdirectory is NOT the target file."""
     diffs = (CommitDiffRecord(path="other/manifest.env", additions=2, deletions=2),)
     assert _is_digest_commit(diffs) is False
 
 
-def test_digest_author_constant():
+def test_digest_author_constant() -> None:
     """Verify the digest author constant is correct."""
     assert DIGEST_AUTHOR == "github-actions[bot]"
 
 
-def test_digest_message_prefix_constant():
+def test_digest_message_prefix_constant() -> None:
     """Verify the digest message prefix constant is correct."""
     assert DIGEST_MESSAGE_PREFIX == "Record the CI-built digest"
 
 
-def test_digest_file_constant():
+def test_digest_file_constant() -> None:
     """Verify the digest file constant is correct."""
     assert DIGEST_FILE == "images/manifest.env"
 
@@ -214,7 +214,7 @@ def test_digest_file_constant():
 # ---- integration: observe_head path -------------------------------------------
 
 
-def test_observe_head_digest_commit_records_digest_event_not_divergence():
+def test_observe_head_digest_commit_records_digest_event_not_divergence() -> None:
     """AC1: a head move with digest author/message/diff records DIGEST_COMMIT_OBSERVED,
     updates head_sha, and does NOT diverge.
 
@@ -248,7 +248,7 @@ def test_observe_head_digest_commit_records_digest_event_not_divergence():
     result = type("ObservationResult", (), {"changed": False, "diverged": False})()
 
     observe_head(
-        uow=store,
+        uow=store,  # type: ignore[arg-type]
         clock=FakeClock(NOW),
         task=task,
         pull_request=pr_row,
@@ -266,7 +266,7 @@ def test_observe_head_digest_commit_records_digest_event_not_divergence():
     assert EventKind.DIGEST_COMMIT_OBSERVED.value in event_kinds
 
 
-def test_observe_head_non_digest_author_records_head_diverged():
+def test_observe_head_non_digest_author_records_head_diverged() -> None:
     """AC2: a head move by a non-bot author still diverges."""
     store = _make_store()
     task = _make_task(state=TaskState.READY_FOR_MERGE)
@@ -293,7 +293,7 @@ def test_observe_head_non_digest_author_records_head_diverged():
     result = type("ObservationResult", (), {"changed": False, "diverged": False})()
 
     observe_head(
-        uow=store,
+        uow=store,  # type: ignore[arg-type]
         clock=FakeClock(NOW),
         task=task,
         pull_request=pr_row,
@@ -309,7 +309,7 @@ def test_observe_head_non_digest_author_records_head_diverged():
     assert EventKind.TASK_HEAD_DIVERGED.value in event_kinds
 
 
-def test_observe_head_non_digest_message_records_head_diverged():
+def test_observe_head_non_digest_message_records_head_diverged() -> None:
     """AC2: same author but wrong message still diverges."""
     store = _make_store()
     task = _make_task(state=TaskState.READY_FOR_MERGE)
@@ -336,7 +336,7 @@ def test_observe_head_non_digest_message_records_head_diverged():
     result = type("ObservationResult", (), {"changed": False, "diverged": False})()
 
     observe_head(
-        uow=store,
+        uow=store,  # type: ignore[arg-type]
         clock=FakeClock(NOW),
         task=task,
         pull_request=pr_row,
@@ -348,7 +348,7 @@ def test_observe_head_non_digest_message_records_head_diverged():
     assert task.state == TaskState.HEAD_DIVERGED
 
 
-def test_observe_head_non_manifest_diff_records_head_diverged():
+def test_observe_head_non_manifest_diff_records_head_diverged() -> None:
     """AC2: same author, correct message, but non-manifest files diverges."""
     store = _make_store()
     task = _make_task(state=TaskState.READY_FOR_MERGE)
@@ -378,7 +378,7 @@ def test_observe_head_non_manifest_diff_records_head_diverged():
     result = type("ObservationResult", (), {"changed": False, "diverged": False})()
 
     observe_head(
-        uow=store,
+        uow=store,  # type: ignore[arg-type]
         clock=FakeClock(NOW),
         task=task,
         pull_request=pr_row,
@@ -393,7 +393,7 @@ def test_observe_head_non_manifest_diff_records_head_diverged():
 # ---- publisher script: digest commits ahead -----------------------------------
 
 
-def test_publisher_script_digest_commits_are_ignored_for_ownership():
+def test_publisher_script_digest_commits_are_ignored_for_ownership() -> None:
     """AC3: the publisher and merge_main scripts are the entry points.
 
     The actual rebase/merge logic lives in the shell scripts (12, 15), so we
@@ -401,9 +401,6 @@ def test_publisher_script_digest_commits_are_ignored_for_ownership():
     and they reference the same digest constants that observation.py uses,
     so that both sides agree on what a digest commit is.
     """
-    from crucible.adapters.execution import scripts
-    from crucible.application.observation import DIGEST_AUTHOR
-
     # The scripts module exports the publisher script.
     assert "publisher_script" in scripts.__all__
 
@@ -423,7 +420,7 @@ def test_publisher_script_digest_commits_are_ignored_for_ownership():
 # ---- delivery: certified head + digest commit -> ready_for_merge --------------
 
 
-def test_observe_head_digest_updates_head_sha_and_carries_state():
+def test_observe_head_digest_updates_head_sha_and_carries_state() -> None:
     """AC4: after CI certification, a digest commit moves the head_sha forward.
     The task stays in its current state (e.g. READY_FOR_MERGE ->
     READY_FOR_MERGE still, but with the new head_sha). In the real flow,
@@ -458,7 +455,7 @@ def test_observe_head_digest_updates_head_sha_and_carries_state():
     result = type("ObservationResult", (), {"changed": False, "diverged": False})()
 
     observe_head(
-        uow=store,
+        uow=store,  # type: ignore[arg-type]
         clock=FakeClock(NOW),
         task=task,
         pull_request=pr_row,

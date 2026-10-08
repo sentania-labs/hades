@@ -366,7 +366,7 @@ class GitHubClient(Protocol):
         repository: str,
         base_sha: str,
         head_sha: str,
-    ) -> Sequence["CommitDiffRecord"]:
+    ) -> Sequence[CommitDiffRecord]:
         """The diff stats between ``base_sha`` and ``head_sha`` (contents read).
 
         Returns a list of changed-file summaries so the observer can verify that only

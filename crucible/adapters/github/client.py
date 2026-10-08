@@ -347,7 +347,7 @@ class RestGitHubClient:
         head_commit_message = ""
         head_commit_diff: tuple[CommitDiffRecord, ...] = ()
         try:
-            status, commit_payload, _ = self._http.request(
+            _status, commit_payload, _ = self._http.request(
                 "GET",
                 f"/repos/{repository}/commits/{pr.head_sha}",
                 bearer=token.reveal(),

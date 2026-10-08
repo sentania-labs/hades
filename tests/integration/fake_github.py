@@ -357,9 +357,7 @@ class FakeGitHub:
         # Make the commit on the default branch so remote_head returns it.
         repo.branches["main"] = sha
 
-    def diff_commits(
-        self, full_name: str, base_sha: str, head_sha: str
-    ) -> list[dict[str, Any]]:
+    def diff_commits(self, full_name: str, base_sha: str, head_sha: str) -> list[dict[str, Any]]:
         """Return the compare diff between two commits (hades #443)."""
         repo = self.repositories[full_name]
         if base_sha == head_sha:
@@ -367,7 +365,7 @@ class FakeGitHub:
         head_commit = repo.commits.get(head_sha)
         if head_commit is None:
             return []
-        return head_commit.get("files", [])
+        return head_commit.get("files", [])  # type: ignore[no-any-return]
 
     # ----- hades #443: compare endpoint for the test server ---------------
 
@@ -695,7 +693,6 @@ class _Handler(BaseHTTPRequestHandler):
             return
         # hades #443: /repos/{owner}/{repo}/compare/{base}...{head}
         if rest[:1] == ["compare"] and len(rest) >= 3:
-            base_part = rest[-1] if len(rest) == 3 else rest[-1]
             # Handle ... separator: rest[1] might be "base...head" or "base" with rest[2] as "head"
             compare_ref = parts[-1]  # Everything after /repos/owner/repo/
             if "..." in compare_ref:
