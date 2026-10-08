@@ -168,12 +168,25 @@ async def get_attempt_logs(
                 if await request.is_disconnected():
                     return
                 await asyncio.sleep(0.25)
+        except GeneratorExit:
+            # GeneratorExit must propagate so the async generator actually
+            # terminates.  Starlette calls ``aclose()`` on the body iterator
+            # when the response closes; a swallowed GeneratorExit leaves the
+            # generator in a running state, which prevents the ASGI server
+            # from completing the response and causes the client's iter_lines()
+            # to hang forever.  (The e2e test
+            # ``test_live_log_tail_delivers_while_worker_is_running`` was failing
+            # with ``asyncio.Event bound to a different event loop`` because the
+            # test thread's iter_lines never returned, the ``wait_for``
+            # cancelled the coroutine, and Starlette's cleanup raised an
+            # EventGroup over a dead event loop.)
+            raise
         except BaseException:
-            # Cancellation (asyncio.CancelledError), generator exit (GeneratorExit),
-            # or a disconnect that Starlette surfaces as an exception must not
-            # escape into the StreamingResponse's internal TaskGroup, because
-            # Starlette treats any unhandled sub-exception as a stream error and
-            # propagates it to the client as an ExceptionGroup (E2E test failure).
+            # Cancellation (asyncio.CancelledError) or a disconnect that
+            # Starlette surfaces as an exception must not escape into the
+            # StreamingResponse's internal TaskGroup, because Starlette treats
+            # any unhandled sub-exception as a stream error and propagates it to
+            # the client as an ExceptionGroup (E2E test failure).
             # The permit is already tied to the response lifecycle via the
             # BackgroundTask above, so this is a clean shutdown.
             return

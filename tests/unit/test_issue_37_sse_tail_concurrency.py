@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import nullcontext
+from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
 import pytest
 from starlette.requests import Request
+from starlette.testclient import TestClient
 
 from crucible.adapters.api.deps import AppContext, SseTailLimiter
 from crucible.adapters.api.routers import records
+from crucible.application.auth import mint_token
 from crucible.domain.entities import Role
 from crucible.settings import Settings
 
@@ -177,3 +181,63 @@ def test_two_separate_event_loops_each_open_a_tail(
     # Release both permits so the limiter can be reused.
     ctx.sse_tail_limiter.release()
     ctx.sse_tail_limiter.release()
+
+
+def test_tail_emits_event_end_and_cleans_up_when_attempt_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the attempt is already terminal (logs_drained_at is set), the SSE stream
+    must emit 'event: end' and return cleanly.  This is the simplest case the e2e test
+    exercises: an attempt reaches a terminal state, the supervisor sets logs_drained_at,
+    and the tail picks up 'event: end' on its next poll.
+
+    The e2e test ``test_live_log_tail_delivers_while_worker_is_running`` proved that
+    if the stream does not close cleanly, Starlette raises an exception group over a
+    dead event loop.  By re-raising GeneratorExit, the generator terminates so the
+    TestClient stream context manager can exit without error."""
+    from pathlib import Path
+
+    from sqlalchemy.orm import Session
+
+    from crucible.adapters.api.deps import SseTailLimiter
+    from crucible.adapters.persistence import models as m
+    from tests.unit.issue_485_fixture import workload
+
+    tmp = Path(__file__).parent / "_concurrency_test.db"
+    app, ctx, engine = workload(tmp, count=1)
+
+    # Override the limiter to a generous cap for this single-tail test.
+    ctx.sse_tail_limiter = SseTailLimiter(5)
+
+    # Create an attempt row that is terminal (logs_drained_at is set) via ORM.
+    now = m.datetime.now()
+    with Session(engine) as db:
+        db.add(
+            m.AttemptRow(
+                id="tail-test",
+                execution_id="tail-exec",
+                task_id="tail-task",
+                number=1,
+                state="accepted",
+                created_at=now,
+                logs_drained_at=now,
+            )
+        )
+        db.commit()
+
+    # The stream must carry 'event: end' and the TestClient context manager must
+    # exit cleanly (no ExceptionGroup from a stuck generator).
+    with TestClient(app, headers={"Authorization": f"Bearer {ctx.logins.get_or_create('admin').token}"}) as c:
+        with c.stream(
+            "GET",
+            "/v1/attempts/tail-test/logs",
+            headers={"Accept": "text/event-stream"},
+        ) as resp:
+            assert resp.status_code == 200
+            full_body = "\n".join(resp.iter_lines())
+
+    assert "event: end" in full_body, (
+        f"expected 'event: end' in SSE response; got: {full_body[:500]}"
+    )
+
+    engine.dispose()
