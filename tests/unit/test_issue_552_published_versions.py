@@ -42,7 +42,9 @@ v = _load("version", _VERSION_PY)
 class TestPublishedVersionsFilter:
     """Filter tags from a raw API list to bare version strings (N.N.N)."""
 
-    def test_accepts_plain_versions(self) -> None:
+    def test_accepts_plain_versions_when_no_harness_tags_present(self) -> None:
+        """When the tag list contains zero harness tags (pre-harness packages),
+        all bare version tags are returned (backwards-compatible fallback)."""
         tags = ["0.11.0", "0.11.1", "0.11.2", "0.11.4"]
         assert pv.published_versions(tags) == tags
 
@@ -69,6 +71,48 @@ class TestPublishedVersionsFilter:
         tags = ["latest", "script-harness-0.11.0", "20260916-aaa"]
         assert pv.published_versions(tags) == []
 
+    def test_half_published_version_is_excluded(self) -> None:
+        """Finding 01M4E3NSPW77SVH0YYRDZV1K5T: a release that pushed <version>
+        but failed before script-harness-<version> must not be considered
+        published."""
+        tags = [
+            "0.11.0",
+            "script-harness-0.11.0",
+            "0.11.3",  # bare but no script-harness-0.11.3
+            "0.11.2",
+            "script-harness-0.11.2",
+        ]
+        assert pv.published_versions(tags) == ["0.11.0", "0.11.2"]
+
+    def test_half_published_version_skipped_with_multiple_full(self) -> None:
+        """When there are multiple full publishes, the half-published one
+        is excluded but others are included."""
+        tags = [
+            "0.11.0",
+            "script-harness-0.11.0",
+            "0.11.1",
+            "script-harness-0.11.1",
+            "0.11.3",  # bare only — half-published
+            "0.11.4",
+            "script-harness-0.11.4",
+        ]
+        assert pv.published_versions(tags) == ["0.11.0", "0.11.1", "0.11.4"]
+
+    def test_no_bare_version_with_harness_returns_empty(self) -> None:
+        """When there are only harness tags and no bare version tags, return empty."""
+        tags = ["script-harness-0.11.0", "script-harness-0.11.1"]
+        assert pv.published_versions(tags) == []
+
+    def test_mixed_harness_and_bare_with_no_match(self) -> None:
+        """Harness tags exist but no bare version matches any harness."""
+        tags = [
+            "0.9.9",  # bare but no script-harness-0.9.9
+            "script-harness-0.11.0",
+            "0.11.0",
+            "script-harness-0.11.0",
+        ]
+        assert pv.published_versions(tags) == ["0.11.0"]
+
 
 # -- integration with version.py --previous -----------------------------------
 
@@ -82,23 +126,24 @@ class TestPublishedVersionsPrevious:
     """
 
     def test_previous_release_skips_failed_tag(self) -> None:
-        """Published versions: 0.11.0, 0.11.1, 0.11.2 (0.11.3 failed to
-        publish).  For candidate 0.11.4, --previous must return 0.11.2, not
-        0.11.3 (which is a git tag but not published)."""
-        # Simulate what the shell pipeline produces: published_versions.py
-        # prints the filtered list, version.py --previous picks the highest
-        # below the candidate.
+        """Published versions (with harness): 0.11.0, 0.11.1, 0.11.2, 0.11.4
+        (0.11.3 has bare tag but no script-harness).  For candidate 0.11.4,
+        --previous must return 0.11.2, not 0.11.3 (which is a git tag but not
+        fully published)."""
+        # Simulate the full tag list from GHCR, including harness tags.
         all_tags = [
             "0.11.0",
+            "script-harness-0.11.0",
             "0.11.1",
+            "script-harness-0.11.1",
             "0.11.2",
-            "0.11.3",  # git tag exists but failed to publish
-            "0.11.4",  # this release
+            "script-harness-0.11.2",
+            "0.11.3",  # git tag exists but no harness — half-published
+            "0.11.4",
+            "script-harness-0.11.4",
         ]
         published = pv.published_versions(all_tags)
-        # published should be [0.11.0, 0.11.1, 0.11.2, 0.11.3, 0.11.4]
-        # version.py --previous with published list picks highest below 0.11.4
-        # but we need to exclude 0.11.4 from the comparison.
+        # published is [0.11.0, 0.11.1, 0.11.2, 0.11.4]
         versions_output = "\n".join(published) + "\n"
         ver_stdin = StringIO(versions_output)
         ver_old_stdin = sys.stdin
@@ -109,14 +154,13 @@ class TestPublishedVersionsPrevious:
                 v.main(["--previous", "0.11.4"])
         finally:
             sys.stdin = ver_old_stdin
-        # 0.11.4 is excluded by --previous (never answer with own version).
-        # The highest below 0.11.4 among the published is 0.11.3.
-        assert ver_out.getvalue().strip() == "0.11.3"
+        # 0.11.4 is excluded by --previous; highest below is 0.11.2.
+        assert ver_out.getvalue().strip() == "0.11.2"
 
     def test_previous_release_skips_failed_tag_explicit(self) -> None:
-        """The real scenario: published versions are 0.11.0, 0.11.1, 0.11.2
-        (0.11.3 never published).  For 0.11.4, the previous published is
-        0.11.2, not 0.11.3."""
+        """The real scenario: published versions (with harness) are 0.11.0,
+        0.11.1, 0.11.2 (0.11.3 never published).  For 0.11.4, the previous
+        published is 0.11.2, not 0.11.3."""
         published = ["0.11.0", "0.11.1", "0.11.2"]
         versions_output = "\n".join(published) + "\n"
         ver_stdin = StringIO(versions_output)
@@ -176,8 +220,26 @@ class TestGhcrTagParsing:
         parsed = json.loads(response_body)
         tags = parsed.get("tags") or []
         versions = pv.published_versions(tags)
-        # All bare versions, excluding script-harness-* and latest.
-        assert versions == ["0.11.0", "0.11.1", "0.11.2", "0.11.3", "0.11.4"]
+        # All bare versions that have matching harness tags, excluding latest.
+        assert versions == ["0.11.0", "0.11.1", "0.11.2", "0.11.4"]
+
+    def test_parses_realistic_ghcr_response_no_harness(self) -> None:
+        """When the response has only bare version tags (pre-harness package),
+        all bare versions are returned."""
+        response_body = json.dumps(
+            {
+                "tags": [
+                    "0.1.0",
+                    "0.2.0",
+                    "0.3.0",
+                    "latest",
+                ]
+            }
+        )
+        parsed = json.loads(response_body)
+        tags = parsed.get("tags") or []
+        versions = pv.published_versions(tags)
+        assert versions == ["0.1.0", "0.2.0", "0.3.0"]
 
     def test_empty_tags_array(self) -> None:
         response_body = json.dumps({"tags": []})
