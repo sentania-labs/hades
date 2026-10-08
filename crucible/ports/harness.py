@@ -88,16 +88,16 @@ class TranscriptFormat(StrEnum):
 class ProviderQuotaEvent:
     """One authoritative structured provider refusal emitted by a harness.
 
-    `model_only_refusal` is True when the refusal applies only to the model that
-    was tried (e.g. `model_requires_usage_credits` or a model-switch suggestion);
-    the supervisor then excludes that model and reroutes to the next candidate
-    in the same pool without marking the whole pool (hades #373).  When False
-    the signal is account-level (e.g. `out_of_credits` on the account) and the
-    pool must be marked exhausted (the existing path).
-    """
+    `model_only` is True when the refusal is about the model that was tried and not
+    about the account (hades #373): Claude Code's `model_requires_usage_credits`, or
+    any refusal whose text tells the user to switch models. The supervisor then
+    excludes that model until `reset_at` (the pool's default cooldown when the
+    refusal states none) and reroutes to the next candidate in the same pool; the
+    pool itself is not marked. False is the account-level refusal, which marks the
+    pool."""
 
     reset_at: datetime | None = None
-    model_only_refusal: bool = False
+    model_only: bool = False
 
 
 def parse_version(value: str) -> tuple[int, int, int]:
@@ -463,11 +463,6 @@ class HarnessAdapter(Protocol):
     def provider_quota_exhausted(self, stdout_tail: str, stderr_tail: str) -> bool:
         """True only for the harness's authoritative provider-refusal event."""
         ...
-
-    def is_model_refusal(self, stdout_tail: str, stderr_tail: str) -> bool:
-        """FDY-0514: True when the exit was quota-exhausted but only the model is at
-        fault.  Subclasses override; the default is False (account-level)."""
-        return False
 
     def command_tracker(self) -> CommandTracker | None:
         """A fresh tracker for one attempt, or None where the harness gives no live

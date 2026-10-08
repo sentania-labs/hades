@@ -133,6 +133,29 @@ bumping a pin without renaming the fixtures fails the test with a clear
   remain project files and no generated shim is written.
 - Stream-json lines are parsed into progress events (tool use, text) at low
   fidelity; the full stream is stored as the transcript artifact.
+- Quota (hades #373): two refusals, read apart. The account's own refusal is
+  the CLI's `rate_limit_event` whose window `status` is `rejected` (the C5b
+  live sample: status rejected, overage reason `out_of_credits`, then a
+  synthetic result with `terminal_reason` `api_error`); it is the one signal
+  that marks the pool (05b, 16), until the reset the event states, else the
+  pool's `default_cooldown_seconds`. The event's overage fields are not the
+  signal: with extra usage switched off for the account, every ordinary run
+  carries `overageStatus: rejected` and `overageDisabledReason: out_of_credits`
+  beside `status: allowed` (observed on 2.1.280, 2026-10-08), so those words
+  alone classify nothing and mark nothing. A model-only refusal is an error
+  event (a synthetic assistant message, an `api_retry` line, an error result)
+  whose words name the model's own credit requirement
+  (`model_requires_usage_credits`, "out of usage credits") or tell the user to
+  switch models ("Switch to another model to continue"); it classifies
+  `quota_exhausted` like any refusal, but `provider_quota_event` reports it
+  `model_only`, and the supervisor excludes that model id until the refusal's
+  reset, or the pool's `default_cooldown_seconds` when it states none, and
+  reroutes the task to the next candidate in the same pool. The pool is not
+  marked and no pool wake is raised. The same words reaching the tail as plain
+  text exclude the model too: an exclusion is that model's own, so it needs no
+  structured proof the way a shared pool mark does. (2026-10-02, FDY-0256: the
+  429 `model_requires_usage_credits` on claude-fable-5-1 marked anthropic-sub
+  for two days while Opus and Sonnet, which the plan covers, were eligible.)
 - Known: nested invocation from inside another Claude session works, but
   workers never run inside a session anyway.
 

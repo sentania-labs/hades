@@ -70,6 +70,7 @@ from crucible.application.routing import (
     count_blocking_failures,
     current_routing_version,
     load_attempt_routing,
+    model_mark_key,
     reserve,
     select_model,
 )
@@ -1309,7 +1310,6 @@ class Supervisor:
         *,
         number: int,
         excluded_pools: set[str] | None = None,
-        excluded_models: set[str] | None = None,
     ) -> Attempt:
         attempt = Attempt(
             id=new_id(),
@@ -1320,7 +1320,6 @@ class Supervisor:
             created_at=self._clock.now(),
             resume_from_remote=execution.resume_from_remote,
             routing_excluded_pools=sorted(excluded_pools or set()),
-            routing_excluded_models=sorted(excluded_models or set()),
         )
         uow.attempts.add(attempt)
         record_event(
@@ -2542,17 +2541,16 @@ class Supervisor:
                 provider=request.provider.value,
             )
         )
-        # FDY-0514: when *excluded_models* is given (from a model-only refusal) use it;
-        # otherwise fall back to events that name an excluded model for this attempt.
-        if excluded_models is not None:
-            all_excluded_models = set(excluded_models)
-        else:
-            all_excluded_models = {
-                str(event.payload["excluded_model"])
-                for event in self._all_task_events(uow, item.task.id)
-                if event.payload.get("next_attempt_id") == item.attempt.id
-                and event.payload.get("excluded_model")
-            }
+        # The models this attempt may not take: the ones the caller names (a reroute
+        # deciding where to go next) and the ones the event that created the attempt
+        # excluded, a capacity refusal's retry or a model-only quota refusal's reroute
+        # (hades #373).
+        all_excluded_models = set(excluded_models or set()) | {
+            str(event.payload["excluded_model"])
+            for event in self._all_task_events(uow, item.task.id)
+            if event.payload.get("next_attempt_id") == item.attempt.id
+            and event.payload.get("excluded_model")
+        }
         selection = select_model(
             uow,
             routing,
@@ -2622,7 +2620,8 @@ class Supervisor:
         return bool(relevant) and all(
             reasons
             and all(
-                reason.startswith("pool exhausted until ") or reason == "pool is at its soft limit"
+                reason.startswith(("pool exhausted until ", "model excluded until "))
+                or reason == "pool is at its soft limit"
                 for reason in reasons
             )
             for reasons in relevant
@@ -4634,10 +4633,14 @@ class Supervisor:
                 or task.state is not TaskState.RUNNING
             ):
                 return
+            # hades #373: the exit's own verdict, read back from the mark it wrote.
+            excluded_models = self._model_exclusion_for(uow, attempt)
             if pushed:
                 execution.resume_from_remote = True
                 uow.executions.save(execution)
-                self._handle_quota_exit(uow, task, execution, attempt)
+                self._handle_quota_exit(
+                    uow, task, execution, attempt, excluded_models=excluded_models
+                )
             elif checkpoint_skipped:
                 self._handle_quota_exit(
                     uow,
@@ -4645,6 +4648,7 @@ class Supervisor:
                     execution,
                     attempt,
                     checkpoint_skip_detail=detail[:1000],
+                    excluded_models=excluded_models,
                 )
             else:
                 bundle_path = f"{attempt.workspace_path}/output/work_branch.bundle"
@@ -5291,32 +5295,24 @@ class Supervisor:
                 if attempt.exit_class is ExitClass.QUOTA_EXHAUSTED and adapter is not None
                 else None
             )
-            # FDY-0514: a model-only refusal excludes only the model; the pool stays
-            # open and the next candidate launches.  Only an account-level signal (the
-            # structured rate_limit_event rejected/out_of_credits pair) marks the pool.
-            is_account_level = provider_quota is not None and not provider_quota.model_only_refusal
-            # The adapter's own text-based model-refusal check (model_requires_usage_credits,
-            # switch-model text) covers unstructured refusals that never reach
-            # provider_quota_event.
-            is_model_refusal_text = (
-                adapter.is_model_refusal(outputs.stdout_tail, outputs.stderr_tail)
-                if adapter is not None and hasattr(adapter, "is_model_refusal")
-                else False
-            )
+            # hades #373: a refusal about the model alone (Claude Code's
+            # model_requires_usage_credits, or words that say to switch models) excludes
+            # that model until its reset and leaves the pool open, so the next candidate
+            # in the same pool launches. Only the account's own refusal marks the pool.
             pool_mark: tuple[PoolExhaustion, bool] | None = None
-            if attempt.exit_class is ExitClass.QUOTA_EXHAUSTED and (
-                provider_quota is None or is_account_level
-            ):
-                pool_mark = self._mark_pool_exhausted(
-                    uow, attempt, execution, provider_quota.reset_at if provider_quota else None
-                )
             excluded_models: set[str] | None = None
-            if (
-                attempt.exit_class is ExitClass.QUOTA_EXHAUSTED
-                and not is_account_level
-                and (provider_quota is not None or is_model_refusal_text)
-            ):
-                excluded_models = {attempt.selected_model or execution.model}
+            if attempt.exit_class is ExitClass.QUOTA_EXHAUSTED:
+                if provider_quota is not None and provider_quota.model_only:
+                    excluded_models = self._mark_model_excluded(
+                        uow, attempt, execution, provider_quota.reset_at
+                    )
+                else:
+                    pool_mark = self._mark_pool_exhausted(
+                        uow,
+                        attempt,
+                        execution,
+                        provider_quota.reset_at if provider_quota else None,
+                    )
             # A collection failure makes this exit `environment` below, whatever the
             # harness said, so it is not a gateway failure and marks nothing.
             if attempt.exit_class is ExitClass.PROVIDER_ERROR and collection_error is None:
@@ -5882,11 +5878,22 @@ class Supervisor:
             and model.capability in tier.allowed_capability
             and (pinned is None or model.id == pinned)
         }
+        # hades #373: a model's own exclusion ends at its reset too; a class whose only
+        # candidates are excluded models resumes when the earliest of them lifts.
+        model_marks = {
+            model_mark_key(model.id)
+            for model in routing.models
+            if model.enabled
+            and model.capability in tier.allowed_capability
+            and (pinned is None or model.id == pinned)
+        }
         now = self._clock.now()
         return sorted(
             mark.reset_at
             for mark in uow.pool_exhaustions.list_all()
-            if mark.pool in pools and mark.cleared_at is None and mark.reset_at > now
+            if (mark.pool in pools or mark.pool in model_marks)
+            and mark.cleared_at is None
+            and mark.reset_at > now
         )
 
     def _enter_quota_wait(
@@ -6073,13 +6080,17 @@ class Supervisor:
         latest = max(earlier, key=finished)
         if latest.exit_class != ExitClass.PROVIDER_ERROR.value:
             return
-        self._mark_pool_exhausted(
+        marked = self._mark_pool_exhausted(
             uow,
             attempt,
             execution,
             None,
             reason="local endpoint failed (provider_error)",
         )
+        # hades #373: every pool mark is announced. A provider-error exit goes on to
+        # retry, which raises no wake of its own, so the mark's wake is raised here.
+        if marked is not None and marked[1]:
+            self._wake_pool_exhausted(uow, task, attempt, marked[0])
 
     def _mark_pool_exhausted(
         self,
@@ -6173,9 +6184,81 @@ class Supervisor:
     def _bounded_quota_reset(
         now: Any, candidate: Any, *, max_seconds: int, default_seconds: int
     ) -> tuple[Any, Any]:
+        """The reset a mark gets: the one the signal states, when it lies ahead; else now
+        plus the pool's `default_cooldown_seconds` (hades #373: a mark from a signal that
+        states no reset for the pool expires no later than the default cooldown; a
+        stated reset is the provider's fact and is used as given, 05b)."""
         del max_seconds
         accepted = candidate if candidate is not None and now < candidate else None
         return accepted or now + timedelta(seconds=default_seconds), accepted
+
+    def _mark_model_excluded(
+        self, uow: UnitOfWork, attempt: Attempt, execution: Execution, reset_at: Any
+    ) -> set[str]:
+        """hades #373: exclude the attempt's model, not its pool, until `reset_at`, or
+        for the pool's default cooldown when the refusal states none. The exclusion is
+        a mark keyed `model:<id>` in the same table as a pool mark, so it is listed on
+        Routing and clearable there, and `select_model` turns the model away while it
+        is in force. Returns the model as the set a reroute excludes."""
+        model = attempt.selected_model or execution.model
+        task = uow.tasks.get(attempt.task_id)
+        assert task is not None
+        context = self._routing_context(uow, task, execution, attempt.routing_version)
+        if context is None:
+            return {model}
+        routing, _ = context
+        entry = routing.model(model)
+        pool = attempt.selected_pool or (entry.pool if entry is not None else None)
+        if pool is None or pool not in routing.pools:
+            return {model}
+        now = self._clock.now()
+        reset, parsed_reset = self._bounded_quota_reset(
+            now,
+            reset_at,
+            max_seconds=routing.reroute.resume_max_wait_seconds,
+            default_seconds=routing.pools[pool].default_cooldown_seconds,
+        )
+        reason = "harness reported quota_exhausted for this model only"
+        mark = uow.pool_exhaustions.put(
+            PoolExhaustion(
+                pool=model_mark_key(model),
+                exhausted_at=now,
+                reset_at=reset,
+                task_id=attempt.task_id,
+                attempt_id=attempt.id,
+                reason=reason,
+            )
+        )
+        record_event(
+            uow,
+            self._clock,
+            EventKind.QUOTA_EXHAUSTED,
+            principal=PRINCIPAL_CRUCIBLE,
+            task_id=attempt.task_id,
+            execution_id=attempt.execution_id,
+            attempt_id=attempt.id,
+            payload={
+                "scope": "model",
+                "model": model,
+                "pool": pool,
+                "reset_at": mark.reset_at.isoformat(),
+                "source": "harness" if parsed_reset else "policy_default_cooldown",
+                "reason": reason,
+                "detail": f"model {model} excluded until {mark.reset_at.isoformat()}; "
+                f"pool {pool} stays open",
+            },
+        )
+        return {model}
+
+    def _model_exclusion_for(self, uow: UnitOfWork, attempt: Attempt) -> set[str] | None:
+        """The model an attempt's quota exit excluded (hades #373), read back from the
+        mark that exit wrote, for a decision taken after the checkpoint push."""
+        if attempt.selected_model is None:
+            return None
+        mark = uow.pool_exhaustions.get(model_mark_key(attempt.selected_model))
+        if mark is not None and mark.attempt_id == attempt.id and mark.cleared_at is None:
+            return {attempt.selected_model}
+        return None
 
     def _handle_quota_exit(
         self,
@@ -6189,9 +6272,8 @@ class Supervisor:
         checkpoint_skip_detail: str | None = None,
         excluded_models: set[str] | None = None,
     ) -> None:
-        # FDY-0514: when *excluded_models* is provided the exit was model-only;
-        # the pool stays open and the supervisor reroutes within it.  Otherwise the
-        # existing pool-mark path runs.
+        # hades #373: `excluded_models` names the model a model-only refusal excluded;
+        # the pool stays open and the reroute stays inside it.
         # hades #378: one wake per refusal names the pool and its reset. A task that
         # ends or waits says it in the wake it raises anyway; a reroute, which raised
         # none, raises the pool's own, once per exhaustion (when the mark opened).
@@ -6262,105 +6344,73 @@ class Supervisor:
         stored = uow.contracts.get(task.id, execution.contract_version)
         assert stored is not None
         item = _Pending(attempt, execution, task, stored.document)
+        # hades #373: a model-only refusal leaves its pool open and the reroute stays
+        # inside it, with the refused model excluded; an account refusal leaves the pool.
+        excluded_pools: set[str] = set()
+        excluded_model: str | None = None
         if excluded_models:
-            # FDY-0514: model-only exclusion; keep the pool open.
-            sel = self._selection_for(
-                uow, item, excluded_pools=None, excluded_models=excluded_models, routing=routing
+            excluded_model = attempt.selected_model or execution.model
+        elif attempt.selected_pool:
+            excluded_pools = {attempt.selected_pool}
+        selection = self._selection_for(
+            uow,
+            item,
+            excluded_pools=set(excluded_pools),
+            excluded_models=excluded_models,
+            routing=routing,
+        )
+        if selection is not None and selection.selected is not None and selection.image is not None:
+            nxt = self._create_attempt(
+                uow,
+                execution,
+                number=attempt.number + 1,
+                excluded_pools=excluded_pools or None,
             )
-        else:
-            sel = self._selection_for(
-                uow, item, excluded_pools={attempt.selected_pool}, routing=routing
+            move_task(
+                uow,
+                self._clock,
+                task,
+                TaskState.SCHEDULED,
+                EventKind.TASK_REROUTED,
+                execution_id=execution.id,
+                attempt_id=attempt.id,
+                payload={
+                    "contract_version": execution.contract_version,
+                    "from_attempt_id": attempt.id,
+                    "from_pool": attempt.selected_pool,
+                    "to_attempt_id": nxt.id,
+                    "why": (
+                        "previous model refused this model only; rerouted within its pool"
+                        if excluded_model is not None
+                        else "previous pool reported quota exhaustion"
+                        if source == "worker"
+                        else "launch reservation found the selected pool unavailable"
+                    ),
+                    "source": source,
+                    # The next attempt routes with this model excluded (_selection_for
+                    # reads it back by next_attempt_id), the path a capacity refusal's
+                    # retry already takes.
+                    **(
+                        {"excluded_model": excluded_model, "next_attempt_id": nxt.id}
+                        if excluded_model is not None
+                        else {}
+                    ),
+                    **(
+                        {
+                            "checkpoint_push": "skipped",
+                            "checkpoint_detail": checkpoint_skip_detail,
+                        }
+                        if checkpoint_skip_detail is not None
+                        else {}
+                    ),
+                    **({"wip_commit_sha": task.head_sha} if source == "worker" else {}),
+                    "ordered_candidates": list(selection.candidates),
+                },
             )
-        if sel is not None and sel.selected is not None and sel.image is not None:
-            if excluded_models:
-                nxt = self._create_attempt(
-                    uow,
-                    execution,
-                    number=attempt.number + 1,
-                    excluded_pools=None,
-                    excluded_models=excluded_models,
-                )
-                move_task(
-                    uow,
-                    self._clock,
-                    task,
-                    TaskState.SCHEDULED,
-                    EventKind.TASK_REROUTED,
-                    execution_id=execution.id,
-                    attempt_id=attempt.id,
-                    payload={
-                        "contract_version": execution.contract_version,
-                        "from_attempt_id": attempt.id,
-                        "from_pool": attempt.selected_pool,
-                        "to_attempt_id": nxt.id,
-                        "why": "model quota exhausted; rerouted within pool",
-                        "source": source,
-                        **(
-                            {}
-                            if checkpoint_skip_detail is None
-                            else {
-                                "checkpoint_push": "skipped",
-                                "checkpoint_detail": checkpoint_skip_detail,
-                            }
-                        ),
-                        **(
-                            {}
-                            if task.head_sha is None
-                            else {"wip_commit_sha": task.head_sha}
-                            if source == "worker"
-                            else {}
-                        ),
-                        "ordered_candidates": list(sel.candidates),
-                    },
-                )
-            else:
-                nxt = self._create_attempt(
-                    uow,
-                    execution,
-                    number=attempt.number + 1,
-                    excluded_pools={attempt.selected_pool} if attempt.selected_pool else None,
-                )
-                move_task(
-                    uow,
-                    self._clock,
-                    task,
-                    TaskState.SCHEDULED,
-                    EventKind.TASK_REROUTED,
-                    execution_id=execution.id,
-                    attempt_id=attempt.id,
-                    payload={
-                        "contract_version": execution.contract_version,
-                        "from_attempt_id": attempt.id,
-                        "from_pool": attempt.selected_pool,
-                        "to_attempt_id": nxt.id,
-                        "why": (
-                            "previous pool reported quota exhaustion"
-                            if source == "worker"
-                            else "launch reservation found the selected pool unavailable"
-                        ),
-                        "source": source,
-                        **(
-                            {}
-                            if checkpoint_skip_detail is None
-                            else {
-                                "checkpoint_push": "skipped",
-                                "checkpoint_detail": checkpoint_skip_detail,
-                            }
-                        ),
-                        **(
-                            {}
-                            if task.head_sha is None
-                            else {"wip_commit_sha": task.head_sha}
-                            if source == "worker"
-                            else {}
-                        ),
-                        "ordered_candidates": list(sel.candidates),
-                    },
-                )
-                if mark is not None and opened:
-                    self._wake_pool_exhausted(uow, task, attempt, mark)
+            if mark is not None and opened:
+                self._wake_pool_exhausted(uow, task, attempt, mark)
             return
-        self._enter_quota_wait(uow, task, attempt, execution, sel, pool_mark=pool_mark)
+        self._enter_quota_wait(uow, task, attempt, execution, selection, pool_mark=pool_mark)
 
     @staticmethod
     def _all_task_events(uow: UnitOfWork, task_id: str) -> list[Any]:
@@ -6483,11 +6533,9 @@ class Supervisor:
         before the retry count and never reaches pool accounting.
         `pool_mark` is the exhaustion mark this exit wrote and whether it opened the
         pool's exhaustion (hades #378): the one wake the refusal raises names the pool
-        and its reset, whichever path the attempt takes from here.
-        `excluded_models` is the model-only set from a model-refusal exit (FDY-0514);
-        when present the supervisor excludes only those models and reroutes within the
-        pool instead of marking the whole pool.
-        """
+        and its reset, whichever path the attempt takes from here. `excluded_models`
+        is the model a model-only refusal excluded (hades #373): the pool is unmarked
+        and the reroute stays inside it."""
         execution = uow.executions.get(attempt.execution_id, for_update=True)
         task = uow.tasks.get(attempt.task_id, for_update=True)
         assert execution is not None and task is not None

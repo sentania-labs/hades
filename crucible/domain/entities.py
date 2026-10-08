@@ -170,8 +170,6 @@ class Attempt:
     selected_pool: str | None = None
     ordered_candidates: list[dict[str, Any]] = field(default_factory=list)
     routing_excluded_pools: list[str] = field(default_factory=list)
-    # FDY-0514: models excluded from this attempt by model-only quota refusals.
-    routing_excluded_models: list[str] = field(default_factory=list)
     resume_from_remote: bool = False
     # hades #254: the routing policy version this attempt was routed with.
     routing_version: int | None = None

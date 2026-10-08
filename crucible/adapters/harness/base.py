@@ -260,7 +260,7 @@ def provider_quota_event(
     *tails: str,
     predicate: Callable[[Mapping[str, Any]], bool],
     now: datetime | None = None,
-    is_account_level: Callable[[Mapping[str, Any], str], bool] | None = None,
+    model_only: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> ProviderQuotaEvent | None:
     """Return the refusal and reset from the same structured harness event.
 
@@ -270,11 +270,9 @@ def provider_quota_event(
     says). An event that says neither leaves `reset_at` None and the pool's default
     cooldown applies.
 
-    When *is_account_level* is provided and matches the accepted event, the result has
-    `model_only_refusal=False` (the pool is marked).  When it is not provided or does
-    not match, `model_only_refusal=True` so the supervisor excludes only that model
-    and reroutes within the pool (hades #373).
-    """
+    `model_only`, when a harness gives one, is asked about the accepted event: True
+    makes the result a model-only refusal (hades #373), which excludes the model and
+    leaves the pool unmarked. Without it every refusal is the account's."""
     for tail in tails:
         for line in reversed(tail[-TAIL_LIMIT:].splitlines()):
             try:
@@ -287,23 +285,27 @@ def provider_quota_event(
                     after = _reset_after_from_document(document)
                     if after is not None:
                         reset_at = (now or datetime.now(UTC)) + after
-                # Default to account-level (pool marking). When a harness provides
-                # *is_account_level* and the callback returns True, the refusal is
-                # account-level (pool marked). When it returns False, model-only
-                # exclusion. When not provided, the pool is marked (backward compat).
-                if is_account_level is not None and is_account_level(document, line):
-                    model_only = False
-                elif is_account_level is not None:
-                    model_only = True
-                else:
-                    model_only = False
-                return ProviderQuotaEvent(reset_at=reset_at, model_only_refusal=model_only)
+                return ProviderQuotaEvent(
+                    reset_at=reset_at,
+                    model_only=model_only is not None and model_only(document),
+                )
     return None
 
 
 def provider_quota_exhausted(*tails: str, signals: Sequence[Pattern]) -> bool:
     """Shared pool state requires a structured signal emitted by the harness itself."""
+    return text_matches(signals, *tails)
+
+
+def text_matches(signals: Sequence[Pattern], *tails: str) -> bool:
+    """Whether any of `signals` appears in the tails, structured or not."""
     return first_match(tuple(tail[-TAIL_LIMIT:] for tail in tails), signals) is not None
+
+
+def document_strings(document: Mapping[str, Any]) -> Iterator[str]:
+    """Every string value in a harness event, nested ones included: the words an
+    adapter reads when a refusal's meaning is in its text (hades #373)."""
+    return _strings(document)
 
 
 def read_text(path: Path, limit: int = 8 * 1024 * 1024) -> str | None:

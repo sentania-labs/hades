@@ -79,8 +79,6 @@ QUOTA_PATTERNS = base.patterns(
     "out of extra usage",
     "rate_limit_error",
     "Credit balance is too low",
-    # FDY-0514: a model-only refusal whose body tells the user to switch models.
-    "model_requires_usage_credits",
 )
 # What the CLI actually emits when the subscription window is used up (first live
 # sample, C5b, 08:58 CDT on 2026-09-17): a `rate_limit_event` whose status is
@@ -89,57 +87,68 @@ QUOTA_PATTERNS = base.patterns(
 # (the CLI emits one with status "allowed" on ordinary runs) and neither is a rejected
 # status on its own: any failing run whose tail happens to carry one, a GitHub payload
 # or a fixture among them, would otherwise be read as an exhausted quota and retried
-# under the wrong rule. The signal is the two together in the one event line.
+# under the wrong rule. The signal is the event line with the window's own status
+# rejected. The overage fields are not the signal (hades #373): an ordinary allowed
+# run on 2.1.280 (observed 2026-10-08) carries `"overageStatus": "rejected"` and
+# `"overageDisabledReason": "out_of_credits"` beside `"status": "allowed"`, because
+# extra usage is switched off for the account, so `out_of_credits` on its own would
+# turn every failing run into a pool mark.
 QUOTA_PATTERNS += base.correlated(
     r"rate_limit_event.*\"status\"\s*:\s*\"rejected\"",
-    r"rate_limit_event.*out_of_credits",
 )
-
-
-# FDY-0514: text that tells the user to switch models (a model-only refusal).
-_MODEL_REFUSAL_PATTERNS = base.patterns(
+# hades #373: a refusal about one model, not the account. On 2026-10-02 the CLI
+# answered a claude-fable-5-1 launch with HTTP 429 `api_error:
+# model_requires_usage_credits` and "You're out of usage credits. Switch to another
+# model to continue." The plan covers Opus and Sonnet; Fable needs extra usage
+# credits. The refusal classifies `quota_exhausted` like any other, but it is read as
+# a model-only refusal: the model is excluded until the refusal's reset (the pool's
+# default cooldown when it states none) and the task reroutes within the pool. Any
+# refusal whose words tell the user to switch models is read the same way.
+MODEL_REFUSAL_PATTERNS = base.patterns(
+    "model_requires_usage_credits",
+    "out of usage credits",
+    "switch to another model",
     "switch to a different model",
+    "try another model",
     "try a different model",
-    "switch model",
-    "try switching models",
 )
+QUOTA_PATTERNS += MODEL_REFUSAL_PATTERNS
+
+
+def _account_refusal(document: Mapping[str, Any]) -> bool:
+    """The account's own refusal: the CLI's `rate_limit_event` with the window's status
+    "rejected". This is the one signal that marks the pool."""
+    if document.get("type") != "rate_limit_event":
+        return False
+    info = document.get("rate_limit_info")
+    return isinstance(info, dict) and info.get("status") == "rejected"
+
+
+def _error_shaped(document: Mapping[str, Any]) -> bool:
+    """An event that reports a failure: the CLI's synthetic assistant message (model
+    `<synthetic>`, an `error` key), an `api_retry` system line, or an error result."""
+    message = document.get("message")
+    return (
+        "error" in document
+        or document.get("is_error") is True
+        or str(document.get("subtype") or "").startswith("error")
+        or document.get("terminal_reason") == "api_error"
+        or (isinstance(message, dict) and message.get("model") == "<synthetic>")
+    )
+
+
+def _model_refusal(document: Mapping[str, Any]) -> bool:
+    """A model-only refusal (hades #373): an error-shaped event whose words name the
+    model's own credit requirement or tell the user to switch models. The
+    `rate_limit_event` is never one; it speaks for the account."""
+    if document.get("type") == "rate_limit_event" or not _error_shaped(document):
+        return False
+    words = tuple(base.document_strings(document))
+    return base.first_match(words, MODEL_REFUSAL_PATTERNS) is not None
 
 
 def _provider_quota_refusal(document: Mapping[str, Any]) -> bool:
-    if document.get("type") != "rate_limit_event":
-        return False
-    info = document.get("rate_limit_info")
-    if not isinstance(info, dict):
-        return False
-    return any(
-        info.get(key) in {"rejected", "out_of_credits"}
-        for key in ("status", "overageStatus", "overageDisabledReason")
-    )
-
-
-def _is_account_level_refusal(document: Mapping[str, Any]) -> bool:
-    """Return True when the refusal is account-level (should mark the pool), not
-    model-only (which should exclude only the model and reroute within the pool).
-
-    Account-level signals are:
-    - rate_limit_event with status 'rejected' and overage 'out_of_credits'
-    - out_of_credits with no model qualifier in the refusal text
-    - rate-limit headers (handled elsewhere in the supervisor)
-    """
-    if document.get("type") != "rate_limit_event":
-        return False
-    info = document.get("rate_limit_info")
-    if not isinstance(info, dict):
-        return False
-    status = info.get("status")
-    return status == "rejected" and "out_of_credits" in str(
-        info.get("overageReason", info.get("overageReasonCode", ""))
-    )
-
-
-def _is_model_refusal(text: str) -> bool:
-    """Return True when *text* tells the user to switch models (a model-only signal)."""
-    return base.first_match((text,), _MODEL_REFUSAL_PATTERNS) is not None
+    return _account_refusal(document) or _model_refusal(document)
 
 
 class ClaudeCodeAdapter:
@@ -154,21 +163,24 @@ class ClaudeCodeAdapter:
     def provider_quota_event(
         self, stdout_tail: str, stderr_tail: str, now: datetime | None = None
     ) -> ProviderQuotaEvent | None:
-        return base.provider_quota_event(
+        """The last refusal in the tails decides: the account's `rate_limit_event`
+        marks the pool; a model-qualified error event excludes the model (hades #373).
+        A model refusal that reached the tail only as plain text still excludes the
+        model: it names the model, not the account, and an exclusion is that model's
+        own, so it needs no structured proof the way a shared pool mark does."""
+        event = base.provider_quota_event(
             stdout_tail,
             stderr_tail,
             predicate=_provider_quota_refusal,
             now=now,
-            is_account_level=lambda doc, _line: _is_account_level_refusal(doc),
+            model_only=_model_refusal,
         )
+        if event is None and base.text_matches(MODEL_REFUSAL_PATTERNS, stdout_tail, stderr_tail):
+            return ProviderQuotaEvent(reset_at=None, model_only=True)
+        return event
 
     def provider_quota_exhausted(self, stdout_tail: str, stderr_tail: str) -> bool:
         return self.provider_quota_event(stdout_tail, stderr_tail) is not None
-
-    def is_model_refusal(self, stdout_tail: str, stderr_tail: str) -> bool:
-        """FDY-0514: True when the exit was quota-exhausted but only the model is at
-        fault (model_requires_usage_credits or model-switch text)."""
-        return _is_model_refusal(stdout_tail) or _is_model_refusal(stderr_tail)
 
     def capabilities(self) -> HarnessCapabilities:
         return HarnessCapabilities(
