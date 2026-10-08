@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import logging
 import shutil
 from collections.abc import Mapping, Sequence
@@ -447,14 +448,10 @@ def outcome_from_files(files: Mapping[str, str], exit_code: int) -> PublishOutco
     head = text("bundle-head.txt")
     detail = redact(text("error.txt"))
     pushed = text("push.txt") == "ok" and exit_code == 0
-    import json
-
     schema_changes = None
     if text("schema.json"):
-        try:
+        with contextlib.suppress(json.JSONDecodeError):
             schema_changes = json.loads(text("schema.json"))
-        except json.JSONDecodeError:
-            pass
     return PublishOutcome(
         pushed=pushed,
         head_sha=head,
@@ -493,14 +490,10 @@ def merge_outcome_from_files(files: Mapping[str, str], exit_code: int) -> MergeM
 
     merged = text("push.txt") == "ok" and exit_code == 0
     conflicts = tuple(line.strip() for line in text("conflicts.txt").splitlines() if line.strip())
-    import json
-
     schema_changes = None
     if text("schema.json"):
-        try:
+        with contextlib.suppress(json.JSONDecodeError):
             schema_changes = json.loads(text("schema.json"))
-        except json.JSONDecodeError:
-            pass
     return MergeMainOutcome(
         merged=merged,
         head_sha=text("merge-head.txt") if merged else "",

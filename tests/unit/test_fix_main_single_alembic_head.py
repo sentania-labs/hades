@@ -29,8 +29,9 @@ MERGED = {"0044_attempt_stall_shape", "0044_editor_leftovers_policy", "0044_merg
 # 0047 above that; hades #389's migration was renumbered to 0047 on top and chains from
 # 0047_attempt_egress_probe so the graph stays linear. hades #176 adds 0048 on top,
 # hades #265 adds 0049 for persisted batch outcomes, then #485 adds 0050 for the cache TTL.
-# hades #515 adds 0051 for routing model references. hades #447 adds the pull request
-# schema overlap migration on top of 0051.
+# hades #515 adds 0051 for routing model references. hades #447 adds 0052 for the schema
+# a pull request's migrations touch; its number is provisional and Hades assigns the final
+# one at merge (hades #447).
 ABOVE = "0046_blocked_reason"
 PROBE = "0047_attempt_egress_probe"
 LAUNCH = "0047_successful_launch_time"
@@ -38,7 +39,7 @@ REBOUND = "0048_repository_rebound"
 BATCH = "0049_repository_batch"
 CACHE = "0050_status_cache"
 ROUTING = "0051_routing_model_references"
-HEAD = "b0eb5c46d4cb"
+HEAD = "0052_pull_request_schema_overlap"
 
 
 def _script() -> ScriptDirectory:

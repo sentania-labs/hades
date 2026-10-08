@@ -1,23 +1,25 @@
-"""pull_request_schema_overlap
+"""Record the schema a pull request's migrations touch (hades #447).
 
-Revision ID: b0eb5c46d4cb
+Revision ID: 0052_pull_request_schema_overlap
 Revises: 0051_routing_model_references
-Create Date: 2026-10-07 23:47:43.308583
+
+This revision's number and down_revision are provisional: Hades assigns them when the
+pull request merges (hades #447).
 """
 
 from __future__ import annotations
 
-revision = "b0eb5c46d4cb"
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy.dialects import postgresql
+
+revision = "0052_pull_request_schema_overlap"
 down_revision = "0051_routing_model_references"
 branch_labels = None
 depends_on = None
 
 
 def upgrade() -> None:
-    import sqlalchemy as sa
-    from alembic import op
-    from sqlalchemy.dialects import postgresql
-
     op.add_column(
         "pull_requests",
         sa.Column("schema_tables", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
@@ -33,8 +35,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    from alembic import op
-
-    op.drop_column("pull_requests", "schema_tables")
-    op.drop_column("pull_requests", "schema_columns")
     op.drop_column("pull_requests", "schema_models")
+    op.drop_column("pull_requests", "schema_columns")
+    op.drop_column("pull_requests", "schema_tables")

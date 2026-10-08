@@ -1135,6 +1135,144 @@ export GIT_CONFIG_GLOBAL=/tmp/gitconfig
 )
 
 
+# hades #447: what a work branch does to the schema, and the renumbering of its new
+# migrations. Both the publisher and merge-main write this program into their output
+# directory and run it there: it reads the migrations the branch adds under
+# `migrations/versions/`, records the tables and columns their alembic operations touch
+# and whether `models.py` changed (schema.json), and, when RUN_RENUMBER is 1 (merge-main
+# only), renumbers the added migrations to follow the base's highest number, points the
+# first at the base's head, and commits that as Crucible's own commit. A plain string,
+# not an f-string: its braces and backslashes are its own.
+SCHEMA_SCRIPT = r"""import ast
+import json
+import os
+import re
+import subprocess
+
+VERSIONS = 'crucible/adapters/persistence/migrations/versions/'
+MODELS = 'crucible/adapters/persistence/models.py'
+NUMBERED = re.compile(r'^_?(\d+)_(.*)\.py$')
+TABLE_OPS = ('add_column', 'drop_column', 'alter_column', 'create_table', 'drop_table')
+INDEX_OPS = ('create_index', 'drop_index')
+COLUMN_OPS = ('add_column', 'drop_column', 'alter_column')
+COMMIT_MESSAGE = 'Crucible: renumber migrations to follow main'
+base = 'refs/remotes/origin/' + os.environ['BASE_REF']
+out_dir = os.environ['OUT']
+tables = set()
+columns = set()
+
+
+def cmd(args):
+    return subprocess.check_output(args).decode('utf-8').strip()
+
+
+def changed(*flags):
+    try:
+        return cmd(['git', 'diff', '--name-only', *flags, base + '...HEAD']).splitlines()
+    except subprocess.CalledProcessError:
+        return []
+
+
+def is_migration(path):
+    return path.startswith(VERSIONS) and path.endswith('.py') and '__init__' not in path
+
+
+def constant(node):
+    return node.value if isinstance(node, ast.Constant) else None
+
+
+def column_name(node):
+    if constant(node) is not None:
+        return constant(node)
+    is_column = isinstance(node, ast.Call) and getattr(node.func, 'attr', None) == 'Column'
+    if is_column and node.args:
+        return constant(node.args[0])
+    return None
+
+
+class Visitor(ast.NodeVisitor):
+    def visit_Call(self, node):
+        func = node.func
+        if isinstance(func, ast.Attribute) and getattr(func.value, 'id', None) == 'op':
+            args = node.args
+            if func.attr in TABLE_OPS and args and constant(args[0]) is not None:
+                tables.add(constant(args[0]))
+            if func.attr in INDEX_OPS and len(args) >= 2 and constant(args[1]) is not None:
+                tables.add(constant(args[1]))
+            if func.attr in COLUMN_OPS and len(args) >= 2 and column_name(args[1]) is not None:
+                columns.add(column_name(args[1]))
+        self.generic_visit(node)
+
+
+def number(path):
+    match = NUMBERED.match(os.path.basename(path))
+    return int(match.group(1)) if match else 999999
+
+
+def slug(path):
+    match = NUMBERED.match(os.path.basename(path))
+    return match.group(2) if match else os.path.basename(path)[:-3]
+
+
+def rewrite(source, revision, down):
+    source = re.sub(r'(?m)^revision\s*=.*$', 'revision = "%s"' % revision, source)
+    source = re.sub(r'(?m)^down_revision\s*=.*$', 'down_revision = "%s"' % down, source)
+    source = re.sub(r'Revision ID:\s*.*', 'Revision ID: ' + revision, source)
+    return re.sub(r'Revises:\s*.*', 'Revises: ' + down, source)
+
+
+def renumber(added):
+    try:
+        on_base = cmd(['git', 'ls-tree', '-r', '--name-only', base, VERSIONS]).splitlines()
+    except subprocess.CalledProcessError:
+        on_base = []
+    highest = 0
+    head = ''
+    for path in on_base:
+        match = NUMBERED.match(os.path.basename(path))
+        if match and int(match.group(1)) >= highest:
+            highest = int(match.group(1))
+            head = os.path.basename(path)[:-3].lstrip('_')
+    renumbered = False
+    for path in sorted(added, key=number):
+        highest += 1
+        revision = '%04d_%s' % (highest, slug(path))
+        new_path = os.path.join(os.path.dirname(path), '_' + revision + '.py')
+        with open(path) as handle:
+            source = handle.read()
+        updated = rewrite(source, revision, head)
+        if new_path != path:
+            subprocess.check_call(['git', 'mv', path, new_path])
+        if updated != source or new_path != path:
+            with open(new_path, 'w') as handle:
+                handle.write(updated)
+            subprocess.check_call(['git', 'add', new_path])
+            renumbered = True
+        head = revision
+    if renumbered:
+        subprocess.check_call(['git', 'commit', '--quiet', '-m', COMMIT_MESSAGE])
+
+
+added = [p for p in changed('--diff-filter=A') if is_migration(p)]
+for path in added:
+    if not os.path.exists(path):
+        continue
+    with open(path) as handle:
+        source = handle.read()
+    try:
+        Visitor().visit(ast.parse(source))
+    except SyntaxError:
+        pass
+
+if os.environ.get('RUN_RENUMBER') == '1' and added:
+    renumber(added)
+
+models = [p for p in changed() if p == MODELS]
+with open(os.path.join(out_dir, 'schema.json'), 'w') as handle:
+    json.dump({'tables': sorted(tables), 'columns': sorted(columns), 'models': models}, handle)
+"""
+
+
 def publisher_script(
     *,
     clone_url: str,
@@ -1278,133 +1416,7 @@ export BASE_REF="{base_ref}"
 export OUT
 export RUN_RENUMBER=0
 cat << 'PYEOF' > "$OUT/schema.py"
-import os, sys, json, ast, subprocess, re
-
-base_ref = os.environ.get('BASE_REF')
-out_dir = os.environ.get('OUT')
-
-def cmd(args):
-    return subprocess.check_output(args).decode('utf-8').strip()
-
-try:
-    added_out = cmd(['git', 'diff', '--name-only', '--diff-filter=A', f'refs/remotes/origin/{{base_ref}}...HEAD'])
-    added_paths = added_out.splitlines()
-except Exception:
-    added_paths = []
-
-added_migrations = [p for p in added_paths if p.startswith('crucible/adapters/persistence/migrations/versions/') and p.endswith('.py') and not p.endswith('__init__.py')]
-
-tables = set()
-columns = set()
-
-class Visitor(ast.NodeVisitor):
-    def visit_Call(self, node):
-        if isinstance(node.func, ast.Attribute) and getattr(node.func.value, 'id', None) == 'op':
-            func_name = node.func.attr
-            if func_name in ('add_column', 'drop_column', 'alter_column', 'create_table', 'drop_table', 'create_index', 'drop_index'):
-                if len(node.args) >= 1 and isinstance(node.args[0], ast.Constant):
-                    if func_name in ('create_index', 'drop_index'):
-                        if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
-                            tables.add(node.args[1].value)
-                    else:
-                        tables.add(node.args[0].value)
-                if func_name in ('add_column', 'drop_column', 'alter_column') and len(node.args) >= 2:
-                    if isinstance(node.args[1], ast.Constant):
-                        columns.add(node.args[1].value)
-                    elif isinstance(node.args[1], ast.Call) and getattr(node.args[1].func, 'attr', None) == 'Column':
-                        if len(node.args[1].args) >= 1 and isinstance(node.args[1].args[0], ast.Constant):
-                            columns.add(node.args[1].args[0].value)
-        self.generic_visit(node)
-
-for path in added_migrations:
-    print("PATH:", path, os.path.exists(path))
-    if not os.path.exists(path):
-        continue
-    with open(path, 'r') as f:
-        mcontent = f.read()
-    v = Visitor()
-    try:
-        v.visit(ast.parse(mcontent))
-    except Exception:
-        pass
-
-if os.environ.get('RUN_RENUMBER') == '1' and added_migrations:
-    try:
-        main_files = cmd(['git', 'ls-tree', '-r', '--name-only', f'refs/remotes/origin/{{base_ref}}', 'crucible/adapters/persistence/migrations/versions/']).splitlines()
-    except Exception:
-        main_files = []
-    main_migs = [p for p in main_files if p.endswith('.py') and not p.endswith('__init__.py')]
-    
-    highest_num = 0
-    highest_name = ""
-    for m in main_migs:
-        basename = os.path.basename(m)
-        m_match = re.match(r'^_?(\\d+)_', basename)
-        if m_match:
-            num = int(m_match.group(1))
-            if num >= highest_num:
-                highest_num = num
-                highest_name = basename.replace('.py', '').lstrip('_')
-                
-    def get_num(p):
-        m = re.match(r'^_?(\\d+)_', os.path.basename(p))
-        return int(m.group(1)) if m else 999999
-    added_migrations.sort(key=get_num)
-
-    current_head = highest_name
-    current_num = highest_num
-    
-    renumbered = False
-    for path in added_migrations:
-        with open(path, 'r') as f:
-            mcontent = f.read()
-            
-        current_num += 1
-        new_num_str = f"{{current_num:04d}}"
-        basename = os.path.basename(path)
-        m = re.match(r'^_?\\d+_(.*)\\.py$', basename)
-        slug = m.group(1) if m else basename.replace('.py', '')
-        new_basename = f"_{{new_num_str}}_{{slug}}.py"
-        new_revision = f"{{new_num_str}}_{{slug}}"
-        
-        if f"{{current_num:04d}}" != f"{{get_num(path):04d}}" or new_revision not in mcontent:
-            mcontent = re.sub(r'revision\\s*=\\s*["\\'].*?["\\']', f'revision = "{{new_revision}}"', mcontent)
-            mcontent = re.sub(r'down_revision\\s*=\\s*["\\'].*?["\\']', f'down_revision = "{{current_head}}"', mcontent)
-            mcontent = re.sub(r'Revises:\\s+.*', f'Revises: {{current_head}}', mcontent)
-            mcontent = re.sub(r'Revision ID:\\s+.*', f'Revision ID: {{new_revision}}', mcontent)
-            
-            new_path = os.path.join(os.path.dirname(path), new_basename)
-            
-            print('NEW CONTENT:', repr(mcontent))
-            with open(path, 'w') as f:
-                f.write(mcontent)
-                
-            if new_path != path:
-                subprocess.check_call(['git', 'mv', path, new_path])
-                subprocess.check_call(['git', 'add', new_path])
-            else:
-                subprocess.check_call(['git', 'add', path])
-            renumbered = True
-        
-        current_head = new_revision
-
-    if renumbered:
-        subprocess.check_call(['git', 'commit', '--quiet', '-m', "Crucible: renumber migrations to follow main"])
-
-try:
-    all_changed = cmd(['git', 'diff', '--name-only', f'refs/remotes/origin/{{base_ref}}...HEAD']).splitlines()
-except Exception:
-    all_changed = []
-models = [p for p in all_changed if p == 'crucible/adapters/persistence/models.py']
-
-with open(os.path.join(out_dir, 'schema.json'), 'w') as f:
-    json.dump(dict(
-        tables= sorted(list(tables)),
-        columns= sorted(list(columns)),
-        models= models,
-        debug_added=added_paths
-    ), f)
-PYEOF
+{SCHEMA_SCRIPT}PYEOF
 python3 "$OUT/schema.py" >> "$OUT/publisher.log" 2>&1 || true
 
 echo push > "$OUT/step.txt"
@@ -1543,133 +1555,7 @@ export BASE_REF="{base_ref}"
 export OUT
 export RUN_RENUMBER=1
 cat << 'PYEOF' > "$OUT/schema.py"
-import os, sys, json, ast, subprocess, re
-
-base_ref = os.environ.get('BASE_REF')
-out_dir = os.environ.get('OUT')
-
-def cmd(args):
-    return subprocess.check_output(args).decode('utf-8').strip()
-
-try:
-    added_out = cmd(['git', 'diff', '--name-only', '--diff-filter=A', f'refs/remotes/origin/{{base_ref}}...HEAD'])
-    added_paths = added_out.splitlines()
-except Exception:
-    added_paths = []
-
-added_migrations = [p for p in added_paths if p.startswith('crucible/adapters/persistence/migrations/versions/') and p.endswith('.py') and not p.endswith('__init__.py')]
-
-tables = set()
-columns = set()
-
-class Visitor(ast.NodeVisitor):
-    def visit_Call(self, node):
-        if isinstance(node.func, ast.Attribute) and getattr(node.func.value, 'id', None) == 'op':
-            func_name = node.func.attr
-            if func_name in ('add_column', 'drop_column', 'alter_column', 'create_table', 'drop_table', 'create_index', 'drop_index'):
-                if len(node.args) >= 1 and isinstance(node.args[0], ast.Constant):
-                    if func_name in ('create_index', 'drop_index'):
-                        if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
-                            tables.add(node.args[1].value)
-                    else:
-                        tables.add(node.args[0].value)
-                if func_name in ('add_column', 'drop_column', 'alter_column') and len(node.args) >= 2:
-                    if isinstance(node.args[1], ast.Constant):
-                        columns.add(node.args[1].value)
-                    elif isinstance(node.args[1], ast.Call) and getattr(node.args[1].func, 'attr', None) == 'Column':
-                        if len(node.args[1].args) >= 1 and isinstance(node.args[1].args[0], ast.Constant):
-                            columns.add(node.args[1].args[0].value)
-        self.generic_visit(node)
-
-for path in added_migrations:
-    print("PATH:", path, os.path.exists(path))
-    if not os.path.exists(path):
-        continue
-    with open(path, 'r') as f:
-        mcontent = f.read()
-    v = Visitor()
-    try:
-        v.visit(ast.parse(mcontent))
-    except Exception:
-        pass
-
-if os.environ.get('RUN_RENUMBER') == '1' and added_migrations:
-    try:
-        main_files = cmd(['git', 'ls-tree', '-r', '--name-only', f'refs/remotes/origin/{{base_ref}}', 'crucible/adapters/persistence/migrations/versions/']).splitlines()
-    except Exception:
-        main_files = []
-    main_migs = [p for p in main_files if p.endswith('.py') and not p.endswith('__init__.py')]
-    
-    highest_num = 0
-    highest_name = ""
-    for m in main_migs:
-        basename = os.path.basename(m)
-        m_match = re.match(r'^_?(\\d+)_', basename)
-        if m_match:
-            num = int(m_match.group(1))
-            if num >= highest_num:
-                highest_num = num
-                highest_name = basename.replace('.py', '').lstrip('_')
-                
-    def get_num(p):
-        m = re.match(r'^_?(\\d+)_', os.path.basename(p))
-        return int(m.group(1)) if m else 999999
-    added_migrations.sort(key=get_num)
-
-    current_head = highest_name
-    current_num = highest_num
-    
-    renumbered = False
-    for path in added_migrations:
-        with open(path, 'r') as f:
-            mcontent = f.read()
-            
-        current_num += 1
-        new_num_str = f"{{current_num:04d}}"
-        basename = os.path.basename(path)
-        m = re.match(r'^_?\\d+_(.*)\\.py$', basename)
-        slug = m.group(1) if m else basename.replace('.py', '')
-        new_basename = f"_{{new_num_str}}_{{slug}}.py"
-        new_revision = f"{{new_num_str}}_{{slug}}"
-        
-        if f"{{current_num:04d}}" != f"{{get_num(path):04d}}" or new_revision not in mcontent:
-            mcontent = re.sub(r'revision\\s*=\\s*["\\'].*?["\\']', f'revision = "{{new_revision}}"', mcontent)
-            mcontent = re.sub(r'down_revision\\s*=\\s*["\\'].*?["\\']', f'down_revision = "{{current_head}}"', mcontent)
-            mcontent = re.sub(r'Revises:\\s+.*', f'Revises: {{current_head}}', mcontent)
-            mcontent = re.sub(r'Revision ID:\\s+.*', f'Revision ID: {{new_revision}}', mcontent)
-            
-            new_path = os.path.join(os.path.dirname(path), new_basename)
-            
-            print('NEW CONTENT:', repr(mcontent))
-            with open(path, 'w') as f:
-                f.write(mcontent)
-                
-            if new_path != path:
-                subprocess.check_call(['git', 'mv', path, new_path])
-                subprocess.check_call(['git', 'add', new_path])
-            else:
-                subprocess.check_call(['git', 'add', path])
-            renumbered = True
-        
-        current_head = new_revision
-
-    if renumbered:
-        subprocess.check_call(['git', 'commit', '--quiet', '-m', "Crucible: renumber migrations to follow main"])
-
-try:
-    all_changed = cmd(['git', 'diff', '--name-only', f'refs/remotes/origin/{{base_ref}}...HEAD']).splitlines()
-except Exception:
-    all_changed = []
-models = [p for p in all_changed if p == 'crucible/adapters/persistence/models.py']
-
-with open(os.path.join(out_dir, 'schema.json'), 'w') as f:
-    json.dump(dict(
-        tables= sorted(list(tables)),
-        columns= sorted(list(columns)),
-        models= models,
-        debug_added=added_paths
-    ), f)
-PYEOF
+{SCHEMA_SCRIPT}PYEOF
 python3 "$OUT/schema.py" >> "$OUT/publisher.log" 2>&1 || true
 
 git rev-parse HEAD > "$OUT/merge-head.txt"
