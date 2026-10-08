@@ -45,7 +45,7 @@ def _operator_picks_fast(client: TestClient, tokens: dict[str, str]) -> dict[str
     routing["models"].append(
         {
             **local,
-            "id": "fast",
+            "model": "fast",
             "endpoint_url": GATEWAY,
             "capability": "mid",
             "speed": "fast",
@@ -55,7 +55,7 @@ def _operator_picks_fast(client: TestClient, tokens: dict[str, str]) -> dict[str
     )
     # Only the picked model is enabled, as the gateway page leaves it with one pick.
     for model in routing["models"]:
-        if model["id"] != "fast":
+        if model["model"] != "fast":
             model["enabled"] = False
             model["disabled_reason"] = "not picked in this test"
     put = client.put(
