@@ -14,6 +14,7 @@ and read back.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
 from typing import Any, cast
@@ -110,22 +111,23 @@ class _Events:
 
 class _Escalations:
     def __init__(self, escalations: list[Escalation]) -> None:
-        self.rows: dict[str, Escalation] = {e.id: e for e in escalations}
+        self.rows: dict[str, Escalation] = {e.id: deepcopy(e) for e in escalations}
 
     def add(self, escalation: Escalation) -> None:
-        self.rows[escalation.id] = escalation
+        self.rows[escalation.id] = deepcopy(escalation)
 
     def get(self, escalation_id: str, *, for_update: bool = False) -> Escalation | None:
-        return self.rows.get(escalation_id)
+        escalation = self.rows.get(escalation_id)
+        return deepcopy(escalation) if escalation is not None else None
 
     def save(self, escalation: Escalation) -> None:
-        self.rows[escalation.id] = escalation
+        self.rows[escalation.id] = deepcopy(escalation)
 
     def list_for_task(self, task_id: str) -> list[Escalation]:
-        return [e for e in self.rows.values() if e.task_id == task_id]
+        return [deepcopy(e) for e in self.rows.values() if e.task_id == task_id]
 
     def list_open(self) -> list[Escalation]:
-        return [e for e in self.rows.values() if e.state is EscalationState.OPEN]
+        return [deepcopy(e) for e in self.rows.values() if e.state is EscalationState.OPEN]
 
 
 class _Decisions:
