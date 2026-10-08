@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import subprocess
 import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -15,6 +14,7 @@ from crucible.application.proxy_config import (
 from crucible.cli.wiring import enabled_database_endpoint
 from crucible.ports.execution import LaunchSpec
 from crucible.ports.harness import LaunchContext
+from tests.wait import wait_until
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -24,8 +24,7 @@ def test_proxy_install_waits_for_the_reload_acknowledgement(tmp_path: Path) -> N
 
     def acknowledge() -> None:
         marker = tmp_path / "reload"
-        while not marker.is_file():
-            time.sleep(0.01)
+        wait_until(marker.is_file, timeout=2, describe="proxy reload request")
         (tmp_path / "reloaded").write_text(marker.read_text(encoding="ascii"), encoding="ascii")
 
     thread = threading.Thread(target=acknowledge)

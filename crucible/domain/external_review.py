@@ -35,6 +35,11 @@ DEFAULT_ACCEPTED_SIGNALS: frozenset[str] = frozenset({"reaction:+1", "review"})
 # the live record). A comment carrying it is never a round, even where a policy has
 # deliberately added `comment` to `accepted_signals`.
 SUMMARY_MARKER = "codex-pull-request-review-summary"
+# hades #343: the connector declines a round under more than one wording ("create a
+# Codex account and connect to github", "create an environment for this repo"), and has
+# changed wording before. Matched by this common prefix rather than either exact
+# sentence, so a wording neither Hades nor the issue has seen yet is still caught.
+CODEX_REFUSAL_PREFIX = "to use codex here"
 
 
 class SignalKind(StrEnum):
@@ -116,6 +121,18 @@ def accepted_signals(policy: dict[str, object]) -> frozenset[str]:
 def is_provider_summary(body: str) -> bool:
     """The provider's own summary comment, by the marker it writes into the body (S12)."""
     return SUMMARY_MARKER in body.lower()
+
+
+def is_codex_refusal(body: str) -> bool:
+    """A chatgpt-codex-connector reply declining the round, not a review (hades #343).
+
+    Posted as a plain issue comment, seconds after the App's trigger, instead of a
+    review object or the pre-verdict summary. Matched by its common prefix so both
+    wordings seen on sentania-labs/hades#343 ("...create a Codex account and connect
+    to github" and "...create an environment for this repo") are caught by the one
+    check; never counted as a comment needing a disposition, and never a signal that
+    can complete a cycle."""
+    return body.strip().lower().startswith(CODEX_REFUSAL_PREFIX)
 
 
 def required_rounds(policy: dict[str, object]) -> int:

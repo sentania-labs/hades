@@ -27,6 +27,7 @@ from crucible.application.admin.login import (
     render_line,
 )
 from tests.login_captures import capture, replay_script, replay_to_exit
+from tests.wait import wait_until
 
 CLAUDE_URL_START = (
     "https://claude.com/cai/oauth/authorize?code=true"
@@ -180,8 +181,9 @@ def run_driver(
     consumed = 0
     buffer = ""
     try:
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
+
+        def login_finished() -> bool:
+            nonlocal buffer, code, consumed
             with lock:
                 text = bytes(output).decode("utf-8", "replace")
             fresh, consumed = text[consumed:], len(text)
@@ -191,8 +193,6 @@ def run_driver(
                 if not line.startswith("crucible-login.exit=")
             ]
             buffer = _consume(buffer + "".join(kept), flow, None, tmp_path, session, None)
-            if "crucible-login.exit=" in text:
-                break
             if session.state == "waiting_for_code" and code is not None:
                 subprocess.run(
                     ["sh", "-c", _LOGIN_CODE_SCRIPT],
@@ -202,7 +202,9 @@ def run_driver(
                 )
                 session.state = "waiting_for_operator"
                 code = None
-            time.sleep(0.1)
+            return "crucible-login.exit=" in text
+
+        wait_until(login_finished, timeout=30, describe=f"{harness} login driver to exit")
     finally:
         process.kill()
         process.wait()

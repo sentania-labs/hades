@@ -49,6 +49,7 @@ from crucible.application.publish import (
     hold_publishing,
     open_review_cycle,
     push_url_for,
+    record_external_review_needs_person,
     record_external_review_requested,
     record_publish_started,
     record_token_minted,
@@ -79,7 +80,7 @@ from crucible.domain.entities import (
 )
 from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
 from crucible.domain.exit_class import ExitClass
-from crucible.domain.external_review import completed_rounds
+from crucible.domain.external_review import completed_rounds, required_rounds
 from crucible.domain.ids import new_id
 from crucible.domain.lifecycle import CORRECTION_STATES, ExecutionState, TaskState
 from crucible.domain.publication import body_sha256
@@ -637,7 +638,7 @@ class DeliveryCoordinator:
                 return False
             await self._host._db(lambda: self._record_pull_request(plan, resolved, schema_changes))
             trigger = external_review_trigger(plan.policy)
-            if trigger is not None:
+            if trigger is not None and not plan.external_review_needs_person:
                 github_step = "external_review_request"
                 previous = await self._host._db(lambda: self._external_review_request(plan))
                 comment = await asyncio.to_thread(
@@ -652,6 +653,11 @@ class DeliveryCoordinator:
                     await self._host._db(
                         lambda: self._record_external_review_request(plan, resolved, comment)
                     )
+            elif plan.external_review_needs_person:
+                # hades #343: the repository's Codex review does not start on its own,
+                # or a refusal was already seen there; Crucible never posts the App's
+                # trigger, which the provider would only refuse again.
+                await self._host._db(lambda: self._record_review_needs_person(plan, resolved))
             await self._host._db(
                 lambda: self._finish(
                     plan, ref=resolved, others=others, schema_changes=schema_changes
@@ -947,6 +953,36 @@ class DeliveryCoordinator:
                 plan=plan,
                 pull_request_number=ref.number,
                 comment=comment,
+            )
+            uow.commit()
+
+    def _record_review_needs_person(self, plan: PublishPlan, ref: Any) -> None:
+        with self._host._fenced() as uow:
+            task = uow.tasks.get(plan.task_id, for_update=True)
+            if task is None or task.state is not TaskState.PUBLISHING:
+                return
+            pull_request = uow.pull_requests.get_for_task(task.id)
+            if pull_request is None:
+                return
+            cycles = uow.review_cycles.list_for_pull_request(pull_request.id)
+            rounds = completed_rounds([to_cycle(row) for row in cycles])
+            if rounds >= required_rounds(plan.policy):
+                # hades #343 (01M4CDWQN19WNJTM0BD2NZ7HXN): the required rounds are
+                # already satisfied; `_finish` sends this publish straight to CI
+                # certification, so no further round, and no wake for one, is needed.
+                return
+            section = plan.policy.get("external_review", {})
+            retrigger = isinstance(section, dict) and bool(
+                section.get("retrigger_after_correction")
+            )
+            if plan.existing_pr_number is not None and not retrigger:
+                # A correction publish, and the policy does not ask for a new round
+                # after a correction (23's default): the outstanding round is not this
+                # publish's to request, the same gate `maybe_request_trigger` applies
+                # on the re-request path.
+                return
+            record_external_review_needs_person(
+                uow, self._clock, task=task, pull_request=pull_request
             )
             uow.commit()
 

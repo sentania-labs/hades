@@ -4,8 +4,9 @@ import json
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
+
+from tests.wait import wait_until
 
 HOST = Path(__file__).parents[2] / "images/worker/crucible-codex-host.py"
 
@@ -88,10 +89,11 @@ def test_t_auth_3_host_re_reads_access_token_and_writes_transcript(tmp_path: Pat
     assert process.stdin is not None
     process.stdin.write("identity and pointer")
     process.stdin.close()
-    deadline = time.monotonic() + 5
-    while not marker.exists():
-        assert time.monotonic() < deadline, "fake codex never requested an access token refresh"
-        time.sleep(0.01)
+    wait_until(
+        marker.exists,
+        timeout=5,
+        describe="fake codex to request an access token refresh",
+    )
     _token(tmp_path / "token.json", "access-new")
     assert process.wait(timeout=5) == 0
     lines = [json.loads(line) for line in (tmp_path / "transcript.jsonl").read_text().splitlines()]

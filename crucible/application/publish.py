@@ -85,6 +85,25 @@ def external_review_trigger(policy: dict[str, Any]) -> str | None:
     return {"codex": "@codex review"}.get(provider)
 
 
+def external_review_requires_person(policy: dict[str, Any], repository: Repository) -> bool:
+    """hades #343: a round is expected at publish, but Crucible must not post the App's
+    trigger: the repository's policy says the review does not start on its own, or a
+    refusal was already seen there. Either way the provider would only refuse the App's
+    comment again, so a person requests the round under their own account instead."""
+    review = policy.get("external_review", {})
+    if not isinstance(review, dict):
+        return False
+    provider = str(review.get("provider") or "")
+    if not provider or int(review.get("required_rounds", 0)) <= 0:
+        return False
+    if not bool(review.get("request_on_publish", True)):
+        return False
+    # The marker records only a Codex connector failure (hades #343); a repository that
+    # has since moved to another provider is not held to a refusal that was never its.
+    refused = provider == "codex" and repository.codex_review_refused_at is not None
+    return not bool(review.get("automatic", True)) or refused
+
+
 def external_review_request_exists(
     previous: Any | None,
     comments: tuple[CommentRecord, ...],
@@ -165,6 +184,49 @@ def record_external_review_requested(
     )
 
 
+def record_external_review_needs_person(
+    uow: UnitOfWork,
+    clock: Clock,
+    *,
+    task: Task,
+    pull_request: PullRequest,
+) -> None:
+    """hades #343: the repository's Codex review does not start on its own, or has
+    already refused a round; Crucible never posts the App's trigger there (S12: an
+    App-authored comment is refused the same way). The wake asks a person to request
+    the round under their own account instead; publication does not post again."""
+    record_event(
+        uow,
+        clock,
+        EventKind.EXTERNAL_REVIEW_TRIGGER_NEEDED,
+        principal=PRINCIPAL_CRUCIBLE,
+        task_id=task.id,
+        payload={
+            "pull_request": pull_request.number,
+            "head_sha": pull_request.head_sha,
+            "note": (
+                "the repository's Codex review is not automatic, or a refusal was "
+                "already seen there; the trigger comment is posted by the orchestrator "
+                "under the operator's account; Crucible does not post under its App "
+                "identity (23, S12, hades #343)"
+            ),
+        },
+    )
+    create_wake(
+        uow,
+        clock,
+        principal_id=task.principal_id,
+        reason=WakeReason.EXTERNAL_REVIEW_TRIGGER_NEEDED,
+        summary=(
+            f"{pull_request.url} needs a review round requested by a person: the "
+            "repository's Codex review is not automatic, or a refusal was already "
+            "seen there"
+        )[:500],
+        task=task,
+        extra_links={"pull_request": f"/v1/tasks/{task.id}/pull-request"},
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class PublishPlan:
     """Everything one publication needs, read once inside a fenced transaction.
@@ -202,6 +264,10 @@ class PublishPlan:
     retry_number: int = 0
     publish_retry_max: int = 3
     owned_remote_heads: tuple[str, ...] = ()
+    # hades #343: a round is expected, but the repository's Codex review does not start
+    # on its own, or a refusal was already seen there; the publisher must not post the
+    # App's trigger and wakes the orchestrator instead.
+    external_review_needs_person: bool = False
 
 
 def repository_slug(repository: Repository) -> str:
@@ -438,6 +504,7 @@ def build_plan(uow: UnitOfWork, task: Task, work: tuple[Attempt, Execution]) -> 
         resume_step=str(publishing_payload.get("resume_step") or ""),
         retry_number=int(publishing_payload.get("retry_number", 0)),
         publish_retry_max=int(retry_limit),
+        external_review_needs_person=external_review_requires_person(policy, repository),
     )
 
 

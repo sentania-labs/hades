@@ -378,6 +378,7 @@ class RepositoryView(Response):
     attested_by: str | None = None
     attested_at: Rfc3339 | None = None
     private: bool = False
+    codex_review_refused_at: Rfc3339 | None = None
 
 
 # ----- C2: review, acceptance, corrections, decisions, wakes, policies, artifacts ----

@@ -29,9 +29,10 @@ MERGED = {"0044_attempt_stall_shape", "0044_editor_leftovers_policy", "0044_merg
 # 0047 above that; hades #389's migration was renumbered to 0047 on top and chains from
 # 0047_attempt_egress_probe so the graph stays linear. hades #176 adds 0048 on top,
 # hades #265 adds 0049 for persisted batch outcomes, then #485 adds 0050 for the cache TTL,
-# #515 adds 0051 for pair-based routing references, and #476's correction adds 0052 for
-# the certification's change class. hades #447 adds 0053 for the schema a pull request's
-# migrations touch; it was written as 0052 and renumbered past main's 0052 at merge-main,
+# #437 adds 0051 for routing model references, and #343 adds 0052 for the repository's
+# own Codex connector refusal. #476's correction adds 0053 for the certification's
+# change class. hades #447 adds 0054 for the schema a pull request's
+# migrations touch; it was written as 0052 and renumbered past main's 0053 at merge-main,
 # which is the provisional numbering #447 itself describes.
 ABOVE = "0046_blocked_reason"
 PROBE = "0047_attempt_egress_probe"
@@ -39,9 +40,10 @@ LAUNCH = "0047_successful_launch_time"
 REBOUND = "0048_repository_rebound"
 BATCH = "0049_repository_batch"
 CACHE = "0050_status_cache"
-ROUTING = "0051_routing_model_references"
-CERT = "0052_cert_change_class"
-HEAD = "0053_pull_request_schema_overlap"
+ROUTING_REFS = "0051_routing_model_references"
+CODEX_REFUSAL = "0052_codex_review_refused"
+CERT = "0053_cert_change_class"
+HEAD = "0054_pull_request_schema_overlap"
 
 
 def _script() -> ScriptDirectory:
@@ -74,10 +76,12 @@ def test_the_0045_merge_joins_the_three_0044_heads() -> None:
     assert batch is not None and batch.down_revision == REBOUND
     cache = script.get_revision(CACHE)
     assert cache is not None and cache.down_revision == BATCH
-    routing = script.get_revision(ROUTING)
-    assert routing is not None and routing.down_revision == CACHE
+    routing_refs = script.get_revision(ROUTING_REFS)
+    assert routing_refs is not None and routing_refs.down_revision == CACHE
+    codex_refusal = script.get_revision(CODEX_REFUSAL)
+    assert codex_refusal is not None and codex_refusal.down_revision == ROUTING_REFS
     cert = script.get_revision(CERT)
-    assert cert is not None and cert.down_revision == ROUTING
+    assert cert is not None and cert.down_revision == CODEX_REFUSAL
     head = script.get_revision(HEAD)
     assert head is not None and head.down_revision == CERT
 
@@ -107,7 +111,7 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
         plan = [step.revision.revision for step in script._upgrade_revs("head", head)]
         assert plan.index("0043_credential_mount_mode") < plan.index("0044_merge_423_424")
         assert plan.index("0044_merge_423_424") < plan.index(MERGE)
-        assert plan[-10:] == [
+        assert plan[-11:] == [
             MERGE,
             ABOVE,
             PROBE,
@@ -115,7 +119,8 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
             REBOUND,
             BATCH,
             CACHE,
-            ROUTING,
+            ROUTING_REFS,
+            CODEX_REFUSAL,
             CERT,
             HEAD,
         ]
