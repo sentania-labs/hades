@@ -82,6 +82,7 @@ from crucible.application.harnesses import (
     egress_allowlist,
 )
 from crucible.contracts.completion_claim import CompletionClaimV1
+from crucible.domain.acceptance_checks import verifier_checks
 from crucible.domain.cluster_egress import (
     DEFAULT_ADDRESS_OVERLAP_SECONDS,
     AllowedAddresses,
@@ -5156,11 +5157,7 @@ class KubernetesProvider:
     async def _run_verifier(
         self, spec: LaunchSpec, limits: Limits
     ) -> tuple[VerificationRun, ...] | None:
-        checks = [
-            (str(v.get("id")), str(v.get("command")))
-            for v in spec.contract.get("required_verification", [])
-            if str(v.get("kind", "command")) == "command"
-        ]
+        checks = [(c["id"], c["command"]) for c in verifier_checks(spec.contract)]
         if not checks:
             return ()
         launched = self._launched.get(spec.attempt_id)
@@ -6351,11 +6348,7 @@ def _merge_verifications(
     spec: LaunchSpec,
     timeout: int,
 ) -> tuple[VerificationRun, ...]:
-    checks = [
-        (str(v.get("id")), str(v.get("command")))
-        for v in spec.contract.get("required_verification", [])
-        if str(v.get("kind", "command")) == "command"
-    ]
+    checks = [(c["id"], c["command"]) for c in verifier_checks(spec.contract)]
     if not checks:
         return ()
     runs = read_verifications(verify, spec, checks)

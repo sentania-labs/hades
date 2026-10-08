@@ -21,6 +21,7 @@ from functools import lru_cache
 from typing import Any
 
 from crucible.domain import injected
+from crucible.domain.acceptance_checks import criterion_checks
 from crucible.domain.exit_class import CLEAN_EXIT_CLASSES, ExitClass
 from crucible.domain.injected import (
     injected_prefix as _injected_prefix,
@@ -43,6 +44,7 @@ class GateName(StrEnum):
     VERIFICATION_RAN = "verification_ran"
     RUN_EVIDENCE_PRESENT = "run_evidence_present"
     CRITERIA_MAPPED = "criteria_mapped"
+    ACCEPTANCE_CHECKS = "acceptance_checks"
     DEPENDENCIES_UNCHANGED = "dependencies_unchanged"
     CI_UNCHANGED = "ci_unchanged"
     WORKSPACE_CLEAN = "workspace_clean"
@@ -87,8 +89,12 @@ PRE_PR_GATES: frozenset[str] = frozenset(
 )
 # These gates always run, even when a stored policy omits them. Commit authorship is
 # advisory (FDY-0143); the report gate always runs so its gaps are always listed for the
-# reviewer (#402, hades #498).
-ENFORCED_PRE_PR_GATES: frozenset[str] = frozenset({GateName.COMMIT_POLICY, GateName.REPORT_PRESENT})
+# reviewer (#402, hades #498). The criterion checks a contract carries are judged on every
+# attempt, blocking on a lab-local pool and advisory elsewhere, so no policy lists or
+# drops them (hades #449).
+ENFORCED_PRE_PR_GATES: frozenset[str] = frozenset(
+    {GateName.COMMIT_POLICY, GateName.REPORT_PRESENT, GateName.ACCEPTANCE_CHECKS}
+)
 
 # hades #498, the operator on 2026-10-06: the pre-PR gates judge whether the worker
 # returned work and whether it passes, never whether the paperwork is complete. These
@@ -220,6 +226,8 @@ class GateInput:
     head_sha: str | None
     evidence: tuple[EvidenceItem, ...]
     internal_review_required: bool = True
+    # hades #449: the attempt ran on a lab-local pool, where acceptance_checks blocks.
+    lab_local: bool = False
 
     def of_kind(self, kind: str, *, role: str | None = None) -> list[EvidenceItem]:
         out = [e for e in self.evidence if e.admissible and e.kind == kind]
@@ -1142,6 +1150,61 @@ def commit_policy(gi: GateInput) -> GateOutcome:
     return GateOutcome(GateResult.PASS, f"every commit is authored as {author}", ids)
 
 
+def acceptance_checks(gi: GateInput) -> GateOutcome:
+    """Each executable check an acceptance criterion carries, re-run by Crucible's
+    verifier from the collected tree (hades #449).
+
+    On a lab-local pool a check that did not run, or exited other than it expects,
+    stops the task whatever the policy's advisory list says; the detail names the
+    criterion and the exit. Elsewhere the gate is advisory: it passes and lists each
+    failure for the reviewer. A criterion without a check is listed for the reviewer,
+    as before."""
+    checks = criterion_checks(gi.contract)
+    if not checks:
+        return GateOutcome(GateResult.SKIPPED, "no acceptance criterion carries a check")
+    with_check = {c["criterion"] for c in checks}
+    unchecked = tuple(
+        f"criterion {c.get('id')} has no executable check; the reviewer judges it"
+        for c in gi.contract.get("acceptance_criteria") or []
+        if isinstance(c, dict) and str(c.get("id")) not in with_check
+    )
+    runs = {str(i.payload.get("id")): i for i in gi.of_kind("verification_run")}
+    ids: list[int] = []
+    failed: list[str] = []
+    for check in checks:
+        item = runs.get(check["id"])
+        if item is not None:
+            ids.append(item.id)
+        if item is None or not item.payload.get("ran"):
+            reason = str((item.payload.get("detail") if item else "") or "not re-run")
+            failed.append(f"criterion {check['criterion']}: check did not run ({reason})")
+            continue
+        actual = item.payload.get("exit_code")
+        if actual != check["expect_exit"]:
+            failed.append(
+                f"criterion {check['criterion']}: `{check['command']}` exited {actual!r}, "
+                f"expected {check['expect_exit']}"
+            )
+    lane = "lab-local" if gi.lab_local else "not lab-local, advisory"
+    if not failed:
+        return GateOutcome(
+            GateResult.PASS,
+            f"{len(checks)} criterion check(s) passed on the collected tree ({lane})",
+            tuple(ids),
+            findings=unchecked,
+        )
+    if gi.lab_local:
+        return GateOutcome(
+            GateResult.FAIL, "; ".join(failed), tuple(ids), always_blocks=True, findings=unchecked
+        )
+    return GateOutcome(
+        GateResult.PASS,
+        f"{len(failed)} of {len(checks)} criterion check(s) failed ({lane})",
+        tuple(ids),
+        findings=tuple(failed) + unchecked,
+    )
+
+
 PRE_PR_EVALUATORS: dict[str, Callable[[GateInput], GateOutcome]] = {
     GateName.REPORT_PRESENT: report_present,
     GateName.EXIT_CLEAN: exit_clean,
@@ -1154,6 +1217,7 @@ PRE_PR_EVALUATORS: dict[str, Callable[[GateInput], GateOutcome]] = {
     GateName.VERIFICATION_RAN: verification_ran,
     GateName.RUN_EVIDENCE_PRESENT: run_evidence_present,
     GateName.CRITERIA_MAPPED: criteria_mapped,
+    GateName.ACCEPTANCE_CHECKS: acceptance_checks,
     GateName.DEPENDENCIES_UNCHANGED: dependencies_unchanged,
     GateName.CI_UNCHANGED: ci_unchanged,
     GateName.WORKSPACE_CLEAN: workspace_clean,

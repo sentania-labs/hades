@@ -343,6 +343,12 @@ not run; treated as fail). Pre-PR gates evaluate once per collected head.
 Post-PR gates re-evaluate each reconcile tick and on every processed GitHub
 delivery for the head until they resolve or the task is terminal.
 
+The executable checks a contract's acceptance criteria carry are judged among the
+pre-PR gates, by `acceptance_checks` (hades #449): a failing check on an attempt that
+ran on a lab-local pool sends the task to `pre_pr_gates_failed` like any blocking gate;
+elsewhere it is listed for the reviewer. No review attempt is launched before
+publication to judge them.
+
 ## Escalation
 
 `open` -> `answered` (a Decision references it) -> `closed`. An escalation

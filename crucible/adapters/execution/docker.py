@@ -83,6 +83,7 @@ from crucible.application.harnesses import (
     egress_allowlist,
 )
 from crucible.contracts.completion_claim import CompletionClaimV1
+from crucible.domain.acceptance_checks import verifier_checks
 from crucible.domain.exit_class import ExitClass
 from crucible.domain.ids import new_id
 from crucible.domain.secrets import redact
@@ -1518,11 +1519,7 @@ class DockerProvider:
         )
 
     async def _run_verifier(self, spec: LaunchSpec) -> tuple[VerificationRun, ...]:
-        checks = [
-            (str(v.get("id")), str(v.get("command")))
-            for v in spec.contract.get("required_verification", [])
-            if str(v.get("kind", "command")) == "command"
-        ]
+        checks = [(c["id"], c["command"]) for c in verifier_checks(spec.contract)]
         if not checks:
             return ()
         tree = self._root(spec.attempt_id) / "output" / "tree"

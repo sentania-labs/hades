@@ -61,7 +61,9 @@ the worker is told what to do, not how Crucible checks it. In order:
    refuses a commit for them (operator decision, 2026-09-29, hades FDY-0143).
 6. **Read first** (when the contract names any). The contract's `context`
    references and `project_instructions`, each as `kind: ref`.
-7. **Acceptance criteria.** Each criterion's id and text.
+7. **Acceptance criteria.** Each criterion's id and text, and under it, verbatim, the
+   executable check it carries, if any (hades #449), with a line saying Crucible runs
+   those checks on the collected tree before any pull request.
 8. **Checks.** The `required_verification` commands, verbatim, to run and fix
    what fails; an artifact entry is the file to write in the report directory.
    Then two lines: a program a required command needs that is missing from the
