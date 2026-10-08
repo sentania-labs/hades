@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +22,7 @@ from crucible.adapters.persistence import models as m
 from crucible.domain.entities import Role
 from crucible.settings import Settings
 from tests.unit.issue_485_fixture import workload
+from tests.wait import wait_until
 
 TAIL = "/v1/attempts/attempt-0/logs"
 SSE = {"Accept": "text/event-stream", "Authorization": "Bearer tail-token"}
@@ -53,11 +54,17 @@ def _open_tail(app: Any) -> tuple[threading.Thread, dict[str, Any]]:
     return thread, result
 
 
-def _wait_for(condition: Callable[[], bool], timeout: float = 5.0) -> None:
-    deadline = time.monotonic() + timeout
-    while not condition():
-        assert time.monotonic() < deadline, "condition not reached in time"
-        time.sleep(0.02)
+def _count_polls(ctx: Any) -> list[None]:
+    """Record every unit of work the context opens; an admitted tail opens one per poll."""
+    polls: list[None] = []
+    factory = ctx.uow_factory
+
+    def counted() -> Any:
+        polls.append(None)
+        return factory()
+
+    ctx.uow_factory = counted
+    return polls
 
 
 def _end_attempt(engine: Any) -> float:
@@ -76,7 +83,7 @@ def test_one_tail_over_the_configured_limit_returns_a_problem_with_retry_after(
 ) -> None:
     app, ctx, engine = tail_app
     thread, first = _open_tail(app)
-    _wait_for(lambda: ctx.sse_tail_limiter.in_use == 1)
+    wait_until(lambda: ctx.sse_tail_limiter.in_use == 1, describe="the first tail admitted")
 
     with TestClient(app) as client:
         refused = client.get(TAIL, headers=SSE)
@@ -102,9 +109,12 @@ def test_an_admitted_tail_closes_with_end_within_a_second_of_the_attempt_ending(
     """The limiter only gates admission: it never holds the stream open or swallows
     the end signal, and the slot is free again once the end event has gone out."""
     app, ctx, engine = tail_app
+    polls = _count_polls(ctx)
     thread, tail = _open_tail(app)
-    _wait_for(lambda: ctx.sse_tail_limiter.in_use == 1)
-    time.sleep(0.3)  # let the tail poll at least once while the attempt runs
+    wait_until(lambda: ctx.sse_tail_limiter.in_use == 1, describe="the tail admitted")
+    admitted_at = len(polls)
+    # Let the tail poll at least once more while the attempt is still running.
+    wait_until(lambda: len(polls) > admitted_at + 1, describe="the tail polling")
 
     ended_at = _end_attempt(engine)
     thread.join(timeout=5)

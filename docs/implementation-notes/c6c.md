@@ -233,3 +233,11 @@ background task that releases the same permit; a permit releases only once.
 An earlier revision of this branch released only from the background task and
 wrapped the generator in handlers that swallowed cancellation, and the live tail
 end-to-end test stopped seeing `event: end`; that revision was replaced.
+
+Main went red after #527 merged: two of the tail unit tests used bare
+`time.sleep`, which the issue 193 guard refuses outside `tests/wait.py`. They
+now wait on observed state with `tests.wait.wait_until`: the limiter's
+`in_use`, and the tail's own unit-of-work polls instead of a fixed 0.3 s pause.
+`tests/unit/test_fix_main_74129ec.py` pins this, along with the over-limit
+refusal and the benchmark's output. Re-run on 2026-10-08 with 21 tails for 1 s:
+210 queries, 205.94 queries/s, 105 connection checkouts, peak 1 connection in use.
