@@ -333,7 +333,9 @@ model exits `provider_error` (the gateway refused, was unreachable, or
 answered 5xx) and the previous finished attempt on that pool did too, the
 pool is marked for its `default_cooldown_seconds`, with that reason; the
 mark is listed and cleared like a quota mark. One provider error marks
-nothing, and a subscription model's provider error marks nothing. A pool
+nothing, and a subscription model's provider error marks nothing. The task
+whose attempt ended `provider_error` reroutes to the next eligible candidate
+with the failed route excluded, as a model-only refusal does (16, hades #490). A pool
 at its `max_concurrency` is not excluded: the launch waits for a slot. A
 review attempt holds a slot of its model's pool like an implement attempt
 (hades #359), and the cap that binds is the smaller of the pool's

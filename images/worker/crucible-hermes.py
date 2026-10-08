@@ -52,6 +52,17 @@ less room. Hermes's own retry boosts can ask for more than the allowance (its ca
 Before Hermes starts, the preflight checks that 0.19.0 still reads `model.max_tokens`,
 still boosts the way the cap is written for, and still computes the trigger the way
 `compression_trigger` below does, and stops the attempt otherwise.
+
+Hades #490: a local gateway that drops the connection (refused, reset, timed out, the
+socket closed mid-answer) ends Hermes's run with `failed: true` in its usage record and
+the client's "Connection error." or "Request timed out." for the call, and Hermes does
+not try the call again. The wrapper reads the usage record and the tail of Hermes's own
+stderr after each exit, and when the words say the gateway gave no answer at all (not a
+status it did answer) it starts Hermes again after a pause, up to MAX_RETRIES times with
+the BACKOFF_SECONDS pauses, before giving up with that run's exit status. A relaunch is
+a new session over the same checkout and home: the model finds its edits and commits on
+disk, and the usage enrichment sums every session's tokens as before. The number of
+relaunches goes on the usage record as `transport_retries`.
 """
 
 from __future__ import annotations
@@ -63,9 +74,12 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
+from collections.abc import Callable, Sequence
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
+from typing import IO
 
 HERMES_PYTHON = "/opt/hermes/bin/python"
 # The Hermes the image pins (images/worker/Dockerfile). The usage patches in PATCHES
@@ -75,6 +89,33 @@ HERMES_VERSION = "0.19.0"
 # How often the session store is looked at for progress.
 PROGRESS_SECONDS = 15.0
 PROGRESS_LINE = "crucible-hermes: working, session updated"
+# hades #490: a transport-level API error is one where the gateway gave no answer: the
+# connection was refused, reset or closed before the answer was complete, or the request
+# timed out. The words are what Hermes's OpenAI client (httpx underneath) writes for
+# those; an HTTP status the gateway did answer ("Error code: 503") is never one.
+TRANSPORT_PATTERNS = (
+    "connection error",
+    "connection refused",
+    "connection reset",
+    "connection closed",
+    "failed to connect",
+    "request timed out",
+    "server disconnected",
+    "remote protocol error",
+    "incomplete chunked read",
+    "peer closed connection",
+    "econnreset",
+    "econnrefused",
+    "etimedout",
+    "network error",
+)
+# Three retries after the first launch, with these pauses before each.
+MAX_RETRIES = 3
+BACKOFF_SECONDS: tuple[float, ...] = (5.0, 15.0, 45.0)
+# How much of Hermes's stderr is kept to read the failure from.
+STDERR_TAIL_BYTES = 64 * 1024
+# Hermes's own exit for a provider failure (07).
+EXIT_PROVIDER_FAILURE = 75
 
 # Run inside the Hermes virtual environment, ahead of Hermes itself. It changes the turn
 # budget an agent is built with when the caller named none, and the root of the grep
@@ -586,7 +627,9 @@ def _one_session(database: sqlite3.Connection, session_id: str) -> dict[str, obj
     return dict(row) if row is not None else None
 
 
-def _fill_from_session(usage: dict[str, object], session: dict[str, object]) -> None:
+def _fill_from_session(
+    usage: dict[str, object], session: dict[str, object], *, aggregate: bool = False
+) -> None:
     """#387: fill what the usage record lacks from Hermes's saved session state.
 
     Hermes 0.19 writes its usage file from the agent's result, which is empty when the
@@ -602,12 +645,12 @@ def _fill_from_session(usage: dict[str, object], session: dict[str, object]) -> 
     if usage.get("session_id") is None and session["id"] is not None:
         usage["session_id"] = session["id"]
     for field, column in SESSION_FIELDS:
-        if usage.get(field) is None and session[column] is not None:
+        if (aggregate or usage.get(field) is None) and session[column] is not None:
             usage[field] = session[column]
-    if all(usage.get(field) is None for field in TOKEN_FIELDS):
+    if aggregate or all(usage.get(field) is None for field in TOKEN_FIELDS):
         for field in TOKEN_FIELDS:
             usage[field] = _integer(session[field])
-    if usage.get("total_tokens") is None:
+    if aggregate or usage.get("total_tokens") is None:
         parts = [_integer(usage.get(field)) for field in TOTAL_PARTS]
         if any(part is not None for part in parts):
             usage["total_tokens"] = sum(part for part in parts if part is not None)
@@ -627,12 +670,18 @@ def _session(home: Path, session_id: object) -> dict[str, object] | None:
         return None
 
 
-def _enrich_usage(usage_path: Path, home: Path, max_turns: int = 0) -> None:
+def _enrich_usage(
+    usage_path: Path, home: Path, max_turns: int = 0, transport_retries: int = 0
+) -> None:
     """Add the run's duration, tool calls and, where Hermes left them out, its session,
     model and tokens to the usage record. A session table without the columns this was
-    written against raises SessionSchemaChanged rather than writing silent nulls."""
+    written against raises SessionSchemaChanged rather than writing silent nulls.
+    hades #490: `transport_retries` is how many times the wrapper started Hermes again
+    after a transport-level API error; it goes on the record when there were any."""
     try:
         usage = json.loads(usage_path.read_text(encoding="utf-8"))
+        if transport_retries > 0:
+            usage["transport_retries"] = transport_retries
         if max_turns > 0:
             # FDY-0140: whether the run ended on its turn budget. Hermes reports it as
             # not completed after asking the model for a summary, one call past it.
@@ -645,9 +694,12 @@ def _enrich_usage(usage_path: Path, home: Path, max_turns: int = 0) -> None:
             # #387: Hermes 0.19 writes `completed: null` when its agent raised.
             usage["completed"] = False
         try:
-            session = _session(home, usage.get("session_id"))
+            # Every relaunch uses the same fresh home and creates another top-level
+            # session. Once a transport retry happened, aggregate every row so the
+            # discarded launches' duration, tools, tokens and cost are not lost.
+            session = _session(home, None if transport_retries > 0 else usage.get("session_id"))
             if session is not None:
-                _fill_from_session(usage, session)
+                _fill_from_session(usage, session, aggregate=transport_retries > 0)
         except SessionSchemaChanged as error:
             print(error, file=sys.stderr, flush=True)
         temporary = usage_path.with_suffix(".tmp")
@@ -657,6 +709,151 @@ def _enrich_usage(usage_path: Path, home: Path, max_turns: int = 0) -> None:
         # The adapter records the original usage file or its parse anomaly. Enrichment
         # is secondary evidence and must not hide Hermes's own outcome.
         return
+
+
+def transport_failure(*texts: str) -> str | None:
+    """The first TRANSPORT_PATTERNS word found in `texts`, or None when the gateway
+    answered (or nothing says it did not)."""
+    for text in texts:
+        lowered = text.lower()
+        for pattern in TRANSPORT_PATTERNS:
+            if pattern in lowered:
+                return pattern
+    return None
+
+
+def usage_failure(usage_path: Path) -> tuple[bool, str]:
+    """Whether Hermes's usage record says the run failed, and the failure it names
+    (`failure`, else the result's `error`), or (False, "") when there is no readable
+    record."""
+    try:
+        usage = json.loads(usage_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False, ""
+    if not isinstance(usage, dict):
+        return False, ""
+    # `failed: true` is Hermes's own word that the run failed, the one the adapter
+    # reads; a turn-limit end (`completed: false`, not failed) is never a failure here.
+    failed = usage.get("failed") is True
+    text = usage.get("failure") or usage.get("error") or ""
+    return failed, text if isinstance(text, str) else json.dumps(text)
+
+
+def transport_failure_of(usage_path: Path, code: int, stderr_tail: str = "") -> str | None:
+    """hades #490: the transport-level failure a Hermes run ended on, or None. Only a
+    run Hermes itself calls failed (its usage record, or its exit 75) is read, and the
+    words come from the record's failure and Hermes's stderr, never from a command's
+    output."""
+    failed, text = usage_failure(usage_path)
+    if not failed and code != EXIT_PROVIDER_FAILURE:
+        return None
+    return transport_failure(text, stderr_tail)
+
+
+def run_with_retry(
+    launch: Callable[[int], tuple[int, str | None]],
+    *,
+    retries: int = MAX_RETRIES,
+    backoff: Sequence[float] = BACKOFF_SECONDS,
+    sleep: Callable[[float], None] | None = None,
+    stopped: Callable[[], bool] = lambda: False,
+    name: str = "crucible-hermes",
+) -> tuple[int, int]:
+    """hades #490: run `launch` (given the launch number, 0 first), which returns the
+    exit code and the transport-level failure the run ended on, or None. A run that ended
+    on one is started again after the next BACKOFF pause, up to `retries` times. The
+    result is the last run's code and how many relaunches there were. `stopped` says a
+    termination signal arrived, after which nothing is relaunched."""
+    pause = sleep if sleep is not None else time.sleep
+    code = 0
+    for number in range(retries + 1):
+        code, failure = launch(number)
+        if failure is None or number >= retries or stopped():
+            if failure is not None and number >= retries:
+                print(
+                    f"{name}: transport-level API error ({failure}) after {retries} "
+                    f"retries; giving up with exit {code}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            return code, number
+        delay = backoff[min(number, len(backoff) - 1)] if backoff else 0.0
+        print(
+            f"{name}: transport-level API error ({failure}); retry {number + 1} of "
+            f"{retries} in {delay:g}s",
+            file=sys.stderr,
+            flush=True,
+        )
+        pause(delay)
+        if stopped():
+            return code, number
+    return code, retries
+
+
+class StderrTail:
+    """hades #490: Hermes's stderr passed through as it comes, with its tail kept so
+    the client's message for the failed call can be read after the exit."""
+
+    def __init__(self, limit: int = STDERR_TAIL_BYTES) -> None:
+        self._limit = limit
+        self._chunks: list[bytes] = []
+        self._size = 0
+
+    def feed(self, chunk: bytes) -> None:
+        self._chunks.append(chunk)
+        self._size += len(chunk)
+        while self._chunks and self._size - len(self._chunks[0]) >= self._limit:
+            self._size -= len(self._chunks.pop(0))
+
+    @property
+    def text(self) -> str:
+        return b"".join(self._chunks)[-self._limit :].decode("utf-8", "replace")
+
+
+def _pump_stderr(stream: IO[bytes], tail: StderrTail) -> None:
+    err = getattr(sys.stderr, "buffer", None)
+    for raw in stream:
+        if err is not None:
+            err.write(raw)
+            err.flush()
+        else:
+            sys.stderr.write(raw.decode("utf-8", "replace"))
+            sys.stderr.flush()
+        tail.feed(raw)
+
+
+def run_hermes(
+    argv: list[str], fallback: list[str], stopped: threading.Event | None = None
+) -> tuple[int, str]:
+    """Start Hermes once, with stdout inherited (Crucible's launch wrapper is the sole
+    transcript writer), its stderr passed through with the tail kept (hades #490), and
+    SIGTERM and SIGINT forwarded. Returns the exit status and the stderr tail."""
+    # -P: the working directory is the task's checkout, and a module there named like
+    # one of Hermes's own (`cli`, `tools`, `agent`) must never be imported in its place.
+    try:
+        child = subprocess.Popen(
+            [HERMES_PYTHON, "-P", "-c", BOOTSTRAP, *argv], stderr=subprocess.PIPE
+        )
+    except OSError:
+        # An identity too long for one argument (E2BIG): the pointer alone still works.
+        child = subprocess.Popen(
+            [HERMES_PYTHON, "-P", "-c", BOOTSTRAP, *fallback], stderr=subprocess.PIPE
+        )
+
+    def forward(signum: int, _frame: object) -> None:
+        if stopped is not None:
+            stopped.set()
+        child.send_signal(signum)
+
+    signal.signal(signal.SIGTERM, forward)
+    signal.signal(signal.SIGINT, forward)
+    assert child.stderr is not None
+    tail = StderrTail()
+    pump = threading.Thread(target=_pump_stderr, args=(child.stderr, tail), daemon=True)
+    pump.start()
+    code = child.wait()
+    pump.join()
+    return (code if code >= 0 else 128 - code), tail.text
 
 
 def inline_identity(argv: list[str], identity: str | None) -> list[str]:
@@ -742,26 +939,22 @@ def main() -> int:
         print(PREFLIGHT_FAILED, file=sys.stderr, flush=True)
         return 2
     # Stdout stays inherited. Crucible's launch wrapper is the sole transcript writer.
-    # -P: the working directory is the task's checkout, and a module there named like
-    # one of Hermes's own (`cli`, `tools`, `agent`) must never be imported in its place.
-    try:
-        child = subprocess.Popen([HERMES_PYTHON, "-P", "-c", BOOTSTRAP, *argv])
-    except OSError:
-        # An identity too long for one argument (E2BIG): the pointer alone still works.
-        child = subprocess.Popen([HERMES_PYTHON, "-P", "-c", BOOTSTRAP, *sys.argv[1:]])
-
-    def forward(signum: int, _frame: object) -> None:
-        child.send_signal(signum)
-
-    signal.signal(signal.SIGTERM, forward)
-    signal.signal(signal.SIGINT, forward)
     stop = threading.Event()
     watcher = threading.Thread(target=watch_progress, args=(home, stop), daemon=True)
     watcher.start()
-    code = child.wait()
+    stopped = threading.Event()
+    fallback = list(sys.argv[1:])
+
+    def launch(_number: int) -> tuple[int, str | None]:
+        code, stderr_tail = run_hermes(argv, fallback, stopped)
+        return code, transport_failure_of(usage_path, code, stderr_tail)
+
+    # hades #490: a transport-level API error is tried again, with backoff, before the
+    # run is given up on.
+    code, retries = run_with_retry(launch, stopped=stopped.is_set)
     stop.set()
-    _enrich_usage(usage_path, home, max_turns)
-    return code if code >= 0 else 128 - code
+    _enrich_usage(usage_path, home, max_turns, retries)
+    return code
 
 
 if __name__ == "__main__":

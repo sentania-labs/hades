@@ -293,6 +293,14 @@ def branch_facts(bundle: BranchBundle | None) -> BranchFacts | None:
     )
 
 
+# The classes whose next attempt resumes from the sealed bundle of the one that ended:
+# an interruption's retry, a quota reroute, and (hades #490) a provider error's reroute,
+# which takes the model-only refusal's path (hades #373) to the next eligible candidate.
+REROUTED_EXIT_CLASSES: frozenset[ExitClass] = frozenset(
+    {ExitClass.INFRASTRUCTURE, ExitClass.QUOTA_EXHAUSTED, ExitClass.PROVIDER_ERROR}
+)
+
+
 def retryable_exit(exit_class: ExitClass, retry_on: Sequence[str]) -> bool:
     return exit_class.value in retry_on and exit_class in (
         ExitClass.ENVIRONMENT,
@@ -655,10 +663,11 @@ def workspace_release_reason(
     ):
         return None
     published = uow.events.latest_for_task_kind(task.id, EventKind.PUBLISH_COMPLETED.value)
-    if attempt.exit_class in {ExitClass.INFRASTRUCTURE, ExitClass.QUOTA_EXHAUSTED} and (
+    if attempt.exit_class in REROUTED_EXIT_CLASSES and (
         published is None or published.ts < attempt.created_at
     ):
-        # Keep the sealed source through retries and start failures until publication.
+        # Keep the sealed source through retries, reroutes (hades #490) and start
+        # failures until publication.
         return None
     work = latest_work_attempt(uow, task)
     if (
@@ -2173,7 +2182,7 @@ class Supervisor:
             )
             resume_bundle: dict[str, str] = {}
             interruption_retry = attempt.number > 1 and any(
-                prior.exit_class in {ExitClass.INFRASTRUCTURE, ExitClass.QUOTA_EXHAUSTED}
+                prior.exit_class in REROUTED_EXIT_CLASSES
                 for prior in route_uow.attempts.list_for_execution(execution.id)
             )
             can_resume_bundle = (
@@ -2661,7 +2670,20 @@ class Supervisor:
         excluded = set()
         for event in self._all_task_events(uow, item.task.id):
             model = event.payload.get("excluded_model")
-            if event.payload.get("next_attempt_id") != item.attempt.id or not model:
+            if not model:
+                continue
+            immediate_retry = event.payload.get("next_attempt_id") == item.attempt.id
+            provider_error_reroute = (
+                event.kind == EventKind.TASK_REROUTED.value
+                and event.execution_id == item.execution.id
+                and int(event.payload.get("contract_version", 0)) == item.execution.contract_version
+                and event.payload.get("why")
+                == (
+                    "previous attempt ended provider_error on its route; rerouted to "
+                    "the next eligible candidate"
+                )
+            )
+            if not (immediate_retry or provider_error_reroute):
                 continue
             harness = event.payload.get("excluded_harness")
             if not harness and event.attempt_id:
@@ -2703,7 +2725,9 @@ class Supervisor:
         # The (harness, model) routes this attempt may not take: the ones the caller
         # names (a reroute deciding where to go next) and the ones the event that
         # created the attempt excluded, a capacity refusal's retry or a model-only
-        # quota refusal's reroute (hades #373).
+        # quota refusal's reroute (hades #373). Provider-error exclusions accumulate
+        # across the reroute chain: otherwise attempt N+2 could select the local route
+        # that attempt N proved unavailable (hades #490).
         all_excluded_routes = set(excluded_routes or set()) | self._capacity_exclusions(uow, item)
         selection = select_model(
             uow,
@@ -6572,7 +6596,10 @@ class Supervisor:
         if context is None:
             return
         routing = context[0]
-        entry = routing.model(execution.model, execution.harness)
+        entry = routing.model(
+            attempt.selected_model or execution.model,
+            attempt.selected_harness or execution.harness,
+        )
         if entry is None or entry.endpoint != "local":
             return
         since = self._clock.now() - timedelta(
@@ -6604,7 +6631,8 @@ class Supervisor:
             reason="local endpoint failed (provider_error)",
         )
         # hades #373: every pool mark is announced. A provider-error exit goes on to
-        # retry, which raises no wake of its own, so the mark's wake is raised here.
+        # reroute (hades #490), which raises no wake of its own, so the mark's wake is
+        # raised here.
         if marked is not None and marked[1]:
             self._wake_pool_exhausted(uow, task, attempt, marked[0])
 
@@ -6798,9 +6826,17 @@ class Supervisor:
         pool_mark: tuple[PoolExhaustion, bool] | None = None,
         checkpoint_skip_detail: str | None = None,
         excluded_routes: set[tuple[str, str]] | None = None,
+        exit_class: ExitClass = ExitClass.QUOTA_EXHAUSTED,
     ) -> None:
         # hades #373: `excluded_routes` names the model a model-only refusal excluded;
         # the pool stays open and the reroute stays inside it.
+        # hades #490: `exit_class` is `provider_error` when the attempt's gateway failed
+        # (refused, dropped after the wrapper's own retries, or 5xx) and the same rule
+        # moves it to the next eligible candidate with the failed route excluded: no
+        # quota checkpoint is involved, no pool is marked here (ADR 0028 marks it on the
+        # second failure in a row, before this), and with no candidate the task ends
+        # reported with the class visible, as it did before.
+        provider_error = exit_class is ExitClass.PROVIDER_ERROR
         # hades #378: one wake per refusal names the pool and its reset. A task that
         # ends or waits says it in the wake it raises anyway; a reroute, which raised
         # none, raises the pool's own, once per exhaustion (when the mark opened).
@@ -6817,9 +6853,7 @@ class Supervisor:
             move_execution(
                 uow, self._clock, execution, ExecutionState.FAILED, EventKind.EXECUTION_FAILED
             )
-            self._task_reported(
-                uow, task, attempt, ExitClass.QUOTA_EXHAUSTED, {}, wake_summary=sentence
-            )
+            self._task_reported(uow, task, attempt, exit_class, {}, wake_summary=sentence)
             return
         routing, _contract = context
         reroutes = sum(
@@ -6831,7 +6865,7 @@ class Supervisor:
             and int(event.payload.get("contract_version", 0)) == execution.contract_version
             for event in self._all_task_events(uow, task.id)
         )
-        if task.head_sha and source == "worker":
+        if task.head_sha and source == "worker" and not provider_error:
             record_event(
                 uow,
                 self._clock,
@@ -6852,18 +6886,23 @@ class Supervisor:
                 execution,
                 ExecutionState.FAILED,
                 EventKind.EXECUTION_FAILED,
-                payload={"exit_class": "quota_exhausted", "reroute_cap": reroutes},
+                payload={"exit_class": exit_class.value, "reroute_cap": reroutes},
+            )
+            capped = (
+                f"attempt {attempt.number} ended {exit_class.value} with no reroute "
+                f"remaining (reroute_max {routing.reroute.reroute_max})"
             )
             self._task_reported(
                 uow,
                 task,
                 attempt,
-                ExitClass.QUOTA_EXHAUSTED,
+                exit_class,
                 {},
                 wake_summary=(
-                    f"{sentence}; attempt {attempt.number} ended quota_exhausted with no "
-                    f"reroute remaining (reroute_max {routing.reroute.reroute_max})"
+                    f"{sentence}; {capped}"
                     if sentence is not None
+                    else capped
+                    if provider_error
                     else None
                 ),
             )
@@ -6909,7 +6948,10 @@ class Supervisor:
                     "from_pool": attempt.selected_pool,
                     "to_attempt_id": nxt.id,
                     "why": (
-                        "previous model refused this model only; rerouted within its pool"
+                        "previous attempt ended provider_error on its route; rerouted to "
+                        "the next eligible candidate"
+                        if provider_error
+                        else "previous model refused this model only; rerouted within its pool"
                         if excluded_model is not None
                         else "previous pool reported quota exhaustion"
                         if source == "worker"
@@ -6936,12 +6978,44 @@ class Supervisor:
                         if checkpoint_skip_detail is not None
                         else {}
                     ),
-                    **({"wip_commit_sha": task.head_sha} if source == "worker" else {}),
+                    **(
+                        {"wip_commit_sha": task.head_sha}
+                        if source == "worker" and not provider_error
+                        else {}
+                    ),
                     "ordered_candidates": list(selection.candidates),
                 },
             )
             if mark is not None and opened:
                 self._wake_pool_exhausted(uow, task, attempt, mark)
+            return
+        if provider_error:
+            # hades #490: nothing else in the tier can take the work now. The attempt
+            # ends as a provider error did before the reroute: the execution fails, the
+            # task is reported with the class visible, and the one wake says why.
+            move_execution(
+                uow,
+                self._clock,
+                execution,
+                ExecutionState.FAILED,
+                EventKind.EXECUTION_FAILED,
+                payload={
+                    "exit_class": exit_class.value,
+                    "no_candidate": True,
+                    "ordered_candidates": list(selection.candidates) if selection else [],
+                },
+            )
+            self._task_reported(
+                uow,
+                task,
+                attempt,
+                exit_class,
+                {},
+                wake_summary=(
+                    f"attempt {attempt.number} ended provider_error and no other candidate "
+                    "in the tier was eligible to reroute to; the pre-PR gates will say so"
+                ),
+            )
             return
         self._enter_quota_wait(uow, task, attempt, execution, selection, pool_mark=pool_mark)
 
@@ -7204,15 +7278,38 @@ class Supervisor:
                 uow, task, execution, attempt, pool_mark=pool_mark, excluded_routes=excluded_routes
             )
             return
+        if exit_class is ExitClass.PROVIDER_ERROR and attempt.started_at is not None:
+            # hades #490: a provider error (the gateway refused, dropped the connection
+            # past the wrapper's own retries, or answered 5xx) is no verdict on the
+            # worker's judgment, so it reroutes by the rule a model-only refusal takes
+            # (hades #373): the route that failed is excluded for the next attempt, the
+            # pool stays as ADR 0028 left it, and the next eligible candidate launches
+            # under `reroute_max`, resuming from this attempt's sealed bundle. It
+            # consumes no `max_attempts` retry and raises no wake of its own.
+            self._handle_quota_exit(
+                uow,
+                task,
+                execution,
+                attempt,
+                excluded_routes={
+                    (
+                        attempt.selected_harness or execution.harness,
+                        attempt.selected_model or execution.model,
+                    )
+                },
+                exit_class=ExitClass.PROVIDER_ERROR,
+            )
+            return
         retryable = retryable_exit(exit_class, execution.retry_on)
         if attempt.termination_reason in {TERMINATION_REFUSED, "credential_directory"}:
             # 07: a refused launch would be refused again; Foundry has the wake.
             retryable = False
         # hades #393: a blocked attempt is a question, not a failure, so it consumes no
         # retry when a decision schedules the same execution again.
+        # hades #490: a provider error reroutes under `reroute_max`, as a quota exit
+        # does, so it is not an ordinary attempt either.
         ordinary_attempts = sum(
-            prior.exit_class
-            not in {ExitClass.QUOTA_EXHAUSTED, ExitClass.INFRASTRUCTURE, ExitClass.BLOCKED}
+            prior.exit_class not in (REROUTED_EXIT_CLASSES | {ExitClass.BLOCKED})
             and prior.termination_reason
             not in {"gate_proves_nothing", "check_cannot_run", "credential_directory"}
             for prior in uow.attempts.list_for_execution(execution.id)

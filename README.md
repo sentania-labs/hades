@@ -120,7 +120,12 @@ Set the routing value to the engine's actual capacity. Mirroring Hermes (hades
 #498), the wrapper also allows only the file and shell tools (no sub-agent, skill,
 memory, web or MCP tool), loads no `QWEN.md` or `AGENTS.md` as rules, sets thinking
 off and the response cap, and writes a minimal `report.yaml` from the run log when
-the model left neither a report nor `blocked.md`. The worker also includes
+the model left neither a report nor `blocked.md`. Both local wrappers, Qwen Code's
+and Hermes's, start the harness again after a transport-level API error (the
+gateway gave no answer: refused, reset, timed out), up to three times with 5, 15
+and 45 second pauses, before giving up (hades #490); an attempt that still ends
+`provider_error` is rerouted to the next eligible candidate, and the collector
+leaves a bundle for a failed attempt with no commit too. The worker also includes
 Node 22 and npm for repository checks (#288). Promote its image separately with
 `crucible admin images promote <digest> --harness qwen_code`.
 

@@ -287,6 +287,15 @@ bumping a pin without renaming the fixtures fails the test with a clear
   changes, which is log activity (10). A run that ends on its turn budget is marked
   in the usage record (`turn_limit_reached`) and recorded as `harness_limit_reached`
   evidence; it is not failed for that.
+- hades #490: the image wrapper starts Hermes again, up to three times with 5, 15
+  and 45 second pauses, when a run ended on a transport-level API error: the usage
+  record says `failed` and its failure, or Hermes's stderr for the call, says the
+  gateway gave no answer at all ("Connection error.", "Request timed out.", a reset
+  or refused connection, a peer that closed the connection mid-answer). A status the
+  gateway answered is never retried there. A relaunch is a new session over the same
+  checkout and home, so the model finds its edits and commits on disk; the usage
+  record then carries `transport_retries`, and the enrichment sums every session's
+  tokens as before. A run that still ends failed keeps Hermes's own exit and record.
 - Hermes's usage JSON is mandatory run evidence. Its input and output token counts
   come from that file. The image wrapper enriches duration and tool-call count from
   the same attempt's SQLite session row before exit. Missing or unparsable usage
@@ -497,6 +506,18 @@ carries `schema_version`, `summary` and one `limitations` line and nothing judge
 so Hades lists it for the reviewer under `report_present` and composes the
 completion record from its own evidence. The wrapper never writes over a report or
 a `blocked.md` the model left.
+
+hades #490: when a run ends on a transport-level API error, the result event's error
+or the CLI's stderr saying the gateway gave no answer at all (`fetch failed`,
+`ECONNRESET`, `ECONNREFUSED`, `socket hang up`, a connection reset or a timeout),
+the wrapper starts Qwen again after a pause, up to three times (5, 15 and 45
+seconds), before giving up with that run's exit status. A relaunch is a new session
+over the same checkout, so the model finds its edits and commits on disk. Every
+launch's stream goes through to the transcript and the adapter reads the last result
+event as the run's end; the minimal report says how many transport retries there
+were. An error the gateway answered (a 4xx or a 5xx) is not retried there: the
+adapter's classes and the supervisor's reroute (16) handle it. Only the result's own
+error and the CLI's stderr are read, never an event the model or a tool wrote.
 
 The fresh home gets `~/.qwen/settings.json`, mirroring the Hermes launch
 (`--ignore-rules --safe-mode --toolsets terminal,file`, thinking and

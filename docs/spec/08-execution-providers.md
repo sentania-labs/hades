@@ -143,7 +143,11 @@ It is a test fixture: wired only when `test_fixtures` is on (18).
   copies only regular files, since worker images carry no `O_NOFOLLOW`
   helper). The
   collector also writes `work_branch.bundle` (`git bundle create` of
-  `base_ref..work_branch`) and a second throwaway container with
+  `base_ref..work_branch`; when the branch has no commit beyond the base,
+  which git refuses to bundle as an empty range, the branch tip alone,
+  `work_branch~1..work_branch`, or the whole branch for a root tip, so a
+  failed attempt that committed nothing still leaves a bundle that verifies
+  and that a correction or a reroute resumes from, hades #490) and a second throwaway container with
   `--network none` runs `git bundle verify` on it (never the Crucible
   process, which has no git and must not parse worker-produced files);
   the bundle is the only thing the publisher (23) ever fetches from.
