@@ -5,6 +5,7 @@ from __future__ import annotations
 import secrets
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from threading import BoundedSemaphore
 from typing import Annotated
 
 from fastapi import Depends, Header, Request
@@ -23,6 +24,23 @@ from crucible.ports.execution import ExecutionProvider
 from crucible.ports.first_run import FirstRunDelivery
 from crucible.ports.harness import CredentialSource, HarnessGate
 from crucible.ports.repository import UnitOfWork, UnitOfWorkFactory
+
+
+@dataclass(slots=True)
+class SseTailLimiter:
+    """Process-local admission control for database-polling SSE log tails."""
+
+    limit: int = 20
+    _semaphore: BoundedSemaphore = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._semaphore = BoundedSemaphore(self.limit)
+
+    def try_acquire(self) -> bool:
+        return self._semaphore.acquire(blocking=False)
+
+    def release(self) -> None:
+        self._semaphore.release()
 
 
 @dataclass(slots=True)
@@ -49,6 +67,7 @@ class AppContext:
     # Browser sessions are process-local and intentionally expire on restart. The
     # bearer token remains the source of identity and is never copied into state.
     ui_signing_key: bytes = field(default_factory=lambda: secrets.token_bytes(32))
+    sse_tail_limiter: SseTailLimiter = field(default_factory=SseTailLimiter)
     settings: object | None = None
     credential_renewer: ReadOnlyCredentialStore | None = None
     # Where the migration left the first-run administrator token, removed from there

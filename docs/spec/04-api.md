@@ -85,7 +85,7 @@ endpoint's existing role requirements.
 | GET | `/executions/{id}` | Execution with its attempts. |
 | POST | `/executions/{id}/retry` | Create a new attempt now, if policy permits; body carries reason. |
 | GET | `/attempts/{id}` | Attempt with worker, lease, heartbeat summary, image digest, exit info. |
-| GET | `/attempts/{id}/logs` | Log chunks; `?stream=stdout|stderr&offset=`; `Accept: text/event-stream` for live tail. |
+| GET | `/attempts/{id}/logs` | Log chunks; `?stream=stdout|stderr&offset=`; `Accept: text/event-stream` for live tail. A process admits at most `service.max_sse_log_tails` live tails (default 20); the next tail receives an RFC 9457 `429` problem with `Retry-After: 1`, while ordinary non-streaming reads remain available. |
 | GET | `/attempts/{id}/artifacts` | List artifacts with type, size, sha256. |
 | POST | `/attempts/{id}/artifacts` | Upload an artifact: raw request body with `type` and `filename` as query parameters (no multipart dependency). The logical filename is kept apart from the content-addressed storage path. Principal recorded. Becomes evidence on the next supervisor tick. Orchestrator role. |
 | GET | `/artifacts/{id}` | Metadata; `/artifacts/{id}/content` streams bytes. |

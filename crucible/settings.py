@@ -23,6 +23,9 @@ class ServiceSettings(BaseModel):
     render_timezone: str = "UTC"
     artifact_root: str = "/var/lib/crucible/artifacts"
     log_level: str = "INFO"
+    # Each live log tail polls the database every quarter second. This is a
+    # process-local admission limit, sized from the issue 37 benchmark.
+    max_sse_log_tails: int = Field(default=20, ge=1)
 
     @property
     def host(self) -> str:

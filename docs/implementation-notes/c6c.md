@@ -198,3 +198,22 @@ the Python call stack and raise ``RecursionError`` before the time budget
 check.  The walker now uses an explicit ``list[Path]`` stack (``while stack``)
 instead of recursive ``yield from _walk(child)`` calls, eliminating the
 recursion depth limit entirely.
+
+## FDY-0535: SSE log tail concurrency target (Issue 37)
+
+Each live log tail polls its attempt and log chunks in a short-lived database
+unit of work every 250 ms. The service now admits at most 20 concurrent tails
+per process by default (`service.max_sse_log_tails`). The next request receives
+the `sse-tail-limit-exceeded` RFC 9457 problem with `429` and `Retry-After: 1`.
+
+Measured with `uv run python tools/benchmarks/issue_37_sse_tail_concurrency.py
+20 2` against its SQLite test database on 2026-10-08:
+
+| Tails | Elapsed | Queries | Queries/s | Connection checkouts | Peak connections in use |
+|---:|---:|---:|---:|---:|---:|
+| 20 | 2.029 s | 400 | 197.12 | 200 | 1 |
+
+The benchmark counts SQL statements and pool checkout/checkin events while all
+tails remain open. SQLite serializes this local workload, so the one-connection
+peak is a property of this measurement, not a production database capacity
+claim; the 20-tail process-local cap prevents unbounded polling load.

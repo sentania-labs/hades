@@ -27,6 +27,7 @@ def problem_response(
     detail: str | None = None,
     instance: str | None = None,
     errors: list[dict[str, Any]] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     body = ProblemDetails(
         type=problem_type(slug),
@@ -40,6 +41,7 @@ def problem_response(
         status_code=status,
         content=body.model_dump(mode="json"),
         media_type=PROBLEM_MEDIA_TYPE,
+        headers=headers,
     )
 
 
