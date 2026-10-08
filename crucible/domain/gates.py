@@ -530,28 +530,44 @@ def _injected_hits(
     commit_paths: Sequence[str],
     commit_changes: list[tuple[str, str, str, str]] | None,
     base_paths: frozenset[str] = frozenset(),
-) -> set[str]:
+) -> tuple[set[str], set[str]]:
     """hades #369: an injected-name path fails when the branch adds it relative to the
     base ref, or commits the shim's content into it. Deleting or editing a file the base
     already has is the repository's own work. A file turned into a symlink or back (T)
-    counts as an add, since a link to the identity mount is a shim by another name. A
-    path under an injected prefix always fails, and so does any path the evidence carries
-    no status for, as before #369."""
+    counts as an add, since a link to the identity mount is a shim by another name.
+    hades #446: a path under an injected prefix that the base already has may be edited
+    or deleted; adding a new entry under a harness directory, turning an entry into a
+    symlink or back, or committing the shim's content still fails.
+
+    Returns a set of human-readable reason strings, each naming the rule that fired.
+    """
     shim = _shim_blob_ids()
     hits: set[str] = set()
-    for path in (*paths, *commit_paths):
-        if error := instruction_name_error(path):
-            hits.add(f"{path!a}: {error}")
-    for path, _, _, classification in (diff_changes or []) + (commit_changes or []):
-        if classification.startswith("error:"):
-            hits.add(f"{path!r}: {classification}")
+    allowed: set[str] = set()
+
+    def _record(path: str, rule: str, blob: str = "") -> None:
+        if blob in shim:
+            hits.add(f"{path!r}: shim content")
+        else:
+            hits.add(f"{path!r}: {rule}")
+
     diff_status: dict[str, str] = {}
     for path, status, blob, classification in diff_changes or []:
         diff_status[path] = status
-        if _injected(path) and (
-            status not in ("M", "D") or blob in shim or classification == "shim"
-        ):
-            hits.add(path)
+        # Classifications from the collector that start with "error:" capture bad names
+        # (surrogates in path) and unreadable blobs.  These may reference an ASCII-encoded
+        # path that no longer satisfies `_injected`, so check unconditionally before
+        # narrowing to injected names.
+        if classification.startswith("error:"):
+            hits.add(f"{path!r}: {classification}")
+        elif _injected(path):
+            if status not in ("M", "D"):
+                if status == "T":
+                    _record(path, "symlink", blob)
+                else:
+                    _record(path, "new entry added", blob)
+            elif blob in shim or classification == "shim":
+                _record(path, "shim content", blob)
     # Commits in `git log --diff-merges=separate --topo-order` order, every commit before
     # its parents and a merge once per parent: the last record of a path is the oldest,
     # and says whether the base had it, since only a path the base lacks starts with an
@@ -559,26 +575,72 @@ def _injected_hits(
     oldest_status: dict[str, str] = {}
     for path, status, blob, classification in commit_changes or []:
         oldest_status[path] = status
-        if _injected(path) and (status == "T" or blob in shim or classification == "shim"):
-            hits.add(path)
+        if classification.startswith("error:"):
+            hits.add(f"{path!r}: {classification}")
+        elif _injected(path):
+            if status == "T":
+                _record(path, "symlink", blob)
+            elif blob in shim or classification == "shim":
+                _record(path, "shim content", blob)
     for path, status in oldest_status.items():
-        existed = diff_status.get(path) in ("M", "D") or status in ("M", "D") or path in base_paths
-        if _injected(path) and not existed:
-            hits.add(path)
+        if _injected(path):
+            existed = (
+                diff_status.get(path) in ("M", "D") or status in ("M", "D") or path in base_paths
+            )
+            if not existed:
+                _record(path, "new entry added")
+    # Harness directory entries (paths under an injected prefix) that the base has may be
+    # edited or deleted; new additions and symlink flips still fail.
     for path in paths:
-        if _injected(path) and (
-            _injected_prefix(path) or diff_changes is None or path not in diff_status
-        ):
+        if _injected(path) and _injected_prefix(path):
+            if diff_changes is None or path not in diff_status:
+                hits.add(f"{path!r}: path under injected prefix")
+            elif path in base_paths and diff_status[path] in ("M", "D"):
+                allowed.add(f"{path!r}: existing harness-directory file edited or deleted")
+            else:
+                status = diff_status.get(path, "")
+                if status == "T":
+                    _record(path, "symlink", "")
+                else:
+                    _record(path, "new entry added", "")
+        elif _injected(path) and (diff_changes is None or path not in diff_status):
+            # Instruction-name path where the evidence carries no status (pre-#369).
             hits.add(path)
     for path in commit_paths:
-        if _injected(path) and (
-            _injected_prefix(path) or commit_changes is None or path not in oldest_status
-        ):
-            hits.add(path)
+        if _injected(path) and _injected_prefix(path):
+            if commit_changes is None:
+                # No commit info available; allow if base has it and the diff says M/D.
+                if path in base_paths and diff_status.get(path) in ("M", "D"):
+                    allowed.add(f"{path!r}: existing harness-directory file edited or deleted")
+                else:
+                    hits.add(f"{path!r}: path under injected prefix")
+            elif path not in oldest_status:
+                hits.add(f"{path!r}: path under injected prefix")
+            elif path in base_paths and oldest_status[path] in ("M", "D"):
+                allowed.add(f"{path!r}: existing harness-directory file edited or deleted")
+            else:
+                status = oldest_status.get(path, "")
+                if status == "T":
+                    _record(path, "symlink", "")
+                else:
+                    _record(path, "new entry added", "")
+        elif _injected(path):
+            if commit_changes is None:
+                # No commit info available; allow if base has it and the diff says M/D.
+                if path in base_paths and diff_status.get(path) in ("M", "D"):
+                    pass
+                else:
+                    hits.add(path)
+            elif path not in oldest_status:
+                hits.add(path)
     for path in (*diff_status, *oldest_status):
-        if _injected_prefix(path):
-            hits.add(path)
-    return hits
+        if _injected_prefix(path) and path not in base_paths:
+            hits.add(f"{path!r}: path under injected prefix")
+    # Instruction-name errors and unclassifiable blobs.
+    for path in (*paths, *commit_paths):
+        if error := instruction_name_error(path):
+            hits.add(f"{path!a}: {error}")
+    return hits, allowed
 
 
 def no_injected_files(gi: GateInput) -> GateOutcome:
@@ -586,13 +648,15 @@ def no_injected_files(gi: GateInput) -> GateOutcome:
 
     Names use casefold, NFC, removal of invisible format characters and common
     Cyrillic/Greek lookalikes. AGENTS*.md, CLAUDE*.md and GEMINI*.md match at any
-    depth. Harness directory entries (including symlinks) and descendants always
-    fail. The diff and every commit are checked. Existing repository instruction
-    files may be edited or deleted (#369), unless their content normalizes to the
-    shim after removing trailing whitespace and normalizing line endings/newlines.
-    Unclassifiable names, instruction blobs or records fail closed with the collected
-    reason. Empty lists and ordinary paths pass; the service classifies the shell
-    collector's exported records without a Python dependency in worker images.
+    depth. Harness directory entries (including symlinks) that the base did not
+    provide always fail. Existing repository instruction files may be edited or
+    deleted (#369), and so may existing harness-directory files (#446), unless their
+    content normalizes to the shim after removing trailing whitespace and normalizing
+    line endings/newlines. A path under an injected prefix that the base lacks still
+    fails, as does turning an entry into a symlink or back. The diff and every commit
+    are checked. Unclassifiable names, instruction blobs or records fail closed with the
+    collected reason. Empty lists and ordinary paths pass; the service classifies the
+    shell collector's exported records without a Python dependency in worker images.
 
     Known limit: a base ancestor older than the merge base that once had an injected-name
     file excuses a history-only add of that path that is not the shim's content (a merge
@@ -614,20 +678,20 @@ def no_injected_files(gi: GateInput) -> GateOutcome:
         return GateOutcome(
             GateResult.FAIL, f"path lists over their read limit, not fully read: {over}", ids
         )
-    hits = sorted(
-        _injected_hits(
-            [str(p) for p in diff.payload.get("paths", [])],
-            _changes(diff.payload.get("changes")),
-            [str(p) for p in bundle.payload.get("commit_paths", [])],
-            _changes(bundle.payload.get("commit_changes")),
-            _base_paths(diff.payload.get("base_paths")),
-        )
+    hit_set, allowed_set = _injected_hits(
+        [str(p) for p in diff.payload.get("paths", [])],
+        _changes(diff.payload.get("changes")),
+        [str(p) for p in bundle.payload.get("commit_paths", [])],
+        _changes(bundle.payload.get("commit_changes")),
+        _base_paths(diff.payload.get("base_paths")),
     )
+    hits = sorted(hit_set)
     if hits:
         return GateOutcome(GateResult.FAIL, f"injected paths in the branch: {hits[:10]}", ids)
-    return GateOutcome(
-        GateResult.PASS, "no injected instruction, harness, or identity path in the branch", ids
-    )
+    detail = "no injected instruction, harness, or identity path in the branch"
+    if allowed_set:
+        detail += f"; allowed by existing harness-directory file rule: {sorted(allowed_set)[:10]}"
+    return GateOutcome(GateResult.PASS, detail, ids)
 
 
 def no_secrets(gi: GateInput) -> GateOutcome:

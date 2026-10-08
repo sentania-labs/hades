@@ -317,6 +317,12 @@ def task_view(uow: UnitOfWork, task_id: str) -> TaskView:
         for event in task_events
         if event.kind == "task_rerouted"
     ]
+    warnings = [
+        str(warning)
+        for event in task_events
+        if event.kind in ("task_submitted", "task_proposed")
+        and (warning := event.payload.get("allowed_paths_harness_warning"))
+    ]
     return TaskView(
         id=task.id,
         external_id=task.external_id,
@@ -370,6 +376,7 @@ def task_view(uow: UnitOfWork, task_id: str) -> TaskView:
         ),
         resume_at=task.resume_at,
         reroute_chain=reroutes,
+        warnings=warnings,
     )
 
 

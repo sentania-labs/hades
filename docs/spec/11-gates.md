@@ -24,6 +24,39 @@ is carried to the reviewer.
 | `internal_review_recorded` | skipped | Filled by the orchestrator; the worker self-review is the review |
 | `commit_policy` | advisory | Commit authorship matches the policy (FDY-0143) |
 
+## Injected instruction, harness, and identity files (`no_injected_files`)
+
+The gate catches three categories:
+
+1. **Instruction-name paths** (e.g. `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `crucible-identity.md`)
+   that the branch adds.  Editing or deleting an instruction-name file the merge base
+   already has is the repository's own work and passes (#369).
+
+2. **Harness-directory paths** (paths under `.claude/`, `.codex/`, `.hermes/`,
+   `.gemini/`, `.crucible/`, `crucible/identity/`, `.crucible-shims/`).
+   Adding a new entry under a harness directory, turning an entry into a symlink or back
+   (status ``T``), or committing the shim's content still fails.  Editing or deleting a
+   file the base already has under a harness directory is allowed (#446).
+
+3. **Shim content**: writing the shim blob into any path that the gate treats as
+   injected.
+
+The gate output names the rule that fired, for example:
+
+- `CLAUDE.md: new entry added`
+- `.claude/hooks/check.sh: symlink`
+- `.claude/hooks/check.sh: shim content`
+- `CLAUDE.md: error: undecodable name (invalid UTF-8)`
+
+When the merge base already has a harness-directory file, the passing detail names the
+``existing harness-directory file edited or deleted`` rule. When a harness path is added or
+turned into a symlink, the detail names `"new entry added"` or `"symlink"` respectively.
+
+Task submission also returns an entry in ``TaskView.warnings`` when an
+``allowed_paths`` entry can reach a harness directory. This includes direct paths and
+broad globs such as ``**`` and ``src/**``; the warning is also retained on later task
+views.
+
 ## Editor and merge leftovers (`editor_leftovers`)
 
 When the diff adds a file whose name matches an editor or merge backup pattern, the
