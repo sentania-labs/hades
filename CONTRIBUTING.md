@@ -36,7 +36,8 @@ worker and are CI's; a missing one is expected and is not a reason to stop.
 The tiers split by who has the tools:
 
 - Worker-local tiers, run before the commit and listed in the report's
-  checks: `make lint`, `make test-unit`, `make scan`, and the unit test file
+  checks: `make lint`, `make test-shell` (every `*_test.sh` under `tools/`),
+  `make test-unit`, `make scan`, and the unit test file
   the contract names (`uv run pytest -q tests/unit/test_issue_<n>_<slug>.py`).
   These are the only checks a contract may require; the contract model
   refuses a `required_verification` command that runs `docker`, `kind` or

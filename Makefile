@@ -63,7 +63,7 @@ DEPLOY_TAG ?= 0.2.1
 CRUCIBLE_DEPLOY_IMAGE ?= ghcr.io/sentania-labs/crucible:$(DEPLOY_TAG)
 CRUCIBLE_DEPLOY_PORT ?= 8080
 
-.PHONY: up dev down reset lint check-image-manifest scan scan-tree scan-history smoke test test-unit test-unit-in-image \
+.PHONY: up dev down reset lint check-image-manifest scan scan-tree scan-history smoke test test-shell test-unit test-unit-in-image \
 	test-integration e2e e2e-github e2e-live e2e-admin e2e-image build proxy-config proxies preflight \
 	e2e-kind e2e-kind-self-hosting e2e-command-timeout registry-check manifests deploy-kind first-run-kind release-images-classify release-images-pull release-images-verify \
 	deploy-local deploy-local-down images images-check images-policy-check release-notes flakes
@@ -255,7 +255,7 @@ LIVE_DUMP_SECONDS ?= 3660
 # directory as the `junit-test` artifact so a weekly flake scan can read attempt-1's
 # failing tests. Empty by default: a local run writes nothing extra.
 JUNIT_XML_DIR ?=
-test: test-unit test-integration
+test: test-shell test-unit test-integration
 
 test-unit:
 	$(UV) sync --frozen --quiet
@@ -264,6 +264,9 @@ test-unit:
 test-integration: ## needs Docker for postgres:16 (testcontainers) or CRUCIBLE_TEST_DATABASE_URL
 	$(UV) sync --frozen --quiet
 	$(UV) run pytest tests/integration -q -m integration -n $(PYTEST_WORKERS) $(if $(JUNIT_XML_DIR),--junitxml=$(JUNIT_XML_DIR)/integration.xml)
+
+test-shell: ## run every *_test.sh anywhere under tools/ (today only e2e-kind_cleanup_test.sh)
+	@failures=0; for f in $$(find tools -name '*_test.sh' -type f | sort); do echo "==> running $$f"; if ! bash "$$f"; then failures=1; fi; done; test "$$failures" -eq 0
 
 e2e-image: ## build the e2e worker image (18) on whichever daemon DOCKER names
 	DOCKER_HOST=$${DOCKER_HOST:-} images/build.sh script-harness
