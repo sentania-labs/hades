@@ -545,6 +545,14 @@ class ProviderUnavailableError(ProviderError):
     than failing the attempt."""
 
 
+class PrepareJobPodsTimeoutError(ProviderError):
+    """hades #503: the preparer Job's Pods were still present when the provider's
+    bounded, backed-off deletion wait ran out. The message says what the Job had done
+    when the wait gave up (completed with an exit code, not finished in time, or still
+    running). The supervisor prepares the same attempt again a bounded number of times,
+    charging the task no attempt, before it classes the failure as the environment."""
+
+
 class CollectionPendingError(ProviderUnavailableError):
     """Collection is waiting for backend cleanup. Retry on the next supervisor tick,
     up to the configured collection retry limit, while keeping the workspace intact."""

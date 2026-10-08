@@ -329,6 +329,36 @@ recorded in `external_review_requested`. Republish checks the pull request's
 issue comments and the event before posting, so the request is once per pull
 request. A correction never posts another trigger.
 
+Crucible never posts that trigger when `external_review.automatic` is false,
+or when a refusal was already observed on the repository for the `codex`
+provider specifically (`repositories.codex_review_refused_at`, hades #343:
+the marker records only a Codex connector failure, so it never silences
+another provider a repository has since moved to): either way the provider
+only refuses the App's comment again, the same way it refused the first
+one. Publication wakes the orchestrator instead, with reason
+`external_review_trigger_needed`, asking a person to request the round
+under their own account; the pull request is still opened or updated, and
+the task still waits in `awaiting_external_review` for whatever round
+follows. `external_review.automatic` absent reads as `true`. Like the
+App-authored trigger, this wake is owed only while a round is actually
+outstanding: if the pull request already carries the required completed
+rounds (round counting is per PR, across heads), publication proceeds
+straight to `awaiting_ci_certification` and nothing is asked of anyone. On a
+correction specifically, the wake additionally follows
+`external_review.retrigger_after_correction`: with the default (`false`), a
+correction never causes a second round (above), so an outstanding round from
+before the correction is not this publish's to ask a person for either; set
+it `true` to have every corrected head wake the orchestrator for a fresh,
+person-requested round the same way the first publish would.
+
+A repository's remembered refusal is a fact about that repository, not
+about any one registration call: re-registering it (`PUT
+/repositories/{name}`, including an administrative update of its URL,
+policy, installation, or attestation) leaves `codex_review_refused_at`
+exactly as it was. There is no operation yet that clears it; an operator
+who has resolved the connector refusal reaches for one directly against the
+record rather than through registration.
+
 **Crucible authors the trigger phrase only as the configured issue comment.** The
 provider's trigger is an at-mention of its own name, and the provider acts
 on the raw text: a PR body, a commit message, or a comment Crucible
@@ -458,9 +488,21 @@ cycle opens on that head.
   the PR would make a correction on a three-day-old PR overdue on its first
   poll.
 
-The connector reply beginning "To use Codex here, create a Codex account" is a terminal
-failed round, not a review result. Crucible raises an informational wake immediately so
-the task cannot wait silently (hades #343).
+A chatgpt-codex-connector issue comment beginning "To use Codex here" is a terminal
+failed round, not a review result, whichever wording follows: "...create a Codex
+account and connect to github" (no Codex account behind the App) and "...create an
+environment for this repo" (no environment configured for it) are both seen on
+sentania-labs/hades#343, and the match is by that shared prefix so a wording neither
+Hades nor the issue has seen is still caught. The round ends refused on the spot:
+`record_comments` (23's observation half, shared by the publication-triggered request
+and `maybe_request_trigger`'s re-request) marks it and never turns it into a signal, so
+it is never a comment a disposition is owed for. Crucible raises a wake immediately,
+reason `external_review_trigger_needed`, naming the pull request and saying the round
+must be requested by a person, so the task cannot wait silently for a round the
+provider never starts (hades #343). The same observation records the refusal on the
+repository (`repositories.codex_review_refused_at`), which is what stops a later
+publication from posting the App's trigger there at all (see "Triggering the external
+reviewer" above).
 
 ## CI certification
 

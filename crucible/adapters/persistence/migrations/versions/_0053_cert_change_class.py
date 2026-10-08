@@ -1,7 +1,7 @@
 """hades #476: record the change class on a CI certification.
 
-Revision ID: 0052_cert_change_class
-Revises: 0051_routing_model_references
+Revision ID: 0053_cert_change_class
+Revises: 0052_codex_review_refused
 """
 
 from __future__ import annotations
@@ -9,8 +9,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0052_cert_change_class"
-down_revision = "0051_routing_model_references"
+revision = "0053_cert_change_class"
+down_revision = "0052_codex_review_refused"
 branch_labels = None
 depends_on = None
 

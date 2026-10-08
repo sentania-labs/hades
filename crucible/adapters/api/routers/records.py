@@ -163,6 +163,7 @@ def _repo_view(repo: Repository) -> RepositoryView:
         attested_by=repo.attested_by,
         attested_at=repo.attested_at,
         private=repo.private,
+        codex_review_refused_at=repo.codex_review_refused_at,
     )
 
 

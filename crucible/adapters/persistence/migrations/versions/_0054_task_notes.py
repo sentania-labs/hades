@@ -1,7 +1,7 @@
 """Operator notes on a task, and the board card's phase actions (hades #489).
 
-Revision ID: 0051_task_notes
-Revises: 0050_status_cache
+Revision ID: 0054_task_notes
+Revises: 0053_cert_change_class
 
 A note is an operator's words on one task: who wrote it, when, the text as typed, and
 whether it is verbatim. Hades shows notes on the board card newest first and puts them
@@ -20,13 +20,13 @@ from crucible.adapters.persistence.migrations.versions._0050_status_cache import
     _event_kinds as _previous_event_kinds,
 )
 
-revision = "0052_task_notes"
-down_revision = "0051_routing_model_references"
+revision = "0054_task_notes"
+down_revision = "0053_cert_change_class"
 branch_labels = None
 depends_on = None
 
 EVENT_KINDS = ("task_note_recorded", "task_phase_action_applied")
-EVENT_ARCHIVE = "events_0052_archive"
+EVENT_ARCHIVE = "events_0054_archive"
 
 
 def _event_kinds() -> list[str]:
