@@ -1633,19 +1633,21 @@ class DeliveryCoordinator:
         """Returns (other_pr_number, should_hold)."""
         with self._host._fenced() as uow:
             pr = uow.pull_requests.get(plan.pull_request_id)
-            if not pr or not pr.schema_tables:
+            if not pr or not getattr(pr, "schema_tables", ()):
                 return None
             open_prs = uow.pull_requests.list_open_for_repository(plan.repository_name)
             for other in open_prs:
                 if other.id == pr.id:
                     continue
-                if other.schema_tables and set(other.schema_tables).intersection(pr.schema_tables):
-                    if other.number < pr.number:
-                        return (other.number, True)
+                if getattr(other, "schema_tables", ()):
+                    if set(other.schema_tables).intersection(pr.schema_tables):
+                        if other.number < pr.number:
+                            return (other.number, True)
             return None
 
     def _hold_for_overlap(self, plan: MergePlan, other_number: int) -> None:
         from crucible.application.delivery_decisions import create_wake
+        from crucible.contracts.wake import WakeReason
 
         with self._host._fenced() as uow:
             task = uow.tasks.get(plan.task_id, for_update=True)
@@ -1654,7 +1656,7 @@ class DeliveryCoordinator:
                     uow,
                     self._clock,
                     principal_id=task.principal_id,
-                    reason="schema_overlap",
+                    reason=WakeReason.SCHEMA_OVERLAP,
                     payload={"summary": f"schema_overlap naming #{other_number}"},
                     task_id=task.id,
                 )
@@ -1663,7 +1665,7 @@ class DeliveryCoordinator:
     def _has_migrations(self, plan: MergePlan) -> bool:
         with self._host._fenced() as uow:
             pr = uow.pull_requests.get(plan.pull_request_id)
-            return bool(pr and pr.schema_tables)
+            return bool(pr and getattr(pr, "schema_tables", ()))
 
     def _get_merge_main_request(self, plan: MergePlan):
         from crucible.contracts.api import MergeMainRequest

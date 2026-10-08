@@ -671,9 +671,6 @@ class PullRequest:
     schema_tables: list[str] | None = None
     schema_columns: list[str] | None = None
     schema_models: list[str] | None = None
-    schema_tables: list[str] | None = None
-    schema_columns: list[str] | None = None
-    schema_models: list[str] | None = None
     cancelled_at: datetime | None = None
     observed_head_sha: str = ""
     observed_base_ref: str = ""

@@ -157,7 +157,8 @@ class Host:
                 return
             if time.monotonic() >= deadline:
                 self.transcript.write(
-                    json.dumps({"type": "turn.failed", "error": {"message": AUTH_FAILURE}}) + "\n"
+                    json.dumps({"type": "turn.failed", "error": {"message": AUTH_FAILURE}})
+                    + "\n"
                 )
                 self.transcript.flush()
                 print(AUTH_FAILURE, file=sys.stderr)
