@@ -43,7 +43,7 @@ async def _finish_at_cap(
         routing = uow.routing_policies.get(str(ref["name"]), int(ref["version"]))
         assert routing is not None
         document = copy.deepcopy(routing.document)
-        entry = next(item for item in document["models"] if item["id"] == attempt.selected_model)
+        entry = next(item for item in document["models"] if item["model"] == attempt.selected_model)
         entry["endpoint"] = "local" if local else "subscription"
         if local:
             entry["endpoint_url"] = "http://gateway.lab.test:4000/v1"
