@@ -662,6 +662,9 @@ class CICertificationRow(Base):
     failure: Mapped[dict[str, Any]] = mapped_column(JSONB)
     detail: Mapped[str] = mapped_column(Text)
     evaluated_at: Mapped[datetime] = mapped_column(TZ)
+    # hades #476: the change class recorded for this head; empty for a row written
+    # before this column existed.
+    change_class: Mapped[str] = mapped_column(String(16), server_default="", nullable=False)
 
 
 class CIDecisionRow(Base):

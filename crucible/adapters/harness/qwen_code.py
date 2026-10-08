@@ -12,7 +12,10 @@ from crucible.adapters.harness import base
 from crucible.adapters.harness.hermes import HermesAdapter
 from crucible.domain.exit_class import ExitClass, classify_exit
 from crucible.domain.harness_concurrency import HARNESS_CONCURRENCY
-from crucible.domain.harness_settings import DEFAULT_QWEN_CONTEXT_LENGTH
+from crucible.domain.harness_settings import (
+    DEFAULT_QWEN_CONTEXT_LENGTH,
+    DEFAULT_QWEN_MAX_OUTPUT_TOKENS,
+)
 from crucible.domain.infrastructure import Interruption
 from crucible.ports.harness import (
     AdapterLaunch,
@@ -39,6 +42,14 @@ def context_length(settings: Mapping[str, Any]) -> int:
         return DEFAULT_CONTEXT_LENGTH
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError("Qwen context_length must be a positive integer")
+    return value
+
+
+def max_output_tokens(settings: Mapping[str, Any]) -> int:
+    """hades #498: the response cap, from the attempt's effective settings."""
+    value = settings.get("max_output_tokens")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return DEFAULT_QWEN_MAX_OUTPUT_TOKENS
     return value
 
 
@@ -111,6 +122,15 @@ class QwenCodeAdapter:
                 "OPENAI_API_KEY": "local-no-auth",
                 "CRUCIBLE_QWEN_IDENTITY": f"{ctx.identity_mount}/IDENTITY.md",
                 "CRUCIBLE_QWEN_CONTEXT_LENGTH": str(context_length(ctx.harness_settings)),
+                # hades #498, Hermes parity: the response cap and thinking, which is
+                # always off for Qwen; the wrapper writes both into Qwen's settings and
+                # restricts the tools to file and shell (no sub-agent, skill, memory,
+                # web or MCP tool) and loads no context file as rules.
+                "CRUCIBLE_QWEN_MAX_OUTPUT_TOKENS": str(max_output_tokens(ctx.harness_settings)),
+                "CRUCIBLE_QWEN_THINKING": "false",
+                # Where the wrapper looks after the run for report.yaml or blocked.md,
+                # and writes a minimal report from the run log when it finds neither.
+                "CRUCIBLE_QWEN_REPORT_DIR": ctx.report_mount,
             },
             env_from_files=credential.env_from_files() if ctx.credential_mounted else {},
             transcript_path=f"{ctx.report_mount}/{base.TRANSCRIPT_NAME}",

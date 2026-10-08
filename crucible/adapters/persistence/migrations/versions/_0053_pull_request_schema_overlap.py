@@ -1,10 +1,11 @@
 """Record the schema a pull request's migrations touch (hades #447).
 
-Revision ID: 0052_pull_request_schema_overlap
-Revises: 0051_routing_model_references
+Revision ID: 0053_pull_request_schema_overlap
+Revises: 0052_cert_change_class
 
-This revision's number and down_revision are provisional: Hades assigns them when the
-pull request merges (hades #447).
+This revision was written as 0052 on 0051_routing_model_references and renumbered to
+0053 on 0052_cert_change_class when main was merged into the branch, as hades #447
+describes: a branch's migration numbers are provisional until the pull request merges.
 """
 
 from __future__ import annotations
@@ -13,8 +14,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0052_pull_request_schema_overlap"
-down_revision = "0051_routing_model_references"
+revision = "0053_pull_request_schema_overlap"
+down_revision = "0052_cert_change_class"
 branch_labels = None
 depends_on = None
 

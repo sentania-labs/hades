@@ -141,22 +141,23 @@ async def test_fail_path_scope_contained_on_a_prohibited_path(
 async def test_advisory_failures_reach_the_review_and_are_listed_for_the_reviewer(
     client: TestClient, supervisor: Supervisor, provider: FakeProvider
 ) -> None:
-    """Scope remains advisory, while an incomplete report now blocks publication."""
+    """Scope and the report are both advisory (ADR 0024, hades #498): each is listed
+    for the reviewer with its detail, and the task waits for that review."""
     report = judgement_only()
     del report["risks"]
     provider.set_report("EX-0001", report)
     task_id = submit_and_start(
         client, "crucible-worker:fake-out-of-scope", deliverables=ARTIFACTS_DELIVERABLE
     )
-    assert await run_to_settled(supervisor, client, task_id) == "pre_pr_gates_failed"
+    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
     view = client.get(f"/v1/tasks/{task_id}").json()
     summary = view["gate_summary"]
-    assert summary["failing"] == [GateName.REPORT_PRESENT]
+    assert summary["failing"] == []
     assert summary["classification"][GateName.SCOPE_CONTAINED] == "advisory"
-    assert summary["classification"][GateName.REPORT_PRESENT] == "blocking"
+    assert summary["classification"][GateName.REPORT_PRESENT] == "advisory"
     listed = {item["gate"]: item["detail"] for item in summary["for_reviewer"]}
     assert "infrastructure/outside-the-contract.txt" in listed[GateName.SCOPE_CONTAINED]
-    assert GateName.REPORT_PRESENT not in listed
+    assert "risks" in listed[GateName.REPORT_PRESENT]
     errors = client.get(f"/v1/attempts/{view['latest_attempt']['id']}").json()["report"][
         "parse_errors"
     ]
@@ -164,7 +165,7 @@ async def test_advisory_failures_reach_the_review_and_are_listed_for_the_reviewe
     [wake] = [
         w
         for w in client.get("/v1/wakes").json()["items"]
-        if w["reason"] == "pre_pr_gates_failed" and w["task_id"] == task_id
+        if w["reason"] == "internal_review_needed" and w["task_id"] == task_id
     ]
     assert "report_present" in wake["summary"]
     assert "scope_contained" in {i["gate"] for i in wake["payload"]["for_reviewer"]}
@@ -174,33 +175,36 @@ async def test_advisory_failures_reach_the_review_and_are_listed_for_the_reviewe
 async def test_a_report_that_is_not_yaml_goes_to_the_reviewer_with_its_parse_error(
     client: TestClient, supervisor: Supervisor
 ) -> None:
-    """The report's parse problem is visible and blocks automatic acceptance."""
+    """The report's parse problem is visible to the reviewer and does not stop the
+    task (hades #498)."""
     task_id = submit_and_start(
         client, "crucible-worker:fake-malformed-report", deliverables=ARTIFACTS_DELIVERABLE
     )
-    assert await run_to_settled(supervisor, client, task_id) == "pre_pr_gates_failed"
+    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
     view = client.get(f"/v1/tasks/{task_id}").json()
-    assert view["gate_summary"]["failing"] == [GateName.REPORT_PRESENT]
+    assert view["gate_summary"]["failing"] == []
     rows = client.get(f"/v1/attempts/{view['latest_attempt']['id']}/gates").json()["items"]
     report = next(row for row in rows if row["gate"] == GateName.REPORT_PRESENT)
-    assert report["classification"] == "blocking"
+    assert report["classification"] == "advisory"
     assert "report.yaml is not YAML: mapping values are not allowed here" in report["detail"]
     assert "at line 1, column 12" in report["detail"]
     assert "live run" not in report["detail"]
     assert view["acceptance_results"] == []
 
 
-async def test_no_report_at_all_still_stops_the_task(
+async def test_no_report_at_all_is_for_the_reviewer(
     client: TestClient, supervisor: Supervisor
 ) -> None:
-    """ADR 0024: only a report that is genuinely absent always blocks."""
+    """hades #498: with commits on the branch and the work gates passing, a missing
+    report is listed for the reviewer in plain words and never stops the task."""
     task_id = submit_and_start(
         client, "crucible-worker:fake-succeed-noreport", deliverables=ARTIFACTS_DELIVERABLE
     )
-    assert await run_to_settled(supervisor, client, task_id) == "pre_pr_gates_failed"
+    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
     summary = client.get(f"/v1/tasks/{task_id}").json()["gate_summary"]
-    assert GateName.REPORT_PRESENT in summary["failing"]
-    assert GateName.REPORT_PRESENT not in {i["gate"] for i in summary["for_reviewer"]}
+    assert summary["failing"] == []
+    listed = {i["gate"]: i["detail"] for i in summary["for_reviewer"]}
+    assert "Hades composed the completion record" in listed[GateName.REPORT_PRESENT]
 
 
 @pytest.mark.parametrize(
@@ -210,7 +214,6 @@ async def test_no_report_at_all_still_stops_the_task(
         ("crucible-worker:fake-secret-leak", GateName.NO_SECRETS),
         ("crucible-worker:fake-no-commits", GateName.COMMITS_PRESENT),
         ("crucible-worker:fake-crash", GateName.EXIT_CLEAN),
-        ("crucible-worker:fake-succeed-noreport", GateName.REPORT_PRESENT),
     ],
 )
 async def test_each_fail_fixture_fails_its_gate(

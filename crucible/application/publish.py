@@ -343,7 +343,13 @@ def build_plan(uow: UnitOfWork, task: Task, work: tuple[Attempt, Execution]) -> 
     assert repository is not None
     policy = execution.policy_snapshot or {}
     claim_record = uow.claims.get(attempt.id)
-    claim = claim_record.document if claim_record and claim_record.parsed_ok else None
+    # hades #498: the stored document is the completion record Hades composed, with the
+    # worker's judgement fields beside Hades's own facts when a report was there. The
+    # body carries it whether or not the worker's report parsed; the title alone comes
+    # only from a report that did.
+    record = claim_record.document if claim_record else None
+    claim = record if claim_record and claim_record.parsed_ok else None
+    composed = record.get("composed") if record else None
     repo_section = contract.get("repository", {})
     base_ref = str(repo_section.get("base_ref") or repository.default_branch or "main")
     work_branch = str(repo_section.get("work_branch") or f"crucible/{task.external_id}")
@@ -370,13 +376,14 @@ def build_plan(uow: UnitOfWork, task: Task, work: tuple[Attempt, Execution]) -> 
             harness=execution.harness,
             harness_version=str(policy.get("harness_version", "")) or execution.model,
             image_digest=attempt.image_digest or execution.image,
-            criteria=criteria_mappings(contract, claim),
+            criteria=criteria_mappings(contract, record),
             checks=verified_checks(uow, attempt.id),
             review_reference=review_reference(uow, task),
             corrections=correction_history(uow, task),
             closes=closes,
-            limitations=tuple(str(x) for x in (claim or {}).get("limitations", [])),
-            risks=tuple(str(x) for x in (claim or {}).get("risks", [])),
+            limitations=tuple(str(x) for x in (record or {}).get("limitations") or []),
+            risks=tuple(str(x) for x in (record or {}).get("risks") or []),
+            record=composed if isinstance(composed, dict) else None,
             artifact_verifications=tuple(
                 str(v.get("path", ""))
                 for v in contract.get("required_verification", [])

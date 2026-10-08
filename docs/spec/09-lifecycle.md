@@ -4,9 +4,11 @@ The worker self-review is the internal review. The required `self_review` sectio
 names where documentation was updated (or why no update was needed), maps every
 acceptance criterion with evidence, and lists anything knowingly left out and why.
 
-A missing or incomplete section fails `report_present`, naming `self_review`.
-When every blocking gate passes and the report is complete, Hades records acceptance
-and publishes without an orchestrator review or acceptance call, for first attempts
+A missing or incomplete section is listed for the reviewer under `report_present`,
+naming `self_review`; it never fails the attempt (hades #498: the gates judge the
+work, not the paperwork, and Hades composes the completion record itself).
+When every blocking gate passes and nothing is listed for the reviewer, Hades records
+acceptance and publishes without an orchestrator review or acceptance call, for first attempts
 and corrections alike. Publication sends one informational `published, PR #N` wake.
 An advisory gate failure still requires an orchestrator review before automatic acceptance.
 The orchestrator can still cancel or attach a correction from accepted or after publication. The
@@ -41,7 +43,7 @@ awaiting_quota --resume_at reached, a candidate exists--> scheduled
 awaiting_quota --resume_at reached, still no candidate, wait within cap--> awaiting_quota   (resume_at moves to the next reset; no new wake)
 awaiting_quota --wait cap exceeded, or reroute cap exceeded--> reported --wake-->
 awaiting_quota --cancel--> cancelled
-blocked --decision--> scheduled
+blocked --decision (scope_clarified, accept, recollect, waiver kinds, escalation_answer)--> scheduled
 
 reported --a blocking pre-PR gate fails, including a missing self_review--> pre_pr_gates_failed --wake-->
 reported --every gate passes and the report carries self_review--> gates_passed
@@ -143,7 +145,7 @@ review or acceptance call. The operator may cancel or correct the accepted task.
 
 Terminal: `cancelled`, `rejected`, `closed`. There is no task-level
 `failed`: a failed attempt with no retry remaining still produces a
-`reported` task whose gates then fail (`exit_clean`, `report_present`), so
+`reported` task whose gates then fail (`exit_clean`, `commits_present`), so
 Foundry always sees the outcome through the same path. Foundry alone moves
 `awaiting_acceptance`, `pre_pr_gates_failed`, `external_feedback_received`,
 `ci_certification_failed`, `head_diverged`, and `publish_failed` forward
@@ -232,8 +234,8 @@ remote `work_branch`, so the divergent head gets a completion claim of its
 own, and then re-runs pre-PR gates, internal review when applicable, and
 acceptance before `publishing` re-verifies it) or to reject. Re-entering at
 `reported` instead would put the new head in front of gates with no claim
-behind it, so `report_present` would fail and a correction would be the
-only way forward anyway.
+behind it, so the completion record would be Hades's alone and a correction
+would be the only way forward anyway.
 
 **Branch-only deliverables** (`branch`, allowed only under a policy with
 `deliverables.allow_branch_only: true`) pass through `publishing` like a

@@ -27,7 +27,8 @@ from crucible.application.publish import (
     reopen_or_cancel,
 )
 from crucible.application.transitions import move_task, record_event
-from crucible.application.wakes import create_wake
+from crucible.application.wakes import create_wake, repeat_allowed
+from crucible.contracts.evidence import EvidenceKind
 from crucible.contracts.task_contract import contract_sha256
 from crucible.contracts.wake import WakeReason
 from crucible.domain.certification import (
@@ -38,6 +39,7 @@ from crucible.domain.certification import (
     required_checks_from_policy,
     wait_timeout_hours,
 )
+from crucible.domain.change_class import classify as classify_change
 from crucible.domain.entities import (
     CIAction,
     CICertification,
@@ -915,6 +917,19 @@ def certification_failures(certification: CICertification) -> list[FailedRun]:
     ]
 
 
+def change_class_for_attempt(uow: UnitOfWork, attempt_id: str) -> str:
+    """hades #476: the classifier's label for the paths this attempt's diff touched,
+    read from the same `diff_paths` evidence `scope_contained` reads (11). Empty when
+    the attempt collected no diff (an attempt from before #476, or none yet)."""
+    paths: list[str] | None = None
+    for record in uow.evidence.list_for_attempt(attempt_id):
+        if record.kind == EvidenceKind.DIFF_PATHS.value and record.verified:
+            paths = [str(p) for p in record.payload.get("paths", [])]
+    if paths is None:
+        return ""
+    return classify_change(paths).label
+
+
 def certify_head(
     uow: UnitOfWork,
     clock: Clock,
@@ -924,6 +939,7 @@ def certify_head(
     observation: Observation,
     policy: dict[str, Any],
     head_sha: str,
+    attempt_id: str = "",
     log_excerpt: str = "",
     log_fetched: bool = False,
 ) -> CICertification:
@@ -934,10 +950,12 @@ def certify_head(
     `rerun` decision keeps the failure it was about from being counted again until a
     fresh result arrives."""
     checks = observed_checks(observation)
+    change_class = change_class_for_attempt(uow, attempt_id) if attempt_id else ""
     outcome = certify(
         policy,
         head_sha=head_sha,
         observed=checks,
+        change_class=change_class,
     )
     state = outcome.state
     detail = outcome.detail
@@ -1031,6 +1049,7 @@ def certify_head(
         failure=failure,
         detail=detail,
         evaluated_at=clock.now(),
+        change_class=outcome.change_class,
     )
     stored = uow.ci_certifications.put(certification)
     if previous is None or previous.state != stored.state or previous.detail != stored.detail:
@@ -1457,6 +1476,7 @@ def evaluate_delivery_gates(
         comment_count=len(needing),
         certification_state=certification.state if certification else "",
         certification_detail=certification.detail if certification else "",
+        change_class=certification.change_class if certification else "",
         final_sha=final_sha,
     )
     names: list[str] = []
@@ -2034,7 +2054,13 @@ def repeat_overdue_wakes(
     The clock starts when the task entered the state it is waiting in, not when the pull
     request was opened: a correction on a three-day-old pull request enters certification
     with nothing outstanding yet, and measuring from `opened_at` would call it overdue on
-    its first poll."""
+    its first poll.
+
+    hades #502: exactly one open wake per task per cause. While the last one is unacked
+    no copy is raised, however long the condition persists; once it is acked the notice
+    comes back only when the condition still holds a full `wait_timeout_hours` after
+    the ack. A wake about a pull request that has since merged or closed is acked by
+    the system in the supervisor's sweep (`close_wakes_for_finished_pull_requests`)."""
     now = clock.now()
     if task.state is TaskState.AWAITING_EXTERNAL_REVIEW:
         hours = wait_timeout_hours(policy, "external_review", DEFAULT_EXTERNAL_TIMEOUT_HOURS)
@@ -2056,11 +2082,12 @@ def repeat_overdue_wakes(
         )
     else:
         return False
+    interval = timedelta(hours=hours)
     since = waiting_since(uow, task, entered, fallback=pull_request.opened_at)
-    if now - since < timedelta(hours=hours):
+    if now - since < interval:
         return False
-    latest = _latest_wake_at(uow, task, reason.value)
-    if latest is not None and now - latest < timedelta(hours=hours):
+    previous = uow.wakes.list_for_task(task.id, reason=reason.value)
+    if not repeat_allowed(previous, now=now, interval=interval):
         return False
     create_wake(
         uow,
@@ -2082,20 +2109,6 @@ def waiting_since(uow: UnitOfWork, task: Task, kind: EventKind, *, fallback: dat
     in the same transaction as the state change (09), so the event is the record."""
     event = uow.events.latest_for_task_kind(task.id, kind.value)
     return event.ts if event is not None else fallback
-
-
-def _latest_wake_at(uow: UnitOfWork, task: Task, reason: str) -> datetime | None:
-    latest: datetime | None = None
-    for wake in uow.wakes.list_for_principal(
-        task.principal_id, since=None, include_acked=True, limit=200
-    ):
-        if (
-            wake.task_id == task.id
-            and wake.reason == reason
-            and (latest is None or wake.created_at > latest)
-        ):
-            latest = wake.created_at
-    return latest
 
 
 def poll_due(
@@ -2234,6 +2247,7 @@ def apply_observation(
             observation=observation,
             policy=policy,
             head_sha=head,
+            attempt_id=attempt_id,
             log_excerpt=log_excerpt,
             log_fetched=log_fetched,
         )

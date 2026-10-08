@@ -69,7 +69,9 @@ from crucible.application.review import (
 from crucible.application.routing import (
     count_blocking_failures,
     current_routing_version,
+    launch_model_name,
     load_attempt_routing,
+    model_mark_key,
     reserve,
     select_model,
 )
@@ -83,6 +85,7 @@ from crucible.application.transitions import (
     record_rejected_transition,
 )
 from crucible.application.wakes import (
+    close_wakes_for_finished_pull_requests,
     create_pool_exhausted_wake,
     create_wake,
     pool_exhausted_summary,
@@ -102,6 +105,18 @@ from crucible.contracts.policy import RoutingPolicyV1, routing_model_name, windo
 from crucible.contracts.task_contract import TaskContractV1
 from crucible.contracts.wake import WakeReason
 from crucible.domain.command_timeout import effective_command_timeout_ms
+from crucible.domain.completion_record import (
+    WORKER_REPORT_ABSENT,
+    WORKER_REPORT_PARSED,
+    WORKER_REPORT_REDACTED,
+    WORKER_REPORT_UNPARSED,
+    BranchFacts,
+    CheckRun,
+    ReviewFinding,
+    compose_completion_record,
+    disposition_notes,
+    problem_text,
+)
 from crucible.domain.egress_probe import (
     PROBE_MARKER,
     find_probe_line,
@@ -138,8 +153,8 @@ from crucible.domain.exit_class import (
 )
 from crucible.domain.gates import GateName, GateResult, evaluate_gate
 from crucible.domain.harness_settings import (
-    DEFAULT_QWEN_CONTEXT_LENGTH,
     effective_settings,
+    qwen_effective_settings,
     setting_name,
 )
 from crucible.domain.ids import new_id
@@ -161,6 +176,7 @@ from crucible.ports.execution import (
     IDENTITY_MOUNT,
     REPO_MOUNT,
     REPORT_MOUNT,
+    BranchBundle,
     CancelCheck,
     CleanupPolicy,
     CollectedOutputs,
@@ -236,14 +252,34 @@ SLOT_HOLDING_STATES: tuple[AttemptState, ...] = (
 def local_cap_kind(
     endpoint: str | None, exit_class: ExitClass, turn_cap_reached: bool
 ) -> Literal["turns", "time"] | None:
-    """Name a size cap only when the attempt was routed to a local endpoint."""
-    if endpoint != "local" or exit_class in {ExitClass.INFRASTRUCTURE, ExitClass.QUOTA_EXHAUSTED}:
+    """Name a size cap only when the attempt was routed to a local endpoint. A budget
+    end with commits on the branch (hades #498) is a normal end, never a cap."""
+    if endpoint != "local" or exit_class in {
+        ExitClass.INFRASTRUCTURE,
+        ExitClass.QUOTA_EXHAUSTED,
+        ExitClass.ENDED_BY_BUDGET,
+    }:
         return None
     if turn_cap_reached:
         return "turns"
     if exit_class is ExitClass.TIMEOUT:
         return "time"
     return None
+
+
+def branch_facts(bundle: BranchBundle | None) -> BranchFacts | None:
+    """What the collected bundle says about the branch, for the completion record
+    (hades #498). None when nothing was collected."""
+    if bundle is None or not bundle.head_sha:
+        return None
+    return BranchFacts(
+        head_sha=bundle.head_sha,
+        commits=bundle.commits,
+        work_branch=bundle.work_branch,
+        commit_messages=tuple(bundle.commit_messages),
+        commit_paths=tuple(bundle.commit_paths),
+        attempt_commit_paths=tuple(bundle.attempt_commit_paths),
+    )
 
 
 def retryable_exit(exit_class: ExitClass, retry_on: Sequence[str]) -> bool:
@@ -295,6 +331,9 @@ RETENTION_WORKSPACE = "workspace"
 # How many kept workspaces one tick releases. An upgrade that finds a backlog spreads the
 # provider calls over a few ticks instead of holding one tick for all of them.
 WORKSPACE_RELEASE_BATCH = 10
+# hades #394: how many never-launched attempts one tick cleans up. The first tick after
+# an upgrade finds every such attempt ever recorded; the batch spreads them out.
+PRE_LAUNCH_CLEANUP_BATCH = 20
 # How many pulls the final log drain makes before it stops (issue 63). A provider that
 # bounds one pull at 4 MiB drains 1 GiB of backlog in this many; past that the log is
 # still arriving faster than it is read, and the attempt moves on with what was stored.
@@ -992,6 +1031,7 @@ class Supervisor:
                 await self._abandon_launches()
                 raise LeaseLostError("mid-tick renewal lost lease before cleanup")
             await self._cleanup_step()
+            await self._pre_launch_cleanup_step()
             if not await self._renew_lease_async():
                 result.held = False
                 await self._abandon_launches()
@@ -999,6 +1039,7 @@ class Supervisor:
             await self._retention_step()
             await self._db(self._refresh_attempt_metrics)
             await self._db(self._repeat_stale_escalations)
+            await self._db(self._close_wakes_for_finished_pull_requests)
             result.wakes_delivered = await self._deliver_wakes()
             result.counts = await self._db(partial(self._status_step, started))
         except LeaseLostError:
@@ -1583,6 +1624,13 @@ class Supervisor:
             repeat_stale_escalation_wakes(
                 uow, self._clock, stale_hours=self._escalation_stale_hours(uow)
             )
+            uow.commit()
+
+    def _close_wakes_for_finished_pull_requests(self) -> None:
+        """hades #502: an overdue notice about a pull request that has since merged or
+        closed is acked by the system with a reason, on the pass after the observation."""
+        with self._fenced() as uow:
+            close_wakes_for_finished_pull_requests(uow, self._clock)
             uow.commit()
 
     def _escalation_stale_hours(self, uow: UnitOfWork) -> int:
@@ -2178,16 +2226,42 @@ class Supervisor:
         # that record rather than a value saved since.
         effective: dict[str, Any] | None = None
         if settings_harness == "hermes":
-            effective = attempt.effective_settings or effective_settings(
-                harness_settings,
-                thinking=route.chat_template_kwargs.enable_thinking if route else False,
-            )
+            if attempt.effective_settings is not None:
+                effective = attempt.effective_settings
+            else:
+                effective = effective_settings(
+                    harness_settings,
+                    thinking=route.chat_template_kwargs.enable_thinking if route else False,
+                )
+                # Hades #354: Codex's own provider config takes model_context_window and
+                # the max output tokens from the routing entry, not the Hermes default,
+                # when the entry carries its own. Resolved once per attempt, like the
+                # rest of `effective`.
+                if selected_harness == "codex" and route is not None:
+                    if route.context_length:
+                        effective["context_length"] = route.context_length
+                    if route.max_output_tokens:
+                        effective["max_output_tokens"] = route.max_output_tokens
+                    # Review of #354: `context_length` and `max_output_tokens` are
+                    # independent overrides, so a route can carry a pair the saved
+                    # Hermes settings would reject (`hermes_limit_problems`) without
+                    # either value alone looking wrong. A response reservation that
+                    # consumes the whole window leaves no input budget, so the launch
+                    # is refused rather than sent to fail at request time.
+                    window = effective["context_length"]
+                    allowance = effective["max_output_tokens"]
+                    if window and allowance >= window:
+                        raise LaunchRefusedError(
+                            f"model {route.model!r} max_output_tokens {allowance} leaves no "
+                            f"input budget in its {window}-token context window"
+                        )
         if selected_harness == "qwen_code":
-            effective = attempt.effective_settings or {
-                "context_length": route.context_length
-                if route and route.context_length
-                else DEFAULT_QWEN_CONTEXT_LENGTH
-            }
+            # hades #498: recorded as the Hermes values are; an attempt launched before
+            # the cap and thinking were recorded keeps its record and takes the defaults.
+            effective = attempt.effective_settings or qwen_effective_settings(
+                harness_settings,
+                context_length=route.context_length if route else None,
+            )
         if effective is not None:
             harness_settings.update(effective)
         # Issue 128: the policy default, narrowed by the contract, capped at the attempt.
@@ -2256,7 +2330,7 @@ class Supervisor:
         launch = adapter.build_launch(
             LaunchContext(
                 attempt_id=attempt.id,
-                model=(route.model_name or route.id) if route else selected_model,
+                model=launch_model_name(route, selected_model),
                 effort=execution.effort,
                 timeout_seconds=execution.timeout_seconds,
                 identity_mount=IDENTITY_MOUNT,
@@ -2549,6 +2623,7 @@ class Supervisor:
         item: _Pending,
         *,
         excluded_pools: set[str | None] | None = None,
+        excluded_routes: set[tuple[str, str]] | None = None,
         routing: RoutingPolicyV1 | None = None,
     ) -> Any:
         # hades #254: every attempt, a correction's or a retry's included, routes with
@@ -2567,6 +2642,11 @@ class Supervisor:
                 provider=request.provider.value,
             )
         )
+        # The (harness, model) routes this attempt may not take: the ones the caller
+        # names (a reroute deciding where to go next) and the ones the event that
+        # created the attempt excluded, a capacity refusal's retry or a model-only
+        # quota refusal's reroute (hades #373).
+        all_excluded_routes = set(excluded_routes or set()) | self._capacity_exclusions(uow, item)
         selection = select_model(
             uow,
             routing,
@@ -2585,7 +2665,7 @@ class Supervisor:
                 .get("allowlist", [])
             ],
             excluded_pools={pool for pool in (excluded_pools or set()) if pool is not None},
-            excluded_routes=self._capacity_exclusions(uow, item),
+            excluded_routes=all_excluded_routes,
             pinned_model=request.pinned_model,
             pinned_harness=request.pinned_harness.value if request.pinned_harness else None,
         )
@@ -2636,7 +2716,8 @@ class Supervisor:
         return bool(relevant) and all(
             reasons
             and all(
-                reason.startswith("pool exhausted until ") or reason == "pool is at its soft limit"
+                reason.startswith(("pool exhausted until ", "model excluded until "))
+                or reason == "pool is at its soft limit"
                 for reason in reasons
             )
             for reasons in relevant
@@ -3310,6 +3391,19 @@ class Supervisor:
             )
             attempt.workspace_path = ws.checkout_path.removesuffix("/repo")
             attempt.identity_sha256 = ws.identity_sha256 or attempt.identity_sha256
+            # Hades #354: the evidence records the lane (`model`, above) and the name the
+            # launch actually sends the harness, when a routing entry overrides it.
+            routing = load_attempt_routing(
+                uow, execution.policy_snapshot or {}, attempt.routing_version
+            )
+            route = (
+                routing.model(
+                    attempt.selected_model or execution.model,
+                    attempt.selected_harness or execution.harness,
+                )
+                if routing is not None
+                else None
+            )
             move_attempt(
                 uow,
                 self._clock,
@@ -3319,6 +3413,9 @@ class Supervisor:
                 payload={
                     "workspace": attempt.workspace_path,
                     "model": attempt.selected_model,
+                    "sent_model_name": launch_model_name(
+                        route, attempt.selected_model or execution.model
+                    ),
                     "harness": attempt.selected_harness,
                     "image": attempt.selected_image,
                     "pool": attempt.selected_pool,
@@ -3995,9 +4092,92 @@ class Supervisor:
                 out.append((attempt, execution.provider, choice))
         return out
 
+    def _pre_launch_cleanup_choice(self, uow: UnitOfWork, attempt: Attempt) -> str | None:
+        """hades #394: what cleanup a finished attempt whose worker never ran is due, or
+        None when it is not one or not yet.
+
+        Cleanup of 08 waits for `logs_drained`, which only a launched worker records, so
+        an attempt that ended at prepare, was killed during launch or ran out of quota at
+        reserve kept its claim forever. No gate consumed that claim and no worker wrote a
+        bundle on it, so it is deleted. The one exception is a claim the correction
+        resume of 08 could still pick: an attempt with a verified bundle head is a resume
+        source, and its claim is kept, labelled for the retention window of 16."""
+        if (
+            attempt.state not in ATTEMPT_TERMINAL
+            or attempt.started_at is not None
+            or attempt.logs_drained_at is not None
+            or attempt.cleaned_up_at is not None
+        ):
+            return None
+        if (
+            attempt.exit_class is ExitClass.INFRASTRUCTURE
+            and attempt.ended_at is not None
+            and self._clock.now()
+            < attempt.ended_at + timedelta(seconds=self.attempt_lease_ttl_seconds)
+        ):
+            # The same wait 08 gives an interrupted attempt before its cleanup.
+            return None
+        resume_source = any(
+            row.kind == EvidenceKind.BUNDLE_HEAD.value
+            and row.verified
+            and row.payload.get("bundle_verified")
+            and row.payload.get("bundle_sha256")
+            for row in uow.evidence.list_for_attempt(attempt.id)
+        )
+        return "keep" if resume_source else "delete"
+
+    def _list_pre_launch_cleanup_due(self) -> list[tuple[Attempt, str, str]]:
+        out: list[tuple[Attempt, str, str]] = []
+        with self._uow_factory() as uow:
+            for attempt in uow.attempts.list_in_states(sorted(ATTEMPT_TERMINAL)):
+                if len(out) >= PRE_LAUNCH_CLEANUP_BATCH:
+                    break
+                choice = self._pre_launch_cleanup_choice(uow, attempt)
+                if choice is None:
+                    continue
+                execution = uow.executions.get(attempt.execution_id)
+                if execution is None:
+                    continue
+                out.append((attempt, execution.provider, choice))
+        return out
+
+    async def _pre_launch_cleanup_step(self) -> int:
+        """hades #394: the cleanup of 08 for an attempt that ended before its worker
+        launched (`started_at` null). The provider's own cleanup runs under `delete`,
+        or under `keep` for a claim that is a resume source, and the attempt is
+        recorded cleaned as any other."""
+        cleaned = 0
+        for attempt, provider_name, choice in await self._db(self._list_pre_launch_cleanup_due):
+            with log_context(
+                task_id=attempt.task_id, execution_id=attempt.execution_id, attempt_id=attempt.id
+            ):
+                try:
+                    provider = self._provider(provider_name)
+                    keep = choice == "keep"
+                    spec = await self._spec_for(attempt)
+                    policy = CleanupPolicy.KEEP if keep else CleanupPolicy.DELETE
+                    await provider.cleanup(self._workspace_for(attempt), policy, spec)
+                except LeaseLostError:
+                    raise
+                except Exception:
+                    log.warning(
+                        "a never-launched attempt could not be cleaned up; the next tick "
+                        "tries again",
+                        exc_info=True,
+                    )
+                    continue
+                finally:
+                    self._workspaces.pop(attempt.id, None)
+                await self._db(partial(self._mark_cleaned, attempt.id, choice))
+                self._workspace_fingerprints.pop(attempt.id, None)
+                self._handles.pop(attempt.id, None)
+                cleaned += 1
+        return cleaned
+
     async def _cleanup_step(self) -> int:
         """08: remove the container, keep or delete the workspace per policy, release
-        the checkout lease, and record it. Only ever after `logs_drained`."""
+        the checkout lease, and record it. Only ever after `logs_drained`; an attempt
+        that never launched has `_pre_launch_cleanup_step` instead (hades #394)."""
         cleaned = 0
         for attempt, provider_name, choice in await self._db(self._list_cleanup_due):
             if attempt.id in self._collects:
@@ -4086,10 +4266,15 @@ class Supervisor:
                     ]
                 )
             ]
+            # hades #394: a finished attempt whose worker never ran has no bundle to
+            # read, so its claim is not held back: one leaked before its cleanup existed
+            # drains here. A resume source stays, and a claim cleanup labelled stays by
+            # its retention label.
             live.extend(
                 attempt.id
                 for attempt in uow.attempts.list_in_states(sorted(ATTEMPT_TERMINAL))
                 if attempt.cleaned_up_at is None
+                and self._pre_launch_cleanup_choice(uow, attempt) != "delete"
             )
             return live
 
@@ -4655,10 +4840,14 @@ class Supervisor:
                 or task.state is not TaskState.RUNNING
             ):
                 return
+            # hades #373: the exit's own verdict, read back from the mark it wrote.
+            excluded_routes = self._model_exclusion_for(uow, attempt)
             if pushed:
                 execution.resume_from_remote = True
                 uow.executions.save(execution)
-                self._handle_quota_exit(uow, task, execution, attempt)
+                self._handle_quota_exit(
+                    uow, task, execution, attempt, excluded_routes=excluded_routes
+                )
             elif checkpoint_skipped:
                 self._handle_quota_exit(
                     uow,
@@ -4666,6 +4855,7 @@ class Supervisor:
                     execution,
                     attempt,
                     checkpoint_skip_detail=detail[:1000],
+                    excluded_routes=excluded_routes,
                 )
             else:
                 bundle_path = f"{attempt.workspace_path}/output/work_branch.bundle"
@@ -5316,11 +5506,24 @@ class Supervisor:
                 if attempt.exit_class is ExitClass.QUOTA_EXHAUSTED and adapter is not None
                 else None
             )
+            # hades #373: a refusal about the model alone (Claude Code's
+            # model_requires_usage_credits, or words that say to switch models) excludes
+            # that model until its reset and leaves the pool open, so the next candidate
+            # in the same pool launches. Only the account's own refusal marks the pool.
             pool_mark: tuple[PoolExhaustion, bool] | None = None
+            excluded_routes: set[tuple[str, str]] | None = None
             if attempt.exit_class is ExitClass.QUOTA_EXHAUSTED:
-                pool_mark = self._mark_pool_exhausted(
-                    uow, attempt, execution, provider_quota.reset_at if provider_quota else None
-                )
+                if provider_quota is not None and provider_quota.model_only:
+                    excluded_routes = self._mark_model_excluded(
+                        uow, attempt, execution, provider_quota.reset_at
+                    )
+                else:
+                    pool_mark = self._mark_pool_exhausted(
+                        uow,
+                        attempt,
+                        execution,
+                        provider_quota.reset_at if provider_quota else None,
+                    )
             # A collection failure makes this exit `environment` below, whatever the
             # harness said, so it is not a gateway failure and marks nothing.
             if attempt.exit_class is ExitClass.PROVIDER_ERROR and collection_error is None:
@@ -5328,6 +5531,37 @@ class Supervisor:
             parsed: ParsedReport | None = None
             if adapter is not None and report_dir is not None and report_dir.is_dir():
                 parsed = adapter.parse_report(report_dir, exit_info)
+            limit_reached = parsed.limit_reached if parsed is not None else None
+            has_commits = (
+                collection_error is None
+                and outputs.checkpoint_refusal is None
+                and outputs.bundle is not None
+                and outputs.bundle.commits > 0
+            )
+            if (
+                has_commits
+                and not killed
+                and not oom_killed
+                and execution.role is not (ExecutionRole.REVIEW)
+            ):
+                # hades #498: the gates judge the work, not the paperwork. A clean exit
+                # that left commits and no report is `completed`; the missing report is
+                # for the reviewer. A stop on the attempt's time limit or the harness's
+                # turn limit with commits is `ended_by_budget`: a normal end, collected
+                # and gated like a completed run, never scored as a failure.
+                if attempt.exit_class is ExitClass.COMPLETED_WITHOUT_REPORT:
+                    attempt.exit_class = ExitClass.COMPLETED
+                timed_out_on_budget = (
+                    attempt.termination_reason == TERMINATION_TIMEOUT
+                    and attempt.exit_class is ExitClass.TIMEOUT
+                )
+                turn_limit = limit_reached is not None and attempt.exit_class in {
+                    ExitClass.COMPLETED,
+                    ExitClass.INCOMPLETE,
+                    ExitClass.TIMEOUT,
+                }
+                if timed_out_on_budget or turn_limit:
+                    attempt.exit_class = ExitClass.ENDED_BY_BUDGET
             self._record_credential_sync(uow, attempt, execution, outputs)
             if collection_error is not None:
                 # Preserve the original interruption even if sealing also failed.
@@ -5446,7 +5680,21 @@ class Supervisor:
                 )
             completed: CompletedClaim | None = None
             claim = None
-            expected_findings: set[str] = set()
+            errors: list[dict[str, Any]] = []
+            # hades #498: what Hades noticed about the report that is for the reviewer
+            # and never a failure (a finding left without a disposition, a duplicate).
+            advisory_notes: list[str] = []
+            duplicate_ids: list[str] = []
+            correction = (stored.document.get("correction") if stored else None) or {}
+            expected_findings: set[str] = {
+                str(address.get("id"))
+                for address in correction.get("addresses", [])
+                if isinstance(address, dict) and address.get("kind") == "review_comment"
+            }
+            worker_document: dict[str, Any] | None = None
+            worker_status = WORKER_REPORT_ABSENT
+            if unparsed_errors is not None:
+                worker_status = WORKER_REPORT_UNPARSED
             if outputs.report is not None and not cancelled:
                 # hades #215: Crucible's own facts in place of the worker's, then parse.
                 completed = complete_claim(outputs.report, claim_facts(task, outputs))
@@ -5457,12 +5705,7 @@ class Supervisor:
                     else None,
                 )
                 claim_ok = claim is not None
-                correction = (stored.document.get("correction") if stored else None) or {}
-                expected_findings = {
-                    str(address.get("id"))
-                    for address in correction.get("addresses", [])
-                    if isinstance(address, dict) and address.get("kind") == "review_comment"
-                }
+                worker_status = WORKER_REPORT_PARSED if claim_ok else WORKER_REPORT_UNPARSED
                 finding_counts = (
                     Counter(item.review_comment_id for item in claim.finding_dispositions)
                     if claim is not None
@@ -5471,26 +5714,13 @@ class Supervisor:
                 duplicate_ids = sorted(
                     finding_id for finding_id, count in finding_counts.items() if count > 1
                 )
-                if expected_findings and (
-                    set(finding_counts) != expected_findings or duplicate_ids
-                ):
-                    errors.append(
-                        {
-                            "loc": ["finding_dispositions"],
-                            "msg": (
-                                "the correction report must disposition exactly its review "
-                                "findings; expected "
-                                + ", ".join(sorted(expected_findings))
-                                + (
-                                    "; duplicate ids: " + ", ".join(duplicate_ids)
-                                    if duplicate_ids
-                                    else ""
-                                )
-                            ),
-                            "type": "value_error",
-                        }
+                if claim is not None and expected_findings:
+                    # hades #498: disposition completeness is advisory. The worker
+                    # instructions never asked for `finding_dispositions`; the diff says
+                    # what the correction touched, and the reviewer weighs the rest.
+                    advisory_notes.extend(
+                        disposition_notes(expected_findings, finding_counts, duplicate_ids)
                     )
-                    claim_ok = False
                 # The worker's document and the completed one: Crucible's facts carry
                 # names the worker chose (changed paths, report file names).
                 secret_hits = find_secrets(outputs.report) + find_secrets(completed.document)
@@ -5500,17 +5730,9 @@ class Supervisor:
                         for m in secret_hits
                     ]
                     claim_ok = False
-                    document: dict[str, Any] = {"redacted": True}
+                    worker_status = WORKER_REPORT_REDACTED
                 else:
-                    document = completed.document
-                uow.claims.put(
-                    CompletionClaimRecord(
-                        attempt_id=attempt.id,
-                        document=document,
-                        parsed_ok=claim_ok,
-                        parse_errors=errors,
-                    )
-                )
+                    worker_document = completed.document
                 record_event(
                     uow,
                     self._clock,
@@ -5524,6 +5746,60 @@ class Supervisor:
                         "filled_by_crucible": list(completed.filled),
                         "differences": [dict(d) for d in completed.differences],
                     },
+                )
+            record: dict[str, Any] | None = None
+            if not cancelled:
+                # hades #498: the completion record is Hades's own, from the commits on
+                # the branch, its re-run of the required checks and the diff against
+                # each review finding's path. The worker's report adds to it.
+                record = compose_completion_record(
+                    exit_class=attempt.exit_class,
+                    exit_code=exit_code,
+                    termination_reason=attempt.termination_reason,
+                    limit_reached=limit_reached,
+                    branch=branch_facts(outputs.bundle),
+                    diff_paths=outputs.diff_paths,
+                    checks=tuple(
+                        CheckRun(
+                            id=run.id,
+                            command=run.command,
+                            exit_code=run.exit_code,
+                            expect_exit=run.expect_exit,
+                            ran=run.ran,
+                            detail=run.detail,
+                        )
+                        for run in outputs.verifications
+                    ),
+                    findings=tuple(
+                        ReviewFinding(
+                            review_comment_id=finding_id,
+                            path=getattr(uow.review_comments.get(finding_id), "path", None),
+                        )
+                        for finding_id in sorted(expected_findings)
+                    ),
+                    worker_report=worker_document,
+                    worker_report_status=worker_status,
+                    worker_report_problems=[
+                        problem_text(e)
+                        for e in (errors or unparsed_errors or [])
+                        if isinstance(e, dict)
+                    ],
+                )
+                if worker_status == WORKER_REPORT_REDACTED:
+                    record = {"redacted": True, **record}
+                uow.claims.put(
+                    CompletionClaimRecord(
+                        attempt_id=attempt.id,
+                        document=record,
+                        parsed_ok=claim_ok,
+                        parse_errors=errors
+                        or unparsed_errors
+                        or (
+                            []
+                            if report_present
+                            else [{"loc": [], "msg": "no report was written", "type": "missing"}]
+                        ),
+                    )
                 )
             blocked_reason, blocked_text = blocked_note(outputs.blocked_md)
             if attempt.exit_class is ExitClass.BLOCKED:
@@ -5562,8 +5838,6 @@ class Supervisor:
             )
             uow.leases.release_attempt_lease(attempt.id)
             claim_document = outputs.report if (outputs.report and not cancelled) else None
-            stored_claim = uow.claims.get(attempt.id) if claim_document else None
-            errors = list(stored_claim.parse_errors) if stored_claim else []
             head = record_collection_evidence(
                 uow,
                 self._clock,
@@ -5577,6 +5851,8 @@ class Supervisor:
                 parsed_report=parsed,
                 completed=completed,
                 unparsed_errors=unparsed_errors,
+                record=record,
+                advisory=advisory_notes,
             )
             # hades #360: a correction ended by a merge never reaches the PR, so its head
             # is evidence on the attempt and not the merged task's head.
@@ -5612,12 +5888,16 @@ class Supervisor:
                 blocked_reason=blocked_reason,
                 claim_ok=claim_ok,
                 defer_quota=defer_quota,
-                turn_cap_reached=parsed is not None and parsed.limit_reached is not None,
+                turn_cap_reached=limit_reached is not None,
                 has_commits=outputs.bundle is not None and outputs.bundle.commits > 0,
                 pool_mark=pool_mark,
+                excluded_routes=excluded_routes,
             )
             # A valid report from a failed or locally capped attempt is evidence,
             # but its dispositions must not settle findings or queue public replies.
+            # hades #498: a disposition the worker wrote is recorded for the finding it
+            # names; one named twice, or one this correction does not address, is left
+            # to the reviewer with the advisory note.
             if (
                 attempt.state is AttemptState.SUCCEEDED
                 and claim_ok
@@ -5625,6 +5905,11 @@ class Supervisor:
                 and expected_findings
             ):
                 for finding in claim.finding_dispositions:
+                    if (
+                        finding.review_comment_id in duplicate_ids
+                        or finding.review_comment_id not in expected_findings
+                    ):
+                        continue
                     comment = uow.review_comments.get(finding.review_comment_id)
                     if (
                         comment is None
@@ -5890,11 +6175,22 @@ class Supervisor:
             and model.capability in tier.allowed_capability
             and (pinned is None or model.id == pinned)
         }
+        # hades #373: a model's own exclusion ends at its reset too; a class whose only
+        # candidates are excluded models resumes when the earliest of them lifts.
+        model_marks = {
+            model_mark_key(model.model, model.harness)
+            for model in routing.models
+            if model.enabled
+            and model.capability in tier.allowed_capability
+            and (pinned is None or model.id == pinned)
+        }
         now = self._clock.now()
         return sorted(
             mark.reset_at
             for mark in uow.pool_exhaustions.list_all()
-            if mark.pool in pools and mark.cleared_at is None and mark.reset_at > now
+            if (mark.pool in pools or mark.pool in model_marks)
+            and mark.cleared_at is None
+            and mark.reset_at > now
         )
 
     def _enter_quota_wait(
@@ -6081,13 +6377,17 @@ class Supervisor:
         latest = max(earlier, key=finished)
         if latest.exit_class != ExitClass.PROVIDER_ERROR.value:
             return
-        self._mark_pool_exhausted(
+        marked = self._mark_pool_exhausted(
             uow,
             attempt,
             execution,
             None,
             reason="local endpoint failed (provider_error)",
         )
+        # hades #373: every pool mark is announced. A provider-error exit goes on to
+        # retry, which raises no wake of its own, so the mark's wake is raised here.
+        if marked is not None and marked[1]:
+            self._wake_pool_exhausted(uow, task, attempt, marked[0])
 
     def _mark_pool_exhausted(
         self,
@@ -6184,9 +6484,89 @@ class Supervisor:
     def _bounded_quota_reset(
         now: Any, candidate: Any, *, max_seconds: int, default_seconds: int
     ) -> tuple[Any, Any]:
+        """The reset a mark gets: the one the signal states, when it lies ahead; else now
+        plus the pool's `default_cooldown_seconds` (hades #373: a mark from a signal that
+        states no reset for the pool expires no later than the default cooldown; a
+        stated reset is the provider's fact and is used as given, 05b)."""
         del max_seconds
         accepted = candidate if candidate is not None and now < candidate else None
         return accepted or now + timedelta(seconds=default_seconds), accepted
+
+    def _mark_model_excluded(
+        self, uow: UnitOfWork, attempt: Attempt, execution: Execution, reset_at: Any
+    ) -> set[tuple[str, str]]:
+        """hades #373: exclude the attempt's model, not its pool, until `reset_at`, or
+        for the pool's default cooldown when the refusal states none. The exclusion is
+        a mark keyed `model:<harness>:<model>` (the route a routing entry is identified
+        by) in the same table as a pool mark, so it is listed on Routing and
+        clearable there, and `select_model` turns the route away while it is in force.
+        Returns the route as the set a reroute excludes."""
+        model = attempt.selected_model or execution.model
+        harness = attempt.selected_harness or execution.harness
+        route = {(harness, model)}
+        task = uow.tasks.get(attempt.task_id)
+        assert task is not None
+        context = self._routing_context(uow, task, execution, attempt.routing_version)
+        if context is None:
+            return route
+        routing, _ = context
+        entry = routing.model(model, harness)
+        pool = attempt.selected_pool or (entry.pool if entry is not None else None)
+        if pool is None or pool not in routing.pools:
+            return route
+        now = self._clock.now()
+        reset, parsed_reset = self._bounded_quota_reset(
+            now,
+            reset_at,
+            max_seconds=routing.reroute.resume_max_wait_seconds,
+            default_seconds=routing.pools[pool].default_cooldown_seconds,
+        )
+        reason = "harness reported quota_exhausted for this model only"
+        mark = uow.pool_exhaustions.put(
+            PoolExhaustion(
+                pool=model_mark_key(model, harness),
+                exhausted_at=now,
+                reset_at=reset,
+                task_id=attempt.task_id,
+                attempt_id=attempt.id,
+                reason=reason,
+            )
+        )
+        record_event(
+            uow,
+            self._clock,
+            EventKind.QUOTA_EXHAUSTED,
+            principal=PRINCIPAL_CRUCIBLE,
+            task_id=attempt.task_id,
+            execution_id=attempt.execution_id,
+            attempt_id=attempt.id,
+            payload={
+                "scope": "model",
+                "model": model,
+                "harness": harness,
+                "pool": pool,
+                "reset_at": mark.reset_at.isoformat(),
+                "source": "harness" if parsed_reset else "policy_default_cooldown",
+                "reason": reason,
+                "detail": f"model {model} excluded until {mark.reset_at.isoformat()}; "
+                f"pool {pool} stays open",
+            },
+        )
+        return route
+
+    def _model_exclusion_for(
+        self, uow: UnitOfWork, attempt: Attempt
+    ) -> set[tuple[str, str]] | None:
+        """The route an attempt's quota exit excluded (hades #373), read back from the
+        mark that exit wrote, for a decision taken after the checkpoint push."""
+        if attempt.selected_model is None or attempt.selected_harness is None:
+            return None
+        mark = uow.pool_exhaustions.get(
+            model_mark_key(attempt.selected_model, attempt.selected_harness)
+        )
+        if mark is not None and mark.attempt_id == attempt.id and mark.cleared_at is None:
+            return {(attempt.selected_harness, attempt.selected_model)}
+        return None
 
     def _handle_quota_exit(
         self,
@@ -6198,7 +6578,10 @@ class Supervisor:
         source: str = "worker",
         pool_mark: tuple[PoolExhaustion, bool] | None = None,
         checkpoint_skip_detail: str | None = None,
+        excluded_routes: set[tuple[str, str]] | None = None,
     ) -> None:
+        # hades #373: `excluded_routes` names the model a model-only refusal excluded;
+        # the pool stays open and the reroute stays inside it.
         # hades #378: one wake per refusal names the pool and its reset. A task that
         # ends or waits says it in the wake it raises anyway; a reroute, which raised
         # none, raises the pool's own, once per exhaustion (when the mark opened).
@@ -6269,15 +6652,29 @@ class Supervisor:
         stored = uow.contracts.get(task.id, execution.contract_version)
         assert stored is not None
         item = _Pending(attempt, execution, task, stored.document)
+        # hades #373: a model-only refusal leaves its pool open and the reroute stays
+        # inside it, with the refused model excluded; an account refusal leaves the pool.
+        excluded_pools: set[str] = set()
+        excluded_model: str | None = None
+        excluded_harness: str | None = None
+        if excluded_routes:
+            excluded_model = attempt.selected_model or execution.model
+            excluded_harness = attempt.selected_harness or execution.harness
+        elif attempt.selected_pool:
+            excluded_pools = {attempt.selected_pool}
         selection = self._selection_for(
-            uow, item, excluded_pools={attempt.selected_pool}, routing=routing
+            uow,
+            item,
+            excluded_pools=set(excluded_pools),
+            excluded_routes=excluded_routes,
+            routing=routing,
         )
         if selection is not None and selection.selected is not None and selection.image is not None:
             nxt = self._create_attempt(
                 uow,
                 execution,
                 number=attempt.number + 1,
-                excluded_pools={attempt.selected_pool} if attempt.selected_pool else None,
+                excluded_pools=excluded_pools or None,
             )
             move_task(
                 uow,
@@ -6293,11 +6690,25 @@ class Supervisor:
                     "from_pool": attempt.selected_pool,
                     "to_attempt_id": nxt.id,
                     "why": (
-                        "previous pool reported quota exhaustion"
+                        "previous model refused this model only; rerouted within its pool"
+                        if excluded_model is not None
+                        else "previous pool reported quota exhaustion"
                         if source == "worker"
                         else "launch reservation found the selected pool unavailable"
                     ),
                     "source": source,
+                    # The next attempt routes with this model excluded (_selection_for
+                    # reads it back by next_attempt_id), the path a capacity refusal's
+                    # retry already takes.
+                    **(
+                        {
+                            "excluded_model": excluded_model,
+                            "excluded_harness": excluded_harness,
+                            "next_attempt_id": nxt.id,
+                        }
+                        if excluded_model is not None
+                        else {}
+                    ),
                     **(
                         {
                             "checkpoint_push": "skipped",
@@ -6425,6 +6836,7 @@ class Supervisor:
         has_commits: bool = True,
         wake_summary: str | None = None,
         pool_mark: tuple[PoolExhaustion, bool] | None = None,
+        excluded_routes: set[tuple[str, str]] | None = None,
     ) -> None:
         """Move the attempt to its terminal state and the task after it (09, 16).
 
@@ -6435,7 +6847,9 @@ class Supervisor:
         before the retry count and never reaches pool accounting.
         `pool_mark` is the exhaustion mark this exit wrote and whether it opened the
         pool's exhaustion (hades #378): the one wake the refusal raises names the pool
-        and its reset, whichever path the attempt takes from here."""
+        and its reset, whichever path the attempt takes from here. `excluded_routes`
+        is the model a model-only refusal excluded (hades #373): the pool is unmarked
+        and the reroute stays inside it."""
         execution = uow.executions.get(attempt.execution_id, for_update=True)
         task = uow.tasks.get(attempt.task_id, for_update=True)
         assert execution is not None and task is not None
@@ -6458,7 +6872,10 @@ class Supervisor:
                 EventKind.ATTEMPT_FAILED,
                 payload={"exit_class": exit_class.value, "local_cap": local_cap},
             )
-        elif exit_class is ExitClass.COMPLETED and claim_ok:
+        elif exit_class in {ExitClass.COMPLETED, ExitClass.ENDED_BY_BUDGET}:
+            # hades #498: the worker returned work; whether its paperwork parsed is for
+            # the reviewer, and the gates judge the work. A budget end with commits is
+            # a normal end.
             move_attempt(
                 uow, self._clock, attempt, AttemptState.SUCCEEDED, EventKind.ATTEMPT_SUCCEEDED
             )
@@ -6474,9 +6891,6 @@ class Supervisor:
                 payload={"blocked_reason": blocked_reason} if blocked_reason else None,
             )
         else:
-            if exit_class is ExitClass.COMPLETED and not claim_ok:
-                attempt.exit_class = ExitClass.COMPLETED_WITHOUT_REPORT
-                exit_class = attempt.exit_class
             move_attempt(
                 uow,
                 self._clock,
@@ -6567,7 +6981,9 @@ class Supervisor:
                 if pool_mark is not None and pool_mark[1]:
                     self._wake_pool_exhausted(uow, task, attempt, pool_mark[0])
                 return
-            self._handle_quota_exit(uow, task, execution, attempt, pool_mark=pool_mark)
+            self._handle_quota_exit(
+                uow, task, execution, attempt, pool_mark=pool_mark, excluded_routes=excluded_routes
+            )
             return
         retryable = retryable_exit(exit_class, execution.retry_on)
         if attempt.termination_reason == TERMINATION_REFUSED:

@@ -73,12 +73,23 @@ async def test_crash_no_retry(client: TestClient, supervisor: Supervisor) -> Non
     assert "execution_failed" in kinds and "task_retry_scheduled" not in kinds
 
 
-async def test_completed_without_report(client: TestClient, supervisor: Supervisor) -> None:
+async def test_a_clean_exit_with_commits_and_no_report_is_completed(
+    client: TestClient, supervisor: Supervisor
+) -> None:
+    """hades #498: the worker returned work, so the attempt is `completed` and the
+    missing report is for the reviewer, never `completed_without_report`."""
     task_id = submit_and_start(client, "crucible-worker:fake-succeed-noreport")
-    assert await run_to_settled(supervisor, client, task_id) == "pre_pr_gates_failed"
+    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
     (attempt,) = _attempts(client, task_id)
-    assert attempt["exit_class"] == "completed_without_report" and attempt["state"] == "failed"
+    assert attempt["exit_class"] == "completed" and attempt["state"] == "succeeded"
     assert "report_parsed" not in event_kinds(client, task_id)
+    summary = client.get(f"/v1/tasks/{task_id}").json()["gate_summary"]
+    assert summary["failing"] == []
+    assert "report_present" in {item["gate"] for item in summary["for_reviewer"]}
+    record = client.get(f"/v1/attempts/{attempt['id']}/report").json()
+    assert record["parsed_ok"] is False
+    assert record["document"]["composed"]["by"] == "hades"
+    assert record["document"]["composed"]["worker_report"]["status"] == "absent"
 
 
 async def test_blocked_exit_75(client: TestClient, supervisor: Supervisor) -> None:
@@ -284,9 +295,12 @@ async def test_report_with_secret_is_redacted(
     assert await run_to_settled(supervisor, client, task_id) == "pre_pr_gates_failed"
     (attempt,) = _attempts(client, task_id)
     stored = client.get(f"/v1/attempts/{attempt['id']}").json()["report"]
-    assert stored["parsed_ok"] is False and stored["document"] == {"redacted": True}
+    assert stored["parsed_ok"] is False and stored["document"]["redacted"] is True
+    assert "summary" not in stored["document"] or "kkkk" not in stored["document"]["summary"]
     assert "kkkk" not in client.get(f"/v1/attempts/{attempt['id']}").text
-    assert attempt["exit_class"] == "completed_without_report"
+    # hades #498: the worker returned work; the redacted report is the reviewer's and
+    # the secret is the blocking no_secrets failure.
+    assert attempt["exit_class"] == "completed"
 
 
 async def test_an_oom_killed_worker_is_environment_and_retries(
@@ -310,7 +324,9 @@ async def test_a_report_that_does_not_parse_is_a_parse_failure_not_no_report(
     """07 (found live): the file was there; the record says it did not parse, and only
     a missing file reads as "without report"."""
     task_id = submit_and_start(client, "crucible-worker:fake-bad-report")
-    assert await run_to_settled(supervisor, client, task_id) == "pre_pr_gates_failed"
+    # hades #498: the parse failure is advisory; the work gates pass, so the task waits
+    # for the reviewer with the parse problem listed.
+    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
     events = client.get(f"/v1/tasks/{task_id}/events", params={"limit": 200}).json()["items"]
     kinds = [e["kind"] for e in events]
     assert "report_parse_failed" in kinds
@@ -318,4 +334,4 @@ async def test_a_report_that_does_not_parse_is_a_parse_failure_not_no_report(
     assert collected["payload"]["report_present"] is True
     assert collected["payload"]["report_parsed"] is False
     (attempt,) = _attempts(client, task_id)
-    assert attempt["exit_class"] == "completed_without_report"
+    assert attempt["exit_class"] == "completed"
