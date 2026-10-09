@@ -50,14 +50,16 @@ class ProviderName(StrEnum):
 class RepositoryRef(StrictModel):
     name: str = Field(min_length=1)
     base_ref: str = Field(min_length=1)
-    work_branch: str = Field(min_length=1)
+    work_branch: str | None = None
 
     @field_validator("base_ref", "work_branch")
     @classmethod
-    def _usable_ref(cls, value: str) -> str:
+    def _usable_ref(cls, value: str | None) -> str | None:
         """A ref reaches a command line in the preparer, the collector and the
         publisher. It is quoted everywhere it is used, and it is also refused here if
         it is not a plain ref: defence in depth, not either one alone."""
+        if value is None:
+            return None
         problem = ref_problem(value)
         if problem is not None:
             raise ValueError(problem)
@@ -458,12 +460,19 @@ class TaskContractV1(StrictModel):
             )
         return self
 
+    @property
+    def resolved_work_branch(self) -> str:
+        """hades #564: the task's branch, `crucible/<external_id>` when the contract omits
+        `repository.work_branch`. The one place that shape is written: submission fills
+        it in (`parse_contract`), so every stored contract names its branch."""
+        return self.repository.work_branch or f"crucible/{self.external_id}"
+
     def external_identity_fields(self) -> tuple[str, str, str, str, int]:
         """What a correction version must keep identical to the version it corrects."""
         return (
             self.external_id,
             self.repository.name,
-            self.repository.work_branch,
+            self.resolved_work_branch,
             self.policy.name,
             self.policy.version,
         )

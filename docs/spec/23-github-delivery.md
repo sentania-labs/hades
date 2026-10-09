@@ -118,8 +118,14 @@ review is recorded, and Foundry's `AcceptanceResult` for that head is
    `work_branch` to the derived push remote. Hades owns its work branches
    (issue 403). Fetch the remote branch first. An existing tip must be a
    confirmed `branch_pushed` head for this task, repository and branch, or
-   carry a nonempty `Crucible-Attempt:` trailer. Otherwise refuse publication
-   and name the foreign commit SHA and author, even for a fast-forward.
+   carry a `Crucible-Attempt:` trailer naming this task, as the sealed
+   bundle's own commits name it. Otherwise refuse publication and name the
+   foreign commit SHA and author, even for a fast-forward. A branch belongs
+   to one task (hades #564): a tip whose trailer names another task is
+   foreign although Hades pushed it, and when the tip is the head of a pull
+   request (a `refs/pull/<n>/head` on the remote, read with `git ls-remote`;
+   the publisher makes no API call) the refusal names that task and pull
+   request, and the task goes to `publish_failed` with that detail.
    A Hades tip is replaced whether or not the accepted head descends from
    it: a quota checkpoint is ungated partial work, and the accepted head is
    the gated result that supersedes it. Push with an explicit

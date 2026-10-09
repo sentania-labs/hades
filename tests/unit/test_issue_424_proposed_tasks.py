@@ -88,6 +88,17 @@ class _ProposalTasks(_Tasks):
             None,
         )
 
+    def search(self, *, repository_id: str | None, after_id: str | None, **_: Any) -> list[Task]:
+        """hades #564: submission reads a repository's tasks for branch ownership."""
+        return sorted(
+            (
+                t
+                for t in self.rows.values()
+                if repository_id in (None, t.repository_id) and (after_id or "") < t.id
+            ),
+            key=lambda t: t.id,
+        )
+
 
 class _Principals:
     def __init__(self) -> None:
