@@ -80,7 +80,13 @@ def test_the_egress_rows_name_each_probed_host() -> None:
     view = SimpleNamespace(
         executions=[SimpleNamespace(attempts=[SimpleNamespace(id="A1", egress_probe=PROBE)])]
     )
-    assert board_page.egress_rows(view) == [
-        ["A1", "github.com", "reachable"],
-        ["A1", "pypi.org", "unreachable (curl 28: Timeout)"],
-    ]
+    rows = board_page.egress_rows(view)
+    assert len(rows) == 2
+    assert rows[0]["attempt_id"] == "A1"
+    assert rows[0]["host"] == "github.com"
+    assert rows[0]["result"] == "reachable"
+    assert rows[1]["host"] == "pypi.org"
+    assert rows[1]["result"] == "unreachable (curl 28: Timeout)"
+    assert rows[0]["ms"] is None
+    assert rows[0]["detail"] == ""
+    assert rows[0]["recorded_at"] == NOW.isoformat()
