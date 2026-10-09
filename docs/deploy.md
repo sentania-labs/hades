@@ -47,20 +47,28 @@ helm upgrade --install hades \
   --values values-lab.yaml
 ```
 
-The chart accepts service and worker repository, tag, and digest pins; bundled or
-external PostgreSQL through a Secret name; ingress class, host, and TLS Secret name;
-PVC storage classes and sizes; worker egress names and quota; GitHub App and first-run
-Secret names; and room runner concurrency, workspace, and timeout settings. It never
-accepts or creates secret values. Create the named Kubernetes Secrets separately.
+The chart accepts object name and namespace overrides that also reach the settings
+ConfigMap; service and worker repository, tag, and digest pins (a tag other than
+`latest` needs a digest); bundled or external PostgreSQL through a Secret name, with
+its user and database; ingress class, host, and TLS Secret name; a storage class and
+size per claim; the cluster's DNS, local endpoint, time zone, PID limit and pull Secret;
+the attempt provider's workspace, concurrency, and timeout settings under `provider`;
+a `buildkit.enabled` toggle, off by default; worker egress names and quota; GitHub App
+and first-run Secret names; room runner settings; and an `extraSettings` map for any
+other `CRUCIBLE_*` setting. It never accepts or creates secret values. Create the
+named Kubernetes Secrets separately. [deployment.md](deployment.md#the-helm-chart)
+lists every value against the overlay placeholder it replaces.
 
-Run `make chart` to lint and validate the default and lab-like renders. Run
-`make chart-sync-check` to compare chart objects with the kustomize base. Both targets
+Run `make chart` to lint and validate the default, lab-like and override renders and
+check that the names and settings follow the values. Run `make chart-sync-check` to
+compare chart objects, rendered with `tools/chart/values-base.yaml`, with the kustomize
+base. Both targets
 name any missing command directly. Component manifests live directly in
 `charts/hades/templates/`; each document starts with a standalone `---` line.
 The structure unit test guards this layout, and the CI chart job supplies the real
 Helm lint, render, schema validation, and kustomize comparison proof.
 
-Helm names the migration Job `crucible-migrate-REVISION`, creating a fresh Job on
+Helm names the migration Job `crucible-migrate-REVISION` (the prefix follows `nameOverride`), creating a fresh Job on
 install and each upgrade, including image tag or digest changes. Helm removes the
 previous revision's Job as an obsolete release resource. This is a regular Job so
 its bundled database, ConfigMap and RBAC can be installed together. The services

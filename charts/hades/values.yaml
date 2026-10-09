@@ -1,3 +1,18 @@
+# Object names and namespaces. Empty keeps the kustomize base's layout: objects named
+# `crucible-*` in `crucible` and `crucible-workers`. The names also reach the settings the
+# application reads (KUBERNETES__NAMESPACE, WORKERS_NAMESPACE, SERVICE_ACCOUNT,
+# CACHE_CLAIM and CREDENTIAL_SECRETS), so an override renames the deployment, not only
+# its metadata. `helm --namespace` holds only Helm's release record: the chart creates
+# its own namespaces, so set namespaceOverride instead. Hades's BuildKit keeps
+# `crucible-buildkit` whatever these say, because the provider names it as a constant.
+# At most 43 characters: `<name>-postgres` must leave room for its StatefulSet's
+# revision hash inside a 63-character label.
+nameOverride: ""
+# Empty: the name above. The control plane's namespace. At most 55 characters while
+# workersNamespaceOverride is empty, so `<namespace>-workers` stays within 63.
+namespaceOverride: ""
+# Empty: the control plane's namespace with `-workers` after it. At most 63 characters.
+workersNamespaceOverride: ""
 serviceImage:
   repository: ghcr.io/sentania-labs/crucible
   tag: latest
@@ -10,6 +25,10 @@ postgres:
   bundled: true
   image: postgres:16@sha256:f1c3376c26f2609ab9f29f71f824103fe2fcd8ee0346485cb6122a4f93df6f94
   databaseSecretName: crucible-database
+  # The bundled server's role and database. The DSN in the database Secret's `url` names
+  # the same two.
+  user: crucible
+  database: crucible
   storageClass: ""
   size: 20Gi
 ingress:
@@ -17,11 +36,51 @@ ingress:
   className: ""
   host: crucible.invalid
   tlsSecretName: ""
+# Each claim takes its own class; an empty one falls back to storageClass, and an empty
+# storageClass leaves the cluster's default class to answer.
 storage:
   storageClass: ""
+  # ReadWriteMany: the api serves what the supervisor writes.
+  artifactsStorageClass: ""
   artifactsSize: 50Gi
+  # ReadWriteOnce, in the workers namespace.
+  referenceCacheStorageClass: ""
   referenceCacheSize: 20Gi
+  # ReadWriteOnce, in `crucible-buildkit`; rendered only when buildkit.enabled.
+  buildkitCacheStorageClass: ""
   buildkitCacheSize: 50Gi
+# Hades's rootless BuildKit (hades #475): a namespace that enforces the `privileged`
+# Pod Security level, a Deployment pulled from Docker Hub and its cache claim. Off by
+# default, because a new privileged namespace is the cluster operator's call.
+buildkit:
+  enabled: false
+# Facts about the cluster the provider's NetworkPolicies and Pods depend on (26).
+cluster:
+  # The cluster DNS Service address: `kubectl -n kube-system get service kube-dns`.
+  # 10.96.0.10 on kind and kubeadm, 10.43.0.10 on k3s. A wrong value is a worker with no
+  # name resolution.
+  dnsIp: 10.96.0.10
+  # The resolver's pods, allowed on port 53 beside the address above (crucible#91).
+  dnsNamespace: kube-system
+  dnsPodLabels:
+    k8s-app: kube-dns
+  # The operator's IANA zone. Times are stored in UTC; this is only how they render (01).
+  renderTimezone: UTC
+  # An in-cluster local endpoint as the pods that take its connections (crucible#91).
+  # Empty namespace: the endpoint is outside the cluster and the private ranges in
+  # cidrs are the only way in. Port 0 is the endpoint URL's own port.
+  localEndpoint:
+    namespace: ""
+    podLabels: {}
+    port: 0
+    cidrs: []
+  # The node's pod PID limit, attested by the operator when the readiness canary cannot
+  # read it (95). 0 leaves the setting out.
+  podPidLimitOverride: 0
+  # A pull Secret for the service and worker images, in both namespaces. Empty: the
+  # packages are public. It is set on the control-plane Pods and handed to the provider
+  # for every attempt Pod. Any Secret name, periods included (`ghcr.io-pull`).
+  imagePullSecret: ""
 egress:
   allowlist: []
 workerQuota:
@@ -37,6 +96,17 @@ secrets:
   githubAppPrivateKey: ""
   githubAppWebhook: ""
   firstRunToken: crucible-first-run-admin
+# The Kubernetes attempt provider (26): each attempt's workspace claim, how many attempts
+# run at once, and how long each role may take.
+provider:
+  # Empty: the cluster's default class.
+  workspaceStorageClass: ""
+  workspaceSize: 20Gi
+  maxConcurrency: 3
+  launchTimeoutSeconds: 300
+  prepareTimeoutSeconds: 900
+  collectorTimeoutSeconds: 900
+  verifierTimeoutSeconds: 3600
 roomRunner:
   apiUrl: ""
   provider: kubernetes
@@ -46,9 +116,6 @@ roomRunner:
   defaultHarness: claude_code
   defaultModel: claude-opus-5-5
   models: [claude-opus-5-5]
-  workspaceSize: 20Gi
-  maxConcurrency: 3
-  launchTimeoutSeconds: 300
-  prepareTimeoutSeconds: 900
-  collectorTimeoutSeconds: 900
-  verifierTimeoutSeconds: 3600
+# Any other CRUCIBLE_* setting, merged into the settings ConfigMap last, so a key here
+# replaces the chart's own value for it. Values are strings, as a ConfigMap's are.
+extraSettings: {}

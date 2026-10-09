@@ -36,6 +36,9 @@ deploy/kubernetes/
   argocd/application.yaml  the Application template, automated sync off
 ```
 
+The same deployment is also a Helm chart, `charts/hades`, derived from `base` and
+published as `oci://ghcr.io/sentania-labs/charts/hades`; see "The Helm chart" below.
+
 The manifests in this repository are examples, and `base/kustomization.yaml` tracks
 `latest` on purpose (spec 13, spec 24). A real deployment is a copy: lab-admin copies
 the **whole `deploy/kubernetes` tree** (`base`, `overlays`, `secret-shapes`, `argocd`) into
@@ -583,3 +586,67 @@ volumes are there, the images pull, and a real task completes on the Kubernetes 
 What kind cannot prove: anything cluster-specific. No ReadWriteMany storage, no ingress
 controller, no certificate issuer, no lab network, no DNS. Those are seen for the first
 time on the lab cluster, which is why the first sync is manual.
+
+## The Helm chart
+
+The same deployment is published as a Helm chart, `charts/hades` in this repository and
+`oci://ghcr.io/sentania-labs/charts/hades` in the registry. The release workflow packages
+and pushes it with every release tag, at the release's own version (`helm package
+--version <version> --app-version <version>`), so the chart version and the image
+version are the same number:
+
+```sh
+helm show values oci://ghcr.io/sentania-labs/charts/hades --version <version>
+helm upgrade --install hades oci://ghcr.io/sentania-labs/charts/hades \
+  --version <version> --values <your-values>.yaml
+```
+
+The kustomize base above stays the source: the chart is derived from it, and
+`make chart-sync-check` fails when the two drift (below). Argo CD can render the chart
+the same way it renders the overlay; the first sync is still a person looking at the
+diff. The chart never creates or accepts a credential value. The Secrets in "The
+Secrets" above are provisioned separately and the chart only names them
+(`postgres.databaseSecretName`, `secrets.*`).
+
+`charts/hades/values-lab-example.yaml` is the lab's shape as values: the product names
+the lab runs (`hades`, `hades-workers`), k3s's DNS address, separate storage classes
+per claim, BuildKit off, and the v0.12.0 images pinned by tag and digest from that
+release's body. Copy it, replace every example value, and keep the pin current the same
+way as `REPLACE_ME_CRUCIBLE_TAG` and `REPLACE_ME_CRUCIBLE_DIGEST` above. The values, by
+what they replace in the overlay:
+
+| Values | What they set |
+|---|---|
+| `nameOverride` | the prefix of every object name (`<name>-api`, `<name>-settings`, `<name>-worker`, `<name>-reference-cache`, `<name>-harness-<harness>` and the rest). Empty is `crucible`, the base's names. It also reaches the settings the service reads: `KUBERNETES__SERVICE_ACCOUNT`, `KUBERNETES__CACHE_CLAIM` and `KUBERNETES__CREDENTIAL_SECRETS`. At most 43 characters, so `<name>-postgres` and its StatefulSet's revision hash fit a 63-character label; the schema refuses longer |
+| `namespaceOverride`, `workersNamespaceOverride` | the control plane's namespace (empty: the name) and the workers namespace (empty: the control plane's with `-workers` after it), and `KUBERNETES__NAMESPACE` and `KUBERNETES__WORKERS_NAMESPACE` with them. The chart creates both namespaces itself, so `helm --namespace` only says where Helm keeps its release record. The `app.kubernetes.io/name: crucible` labels do not change, so an existing Deployment's selector still matches. Each is at most 63 characters, and `namespaceOverride` at most 55 while `workersNamespaceOverride` is empty, so the default `<namespace>-workers` fits |
+| `serviceImage`, `workerImage` | repository, tag and digest. The schema refuses a tag other than `latest` without a `sha256:` digest |
+| `cluster.dnsIp`, `cluster.dnsNamespace`, `cluster.dnsPodLabels` | `REPLACE_ME_CLUSTER_DNS_IP` and the resolver's pods. 10.96.0.10 is kind's and kubeadm's; k3s uses 10.43.0.10 |
+| `cluster.renderTimezone` | `REPLACE_ME_RENDER_TIMEZONE`, an IANA zone such as `America/Chicago` |
+| `cluster.localEndpoint.namespace`, `.podLabels`, `.port`, `.cidrs` | the `REPLACE_ME_LOCAL_ENDPOINT_*` placeholders (see "Cilium and an in-cluster LiteLLM") |
+| `cluster.podPidLimitOverride` | `kubernetes.pod_pid_limit_override` (checklist item 4); 0 leaves it out |
+| `cluster.imagePullSecret` | `REPLACE_ME_IMAGE_PULL_SECRET`: the setting the provider gives every attempt Pod, and `imagePullSecrets` on the api, supervisor and migration Pods. Empty when the packages are public. It, `postgres.databaseSecretName` and the `secrets` names take any Secret name, periods included |
+| `provider.workspaceStorageClass`, `provider.workspaceSize`, `provider.maxConcurrency`, `provider.*TimeoutSeconds` | the attempt provider: each attempt's workspace claim (the `KUBERNETES__STORAGE_CLASS` half of `REPLACE_ME_STORAGE_CLASS_RWO`), how many attempts run at once, and the launch, prepare, collector and verifier timeouts. `roomRunner` is only the rooms |
+| `storage.artifactsStorageClass`, `storage.referenceCacheStorageClass`, `storage.buildkitCacheStorageClass`, `postgres.storageClass` | one class per claim: `REPLACE_ME_STORAGE_CLASS_RWX` for the artifact root, a `ReadWriteOnce` class for the others. An empty per-claim class falls back to `storage.storageClass`, and an empty one of those to the cluster's default |
+| `postgres.user`, `postgres.database` | the bundled server's role and database; the DSN in the database Secret names the same two |
+| `buildkit.enabled` | Hades's BuildKit ("Hades's image builder" above). Off by default: it creates `crucible-buildkit`, a namespace at the `privileged` Pod Security level, which is the cluster operator's decision. Its names stay `crucible-buildkit` whatever `nameOverride` says, because the provider addresses the builder by that constant; its NetworkPolicy admits the workers namespace the values name |
+| `workerQuota.*` | the `crucible-workers` ResourceQuota ("ResourceQuota sizing" above) |
+| `extraSettings` | any other `CRUCIBLE_*` setting, as a string, merged into the settings ConfigMap last, so a key here replaces the chart's own value for it (for example `CRUCIBLE_SUPERVISOR__HOLDER`) |
+
+Helm merges a map value into the chart's default, so a `cluster.dnsPodLabels` or
+`cluster.localEndpoint.podLabels` that should lose the default's key sets that key to
+`null`.
+
+The migration Job is named `<name>-migrate-<revision>`. Under `helm upgrade` the
+revision counts, so each upgrade creates a fresh Job. Argo CD renders the chart with
+`helm template`, where the revision is always 1, and the Job's `BeforeHookCreation`
+hook policy is what replaces it on every sync, the same as the base's Job.
+
+`make chart` lints the chart and validates the default, the lab example and an
+every-override render with kubeconform, refuses a pinned tag without a digest, and runs
+`tools/chart/flow.py` on the renders to check that the names, namespaces and settings
+follow the values. `make chart-sync-check` renders the chart with
+`tools/chart/values-base.yaml`, lab-like values that reproduce the base (BuildKit on,
+the base's names written out as overrides), and compares every object with
+`kubectl kustomize deploy/kubernetes/base`; it then compares the chart's own defaults,
+which are the base without BuildKit. Both need `helm`, which the worker image does not
+carry, so the CI `chart` job is where they run.

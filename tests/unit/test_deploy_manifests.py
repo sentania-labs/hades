@@ -53,7 +53,14 @@ SUPERVISOR_ROLE_RULES = {
     ("", "events"): {"get", "list"},
     ("", "secrets"): {"create", "get", "list", "watch", "patch", "delete"},
     ("batch", "jobs"): {"create", "get", "list", "watch", "delete"},
-    ("networking.k8s.io", "networkpolicies"): {"create", "get", "list", "watch", "delete"},
+    ("networking.k8s.io", "networkpolicies"): {
+        "create",
+        "get",
+        "list",
+        "watch",
+        "patch",
+        "delete",
+    },
 }
 
 PSA_LABELS = {
