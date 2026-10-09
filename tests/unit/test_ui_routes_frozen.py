@@ -14,6 +14,7 @@ FROZEN_ROUTES = [
     ("GET", "/ui/board/{task_id}"),
     ("GET", "/ui/bootstrap"),
     ("GET", "/ui/bootstrap/{import_id}"),
+    ("GET", "/ui/catalog"),
     ("GET", "/ui/credentials"),
     ("GET", "/ui/credentials/{harness}/login"),
     ("GET", "/ui/gateway"),

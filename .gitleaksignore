@@ -7,3 +7,9 @@
 # answer whose body is "MIIfake" between PEM header lines; the next commits assemble the
 # header at run time.
 5ea531a3f273e45c475842235bee1242d94c10c2:tests/unit/test_github_manifest.py:crucible-private-key-header:151
+# FDY-0588: test_catalog uses a synthetic sk-ant-* value to exercise the loader's
+# secret-refusal logic; the value is a test fixture, not a real credential.
+a0a59a16b15fb49d654c74fc275dfa60d33ef9e2:tests/unit/test_catalog.py:crucible-anthropic-oauth-token:70
+# Tree-scan ignore for synthetic secret value on same line.
+tests/unit/test_catalog.py:70:crucible-anthropic-oauth-token
+tests/unit/test_catalog.py:70:crucible-openai-style-key
