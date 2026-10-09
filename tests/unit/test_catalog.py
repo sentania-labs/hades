@@ -18,56 +18,7 @@ from crucible.adapters.catalog.loader import (
 )
 from crucible.adapters.ui.pages import catalog as catalog_page_module
 from crucible.application.admin.catalog import view
-
-
-def _seed_catalog(path: Path) -> Path:
-    """Write a valid seed catalog to *path* and return it."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        """skills:
-  - name: example_analyzer
-    summary: Analyze a text file.
-    owner: platform
-    instructions_path: docs/skills/example-analyzer.md
-  - name: example_summarizer
-    summary: Summarize a document.
-    owner: platform
-    instructions_path: docs/skills/example-summarizer.md
-tools:
-  - name: claude_code
-    kind: cli
-    command: claude
-    credential_ref: claude_code_credential
-    allowed_for: [operator, admin]
-  - name: codex
-    kind: cli
-    command: codex
-    credential_ref: codex_credential
-    allowed_for: [operator, admin]
-  - name: agy
-    kind: cli
-    command: agy
-    credential_ref: agy_credential
-    allowed_for: [operator, admin]
-  - name: hermes
-    kind: cli
-    command: hermes
-    credential_ref: hermes_credential
-    allowed_for: [operator, admin]
-  - name: hades_http_client
-    kind: mcp_server
-    endpoint: https://hades-mcp.internal:8080
-    credential_ref: hades_mcp_credential
-    allowed_for: [operator, admin, observer]
-""",
-        encoding="utf-8",
-    )
-    return path
-
-
-def _secret_value() -> str:
-    """Return a value that matches a secret pattern (sk-ant-*)."""
-    return "sk-ant-api03-abc123def456ghi789jkl012mno345pqr678stuv012wx"
+from crucible.domain.secrets import find_secrets, match_text
 
 
 class TestValidateSkill:
@@ -154,12 +105,15 @@ class TestValidateTool:
         assert any(e.path == "command" for e in errors)
 
     def test_secret_credential_ref_refused(self) -> None:
+        """A credential_ref matching a secret pattern is refused."""
+        # Use a value that matches the anthropic pattern but is a test fixture.
+        value = "sk-ant-test-abc123def456ghi789jkl012mno345pqr678stu012vwx"
         errors = _validate_tool(
             {
                 "name": "x",
                 "kind": "cli",
                 "command": "x",
-                "credential_ref": _secret_value(),
+                "credential_ref": value,
             }
         )
         assert len(errors) > 0
@@ -213,8 +167,57 @@ class TestValidateTool:
 
 
 class TestLoadCatalog:
+    def _make_seed(self, tools_yaml: str, skills_yaml: str = "skills: []") -> Path:
+        """Helper: create a catalog yaml at a temp path."""
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(
+            suffix=".yaml", dir="/tmp", delete=False, mode="w"
+        ) as f:
+            f.write(skills_yaml)
+            f.write("\n")
+            f.write("tools:\n")
+            f.write(tools_yaml)
+            return Path(f.name)
+
     def test_load_seed_catalog(self, tmp_path: Path) -> None:
-        p = _seed_catalog(tmp_path / "catalog.yaml")
+        tools_yaml = """  - name: claude_code
+    kind: cli
+    command: claude
+    credential_ref: claude_code_credential
+    allowed_for: [operator, admin]
+  - name: codex
+    kind: cli
+    command: codex
+    credential_ref: codex_credential
+    allowed_for: [operator, admin]
+  - name: agy
+    kind: cli
+    command: agy
+    credential_ref: agy_credential
+    allowed_for: [operator, admin]
+  - name: hermes
+    kind: cli
+    command: hermes
+    credential_ref: hermes_credential
+    allowed_for: [operator, admin]
+  - name: hades_http_client
+    kind: mcp_server
+    endpoint: https://hades-mcp.internal:8080
+    credential_ref: hades_mcp_credential
+    allowed_for: [operator, admin, observer]
+"""
+        skills_yaml = """skills:
+  - name: example_analyzer
+    summary: Analyze a text file.
+    owner: platform
+    instructions_path: docs/skills/example-analyzer.md
+  - name: example_summarizer
+    summary: Summarize a document.
+    owner: platform
+    instructions_path: docs/skills/example-summarizer.md
+"""
+        p = self._make_seed(tools_yaml, skills_yaml)
         catalog = load_catalog(p)
         assert len(catalog.skills) == 2
         assert len(catalog.tools) == 5
@@ -225,24 +228,20 @@ class TestLoadCatalog:
         assert "agy" in names
         assert "hermes" in names
         assert "hades_http_client" in names
+        p.unlink()
 
     def test_load_secret_credential_refused(self, tmp_path: Path) -> None:
-        secret = _secret_value()
-        tmp_path.mkdir(parents=True, exist_ok=True)
-        p = tmp_path / "catalog.yaml"
-        p.write_text(
-            f"""skills: []
-tools:
-  - name: bad_tool
+        """A tool with a credential_ref that looks like a secret is refused."""
+        tools_yaml = """  - name: bad_tool
     kind: cli
     command: bad
-    credential_ref: {secret}
-""",
-            encoding="utf-8",
-        )
+    credential_ref: sk-ant-test-abc123def456ghi789jkl012mno345pqr678stu012vwx
+"""
+        p = self._make_seed(tools_yaml, "skills: []")
         catalog = load_catalog(p)
         assert len(catalog.errors) > 0
         assert all("refused" in e.message.lower() for e in catalog.errors)
+        p.unlink()
 
     def test_load_empty(self, tmp_path: Path) -> None:
         p = tmp_path / "catalog.yaml"
@@ -255,13 +254,33 @@ tools:
 
 class TestApplicationView:
     def test_view_returns_struct(self, tmp_path: Path) -> None:
-        p = _seed_catalog(tmp_path / "catalog.yaml")
+        tools_yaml = """  - name: claude_code
+    kind: cli
+    command: claude
+    credential_ref: claude_code_credential
+    allowed_for: [operator, admin]
+  - name: hades_http_client
+    kind: mcp_server
+    endpoint: https://hades-mcp.internal:8080
+    credential_ref: hades_mcp_credential
+    allowed_for: [operator, admin, observer]
+"""
+        skills_yaml = """skills:
+  - name: example_analyzer
+    summary: Analyze a text file.
+    owner: platform
+    instructions_path: docs/skills/example-analyzer.md
+  - name: example_summarizer
+    summary: Summarize a document.
+    owner: platform
+    instructions_path: docs/skills/example-summarizer.md
+"""
+        p = self._make_seed(tools_yaml, skills_yaml)
         data = view(p)
         assert "skills" in data
         assert "tools" in data
         assert len(data["skills"]) == 2
         assert len(data["tools"]) == 5
-        # Every skill has used_by
         for s in data["skills"]:
             assert "used_by" in s
             assert s["used_by"] == 0
@@ -269,24 +288,37 @@ class TestApplicationView:
             assert "used_by" in t
             assert t["used_by"] == 0
             assert "credential_ref" in t
+        p.unlink()
 
     def test_mcp_tool_has_endpoint(self, tmp_path: Path) -> None:
-        p = _seed_catalog(tmp_path / "catalog.yaml")
+        tools_yaml = """  - name: hades_http_client
+    kind: mcp_server
+    endpoint: https://hades-mcp.internal:8080
+    credential_ref: hades_mcp_credential
+    allowed_for: [operator, admin, observer]
+"""
+        p = self._make_seed(tools_yaml, "skills: []")
         data = view(p)
         for t in data["tools"]:
-            if t["name"] == "hades_http_client":
-                assert t["kind"] == "mcp_server"
-                assert t["endpoint"] == "https://hades-mcp.internal:8080"
-                assert "command" not in t
+            assert t["kind"] == "mcp_server"
+            assert t["endpoint"] == "https://hades-mcp.internal:8080"
+            assert "command" not in t
+        p.unlink()
 
     def test_cli_tool_has_command(self, tmp_path: Path) -> None:
-        p = _seed_catalog(tmp_path / "catalog.yaml")
+        tools_yaml = """  - name: claude_code
+    kind: cli
+    command: claude
+    credential_ref: claude_code_credential
+    allowed_for: [operator, admin]
+"""
+        p = self._make_seed(tools_yaml, "skills: []")
         data = view(p)
         for t in data["tools"]:
-            if t["name"] == "claude_code":
-                assert t["kind"] == "cli"
-                assert t["command"] == "claude"
-                assert "endpoint" not in t
+            assert t["kind"] == "cli"
+            assert t["command"] == "claude"
+            assert "endpoint" not in t
+        p.unlink()
 
 
 class TestAdminCatalogPage:
@@ -298,16 +330,38 @@ class TestAdminCatalogPage:
         )
 
     def test_catalog_page_renders(self, monkeypatch: Any, tmp_path: Path) -> None:
-        _seed_catalog(tmp_path / "catalog.yaml")
+        tools_yaml = """  - name: claude_code
+    kind: cli
+    command: claude
+    credential_ref: claude_code_credential
+    allowed_for: [operator, admin]
+  - name: hades_http_client
+    kind: mcp_server
+    endpoint: https://hades-mcp.internal:8080
+    credential_ref: hades_mcp_credential
+    allowed_for: [operator, admin, observer]
+"""
+        skills_yaml = """skills:
+  - name: example_analyzer
+    summary: Analyze a text file.
+    owner: platform
+    instructions_path: docs/skills/example-analyzer.md
+  - name: example_summarizer
+    summary: Summarize a document.
+    owner: platform
+    instructions_path: docs/skills/example-summarizer.md
+"""
+        p = self._make_seed(tools_yaml, skills_yaml)
         principal = SimpleNamespace(name="admin", role=SimpleNamespace(value="admin"))
-        monkeypatch.setattr(catalog_page_module, "_require", lambda *_: (principal, "csrf"))
+        monkeypatch.setattr(
+            catalog_page_module, "_require", lambda *_: (principal, "csrf")
+        )
         uow_mock = SimpleNamespace()
         ctx: Any = SimpleNamespace()
 
         req = self._make_request("/ui/catalog")
         response = catalog_page_module.catalog_page(req, ctx, uow_mock)
         body = bytes(response.body).decode()
-
         assert "Catalog" in body
         assert "Skills" in body
         assert "Tools" in body
@@ -315,17 +369,68 @@ class TestAdminCatalogPage:
         assert "claude_code" in body
         assert "hades_http_client" in body
         assert "read-only" in body.lower()
+        p.unlink()
 
-    def test_catalog_page_shows_all_harnesses(self, monkeypatch: Any, tmp_path: Path) -> None:
-        _seed_catalog(tmp_path / "catalog.yaml")
+    def test_catalog_page_shows_all_harnesses(
+        self, monkeypatch: Any, tmp_path: Path
+    ) -> None:
+        tools_yaml = """  - name: claude_code
+    kind: cli
+    command: claude
+    credential_ref: claude_code_credential
+    allowed_for: [operator, admin]
+  - name: codex
+    kind: cli
+    command: codex
+    credential_ref: codex_credential
+    allowed_for: [operator, admin]
+  - name: agy
+    kind: cli
+    command: agy
+    credential_ref: agy_credential
+    allowed_for: [operator, admin]
+  - name: hermes
+    kind: cli
+    command: hermes
+    credential_ref: hermes_credential
+    allowed_for: [operator, admin]
+"""
+        p = self._make_seed(tools_yaml, "skills: []")
         principal = SimpleNamespace(name="admin", role=SimpleNamespace(value="admin"))
-        monkeypatch.setattr(catalog_page_module, "_require", lambda *_: (principal, "csrf"))
+        monkeypatch.setattr(
+            catalog_page_module, "_require", lambda *_: (principal, "csrf")
+        )
         uow_mock = SimpleNamespace()
         ctx: Any = SimpleNamespace()
 
         req = self._make_request("/ui/catalog")
         response = catalog_page_module.catalog_page(req, ctx, uow_mock)
         body = bytes(response.body).decode()
-
         for harness in ("claude_code", "codex", "agy", "hermes"):
             assert harness in body
+        p.unlink()
+
+
+class TestSecretDetection:
+    """Tests for the secret-pattern scanner used by the loader."""
+
+    def test_sk_ant_pattern_detected(self) -> None:
+        hit = match_text(
+            "sk-ant-test-abc123def456ghi789jkl012mno345pqr678stu012vwx"
+        )
+        assert hit is not None
+        assert hit.pattern == "anthropic_oauth_token"
+
+    def test_ghp_pattern_detected(self) -> None:
+        hit = match_text("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgh")
+        assert hit is not None
+        assert hit.pattern == "github_token"
+
+    def test_jwt_pattern_detected(self) -> None:
+        hit = match_text("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.abc")
+        assert hit is not None
+        assert hit.pattern == "jwt"
+
+    def test_no_match_for_plain_name(self) -> None:
+        hit = match_text("just_a_plain_credential_name")
+        assert hit is None
