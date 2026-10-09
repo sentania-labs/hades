@@ -14,6 +14,7 @@ from crucible.adapters.ui.render import (
     _document_section,
     _duration_words,
     _page,
+    _redirect,
     _routing_policy_details,
 )
 from crucible.adapters.ui.session import _require
@@ -25,6 +26,7 @@ from crucible.application.admin import routing, routing_preference
 from crucible.application.admin.context import guard_mutation
 from crucible.application.errors import ConflictError, ContractValidationError
 from crucible.application.policies import put_policy, put_routing_policy
+from crucible.application.routing import RoutingResolution, resolve_routing
 from crucible.contracts.policy import routing_model_name
 from crucible.domain.cluster_egress import format_labels, parse_labels
 from crucible.domain.entities import Principal, Role
@@ -45,13 +47,10 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     live = [item for item in versions if item.retired_at is None]
     policy = max(live, key=lambda item: item.version) if live else None
     routing_ref = ((policy.document.get("routing") or {}).get("policy") or {}) if policy else {}
-    routing_record = (
-        uow.routing_policies.get(
-            str(routing_ref.get("name", "")), int(routing_ref.get("version", 0))
-        )
-        if routing_ref
-        else None
-    )
+    # hades #605: the routing version tasks route with now, which an unpinned policy
+    # takes from the newest version not retired, not the one its document names.
+    resolved = resolve_routing(uow, policy.document) if policy else None
+    routing_record = uow.routing_policies.get(resolved.name, resolved.version) if resolved else None
     assert ctx.admin is not None
     exhaustion = routing.list_exhaustions(ctx.admin, uow)
     local = routing.local_endpoint_view(uow)
@@ -83,13 +82,7 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             f"{policy.name} version {policy.version}" if policy else "none",
             "",
         ],
-        [
-            "Routing policy",
-            f"{routing_ref.get('name')} version {routing_ref.get('version')}"
-            if routing_ref
-            else "none",
-            "",
-        ],
+        ["Routing policy", _routing_in_force(resolved), ""],
         [
             "Local gateway",
             {
@@ -598,6 +591,18 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     )
 
 
+def _routing_in_force(resolved: RoutingResolution | None) -> Any:
+    """hades #605: the 'In force' row's routing value: the version tasks route with now,
+    and why that one (pinned, or following the newest version not retired)."""
+    if resolved is None:
+        return "none"
+    return {
+        "kind": "note",
+        "value": f"{resolved.name} version {resolved.version}",
+        "hint": resolved.why,
+    }
+
+
 def _versions_section(uow: UoW, name: str) -> dict[str, Any]:
     """hades #437: each routing version beside what it changed, who published it and
     why, so a publish that flips a model or a pool cap is seen, not found a day later."""
@@ -607,7 +612,8 @@ def _versions_section(uow: UoW, name: str) -> dict[str, Any]:
         "note": (
             "Newest first. A version that enables or disables a model or changes a pool "
             "cap names the decision it supersedes in its reason, and wakes the "
-            "orchestrator with this change."
+            "orchestrator with this change. What changed names each entry whose enabled "
+            "flag, weight, pool or tiers the version overrides."
         ),
         "empty": "No routing version is recorded.",
         "columns": ["Version", "Published", "By", "Reason", "What changed"],
@@ -624,6 +630,36 @@ def _versions_section(uow: UoW, name: str) -> dict[str, Any]:
             for item in history
         ],
     }
+
+
+def _upload_words(
+    name: str,
+    version: int,
+    previous_version: int | None,
+    overrides: list[dict[str, Any]],
+    reason: str,
+    in_force: bool,
+) -> str:
+    """hades #606: what an uploaded routing version overrides, and the reason given."""
+    against = (
+        f"against version {previous_version}"
+        if previous_version is not None
+        else "as the first version"
+    )
+    changed = (
+        "; ".join(routing.override_words(item) for item in overrides)
+        if overrides
+        else "no entry's enabled flag, weight, pool or tiers change"
+    )
+    applies = (
+        "Projects that follow routing unpinned route with it from now on."
+        if in_force
+        else "It is not the version in force."
+    )
+    return (
+        f"Uploaded routing {name} version {version} {against}: overrides {changed}. "
+        f"Reason: {reason or 'none given'}. {applies}"
+    )
 
 
 def _capacity_words(capacity: dict[str, Any]) -> str:
@@ -809,19 +845,31 @@ async def _actions(
             operation=action,
         )
         if action == "routing-upload":
+            name, version = form.get("name", ""), int(form.get("version", "0"))
+            previous_version, overrides = routing.upload_overrides(
+                uow, name=name, version=version, document=document
+            )
             put_routing_policy(
                 uow,
                 ctx.clock,
                 principal=principal,
-                name=form.get("name", ""),
-                version=int(form.get("version", "0")),
+                name=name,
+                version=version,
                 document=document,
                 reason=audited_reason,
+                extra={"previous_version": previous_version, "overrides": overrides},
+            )
+            in_force = routing.sync_upload_egress(ctx.admin, uow, name=name, version=version)
+            uow.commit()
+            return _redirect(
+                form,
+                _upload_words(name, version, previous_version, overrides, audited_reason, in_force),
             )
         else:
             document.setdefault("routing", {}).setdefault("policy", {})["pinned"] = (
                 form.get("routing_pinned") == "true"
             )
+            before = routing.routing_in_force(uow)
             put_policy(
                 uow,
                 ctx.clock,
@@ -837,6 +885,7 @@ async def _actions(
                     and adapter.credential_spec() is not None
                 },
             )
+            routing.sync_policy_egress(ctx.admin, uow, before=before)
     return None
 
 

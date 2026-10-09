@@ -27,6 +27,8 @@ FROZEN_ROUTES = [
     # hades #208: the Admin Memory page, two tabs over the shared store and the ledger.
     ("GET", "/ui/memory"),
     ("GET", "/ui/personas"),
+    # hades #606: the Admin policies page, administrators only, no navigation link yet.
+    ("GET", "/ui/policies"),
     ("GET", "/ui/repositories"),
     ("GET", "/ui/retention"),
     ("GET", "/ui/room"),
@@ -91,6 +93,8 @@ FROZEN_ACTIONS = [
     "login-code",
     "login-finish",
     "login-start",
+    # hades #606: publish the Admin policies page's edit as the next version.
+    "policy-publish",
     "policy-upload",
     "repository-register",
     # hades #265: the Repositories page's picker registers its ticked repositories together.
