@@ -7,6 +7,13 @@
 # answer whose body is "MIIfake" between PEM header lines; the next commits assemble the
 # header at run time.
 5ea531a3f273e45c475842235bee1242d94c10c2:tests/unit/test_github_manifest.py:crucible-private-key-header:151
-# FDY-0588: test_catalog uses a synthetic sk-ant-* value to exercise the loader's
-# secret-refusal logic; the value is a test fixture, not a real credential.
-25cc0eb4d526b2d136338e07e305626a70a5a3a9:tests/unit/test_catalog.py:crucible-anthropic-oauth-token:70
+# FDY-0588: earlier commit iterations on this branch used synthetic sk-ant-* values
+# in test fixtures; the current tree (9571ce16) no longer carries them.
+ab1c64bae84f5c87a2d4ee566b5ae944254592d5:tests/unit/test_catalog.py:crucible-anthropic-oauth-token:110
+ab1c64bae84f5c87a2d4ee566b5ae944254592d5:tests/unit/test_catalog.py:crucible-anthropic-oauth-token:238
+ab1c64bae84f5c87a2d4ee566b5ae944254592d5:tests/unit/test_catalog.py:crucible-openai-style-key:110
+ab1c64bae84f5c87a2d4ee566b5ae944254592d5:tests/unit/test_catalog.py:crucible-openai-style-key:238
+ab1c64bae84f5c87a2d4ee566b5ae944254592d5:tests/unit/test_catalog.py:crucible-anthropic-oauth-token:419
+ab1c64bae84f5c87a2d4ee566b5ae944254592d5:tests/unit/test_catalog.py:crucible-openai-style-key:419
+25cc0eb4192b8067042667920f9e23dc67ac410d:tests/unit/test_catalog.py:crucible-anthropic-oauth-token:70
+25cc0eb4192b8067042667920f9e23dc67ac410d:tests/unit/test_catalog.py:crucible-openai-style-key:70

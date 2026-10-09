@@ -7,18 +7,32 @@ the task (hades #354, FDY-0588 probes).
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from crucible.adapters.catalog.loader import (
+    _check_secret,
     _validate_skill,
     _validate_tool,
     load_catalog,
 )
 from crucible.adapters.ui.pages import catalog as catalog_page_module
 from crucible.application.admin.catalog import view
-from crucible.domain.secrets import find_secrets, match_text
+from crucible.domain.secrets import match_text
+
+
+def _make_catalog(skills_yaml: str, tools_yaml: str) -> Path:
+    """Create a temporary catalog YAML and return its path."""
+    with tempfile.NamedTemporaryFile(
+        suffix=".yaml", dir="/tmp", delete=False, mode="w"
+    ) as f:
+        f.write(skills_yaml)
+        f.write("\n")
+        f.write("tools:\n")
+        f.write(tools_yaml)
+        return Path(f.name)
 
 
 class TestValidateSkill:
@@ -105,9 +119,10 @@ class TestValidateTool:
         assert any(e.path == "command" for e in errors)
 
     def test_secret_credential_ref_refused(self) -> None:
-        """A credential_ref matching a secret pattern is refused."""
-        # Use a value that matches the anthropic pattern but is a test fixture.
-        value = "sk-ant-test-abc123def456ghi789jkl012mno345pqr678stu012vwx"
+        """A credential_ref matching a secret pattern is refused by name."""
+        # Use a value that matches the github_token pattern via the loader's
+        # own scanner. ghp_ followed by 36+ alphanumeric chars.
+        value = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
         errors = _validate_tool(
             {
                 "name": "x",
@@ -167,19 +182,6 @@ class TestValidateTool:
 
 
 class TestLoadCatalog:
-    def _make_seed(self, tools_yaml: str, skills_yaml: str = "skills: []") -> Path:
-        """Helper: create a catalog yaml at a temp path."""
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(
-            suffix=".yaml", dir="/tmp", delete=False, mode="w"
-        ) as f:
-            f.write(skills_yaml)
-            f.write("\n")
-            f.write("tools:\n")
-            f.write(tools_yaml)
-            return Path(f.name)
-
     def test_load_seed_catalog(self, tmp_path: Path) -> None:
         tools_yaml = """  - name: claude_code
     kind: cli
@@ -217,7 +219,7 @@ class TestLoadCatalog:
     owner: platform
     instructions_path: docs/skills/example-summarizer.md
 """
-        p = self._make_seed(tools_yaml, skills_yaml)
+        p = _make_catalog(skills_yaml, tools_yaml)
         catalog = load_catalog(p)
         assert len(catalog.skills) == 2
         assert len(catalog.tools) == 5
@@ -231,13 +233,13 @@ class TestLoadCatalog:
         p.unlink()
 
     def test_load_secret_credential_refused(self, tmp_path: Path) -> None:
-        """A tool with a credential_ref that looks like a secret is refused."""
+        """A tool with a credential_ref matching a secret pattern is refused."""
         tools_yaml = """  - name: bad_tool
     kind: cli
     command: bad
-    credential_ref: sk-ant-test-abc123def456ghi789jkl012mno345pqr678stu012vwx
+    credential_ref: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij
 """
-        p = self._make_seed(tools_yaml, "skills: []")
+        p = _make_catalog("skills: []", tools_yaml)
         catalog = load_catalog(p)
         assert len(catalog.errors) > 0
         assert all("refused" in e.message.lower() for e in catalog.errors)
@@ -275,7 +277,7 @@ class TestApplicationView:
     owner: platform
     instructions_path: docs/skills/example-summarizer.md
 """
-        p = self._make_seed(tools_yaml, skills_yaml)
+        p = _make_catalog(skills_yaml, tools_yaml)
         data = view(p)
         assert "skills" in data
         assert "tools" in data
@@ -297,7 +299,7 @@ class TestApplicationView:
     credential_ref: hades_mcp_credential
     allowed_for: [operator, admin, observer]
 """
-        p = self._make_seed(tools_yaml, "skills: []")
+        p = _make_catalog("skills: []", tools_yaml)
         data = view(p)
         for t in data["tools"]:
             assert t["kind"] == "mcp_server"
@@ -312,7 +314,7 @@ class TestApplicationView:
     credential_ref: claude_code_credential
     allowed_for: [operator, admin]
 """
-        p = self._make_seed(tools_yaml, "skills: []")
+        p = _make_catalog("skills: []", tools_yaml)
         data = view(p)
         for t in data["tools"]:
             assert t["kind"] == "cli"
@@ -351,7 +353,7 @@ class TestAdminCatalogPage:
     owner: platform
     instructions_path: docs/skills/example-summarizer.md
 """
-        p = self._make_seed(tools_yaml, skills_yaml)
+        p = _make_catalog(skills_yaml, tools_yaml)
         principal = SimpleNamespace(name="admin", role=SimpleNamespace(value="admin"))
         monkeypatch.setattr(
             catalog_page_module, "_require", lambda *_: (principal, "csrf")
@@ -395,7 +397,7 @@ class TestAdminCatalogPage:
     credential_ref: hermes_credential
     allowed_for: [operator, admin]
 """
-        p = self._make_seed(tools_yaml, "skills: []")
+        p = _make_catalog("skills: []", tools_yaml)
         principal = SimpleNamespace(name="admin", role=SimpleNamespace(value="admin"))
         monkeypatch.setattr(
             catalog_page_module, "_require", lambda *_: (principal, "csrf")
@@ -414,15 +416,8 @@ class TestAdminCatalogPage:
 class TestSecretDetection:
     """Tests for the secret-pattern scanner used by the loader."""
 
-    def test_sk_ant_pattern_detected(self) -> None:
-        hit = match_text(
-            "sk-ant-test-abc123def456ghi789jkl012mno345pqr678stu012vwx"
-        )
-        assert hit is not None
-        assert hit.pattern == "anthropic_oauth_token"
-
     def test_ghp_pattern_detected(self) -> None:
-        hit = match_text("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgh")
+        hit = match_text("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij")
         assert hit is not None
         assert hit.pattern == "github_token"
 
@@ -434,3 +429,12 @@ class TestSecretDetection:
     def test_no_match_for_plain_name(self) -> None:
         hit = match_text("just_a_plain_credential_name")
         assert hit is None
+
+    def test_check_secret_refuses_matching_value(self) -> None:
+        err = _check_secret("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij", "credential_ref")
+        assert err is not None
+        assert "refused" in err.message
+
+    def test_check_secret_passes_plain_name(self) -> None:
+        err = _check_secret("my_credential_name", "credential_ref")
+        assert err is None
