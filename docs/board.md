@@ -26,3 +26,15 @@ America/Chicago timestamp in the audit event. No action requires typed reason te
 The HTML front door is `/ui/board`. `/ui/tasks/{id}` is the matching card view, including
 the objective, acceptance criteria, pull request and CI state, attempts, actions, and the
 existing notes under the clearly named Thread section.
+
+The root `/` redirects to `/ui/board`, as does sign-in without an explicit return
+destination. Sign-in honors `next=/ui`: that route is the Status page and shows the
+ordered setup steps while setup is incomplete. A fresh installation can also open
+`/ui/board` immediately, with seven empty lanes.
+
+FDY-0585 correction note: compose smoke explicitly posts `next=/ui`, so its first-run
+landing check uses the rendered `<h1>Status</h1>` heading and then fetches `/ui/board`
+separately to check `<h1>Board</h1>`. The regression test renders both pages through a
+first-run session with incomplete setup. Docker is unavailable in the worker; this
+route trace and unit test cover the correction locally, and the compose run stays in CI.
+No application routing workaround was needed.

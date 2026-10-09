@@ -4,18 +4,96 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, Mock
 
+import pytest
+from fastapi import FastAPI
+from starlette.testclient import TestClient
+
+from crucible.adapters.api.deps import app_context, unit_of_work
+from crucible.adapters.ui import session
+from crucible.adapters.ui.router import router
+from crucible.application.admin import status
 from crucible.application.admin.board_lanes import LANE_BY_STATE
 from crucible.application.board_resource import board_resource
 from crucible.domain.entities import EscalationState, Principal, PullRequestState, Role
 from crucible.domain.lifecycle import TaskState
 from tests.unit.test_board import NOW, Repo, row
 from tests.unit.test_issue_489_board_lanes import fixture, task
+from tests.unit.test_ui_sessions import Sessions, context
+from tools.smoke import compose_smoke
 
 
 def principal(role: Role) -> Principal:
     return Principal(id=f"p-{role.value}", name=role.value, role=role, created_at=NOW)
+
+
+def test_first_run_sign_in_renders_the_smoke_landing_and_empty_board(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Follow the smoke's explicit next=/ui through real sessions and templates."""
+    ctx = context()
+    ctx.admin = object()
+    ctx.first_run = SimpleNamespace(discard=Mock())
+    admin = Principal("first-admin", "first-run-admin", Role.ADMIN, NOW)
+    uow, _calls = fixture(0)
+    uow.ui_sessions = Sessions()
+    uow.principals = SimpleNamespace(get=lambda key: admin if key == admin.id else None)
+    uow.commit = Mock()
+    monkeypatch.setattr(session, "authenticate", lambda _uow, _token: admin)
+    monkeypatch.setattr(
+        status,
+        "status",
+        AsyncMock(
+            return_value={
+                "readiness": {
+                    "ready": False,
+                    "ready_harnesses": [],
+                    "harnesses": [],
+                    "steps": [
+                        {
+                            "code": "no_repository",
+                            "text": "Register a repository.",
+                            "fix": "/ui/repositories",
+                        }
+                    ],
+                },
+                "supervisor": {"healthy": True, "last_tick_at": None},
+                "tasks": {"lists": {}},
+                "workers": [],
+                "providers": [],
+                "wakes": {"unacked": 0},
+            }
+        ),
+    )
+    app = FastAPI()
+    app.state.ctx = ctx
+    app.include_router(router)
+    app.dependency_overrides[app_context] = lambda: ctx
+    app.dependency_overrides[unit_of_work] = lambda: uow
+    preauth = session._preauth_serializer(ctx).dumps({"csrf": "preauth-csrf"})
+    with TestClient(app) as client:
+        client.cookies.set(session.PREAUTH_COOKIE, preauth, path="/ui/sign-in")
+        landing = client.post(
+            "/ui/sign-in",
+            data={"csrf": "preauth-csrf", "token": "fixture-only", "next": "/ui"},
+        )
+        assert landing.status_code == 200
+        assert landing.url.path == "/ui"
+        assert [response.headers["location"] for response in landing.history] == ["/ui"]
+        assert compose_smoke.FIRST_RUN_LANDING_MARKER in landing.content
+        assert "Before a task" in landing.text
+        assert "Local gateway" in landing.text
+        ctx.first_run.discard.assert_called_once()
+
+        board = client.get("/ui/board")
+        assert board.status_code == 200
+        assert compose_smoke.BOARD_MARKER in board.content
+        assert board.text.count('class="board-lane"') == 7
+        assert board.text.count("No cards.") == 5
+        assert 'class="board-card"' not in board.text
 
 
 def test_board_document_has_approved_lanes_counts_and_local_times() -> None:
