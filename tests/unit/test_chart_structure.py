@@ -15,6 +15,12 @@ from tools.chart.sync import objects
 ROOT = Path(__file__).parents[2]
 CHART = ROOT / "charts/hades"
 VALUE_REFERENCE = re.compile(r"\.Values\.([A-Za-z0-9_.]+)")
+# The name helpers render the kustomize base's names when no override is set.
+DEFAULT_NAMES = {
+    '{{ include "hades.name" . }}': "crucible",
+    '{{ include "hades.namespace" . }}': "crucible",
+    '{{ include "hades.workersNamespace" . }}': "crucible-workers",
+}
 
 
 def _schema_has_path(schema: dict[str, Any], dotted: str) -> bool:
@@ -92,6 +98,8 @@ def test_every_kustomize_base_object_has_a_chart_template() -> None:
             name = re.search(r"^metadata:\n  name: (.+)$", document, re.M)
             if kind and name:
                 normalized = name[1].replace("-{{ .Release.Revision }}", "")
+                for helper, default in DEFAULT_NAMES.items():
+                    normalized = normalized.replace(helper, default)
                 template_objects.add((kind[1], normalized))
     source_objects = {identity for source in source_files for identity in _identities(source)}
     assert source_objects == template_objects
@@ -167,7 +175,7 @@ def test_chart_secret_settings_reach_application_and_mounts() -> None:
 
 def test_migration_job_name_changes_with_release_revision() -> None:
     template = (CHART / "templates/migrate-job.yaml").read_text()
-    assert "  name: crucible-migrate-{{ .Release.Revision }}\n" in template
+    assert '  name: {{ include "hades.name" . }}-migrate-{{ .Release.Revision }}\n' in template
     assert "helm.sh/hook" not in template  # Dependencies are ordinary release resources.
 
 

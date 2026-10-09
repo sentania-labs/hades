@@ -6,8 +6,8 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: crucible-supervisor
-  namespace: crucible
+  name: {{ include "hades.name" . }}-supervisor
+  namespace: {{ include "hades.namespace" . }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: supervisor
@@ -25,7 +25,11 @@ spec:
         app.kubernetes.io/name: crucible
         app.kubernetes.io/component: supervisor
     spec:
-      serviceAccountName: crucible-supervisor
+      serviceAccountName: {{ include "hades.name" . }}-supervisor
+      {{- if .Values.cluster.imagePullSecret }}
+      imagePullSecrets:
+        - name: {{ .Values.cluster.imagePullSecret | quote }}
+      {{- end }}
       # 26: `drain` sends SIGTERM and waits the policy's grace period before the kubelet
       # kills the worker. The supervisor needs at least that long to finish its own
       # shutdown without leaving an attempt half-terminated.
@@ -98,7 +102,7 @@ spec:
               drop: ["ALL"]
           envFrom:
             - configMapRef:
-                name: crucible-settings
+                name: {{ include "hades.name" . }}-settings
           env:
             - name: CRUCIBLE_DATABASE__URL
               valueFrom:
@@ -123,7 +127,7 @@ spec:
       volumes:
         - name: artifacts
           persistentVolumeClaim:
-            claimName: crucible-artifacts
+            claimName: {{ include "hades.name" . }}-artifacts
         # The GitHub App Secret the service owns (ADR 0017). Optional by design, not by
         # accident (crucible#79): the service creates it when the operator connects the
         # App, so a fresh deployment has none and must still start. The key is read

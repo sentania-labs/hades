@@ -48,8 +48,8 @@
 apiVersion: v1
 kind: ResourceQuota
 metadata:
-  name: crucible-workers
-  namespace: crucible-workers
+  name: {{ include "hades.name" . }}-workers
+  namespace: {{ include "hades.workersNamespace" . }}
   labels:
     app.kubernetes.io/name: crucible
 spec:

@@ -7,12 +7,20 @@
 # The Argo annotations make it a sync hook that is recreated on every sync; a plain
 # `kubectl apply -k` creates it once, and `make deploy-kind` deletes it before applying.
 # A Job's pod template is immutable, so re-creation is how a changed image reaches it.
+#
+# Two installers, two ways to a fresh Job. Helm counts revisions, so `helm upgrade`
+# names a new Job and drops the previous revision's as an obsolete release resource.
+# Argo CD renders the chart with `helm template`, where `.Release.Revision` is always 1,
+# so under Argo the name never changes; the `BeforeHookCreation` delete policy is what
+# makes that work, deleting the last sync's Job before the hook creates this one. Helm
+# itself does not read Argo's annotations, so under `helm upgrade` the Job is an ordinary
+# release resource and no Helm hook is involved.
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: crucible-migrate-{{ .Release.Revision }}
-  namespace: crucible
+  name: {{ include "hades.name" . }}-migrate-{{ .Release.Revision }}
+  namespace: {{ include "hades.namespace" . }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: migrate
@@ -31,7 +39,11 @@ spec:
       # The one API call this Job makes is creating the first-run administrator Secret
       # (ADR 0016), under an account that may do that and nothing else
       # (first-run-rbac.yaml). The token is never printed.
-      serviceAccountName: crucible-migrate
+      serviceAccountName: {{ include "hades.name" . }}-migrate
+      {{- if .Values.cluster.imagePullSecret }}
+      imagePullSecrets:
+        - name: {{ .Values.cluster.imagePullSecret | quote }}
+      {{- end }}
       automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
@@ -100,7 +112,7 @@ spec:
               drop: ["ALL"]
           envFrom:
             - configMapRef:
-                name: crucible-settings
+                name: {{ include "hades.name" . }}-settings
           env:
             - name: CRUCIBLE_DATABASE__URL
               valueFrom:

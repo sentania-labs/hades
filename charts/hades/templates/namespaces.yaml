@@ -11,7 +11,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: crucible
+  name: {{ include "hades.namespace" . }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: control-plane
@@ -29,7 +29,7 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: crucible-workers
+  name: {{ include "hades.workersNamespace" . }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: workers
@@ -39,6 +39,8 @@ metadata:
     pod-security.kubernetes.io/audit-version: latest
     pod-security.kubernetes.io/warn: restricted
     pod-security.kubernetes.io/warn-version: latest
+
+{{- if .Values.buildkit.enabled }}
 
 # Hades's own image builder gets a namespace of its own (hades #475). Rootless BuildKit
 # documents a Pod whose seccomp and AppArmor profiles are both `Unconfined` (it unshares
@@ -51,7 +53,8 @@ metadata:
 # `crucible-workers` namespace on port 1234 and from nowhere else, the Deployment runs
 # as uid 1000 and is never `privileged`, and the warn and audit modes stay at
 # `baseline`, so the two unconfined profiles are the only expected finding on each
-# rollout and anything beyond them is logged.
+# rollout and anything beyond them is logged. The name is the provider's constant
+# (BUILDKIT_NAMESPACE), so it does not follow nameOverride; `buildkit.enabled` renders it.
 ---
 apiVersion: v1
 kind: Namespace
@@ -66,3 +69,4 @@ metadata:
     pod-security.kubernetes.io/audit-version: latest
     pod-security.kubernetes.io/warn: baseline
     pod-security.kubernetes.io/warn-version: latest
+{{- end }}

@@ -1,8 +1,7 @@
-Hades was installed into the crucible, crucible-workers, and crucible-buildkit namespaces.
+Hades was installed into the {{ include "hades.namespace" . }} and {{ include "hades.workersNamespace" . }} namespaces{{ if .Values.buildkit.enabled }}, with its BuildKit in crucible-buildkit{{ end }}.
 The chart never creates credential values. Provision the Secrets named in values.yaml.
 {{- if .Values.ingress.enabled }}
 Open https://{{ .Values.ingress.host }}/ui
 {{- else }}
-Run: kubectl -n crucible port-forward service/crucible-api 8080:8080
+Run: kubectl -n {{ include "hades.namespace" . }} port-forward service/{{ include "hades.name" . }}-api 8080:8080
 {{- end }}
-

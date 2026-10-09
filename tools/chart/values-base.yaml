@@ -1,0 +1,85 @@
+# The values `make chart-sync-check` renders the chart with: a lab-like deployment that
+# reproduces `deploy/kubernetes/base` exactly. The base is the source; this file is the
+# chart's half of the comparison, so every value is written out rather than inherited,
+# and the names go through the override path rather than the empty defaults. BuildKit
+# is on because the base ships it; the image pins are the base's `latest`, which the
+# comparison normalizes.
+nameOverride: crucible
+namespaceOverride: crucible
+workersNamespaceOverride: crucible-workers
+serviceImage:
+  repository: ghcr.io/sentania-labs/crucible
+  tag: latest
+  digest: ""
+workerImage:
+  repository: ghcr.io/sentania-labs/crucible-worker
+  tag: latest
+  digest: ""
+postgres:
+  bundled: true
+  image: postgres:16@sha256:f1c3376c26f2609ab9f29f71f824103fe2fcd8ee0346485cb6122a4f93df6f94
+  databaseSecretName: crucible-database
+  user: crucible
+  database: crucible
+  storageClass: ""
+  size: 20Gi
+ingress:
+  enabled: true
+  className: ""
+  host: crucible.invalid
+  tlsSecretName: ""
+storage:
+  storageClass: ""
+  artifactsStorageClass: ""
+  artifactsSize: 50Gi
+  referenceCacheStorageClass: ""
+  referenceCacheSize: 20Gi
+  buildkitCacheStorageClass: ""
+  buildkitCacheSize: 50Gi
+buildkit:
+  enabled: true
+cluster:
+  dnsIp: 10.96.0.10
+  dnsNamespace: kube-system
+  dnsPodLabels:
+    k8s-app: kube-dns
+  renderTimezone: UTC
+  localEndpoint:
+    namespace: ""
+    podLabels: {}
+    port: 0
+    cidrs: []
+  podPidLimitOverride: 0
+  imagePullSecret: ""
+egress:
+  allowlist: []
+workerQuota:
+  jobs: "17"
+  persistentVolumeClaims: "12"
+  requestsCpu: "3"
+  requestsMemory: 12Gi
+  limitsCpu: "6"
+  limitsMemory: 12Gi
+secrets:
+  githubApp: crucible-github-app
+  githubAppPrivateKey: ""
+  githubAppWebhook: ""
+  firstRunToken: crucible-first-run-admin
+provider:
+  workspaceStorageClass: ""
+  workspaceSize: 20Gi
+  maxConcurrency: 3
+  launchTimeoutSeconds: 300
+  prepareTimeoutSeconds: 900
+  collectorTimeoutSeconds: 900
+  verifierTimeoutSeconds: 3600
+roomRunner:
+  apiUrl: ""
+  provider: kubernetes
+  image: ""
+  idleTimeoutMinutes: 60
+  maxRunnerSeconds: 43200
+  defaultHarness: claude_code
+  defaultModel: claude-opus-5-5
+  models: [claude-opus-5-5]
+extraSettings: {}

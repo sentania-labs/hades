@@ -1,39 +1,87 @@
-# Lab-like, non-secret deployment pins. Secret objects must be provisioned separately.
+# Lab-like, non-secret deployment values: the shape of the lab's own deployment, with
+# the product names the lab runs (hades #609), on k3s. Secret objects are provisioned
+# separately and only named here. Every value is an example to replace; nothing in it
+# is a credential.
+#
+# The images are the v0.12.0 release's, pinned by tag and digest as the release body
+# records them (published 2026-10-09 05:57 America/Chicago). A tag other than `latest`
+# without a digest fails the chart's schema.
+nameOverride: hades
+namespaceOverride: hades
+workersNamespaceOverride: hades-workers
 serviceImage:
   repository: ghcr.io/sentania-labs/crucible
-  tag: latest
-  digest: ""
+  tag: "0.12.0"
+  digest: sha256:1d76a530f0df4869c9fb38cb99014b617842c06cf572c4ee0c46ecfa2965b345
 workerImage:
   repository: ghcr.io/sentania-labs/crucible-worker
-  tag: latest
-  digest: ""
+  tag: "0.12.0"
+  digest: sha256:e54625da57ca85d7a856ee2af12a98a424fabc69564aa8c88e6a8b4b41bbcca9
 postgres:
   bundled: true
-  databaseSecretName: crucible-database
+  image: postgres:16@sha256:f1c3376c26f2609ab9f29f71f824103fe2fcd8ee0346485cb6122a4f93df6f94
+  databaseSecretName: hades-database
+  user: hades
+  database: hades
+  storageClass: longhorn
+  size: 50Gi
 ingress:
   enabled: true
   className: ""
-  host: crucible.invalid
+  host: hades.example.invalid
   tlsSecretName: ""
 storage:
   storageClass: ""
-  artifactsSize: 50Gi
-  referenceCacheSize: 20Gi
+  # The only ReadWriteMany class serves both the artifact root and the cache.
+  artifactsStorageClass: nfs
+  artifactsSize: 100Gi
+  referenceCacheStorageClass: nfs
+  referenceCacheSize: 50Gi
+  buildkitCacheStorageClass: longhorn
+  buildkitCacheSize: 50Gi
+# A new privileged namespace is the cluster operator's call; the lab has not made it.
+buildkit:
+  enabled: false
+cluster:
+  # k3s's cluster DNS Service address.
+  dnsIp: 10.43.0.10
+  dnsNamespace: kube-system
+  dnsPodLabels:
+    k8s-app: kube-dns
+  renderTimezone: America/Chicago
+  # An in-cluster LiteLLM gateway, allowed by its pods' selector because Cilium with
+  # kube-proxy replacement translates a Service address before policy (crucible#91).
+  localEndpoint:
+    namespace: litellm
+    podLabels:
+      app.kubernetes.io/name: litellm
+    port: 4000
+    cidrs: []
+  podPidLimitOverride: 0
+  imagePullSecret: ""
 egress:
   allowlist: []
 workerQuota:
-  jobs: "17"
-  persistentVolumeClaims: "12"
-  requestsCpu: "3"
-  requestsMemory: 12Gi
-  limitsCpu: "6"
-  limitsMemory: 12Gi
+  jobs: "32"
+  persistentVolumeClaims: "24"
+  requestsCpu: "6"
+  requestsMemory: 24Gi
+  limitsCpu: "12"
+  limitsMemory: 24Gi
 secrets:
-  githubApp: crucible-github-app
+  githubApp: hades-github-app
   # Empty names use githubApp; overrides mount app.pem and webhook.secret respectively.
   githubAppPrivateKey: ""
   githubAppWebhook: ""
-  firstRunToken: crucible-first-run-admin
+  firstRunToken: hades-first-run-admin
+provider:
+  workspaceStorageClass: longhorn
+  workspaceSize: 20Gi
+  maxConcurrency: 6
+  launchTimeoutSeconds: 300
+  prepareTimeoutSeconds: 900
+  collectorTimeoutSeconds: 900
+  verifierTimeoutSeconds: 3600
 roomRunner:
   apiUrl: ""
   provider: kubernetes
@@ -43,5 +91,4 @@ roomRunner:
   defaultHarness: claude_code
   defaultModel: claude-opus-5-5
   models: [claude-opus-5-5]
-  workspaceSize: 20Gi
-  maxConcurrency: 3
+extraSettings: {}

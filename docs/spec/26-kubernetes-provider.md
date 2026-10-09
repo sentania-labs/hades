@@ -62,7 +62,7 @@ carries and what a unit test holds it to (C9):
 | `pods/exec` | create, get |
 | `resourcequotas`, `events` | get, list |
 | `batch/jobs` | create, get, list, watch, delete |
-| `networking.k8s.io/networkpolicies` | create, get, list, watch, delete |
+| `networking.k8s.io/networkpolicies` | create, get, list, watch, **patch**, delete |
 
 The admin login Job and the service-owned harness Secrets (ADR 0015) need no
 verb beyond this table: the Job and its NetworkPolicy are `create`, `list` and
@@ -74,7 +74,9 @@ above are the ones the implemented provider needs: `patch` on PersistentVolumeCl
 sync-back (12), and reading the ResourceQuota is where `max_concurrency` on
 `GET /providers` comes from. Reading events is how a Job whose Pod the namespace
 quota refused (`FailedCreate`, "exceeded quota") is seen at once rather than at the
-end of its timeout. `pods/exec` needs `create` as well as `get`
+end of its timeout. `patch` on NetworkPolicies is how a running worker's policy follows
+its allowlisted names to a new address (hades #205); without it every follow is refused
+with a 403 (hades #575). `pods/exec` needs `create` as well as `get`
 because the API server authorizes an exec against `create` even when the
 client opens it as a GET WebSocket upgrade, which is how the reader Pod's tar
 stream is opened; a Role with only `get` is refused at the upgrade with a 403

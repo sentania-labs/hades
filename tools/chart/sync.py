@@ -41,6 +41,17 @@ def objects(path: Path) -> dict[tuple[str, str, str], dict[str, Any]]:
     return result
 
 
+def without_namespaces(
+    found: dict[tuple[str, str, str], dict[str, Any]], namespaces: set[str]
+) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """Drop a component the chart renders only behind a toggle, such as BuildKit."""
+    return {
+        key: item
+        for key, item in found.items()
+        if key[1] not in namespaces and not (key[0] == "Namespace" and key[2] in namespaces)
+    }
+
+
 def _normalise_latest_images(value: Any) -> None:
     if isinstance(value, dict):
         image = value.get("image")
@@ -57,8 +68,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("kustomize", type=Path)
     parser.add_argument("helm", type=Path)
+    parser.add_argument(
+        "--without-namespace",
+        action="append",
+        default=[],
+        help="drop this namespace and everything in it from the kustomize side",
+    )
     args = parser.parse_args()
     left, right = objects(args.kustomize), objects(args.helm)
+    left = without_namespaces(left, set(args.without_namespace))
     if left == right:
         print(f"chart-sync-check: {len(left)} objects match")
         return 0

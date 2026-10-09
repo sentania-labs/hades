@@ -1,14 +1,14 @@
 {{- if .Values.postgres.bundled }}
 # PostgreSQL for the lab: one instance, one claim (26). A deployment with an
-# operator-managed or external server deletes this file from its overlay's resources and
-# points `url` in the `crucible-database` Secret at that server instead; nothing else in
-# the base refers to this StatefulSet except the Service name inside that DSN.
+# operator-managed or external server sets `postgres.bundled: false` and points `url` in
+# the database Secret at that server instead; nothing else in the chart refers to this
+# StatefulSet except the Service name inside that DSN.
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: crucible-postgres
-  namespace: crucible
+  name: {{ include "hades.name" . }}-postgres
+  namespace: {{ include "hades.namespace" . }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: postgres
@@ -29,13 +29,13 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: crucible-postgres
-  namespace: crucible
+  name: {{ include "hades.name" . }}-postgres
+  namespace: {{ include "hades.namespace" . }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: postgres
 spec:
-  serviceName: crucible-postgres
+  serviceName: {{ include "hades.name" . }}-postgres
   replicas: 1
   selector:
     matchLabels:
@@ -65,9 +65,9 @@ spec:
               drop: ["ALL"]
           env:
             - name: POSTGRES_USER
-              value: crucible
+              value: {{ .Values.postgres.user | quote }}
             - name: POSTGRES_DB
-              value: crucible
+              value: {{ .Values.postgres.database | quote }}
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
             - name: POSTGRES_PASSWORD
@@ -80,14 +80,14 @@ spec:
               containerPort: 5432
           readinessProbe:
             exec:
-              command: ["pg_isready", "-U", "crucible", "-d", "crucible"]
+              command: ["pg_isready", "-U", {{ .Values.postgres.user | quote }}, "-d", {{ .Values.postgres.database | quote }}]
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 20
           livenessProbe:
             exec:
-              command: ["pg_isready", "-U", "crucible", "-d", "crucible"]
+              command: ["pg_isready", "-U", {{ .Values.postgres.user | quote }}, "-d", {{ .Values.postgres.database | quote }}]
             initialDelaySeconds: 30
             periodSeconds: 20
             timeoutSeconds: 5

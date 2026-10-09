@@ -17,8 +17,8 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: crucible-migrate
-  namespace: crucible
+  name: {{ include "hades.name" . }}-migrate
+  namespace: {{ include "hades.namespace" . }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: migrate
@@ -26,8 +26,8 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: crucible-first-run-admin-writer
-  namespace: crucible
+  name: {{ include "hades.name" . }}-first-run-admin-writer
+  namespace: {{ include "hades.namespace" . }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: migrate
@@ -43,25 +43,25 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: crucible-first-run-admin-writer
-  namespace: crucible
+  name: {{ include "hades.name" . }}-first-run-admin-writer
+  namespace: {{ include "hades.namespace" . }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: migrate
 subjects:
   - kind: ServiceAccount
-    name: crucible-migrate
-    namespace: crucible
+    name: {{ include "hades.name" . }}-migrate
+    namespace: {{ include "hades.namespace" . }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: crucible-first-run-admin-writer
+  name: {{ include "hades.name" . }}-first-run-admin-writer
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: crucible-first-run-admin-remover
-  namespace: crucible
+  name: {{ include "hades.name" . }}-first-run-admin-remover
+  namespace: {{ include "hades.namespace" . }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: api
@@ -74,19 +74,19 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: crucible-first-run-admin-remover
-  namespace: crucible
+  name: {{ include "hades.name" . }}-first-run-admin-remover
+  namespace: {{ include "hades.namespace" . }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: api
 subjects:
   - kind: ServiceAccount
-    name: crucible-supervisor
-    namespace: crucible
+    name: {{ include "hades.name" . }}-supervisor
+    namespace: {{ include "hades.namespace" . }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: crucible-first-run-admin-remover
+  name: {{ include "hades.name" . }}-first-run-admin-remover
 
 # The control plane's grant on the GitHub App credential Secret in its own namespace (ADR
 # 0017), which the service owns; its other grant here is deleting the first-run Secret
@@ -109,8 +109,8 @@ roleRef:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: crucible-github-app
-  namespace: crucible
+  name: {{ include "hades.name" . }}-github-app
+  namespace: {{ include "hades.namespace" . }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: control-plane
@@ -126,19 +126,19 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: crucible-github-app
-  namespace: crucible
+  name: {{ include "hades.name" . }}-github-app
+  namespace: {{ include "hades.namespace" . }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: control-plane
 subjects:
   - kind: ServiceAccount
-    name: crucible-supervisor
-    namespace: crucible
+    name: {{ include "hades.name" . }}-supervisor
+    namespace: {{ include "hades.namespace" . }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: crucible-github-app
+  name: {{ include "hades.name" . }}-github-app
 
 # The supervisor's only permission on the workers' side of the cluster (26). A Role, never
 # a ClusterRole: no cluster-scoped verb of any kind. Its only other grants are two narrow
@@ -146,11 +146,14 @@ roleRef:
 #
 # The verb set is what `crucible/adapters/execution/k8sapi.py` can actually emit, which
 # is narrower than "everything on these kinds" and slightly wider than 26's original
-# sentence. The two additions are the ones the implemented provider needs and 26 now
+# sentence. The additions are the ones the implemented provider needs and 26 now
 # records:
 #
 #   patch on persistentvolumeclaims  the retention label cleanup writes (26, cleanup)
 #   patch on secrets                 the `rw-narrow` credential sync-back (12, 26)
+#   patch on networkpolicies         a running worker's NetworkPolicy follows its
+#                                    allowlisted names to a new address (hades #205,
+#                                    #575)
 #   get and list on resourcequotas   `max_concurrency` on GET /providers (26)
 #   get and list on events           a Job whose Pod the namespace quota refused
 #                                    (`FailedCreate`) fails at once, not at its timeout
@@ -171,8 +174,8 @@ roleRef:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: crucible-supervisor
-  namespace: crucible-workers
+  name: {{ include "hades.name" . }}-supervisor
+  namespace: {{ include "hades.workersNamespace" . }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: supervisor
@@ -197,7 +200,7 @@ rules:
     verbs: ["create", "get", "list", "watch", "delete"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    verbs: ["create", "get", "list", "watch", "delete"]
+    verbs: ["create", "get", "list", "watch", "patch", "delete"]
 
 # The supervisor Pod runs in the `crucible` namespace, so its ServiceAccount lives there;
 # a Pod can only use an account from its own namespace. A RoleBinding may name a subject
@@ -207,16 +210,16 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: crucible-supervisor
-  namespace: crucible-workers
+  name: {{ include "hades.name" . }}-supervisor
+  namespace: {{ include "hades.workersNamespace" . }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: supervisor
 subjects:
   - kind: ServiceAccount
-    name: crucible-supervisor
-    namespace: crucible
+    name: {{ include "hades.name" . }}-supervisor
+    namespace: {{ include "hades.namespace" . }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: crucible-supervisor
+  name: {{ include "hades.name" . }}-supervisor

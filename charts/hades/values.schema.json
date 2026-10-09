@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["serviceImage", "workerImage", "postgres", "ingress", "storage", "egress", "workerQuota", "secrets", "roomRunner"],
+  "required": ["nameOverride", "namespaceOverride", "workersNamespaceOverride", "serviceImage", "workerImage", "postgres", "ingress", "storage", "buildkit", "cluster", "egress", "workerQuota", "secrets", "provider", "roomRunner", "extraSettings"],
   "$defs": {
     "image": {
       "type": "object", "additionalProperties": false,
@@ -11,20 +11,30 @@
         "repository": {"type": "string", "minLength": 1},
         "tag": {"type": "string", "minLength": 1},
         "digest": {"type": "string", "pattern": "^$|^sha256:[a-f0-9]{64}$"}
-      }
+      },
+      "if": {"properties": {"tag": {"not": {"const": "latest"}}}},
+      "then": {"properties": {"digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}}}
     },
     "name": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+    "optionalName": {"anyOf": [{"const": ""}, {"$ref": "#/$defs/name"}]},
+    "storageClass": {"type": "string"},
+    "labels": {"type": "object", "additionalProperties": {"type": "string"}},
     "quantity": {"type": "string", "minLength": 1}
   },
   "properties": {
+    "nameOverride": {"$ref": "#/$defs/optionalName"},
+    "namespaceOverride": {"$ref": "#/$defs/optionalName"},
+    "workersNamespaceOverride": {"$ref": "#/$defs/optionalName"},
     "serviceImage": {"$ref": "#/$defs/image"},
     "workerImage": {"$ref": "#/$defs/image"},
     "postgres": {
       "type": "object", "additionalProperties": false,
-      "required": ["bundled", "image", "databaseSecretName", "storageClass", "size"],
+      "required": ["bundled", "image", "databaseSecretName", "user", "database", "storageClass", "size"],
       "properties": {
         "bundled": {"type": "boolean"}, "image": {"type": "string", "minLength": 1},
-        "databaseSecretName": {"$ref": "#/$defs/name"}, "storageClass": {"type": "string"}, "size": {"$ref": "#/$defs/quantity"}
+        "databaseSecretName": {"$ref": "#/$defs/name"},
+        "user": {"type": "string", "pattern": "^[a-z_][a-z0-9_]*$"}, "database": {"type": "string", "pattern": "^[a-z_][a-z0-9_]*$"},
+        "storageClass": {"$ref": "#/$defs/storageClass"}, "size": {"$ref": "#/$defs/quantity"}
       }
     },
     "ingress": {
@@ -34,8 +44,36 @@
     },
     "storage": {
       "type": "object", "additionalProperties": false,
-      "required": ["storageClass", "artifactsSize", "referenceCacheSize", "buildkitCacheSize"],
-      "properties": {"storageClass": {"type": "string"}, "artifactsSize": {"$ref": "#/$defs/quantity"}, "referenceCacheSize": {"$ref": "#/$defs/quantity"}, "buildkitCacheSize": {"$ref": "#/$defs/quantity"}}
+      "required": ["storageClass", "artifactsStorageClass", "artifactsSize", "referenceCacheStorageClass", "referenceCacheSize", "buildkitCacheStorageClass", "buildkitCacheSize"],
+      "properties": {
+        "storageClass": {"$ref": "#/$defs/storageClass"},
+        "artifactsStorageClass": {"$ref": "#/$defs/storageClass"}, "artifactsSize": {"$ref": "#/$defs/quantity"},
+        "referenceCacheStorageClass": {"$ref": "#/$defs/storageClass"}, "referenceCacheSize": {"$ref": "#/$defs/quantity"},
+        "buildkitCacheStorageClass": {"$ref": "#/$defs/storageClass"}, "buildkitCacheSize": {"$ref": "#/$defs/quantity"}
+      }
+    },
+    "buildkit": {"type": "object", "additionalProperties": false, "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}}},
+    "cluster": {
+      "type": "object", "additionalProperties": false,
+      "required": ["dnsIp", "dnsNamespace", "dnsPodLabels", "renderTimezone", "localEndpoint", "podPidLimitOverride", "imagePullSecret"],
+      "properties": {
+        "dnsIp": {"type": "string", "pattern": "^[0-9a-fA-F.:]+$"},
+        "dnsNamespace": {"$ref": "#/$defs/name"},
+        "dnsPodLabels": {"$ref": "#/$defs/labels"},
+        "renderTimezone": {"type": "string", "minLength": 1},
+        "localEndpoint": {
+          "type": "object", "additionalProperties": false,
+          "required": ["namespace", "podLabels", "port", "cidrs"],
+          "properties": {
+            "namespace": {"$ref": "#/$defs/optionalName"},
+            "podLabels": {"$ref": "#/$defs/labels"},
+            "port": {"type": "integer", "minimum": 0, "maximum": 65535},
+            "cidrs": {"type": "array", "items": {"type": "string", "pattern": "^[0-9a-fA-F.:]+/[0-9]{1,3}$"}, "uniqueItems": true}
+          }
+        },
+        "podPidLimitOverride": {"type": "integer", "minimum": 0},
+        "imagePullSecret": {"$ref": "#/$defs/optionalName"}
+      }
     },
     "egress": {"type": "object", "additionalProperties": false, "required": ["allowlist"], "properties": {"allowlist": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}}},
     "workerQuota": {
@@ -46,12 +84,22 @@
     "secrets": {
       "type": "object", "additionalProperties": false,
       "required": ["githubApp", "githubAppPrivateKey", "githubAppWebhook", "firstRunToken"],
-      "properties": {"githubApp": {"$ref": "#/$defs/name"}, "githubAppPrivateKey": {"anyOf": [{"const": ""}, {"$ref": "#/$defs/name"}]}, "githubAppWebhook": {"anyOf": [{"const": ""}, {"$ref": "#/$defs/name"}]}, "firstRunToken": {"$ref": "#/$defs/name"}}
+      "properties": {"githubApp": {"$ref": "#/$defs/name"}, "githubAppPrivateKey": {"$ref": "#/$defs/optionalName"}, "githubAppWebhook": {"$ref": "#/$defs/optionalName"}, "firstRunToken": {"$ref": "#/$defs/name"}}
+    },
+    "provider": {
+      "type": "object", "additionalProperties": false,
+      "required": ["workspaceStorageClass", "workspaceSize", "maxConcurrency", "launchTimeoutSeconds", "prepareTimeoutSeconds", "collectorTimeoutSeconds", "verifierTimeoutSeconds"],
+      "properties": {"workspaceStorageClass": {"$ref": "#/$defs/storageClass"}, "workspaceSize": {"$ref": "#/$defs/quantity"}, "maxConcurrency": {"type": "integer", "minimum": 1}, "launchTimeoutSeconds": {"type": "integer", "minimum": 1}, "prepareTimeoutSeconds": {"type": "integer", "minimum": 1}, "collectorTimeoutSeconds": {"type": "integer", "minimum": 1}, "verifierTimeoutSeconds": {"type": "integer", "minimum": 1}}
     },
     "roomRunner": {
       "type": "object", "additionalProperties": false,
-      "required": ["apiUrl", "provider", "image", "idleTimeoutMinutes", "maxRunnerSeconds", "defaultHarness", "defaultModel", "models", "workspaceSize", "maxConcurrency", "launchTimeoutSeconds", "prepareTimeoutSeconds", "collectorTimeoutSeconds", "verifierTimeoutSeconds"],
-      "properties": {"apiUrl": {"type": "string"}, "provider": {"enum": ["kubernetes", "docker"]}, "image": {"type": "string"}, "idleTimeoutMinutes": {"type": "integer", "minimum": 1}, "maxRunnerSeconds": {"type": "integer", "minimum": 600}, "defaultHarness": {"type": "string", "minLength": 1}, "defaultModel": {"type": "string", "minLength": 1}, "models": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "workspaceSize": {"$ref": "#/$defs/quantity"}, "maxConcurrency": {"type": "integer", "minimum": 1}, "launchTimeoutSeconds": {"type": "integer", "minimum": 1}, "prepareTimeoutSeconds": {"type": "integer", "minimum": 1}, "collectorTimeoutSeconds": {"type": "integer", "minimum": 1}, "verifierTimeoutSeconds": {"type": "integer", "minimum": 1}}
+      "required": ["apiUrl", "provider", "image", "idleTimeoutMinutes", "maxRunnerSeconds", "defaultHarness", "defaultModel", "models"],
+      "properties": {"apiUrl": {"type": "string"}, "provider": {"enum": ["kubernetes", "docker"]}, "image": {"type": "string"}, "idleTimeoutMinutes": {"type": "integer", "minimum": 1}, "maxRunnerSeconds": {"type": "integer", "minimum": 600}, "defaultHarness": {"type": "string", "minLength": 1}, "defaultModel": {"type": "string", "minLength": 1}, "models": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}}
+    },
+    "extraSettings": {
+      "type": "object",
+      "propertyNames": {"pattern": "^CRUCIBLE_[A-Z0-9_]+$"},
+      "additionalProperties": {"type": "string"}
     }
   }
 }

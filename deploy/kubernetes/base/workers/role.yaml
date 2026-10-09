@@ -4,11 +4,14 @@
 #
 # The verb set is what `crucible/adapters/execution/k8sapi.py` can actually emit, which
 # is narrower than "everything on these kinds" and slightly wider than 26's original
-# sentence. The two additions are the ones the implemented provider needs and 26 now
+# sentence. The additions are the ones the implemented provider needs and 26 now
 # records:
 #
 #   patch on persistentvolumeclaims  the retention label cleanup writes (26, cleanup)
 #   patch on secrets                 the `rw-narrow` credential sync-back (12, 26)
+#   patch on networkpolicies         a running worker's NetworkPolicy follows its
+#                                    allowlisted names to a new address (hades #205,
+#                                    #575)
 #   get and list on resourcequotas   `max_concurrency` on GET /providers (26)
 #   get and list on events           a Job whose Pod the namespace quota refused
 #                                    (`FailedCreate`) fails at once, not at its timeout
@@ -54,4 +57,4 @@ rules:
     verbs: ["create", "get", "list", "watch", "delete"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    verbs: ["create", "get", "list", "watch", "delete"]
+    verbs: ["create", "get", "list", "watch", "patch", "delete"]

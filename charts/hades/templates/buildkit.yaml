@@ -20,6 +20,12 @@
 # TLS is off on purpose. The port is a ClusterIP in a namespace whose own NetworkPolicy
 # admits only `crucible-workers`, and a worker reaches it only through the per-attempt
 # egress rule the provider writes (26), so the policies are the trust boundary.
+#
+# Off unless `buildkit.enabled`: a namespace at the `privileged` Pod Security level is
+# the cluster operator's decision. Names stay `crucible-buildkit` under nameOverride
+# because the provider addresses the builder by that constant; only the namespace it
+# admits follows the workers namespace.
+{{- if .Values.buildkit.enabled }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -29,12 +35,13 @@ metadata:
   labels:
     app.kubernetes.io/name: crucible-buildkit
 spec:
-  {{- if .Values.storage.storageClass }}
-  storageClassName: {{ .Values.storage.storageClass | quote }}
+  {{- with include "hades.buildkitCacheStorageClass" . }}
+  storageClassName: {{ . | quote }}
   {{- end }}
   # The layer cache. 50 GiB is the documented default (docs/deployment.md): the two
   # worker images and their fetch stages, with room for a pin bump beside the last
-  # build. A deployer sizes it in the overlay; BuildKit prunes within what it has.
+  # build. A deployer sizes it with storage.buildkitCacheSize; BuildKit prunes within
+  # what it has.
   accessModes: [ReadWriteOnce]
   resources:
     requests:
@@ -151,7 +158,8 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: crucible-workers
+              kubernetes.io/metadata.name: {{ include "hades.workersNamespace" . }}
       ports:
         - protocol: TCP
           port: 1234
+{{- end }}

@@ -2,8 +2,8 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: crucible-api
-  namespace: crucible
+  name: {{ include "hades.name" . }}-api
+  namespace: {{ include "hades.namespace" . }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: api
@@ -23,8 +23,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: crucible-api
-  namespace: crucible
+  name: {{ include "hades.name" . }}-api
+  namespace: {{ include "hades.namespace" . }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: api
@@ -40,7 +40,11 @@ spec:
         app.kubernetes.io/name: crucible
         app.kubernetes.io/component: api
     spec:
-      serviceAccountName: crucible-supervisor
+      serviceAccountName: {{ include "hades.name" . }}-supervisor
+      {{- if .Values.cluster.imagePullSecret }}
+      imagePullSecrets:
+        - name: {{ .Values.cluster.imagePullSecret | quote }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -112,7 +116,7 @@ spec:
               containerPort: 8080
           envFrom:
             - configMapRef:
-                name: crucible-settings
+                name: {{ include "hades.name" . }}-settings
           env:
             - name: CRUCIBLE_DATABASE__URL
               valueFrom:
@@ -164,7 +168,7 @@ spec:
       volumes:
         - name: artifacts
           persistentVolumeClaim:
-            claimName: crucible-artifacts
+            claimName: {{ include "hades.name" . }}-artifacts
         # The GitHub App Secret the service owns (ADR 0017). Optional by design, not by
         # accident (crucible#79): the service creates it when the operator connects the
         # App, so a fresh deployment has none and must still start. The key is read
@@ -204,8 +208,8 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: crucible-api
-  namespace: crucible
+  name: {{ include "hades.name" . }}-api
+  namespace: {{ include "hades.namespace" . }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: api
@@ -226,7 +230,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: crucible-api
+                name: {{ include "hades.name" . }}-api
                 port:
                   name: http
 {{- end }}
