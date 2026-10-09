@@ -41,6 +41,7 @@ from crucible.adapters.execution.kubernetes import (
     TimeoutsSource,
 )
 from crucible.adapters.execution.publisher import DockerPublisher, PublisherConfig
+from crucible.adapters.execution.room_launch import DockerRoomLauncher, KubernetesRoomLauncher
 from crucible.adapters.first_run import FILE_NAME, FileDelivery, SecretDelivery
 from crucible.adapters.github.appauth import AppAuthenticator, AppConfig
 from crucible.adapters.github.apps import RestGitHubApps
@@ -70,6 +71,7 @@ from crucible.application.proxy_config import (
     install_worker_proxy_config,
     worker_proxy_config,
 )
+from crucible.application.rooms import RoomConfig, RoomContext
 from crucible.application.supervisor import Supervisor
 from crucible.application.transitions import record_event
 from crucible.application.wakes import create_wake
@@ -87,6 +89,7 @@ from crucible.ports.harness import CredentialSource, HarnessGate, MountMode
 from crucible.ports.notification import WakeDeliverer
 from crucible.ports.publish import Publisher
 from crucible.ports.repository import UnitOfWorkFactory
+from crucible.ports.rooms import RoomRunnerLauncher
 from crucible.settings import Settings
 
 log = logging.getLogger("crucible.wiring")
@@ -617,6 +620,7 @@ def wire(settings: Settings, *, role: ProcessRole) -> Wiring:
         settings=settings,
         first_run=first_run,
         credential_renewer=api_renewer,
+        rooms=build_rooms(settings, providers, registry),
     )
     publisher = build_publisher(settings, docker, providers.get("kubernetes"), github)
     return Wiring(
@@ -631,6 +635,37 @@ def wire(settings: Settings, *, role: ProcessRole) -> Wiring:
         admin=admin,
         credential_renewer=renewer,
     )
+
+
+def build_rooms(
+    settings: Settings, providers: Mapping[str, ExecutionProvider], registry: HarnessRegistry
+) -> RoomContext:
+    """hades #208: the room settings and the launcher of the provider that runs room
+    runners: the one `rooms.provider` names, else Kubernetes when it is enabled, else
+    Docker. The fake provider runs none."""
+    rooms = settings.rooms
+    config = RoomConfig(
+        api_url=rooms.api_url,
+        image=rooms.image,
+        egress_hosts=tuple(rooms.egress_allowlist),
+        idle_timeout_minutes=rooms.idle_timeout_minutes,
+        identity_path=rooms.identity_path,
+    )
+    wanted = rooms.provider or ("kubernetes" if "kubernetes" in providers else "docker")
+    provider = providers.get(wanted)
+    launcher: RoomRunnerLauncher | None = None
+    if isinstance(provider, KubernetesProvider):
+        launcher = KubernetesRoomLauncher(
+            provider,
+            api_namespace=rooms.api_namespace,
+            api_pod_labels=dict(rooms.api_pod_labels),
+            api_port=rooms.api_port,
+            script_path=rooms.runner_script,
+            max_runner_seconds=rooms.max_runner_seconds,
+        )
+    elif isinstance(provider, DockerProvider):
+        launcher = DockerRoomLauncher(provider, script_path=rooms.runner_script, harnesses=registry)
+    return RoomContext(config=config, launcher=launcher)
 
 
 def build_credential_renewer(

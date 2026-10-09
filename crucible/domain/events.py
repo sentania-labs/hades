@@ -102,6 +102,15 @@ class EventKind(StrEnum):
     MEMORY_SUPERSEDED = "memory_superseded"
     MEMORY_FORGOTTEN = "memory_forgotten"
     LEDGER_DECISION_RECORDED = "ledger_decision_recorded"
+    # hades #208, ADR 0031: rooms. The transcript is the room's own record; these are the
+    # audit of what Hades did to the room and its runner.
+    ROOM_CREATED = "room_created"
+    ROOM_RUNNER_LAUNCHED = "room_runner_launched"
+    ROOM_RUNNER_STOPPED = "room_runner_stopped"
+    ROOM_INTERRUPTED = "room_interrupted"
+    ROOM_SWITCHED = "room_switched"
+    ROOM_CLOSED = "room_closed"
+    ROOM_IDLE_TIMEOUT_UPDATED = "room_idle_timeout_updated"
     DISPOSITION_RECORDED = "disposition_recorded"
     DISPOSITION_INVALIDATED = "disposition_invalidated"
     ESCALATION_OPENED = "escalation_opened"

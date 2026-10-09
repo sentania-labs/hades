@@ -333,6 +333,37 @@ class AdminSettings(BaseModel):
     status_cache_ttl_seconds: float = Field(default=60.0, gt=0)
 
 
+class RoomSettings(BaseModel):
+    """Rooms and their runners (hades #208, ADR 0031, docs/spec/28-rooms.md).
+
+    `api_url` is how a runner reaches Hades from where it runs (the API Service's
+    cluster address on Kubernetes, the API's address through the egress proxy under
+    `make up`); left empty, a room takes messages and no runner is launched. `provider`
+    picks the provider that runs runners, Kubernetes first when it is enabled.
+    `idle_timeout_minutes` seeds `rooms.idle_timeout_minutes`, which the settings page
+    saves and which then wins. `api_namespace`, `api_pod_labels` and `api_port` name the
+    API pods the runner's NetworkPolicy opens, and nothing else of that namespace."""
+
+    api_url: str = ""
+    provider: Literal["kubernetes", "docker"] | None = None
+    image: str | None = None
+    egress_allowlist: list[str] = Field(
+        default_factory=lambda: ["api.anthropic.com", "pypi.org", "files.pythonhosted.org"]
+    )
+    idle_timeout_minutes: int | None = Field(default=None, ge=1, le=24 * 60)
+    identity_path: str | None = None
+    runner_script: str | None = None
+    api_namespace: str = "crucible"
+    api_pod_labels: dict[str, str] = Field(
+        default_factory=lambda: {
+            "app.kubernetes.io/name": "crucible",
+            "app.kubernetes.io/component": "api",
+        }
+    )
+    api_port: int = Field(default=8080, ge=1, le=65535)
+    max_runner_seconds: int = Field(default=12 * 3600, ge=600)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CRUCIBLE_", env_nested_delimiter="__", extra="ignore", toml_file=None
@@ -348,6 +379,7 @@ class Settings(BaseSettings):
     credentials: dict[str, CredentialSettings] = Field(default_factory=dict)
     harnesses: dict[str, HarnessSettings] = Field(default_factory=dict)
     admin: AdminSettings = Field(default_factory=AdminSettings)
+    rooms: RoomSettings = Field(default_factory=RoomSettings)
     # The test fixtures (18, crucible#124): the fake provider, which runs nothing, and the
     # script harness, which reports completion without doing work. Off unless a test
     # tier or a developer turns them on; a production deployment never shows or routes
