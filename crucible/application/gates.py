@@ -1,8 +1,8 @@
 """Pre-PR gate evaluation and the task transitions it drives (09, 11).
 
 The evaluators are pure functions in `crucible.domain.gates`. Hades persists their
-results, records acceptance when every blocking gate and the worker self-review pass,
-and publishes without an orchestrator review or acceptance call.
+results, records acceptance when every blocking gate passes, naming any advisory
+failure in it, and publishes without an orchestrator review or acceptance call.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from crucible.domain.gates import (
     PRE_PR_GATES,
     EvidenceItem,
     GateInput,
+    GateName,
     GateOutcome,
     GateResult,
     PrePrVerdict,
@@ -281,7 +282,18 @@ def evaluate_and_advance(
         attempt_id=attempt.id,
         payload={"head_sha": task.head_sha, "results": summary["results"]},
     )
-    acceptance = record_gate_acceptance(uow, clock, task=task)
+    report = outcomes.get(GateName.REPORT_PRESENT)
+    acceptance = record_gate_acceptance(
+        uow,
+        clock,
+        task=task,
+        advisory_failing=[
+            gate
+            for gate, outcome in outcomes.items()
+            if outcome.result in (GateResult.FAIL, GateResult.ERROR)
+        ],
+        self_review_checked=report is not None and report.result is GateResult.PASS,
+    )
     kinds = deliverable_kinds(uow, task)
     destination = (
         TaskState.PUBLISHING if PUBLISHED_DELIVERABLES & set(kinds) else TaskState.ACCEPTED

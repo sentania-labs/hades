@@ -3,7 +3,9 @@
 The pre-PR gate set runs on the collected branch before publication. Every gate is
 blocking or advisory (ADR 0024): a blocking failure stops the task; an advisory one
 is recorded as a reviewer note on the task and in the pull request body, then the task
-continues to publication without an orchestrator review.
+continues to publication without an orchestrator review. The automatic acceptance
+record names each advisory gate that failed and claims the worker self-review only when
+`report_present` passed.
 
 ## Pre-PR gate list
 
@@ -91,14 +93,14 @@ gate fails with a reason listing every offending path. The gate sets `always_blo
 so even an advisory ``scope_contained`` gate still stops the task.
 
 Patterns (matched anywhere in the file name, except ``.#`` which must prefix a
-path component — either the start of the path or immediately after a `/`):
+path component, either the start of the path or immediately after a `/`):
 
-- ``*.bak`` — Emacs backup files
-- ``*.orig`` — diff ``-p`` backup files
-- ``*.rej`` — rejected hunks from ``patch -p``
-- ``*~`` — Vim trailing-tilde backups
-- ``.*.swp`` or ``*/*.swp`` — Vim swap files
-- ``.#*`` — Emacs undo/lock files (e.g. ``src/.#main.py``)
+- ``*.bak``: Emacs backup files
+- ``*.orig``: diff ``-p`` backup files
+- ``*.rej``: rejected hunks from ``patch -p``
+- ``*~``: Vim trailing-tilde backups
+- ``.*.swp`` or ``*/*.swp``: Vim swap files
+- ``.#*``: Emacs undo/lock files (e.g. ``src/.#main.py``)
 
 Only newly added files (diff status ``A``) are checked. A leftover that exists on
 the base ref and is only edited or deleted is not flagged.  When diff change-status

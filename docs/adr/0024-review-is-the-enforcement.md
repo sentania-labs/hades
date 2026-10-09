@@ -120,4 +120,7 @@ The worker self-review is the internal review. A failure of `commit_policy`,
 in the pull request body. It does not move the task to `awaiting_internal_review` and
 does not require an orchestrator review or acceptance call. Hades records acceptance
 and proceeds to publication when all blocking gates pass. A blocking gate failure keeps
-the existing stop and correction behavior.
+the existing stop and correction behavior. The automatic acceptance reasoning states
+what it rests on: that every blocking gate passed, that the report carries the worker
+self-review only when `report_present` passed, and the name of each advisory gate that
+failed and was recorded as a reviewer note.

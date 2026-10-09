@@ -77,3 +77,30 @@ def test_blocking_failure_still_parks(tmp_path: Path) -> None:
     assert store.acceptance.rows == []
     assert asyncio.run(supervisor.delivery.publish()) == 0
     assert publisher.pushes == []
+
+
+def test_clean_acceptance_reasoning_claims_the_self_review(tmp_path: Path) -> None:
+    store, supervisor, _github, _publisher = _collected(tmp_path)
+    supervisor._evaluate_pending_gates()
+    reasoning = store.acceptance.rows[0].reasoning
+    assert "includes the worker self-review" in reasoning
+    assert "Advisory gate failures" not in reasoning
+
+
+def test_missing_self_review_acceptance_reasoning_stays_truthful(tmp_path: Path) -> None:
+    store, supervisor, _github, _publisher = _collected(tmp_path, missing_review=True)
+    supervisor._evaluate_pending_gates()
+    assert _task(store).state is TaskState.PUBLISHING
+    reasoning = store.acceptance.rows[0].reasoning
+    assert reasoning.startswith("Every blocking pre-PR gate passed.")
+    assert "self-review" not in reasoning
+    assert "recorded as reviewer notes:" in reasoning
+    assert "report_present" in reasoning
+
+
+def test_advisory_acceptance_reasoning_names_the_failed_gate(tmp_path: Path) -> None:
+    store, supervisor, _github, _publisher = _collected(tmp_path, advisory_failed=True)
+    supervisor._evaluate_pending_gates()
+    reasoning = store.acceptance.rows[0].reasoning
+    assert "recorded as reviewer notes:" in reasoning
+    assert "scope_contained" in reasoning
