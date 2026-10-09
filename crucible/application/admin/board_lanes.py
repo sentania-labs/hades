@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
@@ -232,47 +233,94 @@ def _states_for_lane(key: str) -> tuple[TaskState, ...]:
     return tuple(state for state, lane in LANE_BY_STATE.items() if lane == key)
 
 
-def board_lanes_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
-    """Build the board with a fixed number of repository reads as task count grows."""
+def board_lanes_view(
+    uow: UnitOfWork, now: datetime, *, cards_for: frozenset[str] | None = None
+) -> dict[str, Any]:
+    """Build the board with a fixed number of repository reads as task count grows.
+
+    `cards_for` names the lanes whose cards are built; every lane still has its count.
+    A collapsed lane that is not selected is counted from `count_by_state` and its
+    contracts, attempts, pull requests, escalations, and events are never read, so the
+    terminal lanes do not slow the live board as they grow. The document's `records`
+    maps each built card's task id to its task, open escalation, and pull request, so
+    callers adding actions need no further reads."""
     counts = dict(uow.tasks.count_by_state())
+    selected = cards_for if cards_for is not None else frozenset(key for key, _n, _m in LANES)
+    # Waiting on Scott takes its cards from the live lanes, which are always listed.
+    # Wins task rows are listed for today's count and graveyard replacements; only the
+    # Graveyard, which nothing else reads, is left unlisted when it is not selected.
+    listed = {
+        key
+        for key, _name, _meaning in LANES
+        if key != "waiting_on_scott" and (key != "graveyard" or key in selected)
+    }
     rows_by_lane = {
         key: list(uow.tasks.list_in_states(_states_for_lane(key)))
         for key, _name, _meaning in LANES
-        if key != "waiting_on_scott"
+        if key in listed
     }
     tasks = [task for rows in rows_by_lane.values() for task in rows]
-    task_ids = {task.id for task in tasks}
-    contracts, _comments, _dispositions = board_batch_records(
-        uow, {task.id: task.contract_version for task in tasks}, []
-    )
-    attempts = list(uow.attempts.list_in_states(list(AttemptState)))
-    attempts.extend(board_imported_attempts(uow, task_ids))
-    current_attempt = _latest_by(attempts, lambda row: row.task_id, lambda row: row.created_at)
-    pull_requests = {
-        row.task_id: row
-        for row in uow.pull_requests.list_in_states(list(PullRequestState))
-        if row.task_id in task_ids
-    }
-    open_escalations = [row for row in uow.escalations.list_open() if row.task_id in task_ids]
+    live_ids = {task.id for task in tasks}
+    open_escalations = [row for row in uow.escalations.list_open() if row.task_id in live_ids]
     escalation_by_task = _latest_by(
         open_escalations, lambda row: row.task_id, lambda row: row.opened_at
     )
-    events = dict(uow.events.latest_for_tasks_kinds(list(task_ids), DETAIL_EVENT_KINDS))
+    lane_by_task = {
+        task.id: lane_for_state(
+            task.state,
+            waiting_on_scott=bool(
+                (escalation := escalation_by_task.get(task.id)) and is_scott_question(escalation)
+            ),
+        )
+        for task in tasks
+    }
+    lane_counts = Counter(lane_by_task.values())
+    for key in {key for key, _name, _meaning in LANES} - listed - {"waiting_on_scott"}:
+        lane_counts[key] = sum(counts.get(state, 0) for state in _states_for_lane(key))
+    built = [task for task in tasks if lane_by_task[task.id] in selected]
+    task_ids = {task.id for task in built}
+    contracts, _comments, _dispositions = board_batch_records(
+        uow, {task.id: task.contract_version for task in built}, []
+    )
+    attempts = (
+        [row for row in uow.attempts.list_in_states(list(AttemptState)) if row.task_id in task_ids]
+        if task_ids
+        else []
+    )
+    attempts.extend(board_imported_attempts(uow, task_ids))
+    current_attempt = _latest_by(attempts, lambda row: row.task_id, lambda row: row.created_at)
+    pull_requests = (
+        {
+            row.task_id: row
+            for row in uow.pull_requests.list_in_states(list(PullRequestState))
+            if row.task_id in task_ids
+        }
+        if task_ids
+        else {}
+    )
+    events = (
+        dict(uow.events.latest_for_tasks_kinds(list(task_ids), DETAIL_EVENT_KINDS))
+        if task_ids
+        else {}
+    )
     tasks_by_external = {task.external_id: task for task in tasks}
 
     cards: dict[str, list[dict[str, Any]]] = {key: [] for key, _name, _meaning in LANES}
-    for task in tasks:
+    records: dict[str, dict[str, Any]] = {}
+    for task in built:
         escalation = escalation_by_task.get(task.id)
-        lane_key = lane_for_state(
-            task.state,
-            waiting_on_scott=bool(escalation and is_scott_question(escalation)),
-        )
+        lane_key = lane_by_task[task.id]
         scheduled_inbox = inbox_run(contracts.get(task.id, {}))
         findings = run_findings(uow, task.id) if scheduled_inbox else None
-        if scheduled_inbox:
+        if scheduled_inbox and lane_key != "inbox":
+            # A scheduled job's inbox_card run shows in the Inbox lane whatever its
+            # state, with the run's findings as the card body; move its count too.
+            lane_counts[lane_key] -= 1
+            lane_counts["inbox"] += 1
             lane_key = "inbox"
         attempt = current_attempt.get(task.id)
         pr = pull_requests.get(task.id)
+        records[task.id] = {"task": task, "escalation": escalation, "pull_request": pr}
         entry = _entry_event(task, events)
         entered_at = (
             escalation.opened_at
@@ -322,18 +370,40 @@ def board_lanes_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
             "name": name,
             "meaning": meaning,
             "collapsed": key in COLLAPSED_LANES,
-            "count": len(ordered),
+            "count": lane_counts[key],
             "cards": ordered,
         }
         if key == "wins":
-            lane_document["count_today"] = sum(
-                card["age"]["entered_at"].date() == today for card in ordered
+            lane_document["count_today"] = (
+                sum(card["age"]["entered_at"].date() == today for card in ordered)
+                if key in selected
+                else _wins_today(uow, now, rows_by_lane["wins"])
             )
             lane_document["count_all_time"] = sum(
                 counts.get(state, 0) for state in _states_for_lane("wins")
             )
         lanes.append(lane_document)
-    return {"generated_at": now, "lanes": lanes}
+    return {"generated_at": now, "lanes": lanes, "records": records}
+
+
+def _wins_today(uow: UnitOfWork, now: datetime, wins: list[Any]) -> int:
+    """Wins entered today without building their cards: a task entered its lane no
+    later than its last update, so only tasks updated today can count, and only their
+    entry events are read."""
+    today = now.date()
+    candidates = [task for task in wins if task.updated_at.date() >= today]
+    if not candidates:
+        return 0
+    events = dict(
+        uow.events.latest_for_tasks_kinds([task.id for task in candidates], ENTRY_EVENT_KINDS)
+    )
+    entered = [
+        entry.ts
+        if (entry := _entry_event(task, events)) is not None
+        else task.closed_at or task.updated_at
+        for task in candidates
+    ]
+    return sum(moment.date() == today for moment in entered)
 
 
 __all__ = [
