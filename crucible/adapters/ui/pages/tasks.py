@@ -17,6 +17,7 @@ from crucible.adapters.ui.pages.proposals import (
     proposal_sections,
     proposed_tasks,
 )
+from crucible.adapters.ui.pages.work import work_page
 from crucible.adapters.ui.render import _page, _redirect, _state_words
 from crucible.adapters.ui.session import _admin, _csrf, _form, _require
 from crucible.application.admin import (
@@ -189,12 +190,13 @@ def tasks_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     hidden_note: str | None = None
     if hidden_total > 0:
         hidden_note = f"{hidden_total} archived import tasks hidden; add ?archived=1 to show them"
-    return _page(
+    # hades #576 U6: the Neon cards and tables, folding to rows at phone width.
+    return work_page(
         request,
         principal,
         csrf,
         active="/ui/tasks",
-        heading="Tasks",
+        heading="All tasks",
         intro="Proposals waiting for your answer, tasks that need you, then every task by state.",
         sections=[
             # hades #424: what the orchestrator proposed, readable, with the answers.
@@ -216,12 +218,14 @@ def tasks_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             *proposal_sections(uow, principal, hidden=hidden),
             {
                 "title": "Needs attention",
+                "count": len(attention),
                 "empty": "No task needs attention.",
                 "columns": ["Task", "Why", "Since"],
                 "rows": attention,
             },
             {
                 "title": "Pull requests in delivery",
+                "count": len(delivering),
                 "empty": "No pull request is open for a task.",
                 "columns": ["Task", "State", "Since"],
                 "rows": delivering,

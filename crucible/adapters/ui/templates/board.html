@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% macro card(item, lane) -%}
-<article class="board-card">
+<article class="board-card{% if item.stuck and item.stuck.owner == 'you' %} board-card--mine{% endif %}"{% if item.stuck %} data-owner="{{ item.stuck.owner }}"{% endif %}>
   <a class="board-card-main" href="/ui/tasks/{{ item.id }}">
     <span class="board-card-id">{{ safe_value("external id", item.external_id) }}</span>
     <strong>{{ safe_value("title", item.title) }}</strong>
@@ -11,24 +11,41 @@
     {% for issue in item.issues %}{% if issue.url %}<a href="{{ issue.url }}" rel="noopener noreferrer" target="_blank">Closes {{ issue.label }}</a>{% else %}Closes {{ issue.label }}{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
     {% if item.pull_request %}<a href="{{ item.pull_request.url }}" rel="noopener noreferrer" target="_blank">PR #{{ item.pull_request.number }}</a>{% endif %}
   </span>
+  {% if item.stuck %}<p class="board-card-reason-line" data-reason="{{ item.stuck.key }}">{{ safe_value("reason", item.stuck.sentence) }}</p>
+  {% if item.stuck.quote %}<blockquote class="board-card-quote">{{ safe_value("question", item.stuck.quote) }}</blockquote>{% endif %}
+  <p class="board-card-owner"><span class="board-owner-tag board-owner-tag--{{ item.stuck.owner }}">{{ item.stuck.owner_words }}</span> {{ item.stuck.owner_line }}</p>{% endif %}
   <dl class="board-card-facts">
     <div><dt>Worker</dt><dd>{{ item.harness or "not started" }} / {{ item.model or "not selected" }}</dd></div>
     <div><dt>Tier</dt><dd>{{ item.tier }}</dd></div>
     <div><dt>Waiting on</dt><dd>{{ safe_value("waiting on", item.waiting_on) }}</dd></div>
     <div><dt>Lane age</dt><dd title="Since {{ item.age.entered_at }}">{{ item.age.label }}</dd></div>
   </dl>
-  {% if item.actions %}<div class="board-card-actions">{% for action in item.actions %}<form method="post" action="/ui/board/{{ item.id }}/actions"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="return_to" value="/ui/board"><input type="hidden" name="move" value="{{ action.key }}"><button class="lat-btn {% if loop.first %}lat-btn--primary{% else %}lat-btn--ghost{% endif %}" type="submit" name="apply" value="go"{% if action.confirm %} data-confirm="true"{% endif %}>{{ action.label }}</button></form>{% endfor %}</div>{% endif %}
+  {% if item.actions %}<div class="board-card-actions">{% for action in item.actions %}<form method="post" action="/ui/board/{{ item.id }}/actions"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="return_to" value="/ui/board"><input type="hidden" name="move" value="{{ action.key }}"><button class="lat-btn {% if loop.first and (not item.stuck or item.stuck.owner == 'you') %}lat-btn--primary{% else %}lat-btn--ghost{% endif %}" type="submit" name="apply" value="go"{% if action.confirm %} data-confirm="true"{% endif %}>{{ action.label }}</button></form>{% endfor %}</div>{% endif %}
   {% if lane.key == "graveyard" %}<p class="board-card-reason"><b>Reason:</b> {{ safe_value("reason", item.reason) }}{% if item.replacement %} <a href="/ui/tasks/{{ item.replacement.task_id }}">Replaced by {{ item.replacement.external_id }}</a>{% endif %}</p>{% endif %}
 </article>
 {%- endmacro %}
 {% block content %}
+<style>
+  .board-card--mine { box-shadow: 0 0 0 1px rgba(180,107,255,.55), 0 0 18px rgba(180,107,255,.45); }
+  .board-card-reason-line { margin: 6px 0 4px; color: var(--ink); line-height: 1.4; overflow-wrap: anywhere; }
+  .board-card-quote { margin: 0 0 6px; padding: 4px 8px; border-left: 3px solid var(--cyan); color: var(--ink-muted); font-size: 12px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+  .board-card-owner { margin: 0 0 6px; color: var(--ink-subtle); font-size: 12px; }
+  .board-owner-tag { display: inline-block; margin-right: 4px; padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink-muted); }
+  .board-owner-tag--you { color: var(--accent-ink); border-color: var(--accent); background: var(--accent-soft); }
+  .board-group + .board-group { margin-top: 12px; }
+  .board-group-head { margin: 8px 0 6px; font-size: 13px; color: var(--ink-muted); letter-spacing: .04em; }
+  .board-group--waiting_on_me .board-group-head { color: var(--accent-ink); }
+</style>
 <div class="admin-title"><div><h1>Board</h1><p><b>{{ needs_me }}</b> need me. Work grouped by what happens next. Open a card for the contract, where it is stuck, its notes and actions.</p></div></div>
 <nav class="board-service-strip" aria-label="Services"><a href="/ui/room">Talk to Hades</a></nav>
 <div class="board-lanes">
 {% for lane in lanes %}
   {% if lane.collapsed %}<details class="board-lane" data-lane="{{ lane.key }}"><summary><span><b>{{ lane.name }}</b> <span class="board-count">{% if lane.key == "wins" %}{{ lane.count_today }} today · {{ lane.count_all_time }} all time{% else %}{{ lane.count }}{% endif %}</span></span><small>{{ lane.meaning }}</small></summary>
   {% else %}<section class="board-lane" data-lane="{{ lane.key }}"><header><span><h2>{{ lane.name }}</h2><span class="board-count">{{ lane.count }}</span></span><p>{{ lane.meaning }}</p></header>{% endif %}
-  <div class="board-cards" data-cards="{{ lane.key }}">{% for item in lane.cards %}{{ card(item, lane) }}{% else %}{% if not lane.collapsed %}<p class="admin-empty">No cards.</p>{% endif %}{% endfor %}</div>
+  {% if lane.groups %}{% set by_id = {} %}{% for item in lane.cards %}{% set _ = by_id.update({item.id: item}) %}{% endfor %}
+  {% for group in lane.groups %}<div class="board-group board-group--{{ group.key }}" data-group="{{ group.key }}"><h3 class="board-group-head">{{ group.name }} <span class="board-count">{{ group.count }}</span></h3>
+  <div class="board-cards" data-cards="{{ lane.key }}">{% for card_id in group.card_ids %}{% if card_id in by_id %}{{ card(by_id[card_id], lane) }}{% endif %}{% else %}<p class="admin-empty">{% if group.key == "waiting_on_me" %}Nothing stuck waits on you.{% else %}Nothing stuck waits on Foundry.{% endif %}</p>{% endfor %}</div></div>{% endfor %}
+  {% else %}<div class="board-cards" data-cards="{{ lane.key }}">{% for item in lane.cards %}{{ card(item, lane) }}{% else %}{% if not lane.collapsed %}<p class="admin-empty">No cards.</p>{% endif %}{% endfor %}</div>{% endif %}
   {% if lane.collapsed %}</details>{% else %}</section>{% endif %}
 {% endfor %}
 </div>

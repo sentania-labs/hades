@@ -97,6 +97,7 @@ mapped to an existing operation:
 | Correction, resume from the last attempt | `corrections` with `resume_from: last_attempt` | a correctable state |
 | Accept the collected head | `accept` with verdict `accepted` | `awaiting_acceptance` |
 | Answer the open escalation | `decisions` on the escalation (rescheduling a blocked task) | an open escalation |
+| Send back to Foundry | a `sent_back` wake to the task's orchestrator with the escalation (hades #607) | a stuck task, an open escalation, or `awaiting_internal_review` |
 | Cancel with reason | `cancel` | any state the lifecycle lets cancel |
 
 The operator's words are required. **Go** stores them as a note and applies the
@@ -105,7 +106,9 @@ the acceptance reasoning, the decision verbatim, the approval reason. **Next pha
 applies the lane's default move, published on the card: Inbox to Holding pen
 (approve), Holding pen to In progress (start now), Stuck to In progress (correction,
 resume from the PR branch), Waiting on Scott to In progress (answer the escalation),
-In progress to Graveyard (cancel). Wins and Graveyard have no next phase. Every action
+In progress to Graveyard (cancel); a Stuck card waiting on the operator's answer
+defaults to answer. A card with a stuck reason (hades #607, `docs/board.md`) offers only
+that reason's clicks, so it shows no Next phase. Wins and Graveyard have no next phase. Every action
 records a `task_phase_action_applied` event with the move, the operation, the lane,
 and the note's text as `verbatim`, beside the operation's own event; both show on
 the Audit page with the words as the reason. The actions are open to operator and

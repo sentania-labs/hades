@@ -137,8 +137,14 @@ def test_card_fields_scott_question_and_graveyard_replacement() -> None:
         ]
     )
     lanes = {lane["key"]: lane for lane in board_lanes_view(uow, NOW)["lanes"]}
-    scott = next(card for card in lanes["waiting_on_scott"]["cards"] if card["id"] == blocked.id)
-    assert scott["waiting_on"] == "Which layout should we use?"
+    # hades #607: a stuck task with the operator's question stays in Stuck, under
+    # Waiting on me, and says whose move it is.
+    scott = next(card for card in lanes["stuck"]["cards"] if card["id"] == blocked.id)
+    assert scott["waiting_on"] == "You"
+    assert scott["stuck"]["owner"] == "you"
+    assert scott["stuck"]["quote"] == "Which layout should we use? More context follows."
+    mine = next(group for group in lanes["stuck"]["groups"] if group["key"] == "waiting_on_me")
+    assert mine["card_ids"] == [blocked.id] and mine["count"] == 1
     assert scott["issues"][0]["url"].endswith("/issues/489")
     assert scott["tier"] == "frontier"
     assert {"external_id", "project", "title", "harness", "model", "age"} <= scott.keys()
@@ -183,9 +189,13 @@ def test_real_escalations_compare_by_opened_at() -> None:
         ]
     )
     lanes = _lanes(uow)
-    card = next(card for card in lanes["waiting_on_scott"]["cards"] if card["id"] == blocked.id)
-    assert card["waiting_on"] == "Newer question?"
-    assert card["age"]["entered_at"] == NOW - timedelta(minutes=2)
+    # hades #607: a worker's ambiguous_contract is Foundry's to answer, so the card stays
+    # in Stuck under Waiting on Foundry, quoting the newest question.
+    card = next(card for card in lanes["stuck"]["cards"] if card["id"] == blocked.id)
+    assert card["stuck"]["key"] == "ambiguous_contract"
+    assert card["stuck"]["owner"] == "foundry"
+    assert card["stuck"]["quote"] == "Newer question? Detail."
+    assert blocked.id not in {c["id"] for c in lanes["waiting_on_scott"]["cards"]}
 
 
 def test_closed_tasks_are_wins_not_graveyard() -> None:
