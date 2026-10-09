@@ -4,7 +4,7 @@ and what the last check found. `check` mints a token per repository and discards
 
 Connect GitHub (crucible#120, ADR 0017): the operator creates the App with one click
 (`github_manifest`, crucible#168), the only way to connect one; the service then owns
-the credential (the `crucible-github-app` Secret on Kubernetes, the files
+the credential (the `hades-github-app` Secret on Kubernetes, the files
 beside `github.app.private_key_path` with Docker). The App's install link comes from its
 own `html_url`. The repository picker lists what each installation covers, grouped by
 account, and registers a pick with the installation id and the default branch GitHub

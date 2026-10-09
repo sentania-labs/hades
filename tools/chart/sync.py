@@ -18,17 +18,15 @@ def objects(path: Path) -> dict[tuple[str, str, str], dict[str, Any]]:
         if not item:
             continue
         metadata = item.get("metadata", {})
-        if item["kind"] == "Job" and metadata.get("namespace") == "crucible":
-            metadata["name"] = re.sub(
-                r"^crucible-migrate-[0-9]+$", "crucible-migrate", metadata["name"]
-            )
+        if item["kind"] == "Job" and metadata.get("namespace") == "hades":
+            metadata["name"] = re.sub(r"^hades-migrate-[0-9]+$", "hades-migrate", metadata["name"])
         key = (item["kind"], metadata.get("namespace", ""), metadata["name"])
         metadata.pop("creationTimestamp", None)
         labels = metadata.get("labels", {})
         for name in list(labels):
             if name.startswith("helm.sh/") or name.startswith("app.kubernetes.io/managed-by"):
                 labels.pop(name)
-        if item["kind"] == "ConfigMap" and metadata["name"] == "crucible-settings":
+        if item["kind"] == "ConfigMap" and metadata["name"] == "hades-settings":
             data = item.get("data", {})
             for name in list(data):
                 if name.startswith("CRUCIBLE_ROOMS__") or name in {

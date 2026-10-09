@@ -35,7 +35,7 @@ async def ro_claude_code_attempt() -> tuple[Any, ...]:
     image = "crucible-worker:claude-fake-succeed-2"
     registry.register(image, harness="claude_code", version="2.1.277")
     api.put_harness_secret(
-        "crucible-harness-claude-code",
+        "hades-harness-claude-code",
         {"oauth-token": b"not-a-real-value"},
     )
     launch = spec(harness="claude_code", image=image)
@@ -119,7 +119,7 @@ async def test_rw_narrow_unchanged() -> None:
     )
     codex_image = "crucible-worker:codex-fake-succeed-2"
     registry.register(codex_image, harness="codex", version="0.153.4")
-    api.put_harness_secret("crucible-harness-codex", {"auth.json": b"{}"})
+    api.put_harness_secret("hades-harness-codex", {"auth.json": b"{}"})
     launch = spec(harness="codex", image=codex_image)
     workspace = await provider.prepare(launch)
     await provider.launch(workspace, launch)
@@ -172,7 +172,7 @@ async def test_ro_without_templates_still_mounts_credential_target() -> None:
     )
     copy = _CredentialCopy(
         spec=cred_spec,
-        source_secret="crucible-harness-claude-code",
+        source_secret="hades-harness-claude-code",
         mode=MountMode.RO,
     )
 

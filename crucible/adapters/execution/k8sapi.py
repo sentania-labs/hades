@@ -257,7 +257,7 @@ def _named(entries: Any, name: str, kind: str) -> dict[str, Any]:
 
 class KubernetesClient:
     """Namespaced calls only. The namespace is fixed at construction on purpose: 26
-    gives the supervisor a Role in `crucible-workers` and nothing anywhere else, and a
+    gives the supervisor a Role in `hades-workers` and nothing anywhere else, and a
     client that cannot spell another namespace cannot drift past that."""
 
     def __init__(

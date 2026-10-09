@@ -54,7 +54,7 @@ PREVIOUS = "01PREVIOUS000000000000000A"
 
 # The fake's FailedCreate event, word for word (k8sfake `_start_job`).
 FAILED_CREATE = (
-    "exceeded quota: crucible-workers, requested: limits.memory=4Gi, used: "
+    "exceeded quota: hades-workers, requested: limits.memory=4Gi, used: "
     "limits.memory=12Gi, limited: limits.memory=12Gi"
 )
 # A 403 body the API server itself answers a create with when a count quota is full.

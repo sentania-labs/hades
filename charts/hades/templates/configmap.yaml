@@ -1,7 +1,7 @@
 # Every non-secret setting the cluster deployment carries (crucible/settings.py). Nothing
 # here is a credential value: the database DSN and the GitHub App credential are Secrets
 # (the second one the service's own, ADR 0017), and the harness credentials are Secrets in
-# `crucible-workers` that only the supervisor's account can read (12, 26).
+# `hades-workers` that only the supervisor's account can read (12, 26).
 #
 # The settings are the `hades.settings` block below, read back as a map so that
 # `extraSettings` merges over it: a key there replaces the chart's own value for it.
@@ -48,6 +48,7 @@ CRUCIBLE_KUBERNETES__FIRST_RUN_SECRET_NAME: {{ .Values.secrets.firstRunToken | q
 CRUCIBLE_KUBERNETES__WORKERS_NAMESPACE: {{ include "hades.workersNamespace" . | quote }}
 CRUCIBLE_KUBERNETES__SERVICE_ACCOUNT: {{ printf "%s-worker" $name | quote }}
 CRUCIBLE_KUBERNETES__CACHE_CLAIM: {{ printf "%s-reference-cache" $name | quote }}
+CRUCIBLE_KUBERNETES__BUILDKIT_NAMESPACE: {{ .Values.buildkit.namespace | quote }}
 CRUCIBLE_KUBERNETES__USE_REFERENCE_CACHE: "true"
 CRUCIBLE_KUBERNETES__WORKSPACE_SIZE: {{ .Values.provider.workspaceSize | quote }}
 # The class of each attempt's workspace claim; absent, the cluster's default class.
@@ -98,8 +99,8 @@ CRUCIBLE_KUBERNETES__PROBE_IMAGE: {{ include "hades.workerImage" . | quote }}
 # requests a fixed small size rather than the policy's limits (26, issue 93).
 CRUCIBLE_KUBERNETES__CANARY_CPU_MILLICORES: "100"
 CRUCIBLE_KUBERNETES__CANARY_MEMORY: 64Mi
-# The harness credential Secret in `crucible-workers`, per harness (12, 26). The
-# default for a harness that is absent here is `crucible-harness-<harness>`; it is
+# The harness credential Secret in `hades-workers`, per harness (12, 26). The
+# default for a harness that is absent here is `hades-harness-<harness>`; it is
 # written out so the runbook and the cluster name the same objects.
 # Mapping a harness here does not force a credential mount if the Secret contains
 # none of the adapter's declared auth files: an optional credential whose Secret is
@@ -130,7 +131,7 @@ CRUCIBLE_KUBERNETES__LOCAL_ENDPOINT_POD_LABELS: {{ .Values.cluster.localEndpoint
 CRUCIBLE_KUBERNETES__LOCAL_ENDPOINT_PORT: {{ .Values.cluster.localEndpoint.port | quote }}
 
 # GitHub delivery (12, 23, ADR 0017). The App credential is the Secret
-# `crucible-github-app` in this namespace, which the service owns: the operator connects
+# `hades-github-app` in this namespace, which the service owns: the operator connects
 # the App from the GitHub page (its id and private key), and the service creates the
 # Secret and reads it through the API server. Nothing here needs to change for that;
 # `enabled` and `app_id` only matter for a Secret a deployment placed there itself. The

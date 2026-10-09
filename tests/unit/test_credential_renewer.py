@@ -137,7 +137,7 @@ def test_kubernetes_store_refreshes_the_service_held_secret() -> None:
     client.create(
         "secrets",
         k8sspec.secret(
-            name="crucible-harness-codex",
+            name="hades-harness-codex",
             namespace="crucible",
             object_labels={},
             data={"auth.json": json.dumps(login).encode()},
@@ -150,7 +150,7 @@ def test_kubernetes_store_refreshes_the_service_held_secret() -> None:
     )
 
     assert renewer.refresh("timer") is True
-    stored_secret = client.get("secrets", "crucible-harness-codex")
+    stored_secret = client.get("secrets", "hades-harness-codex")
     stored = json.loads(base64.b64decode(stored_secret["data"]["auth.json"]))
     assert stored["last_refresh"] == clock.now().isoformat()
 
@@ -170,8 +170,8 @@ def test_wiring_uses_service_secret_when_codex_has_no_directory(mode: Any) -> No
     client.create(
         "secrets",
         k8sspec.secret(
-            name="crucible-harness-codex",
-            namespace="crucible-workers",
+            name="hades-harness-codex",
+            namespace="hades-workers",
             object_labels={},
             data={"auth.json": json.dumps(login).encode()},
         ),

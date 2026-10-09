@@ -19,11 +19,11 @@ deploy/kubernetes/
   base/crucible/         the api and supervisor Deployments, PostgreSQL, the settings
                          ConfigMap, the artifact claim, the migration Job, the Service
                          and the Ingress
-  base/buildkit/         the crucible-buildkit namespace (hades #475): Hades's own
+  base/buildkit/         the hades-buildkit namespace (hades #475): Hades's own
                          rootless BuildKit Deployment, its ClusterIP Service, its
                          layer-cache claim and the NetworkPolicy that admits only the
                          workers namespace to it
-  base/workers/          the crucible-workers namespace: Pod Security admission at
+  base/workers/          the hades-workers namespace: Pod Security admission at
                          restricted, the default-deny NetworkPolicy, the worker account,
                          the supervisor Role and RoleBinding, the ResourceQuota and the
                          reference-cache claim
@@ -60,21 +60,21 @@ Spec 26's checklist, made concrete. Each row is either a placeholder in
 
 | # | What | Where it lands |
 |---|---|---|
-| 1 | Nothing: the three namespaces (`crucible`, `crucible-workers`, `crucible-buildkit`), their Pod Security admission labels and the default-deny NetworkPolicy are in the base and are applied by this Application | - |
+| 1 | Nothing: the three namespaces (`hades`, `hades-workers`, `hades-buildkit`), their Pod Security admission labels and the default-deny NetworkPolicy are in the base and are applied by this Application | - |
 | 2 | A CNI that enforces egress NetworkPolicy, on which the worker DNS and local endpoint rules match | verified by the readiness canary, shown on the status page; on Cilium with kube-proxy replacement, see "Cilium and an in-cluster LiteLLM" below |
 | 3 | A `ReadWriteOnce` storage class for PostgreSQL, the reference cache and the attempt workspaces | `REPLACE_ME_STORAGE_CLASS_RWO` |
 | 3a | A `ReadWriteOnce` claim for Hades's own BuildKit layer cache (hades #475, "Hades's image builder" below). The base requests 50 GiB; size it in the overlay the way `storage.yaml` sizes the others. The node pulls `moby/buildkit:<version>-rootless` from Docker Hub (images/pins.env `BUILDKIT_ROOTLESS_IMAGE`); a cluster without that route mirrors it | `base/buildkit/buildkit.yaml` |
 | 3b | A `ReadWriteMany` storage class for the artifact root | `REPLACE_ME_STORAGE_CLASS_RWX` |
-| 4 | A pod PID limit configured on every node that can run a `crucible-workers` Pod (the kubelet's `podPidsLimit`; Kubernetes has no per-pod PID field, issue 60) | reported on the status page when the canary can see it; the provider refuses to launch without a confirmed one (95: on a runtime that isolates the pod's cgroup from the container, the canary cannot see it at all, and lab-admin attests to it with `kubernetes.pod_pid_limit_override` instead) |
+| 4 | A pod PID limit configured on every node that can run a `hades-workers` Pod (the kubelet's `podPidsLimit`; Kubernetes has no per-pod PID field, issue 60) | reported on the status page when the canary can see it; the provider refuses to launch without a confirmed one (95: on a runtime that isolates the pod's cgroup from the container, the canary cannot see it at all, and lab-admin attests to it with `kubernetes.pod_pid_limit_override` instead) |
 | 5 | The cluster can pull `ghcr.io/sentania-labs/crucible` and `ghcr.io/sentania-labs/crucible-worker` (the release publishes both); a pull secret if the packages are private. The api and supervisor Pods also read the worker registry themselves, to resolve a tag to a digest and its harness labels before a launch and to list images for promotion: they run `crane`, which the service image ships, with the same pull Secret, so nothing else is configured. They need HTTPS egress to the registry and to the host it redirects blob downloads to (for GHCR, `pkg-containers.githubusercontent.com`). A registry must be named by a host name it serves HTTPS on: one named by a private IP address is refused, because crane would read it over plain HTTP | `REPLACE_ME_IMAGE_PULL_SECRET` |
-| 6 | Egress from `crucible-workers` to the model providers, the package registries, GitHub and the Spark is possible at the network edge | the per-attempt NetworkPolicy narrows it; the edge must not block it |
+| 6 | Egress from `hades-workers` to the model providers, the package registries, GitHub and the Spark is possible at the network edge | the per-attempt NetworkPolicy narrows it; the edge must not block it |
 | 7 | The Argo Application | `argocd/application.yaml`, with `REPLACE_ME_ARGOCD_PROJECT`, `REPLACE_ME_MANIFEST_REPO_URL`, `REPLACE_ME_MANIFEST_REVISION` |
 | 8 | Nothing: public DNS is the operator's alone (below) | - |
 
 ### Hades's image builder
 
-Hades deploys its own BuildKit (hades #475), `crucible-buildkit` in the
-`crucible-buildkit` namespace, as its own dependency: it is not the lab's shared CI
+Hades deploys its own BuildKit (hades #475), `hades-buildkit` in the
+`hades-buildkit` namespace, as its own dependency: it is not the lab's shared CI
 builder, and nothing outside Hades is expected to use it. A worker or a verifier whose
 contract requires `make images-check` is told
 `BUILDKIT_HOST=tcp://crucible-buildkit.crucible-buildkit.svc:1234` and builds the
@@ -90,13 +90,13 @@ reproducibility check runs inside Hades.
 - **Why its own namespace.** The security context rootless BuildKit documents sets
   seccomp and AppArmor to `Unconfined` on that one Pod (it unshares user and mount
   namespaces), which the Baseline standard does not permit, so the Pod cannot be
-  admitted under `crucible`'s `restricted` label. Pod Security admission is per
-  namespace: `crucible-buildkit` enforces `privileged` with `warn` and `audit` at
-  `baseline`, holds only this Pod, and `crucible` stays `restricted`. Privilege
+  admitted under `hades`'s `restricted` label. Pod Security admission is per
+  namespace: `hades-buildkit` enforces `privileged` with `warn` and `audit` at
+  `baseline`, holds only this Pod, and `hades` stays `restricted`. Privilege
   escalation stays allowed on the container because `newuidmap` is setuid; that is
   how a build creates files owned by other users.
 - **Who reaches it.** TLS is off on the cluster-only port 1234. The namespace's own
-  NetworkPolicy admits ingress from `crucible-workers` and nothing else, and a worker
+  NetworkPolicy admits ingress from `hades-workers` and nothing else, and a worker
   reaches it only through the per-attempt egress rule the provider writes for a
   contract whose `required_verification` names both `make images-check` and `make
   registry-check`; that rule also opens HTTPS to `ghcr.io` and to
@@ -107,7 +107,7 @@ reproducibility check runs inside Hades.
 - **Replacing it.** A deployer may size the claim, set the resources, or replace the
   component with another BuildKit reachable at that Service name, as long as the
   provider's rule still selects its pods by the `app.kubernetes.io/name:
-  crucible-buildkit` label in that namespace.
+  hades-buildkit` label in that namespace.
 
 ### Every placeholder, and what goes in it
 
@@ -115,7 +115,7 @@ reproducibility check runs inside Hades.
 |---|---|---|
 | `REPLACE_ME_LAB_DOMAIN` | `overlays/lab/ingress.yaml` | the domain the API host sits under; the host becomes `crucible.<domain>` |
 | `REPLACE_ME_INGRESS_CLASS` | `overlays/lab/ingress.yaml` | the cluster's ingress class name |
-| `REPLACE_ME_CERT_ISSUER_ANNOTATION` and `REPLACE_ME_CERT_ISSUER_NAME` | `overlays/lab/ingress.yaml` | the annotation the cluster's certificate issuer watches, and the issuer's name. Delete the annotation entirely if certificates are provisioned some other way; the TLS Secret is `crucible-tls` either way |
+| `REPLACE_ME_CERT_ISSUER_ANNOTATION` and `REPLACE_ME_CERT_ISSUER_NAME` | `overlays/lab/ingress.yaml` | the annotation the cluster's certificate issuer watches, and the issuer's name. Delete the annotation entirely if certificates are provisioned some other way; the TLS Secret is `hades-tls` either way |
 | `REPLACE_ME_STORAGE_CLASS_RWO` | `overlays/lab/storage.yaml`, `overlays/lab/settings.yaml` | a `ReadWriteOnce` class. It appears twice on purpose: once for the claims the manifests create and once as the class the provider gives each attempt's workspace claim |
 | `REPLACE_ME_STORAGE_CLASS_RWX` | `overlays/lab/storage.yaml` | a `ReadWriteMany` class, for the artifact root the api serves and the supervisor writes |
 | `REPLACE_ME_CLUSTER_DNS_IP` | `overlays/lab/settings.yaml` | `kubectl -n kube-system get service kube-dns -o jsonpath='{.spec.clusterIP}'` |
@@ -159,7 +159,7 @@ change them from the admin UI (Routing, "Edit Kubernetes egress selectors"), fro
 saved value wins over the file, is audited, and reaches the supervisor within 15 seconds
 without a restart. A save states both halves: an empty namespace is how a selector is
 turned off, and a request that leaves one out is refused. No selector may name
-`crucible` or `crucible-workers`, and none may be empty. The readiness canary runs again
+`hades` or `hades-workers`, and none may be empty. The readiness canary runs again
 under the new values before any launch uses them.
 
 ### The Secrets
@@ -169,12 +169,12 @@ delivers one Secret:
 
 | Object | Namespace | Keys |
 |---|---|---|
-| `crucible-database` | `crucible` | `password`, and `url`, the whole DSN, which must carry the same password |
+| `hades-database` | `hades` | `password`, and `url`, the whole DSN, which must carry the same password |
 
 **The GitHub App Secret is not GitOps's either** (ADR 0017). On the GitHub page press
 Create GitHub App (for your account, or name an organization): GitHub opens its own
 create page filled in, you confirm, and GitHub sends your browser back to Crucible, which
-creates `crucible-github-app` in `crucible` (keys `app-id`, `app.pem`, `webhook.secret`)
+creates `hades-github-app` in `hades` (keys `app-id`, `app.pem`, `webhook.secret`)
 and is its only writer (crucible#168). No public DNS record is needed: every redirect is
 of your own browser, so the internal hostname you use for the UI is enough, and the App
 has no webhook (Crucible polls). If Crucible sees a different address than your browser
@@ -184,7 +184,7 @@ each installation's repositories can be filtered by name, paged, and ticked to r
 several at once under one policy. Create is the only
 way to connect an App. To change Apps, use Replace the App on the same page, install the
 new App, and register each repository again on Repositories with its new installation.
-A deployment that sealed `crucible-github-app` before this change takes it out of its
+A deployment that sealed `hades-github-app` before this change takes it out of its
 GitOps repository without pruning it, or creates the App again afterwards.
 
 **Private repositories need the App and nothing else** (ADR 0019). The picker on Repositories registers a
@@ -194,7 +194,7 @@ covers it. Registration asks GitHub for a read-only token for that repository an
 it at once, so a missing App, a wrong installation, or an App without Contents read is
 refused there, in those words. Each preparation then gets its own read-only token,
 revoked when the step ends; on this cluster it is a short-lived Secret `checkout-<attempt>`
-in `crucible-workers`, mounted into the cache refresher and the preparer Jobs only. No
+in `hades-workers`, mounted into the cache refresher and the preparer Jobs only. No
 extra RBAC is needed: the service already creates and deletes Secrets there for the
 harness credential copies. The token is answered only for https on
 `CRUCIBLE_GITHUB__CREDENTIAL_HOST` (default `github.com`); a GitHub Enterprise Server
@@ -209,10 +209,10 @@ harness has already rotated. They are:
 
 | Object | Namespace | Keys |
 |---|---|---|
-| `crucible-harness-claude-code` | `crucible-workers` | `oauth-token`, `.claude.json` |
-| `crucible-harness-codex` | `crucible-workers` | `auth.json` |
-| `crucible-harness-agy` | `crucible-workers` | `antigravity-cli_antigravity-oauth-token` |
-| `crucible-harness-hermes` | `crucible-workers` | `api-key` |
+| `hades-harness-claude-code` | `hades-workers` | `oauth-token`, `.claude.json` |
+| `hades-harness-codex` | `hades-workers` | `auth.json` |
+| `hades-harness-agy` | `hades-workers` | `antigravity-cli_antigravity-oauth-token` |
+| `hades-harness-hermes` | `hades-workers` | `api-key` |
 
 Each carries `app.kubernetes.io/managed-by: crucible`. The names come from
 `CRUCIBLE_KUBERNETES__CREDENTIAL_SECRETS` in the settings ConfigMap, which the base
@@ -229,7 +229,7 @@ repository. Nothing sealed, encrypted or plain belongs in Crucible's repository.
 ## What Crucible provides
 
 Everything else: both namespaces with their admission labels and the default deny, the
-supervisor's Role scoped to `crucible-workers`, the one Role in `crucible` for the GitHub
+supervisor's Role scoped to `hades-workers`, the one Role in `hades` for the GitHub
 App Secret the service owns (ADR 0017), the worker
 ServiceAccount with no permission at all, the ResourceQuota that is also the provider's
 concurrency bound, the reference cache claim, PostgreSQL for the lab, the migration Job,
@@ -297,7 +297,7 @@ quota. `kubernetes.max_concurrency` only applies when the namespace has no quota
    wrote. It is never in the Job's log (ADR 0016); the log says only where it is:
 
    ```sh
-   kubectl -n crucible get secret crucible-first-run-admin \
+   kubectl -n hades get secret hades-first-run-admin \
      -o jsonpath='{.data.token}' | base64 -d
    ```
 
@@ -314,7 +314,7 @@ Once the api is reachable, sign in at `/ui` with that token and, for each harnes
 
 1. **Credentials**: start the login (the harness's Login page, `crucible admin
    credentials login`, or `POST /v1/admin/credentials/{harness}/login`). The service runs
-   the harness's own CLI as a Job in `crucible-workers` from the promoted worker image,
+   the harness's own CLI as a Job in `hades-workers` from the promoted worker image,
    with a memory-backed home, no workspace, no credential mounted, and a NetworkPolicy
    for that harness's login endpoints only (never its model API). The page shows the
    device or browser URL and the device code read from the Pod log, the harness's own
@@ -368,7 +368,7 @@ that older image is no longer offered for it; roll the Crucible release back wit
 For Hermes, use **Local gateway** to set the HTTPS `/v1` gateway URL and the LiteLLM
 virtual key together (also `crucible admin gateway set --endpoint-url URL --key` or
 `POST /v1/admin/gateway`), then tick the harness routes to use under each gateway model
-and set the pool concurrency; saving the models writes a new routing policy version. Crucible writes the key into the `crucible-harness-hermes`
+and set the pool concurrency; saving the models writes a new routing policy version. Crucible writes the key into the `hades-harness-hermes`
 Secret, creating it if it is absent, and tests both: unauthenticated
 `/health/readiness` must return 200, then authenticated `/v1/models` decides. The key is
 never shown again; the page and `GET /v1/admin/credentials/hermes` report only
@@ -536,7 +536,7 @@ target: the address or name of the cluster's ingress endpoint for
 ```
 
 Until the operator creates that record, the Ingress is reachable only from inside, and
-`kubectl -n crucible port-forward service/crucible-api 8080:8080` is the way in. That is
+`kubectl -n hades port-forward service/hades-api 8080:8080` is the way in. That is
 a perfectly good state to run in: polling is the complete GitHub observation path and the
 webhook is only an accelerator (23, Q13). `CRUCIBLE_GITHUB__WEBHOOK_ENABLED` stays
 `false` until the record exists and the route terminates TLS.
@@ -554,7 +554,7 @@ make deploy-kind   # the whole thing on a disposable kind cluster, one task thro
 
 `make manifests` also prints a resource budget line for `base`, `overlays/lab` and
 `overlays/kind` (issue 93): the CPU and memory each target's Deployments, StatefulSets
-and Jobs in the `crucible` namespace request, plus `crucible-workers`'s ResourceQuota
+and Jobs in the `hades` namespace request, plus `hades-workers`'s ResourceQuota
 `requests.cpu` / `requests.memory`, which is the manifests' own record of what the
 configured concurrency requests at once. `CRUCIBLE_CLUSTER_CPU_BUDGET` refuses a target
 whose total exceeds it; it defaults to `12`, the lab's own stated shape (three 4-CPU
@@ -567,7 +567,7 @@ variables:
 make manifests CRUCIBLE_CLUSTER_CPU_BUDGET=12 CRUCIBLE_CLUSTER_MEMORY_BUDGET_GI=48
 ```
 
-This catches the `crucible-workers` ResourceQuota drifting from what the deployed
+This catches the `hades-workers` ResourceQuota drifting from what the deployed
 policy and `max_concurrency` actually request; it does not catch a policy whose request
 fraction alone makes the arithmetic wrong, which is a review-time check on the policy
 document, not a rendered one (spec 26, "Requests below limits").
@@ -617,7 +617,7 @@ what they replace in the overlay:
 
 | Values | What they set |
 |---|---|
-| `nameOverride` | the prefix of every object name (`<name>-api`, `<name>-settings`, `<name>-worker`, `<name>-reference-cache`, `<name>-harness-<harness>` and the rest). Empty is `crucible`, the base's names. It also reaches the settings the service reads: `KUBERNETES__SERVICE_ACCOUNT`, `KUBERNETES__CACHE_CLAIM` and `KUBERNETES__CREDENTIAL_SECRETS`. At most 43 characters, so `<name>-postgres` and its StatefulSet's revision hash fit a 63-character label; the schema refuses longer |
+| `nameOverride` | the prefix of every object name (`<name>-api`, `<name>-settings`, `<name>-worker`, `<name>-reference-cache`, `<name>-harness-<harness>` and the rest). Empty is `hades`, the base's names. It also reaches the settings the service reads: `KUBERNETES__SERVICE_ACCOUNT`, `KUBERNETES__CACHE_CLAIM` and `KUBERNETES__CREDENTIAL_SECRETS`. At most 43 characters, so `<name>-postgres` and its StatefulSet's revision hash fit a 63-character label; the schema refuses longer |
 | `namespaceOverride`, `workersNamespaceOverride` | the control plane's namespace (empty: the name) and the workers namespace (empty: the control plane's with `-workers` after it), and `KUBERNETES__NAMESPACE` and `KUBERNETES__WORKERS_NAMESPACE` with them. The chart creates both namespaces itself, so `helm --namespace` only says where Helm keeps its release record. The `app.kubernetes.io/name: crucible` labels do not change, so an existing Deployment's selector still matches. Each is at most 63 characters, and `namespaceOverride` at most 55 while `workersNamespaceOverride` is empty, so the default `<namespace>-workers` fits |
 | `serviceImage`, `workerImage` | repository, tag and digest. The schema refuses a tag other than `latest` without a `sha256:` digest |
 | `cluster.dnsIp`, `cluster.dnsNamespace`, `cluster.dnsPodLabels` | `REPLACE_ME_CLUSTER_DNS_IP` and the resolver's pods. 10.96.0.10 is kind's and kubeadm's; k3s uses 10.43.0.10 |
@@ -628,8 +628,8 @@ what they replace in the overlay:
 | `provider.workspaceStorageClass`, `provider.workspaceSize`, `provider.maxConcurrency`, `provider.*TimeoutSeconds` | the attempt provider: each attempt's workspace claim (the `KUBERNETES__STORAGE_CLASS` half of `REPLACE_ME_STORAGE_CLASS_RWO`), how many attempts run at once, and the launch, prepare, collector and verifier timeouts. `roomRunner` is only the rooms |
 | `storage.artifactsStorageClass`, `storage.referenceCacheStorageClass`, `storage.buildkitCacheStorageClass`, `postgres.storageClass` | one class per claim: `REPLACE_ME_STORAGE_CLASS_RWX` for the artifact root, a `ReadWriteOnce` class for the others. An empty per-claim class falls back to `storage.storageClass`, and an empty one of those to the cluster's default |
 | `postgres.user`, `postgres.database` | the bundled server's role and database; the DSN in the database Secret names the same two |
-| `buildkit.enabled` | Hades's BuildKit ("Hades's image builder" above). Off by default: it creates `crucible-buildkit`, a namespace at the `privileged` Pod Security level, which is the cluster operator's decision. Its names stay `crucible-buildkit` whatever `nameOverride` says, because the provider addresses the builder by that constant; its NetworkPolicy admits the workers namespace the values name |
-| `workerQuota.*` | the `crucible-workers` ResourceQuota ("ResourceQuota sizing" above) |
+| `buildkit.enabled`, `buildkit.namespace` | Hades's BuildKit ("Hades's image builder" above). Off by default: it creates `buildkit.namespace` (`hades-buildkit`), a namespace at the `privileged` Pod Security level, which is the cluster operator's decision. The namespace, its Service and Deployment and its Pods' `app.kubernetes.io/name` label all carry that one name, whatever `nameOverride` says, and it reaches the provider as `KUBERNETES__BUILDKIT_NAMESPACE` whether or not this chart renders BuildKit; its NetworkPolicy admits the workers namespace the values name |
+| `workerQuota.*` | the `hades-workers` ResourceQuota ("ResourceQuota sizing" above) |
 | `extraSettings` | any other `CRUCIBLE_*` setting, as a string, merged into the settings ConfigMap last, so a key here replaces the chart's own value for it (for example `CRUCIBLE_SUPERVISOR__HOLDER`) |
 
 Helm merges a map value into the chart's default, so a `cluster.dnsPodLabels` or
@@ -650,3 +650,87 @@ the base's names written out as overrides), and compares every object with
 `kubectl kustomize deploy/kubernetes/base`; it then compares the chart's own defaults,
 which are the base without BuildKit. Both need `helm`, which the worker image does not
 carry, so the CI `chart` job is where they run.
+
+## Upgrading from crucible names
+
+Hades #609 step 2 moved the Kubernetes names to the product's: the control plane runs
+in `hades`, the attempts in `hades-workers`, Hades's BuildKit in `hades-buildkit`, and
+every object is `hades-*` (`hades-api`, `hades-supervisor`, `hades-postgres`, the
+`hades-migrate` Job, `hades-settings`, the `hades-supervisor`, `hades-migrate` and
+`hades-worker` accounts and Roles, the `hades-artifacts` and `hades-reference-cache`
+claims, `hades-database`, `hades-github-app`, `hades-first-run-admin` and
+`hades-harness-<harness>`). The settings defaults moved with them. Nothing else was
+renamed: the `CRUCIBLE_*` setting names, the `app.kubernetes.io/name: crucible` labels,
+the images, the paths under `/var/lib/crucible` and the database's role and name are
+the same.
+
+**A deployment that set its own names keeps them.** Every name is still read from its
+setting as written, so a settings ConfigMap or chart values that already name each
+object behave exactly as before.
+
+**A deployment that relied on the defaults does one of two things before it takes this
+version.** Do not sync or `helm upgrade` first: a Helm upgrade, or an Argo sync with
+pruning, deletes the objects whose names left the manifests, and with them the
+`crucible` namespaces and their claims.
+
+1. Keep the old names. With the chart, set them in the values (`buildkit.namespace`
+   matters even with BuildKit off, because it reaches the settings):
+
+   ```yaml
+   nameOverride: crucible
+   namespaceOverride: crucible
+   workersNamespaceOverride: crucible-workers
+   buildkit:
+     namespace: crucible-buildkit
+   postgres:
+     databaseSecretName: crucible-database
+   secrets:
+     githubApp: crucible-github-app
+     firstRunToken: crucible-first-run-admin
+   ```
+
+   With copied kustomize manifests, keep the copy's own object names and namespaces,
+   and set every name in its settings ConfigMap, because the service no longer
+   defaults to them: `CRUCIBLE_KUBERNETES__NAMESPACE: crucible`,
+   `CRUCIBLE_KUBERNETES__WORKERS_NAMESPACE: crucible-workers`,
+   `CRUCIBLE_KUBERNETES__SERVICE_ACCOUNT: crucible-worker`,
+   `CRUCIBLE_KUBERNETES__CACHE_CLAIM: crucible-reference-cache`,
+   `CRUCIBLE_KUBERNETES__FIRST_RUN_SECRET_NAME: crucible-first-run-admin`,
+   `CRUCIBLE_KUBERNETES__BUILDKIT_NAMESPACE: crucible-buildkit`,
+   `CRUCIBLE_KUBERNETES__CREDENTIAL_SECRETS` with each harness's
+   `crucible-harness-<harness>`, `CRUCIBLE_GITHUB__APP__SECRET_NAME: crucible-github-app`
+   and, when rooms run on Kubernetes, `CRUCIBLE_ROOMS__API_NAMESPACE: crucible`.
+
+2. Migrate to the new namespaces. The new objects are created beside the old ones, the
+   state is copied across, and the old namespaces are deleted last:
+
+   1. Wait until no attempt is running (Status shows none), then stop the old
+      supervisor so nothing new starts:
+      `kubectl -n crucible scale deployment/crucible-supervisor --replicas=0`.
+   2. Dump the database, which keeps its role and name:
+      `kubectl -n crucible exec statefulset/crucible-postgres -- pg_dump -U crucible --clean --if-exists crucible > <dump-file>`.
+   3. Provision `hades-database` in `hades` the same way `crucible-database` was
+      ("The Secrets" above), with the same password and `hades-postgres` as the host
+      in `url`.
+   4. Apply the new manifests: the copied base and overlay at this version, or a new
+      Helm release (`helm install <new-release> ...` with the defaults) beside the
+      old one. The migration Job prepares an empty database.
+   5. Stop the new service while its database is filled:
+      `kubectl -n hades scale deployment/hades-api deployment/hades-supervisor --replicas=0`,
+      then restore the dump:
+      `kubectl -n hades exec -i statefulset/hades-postgres -- psql -U crucible crucible < <dump-file>`.
+   6. Copy the Secrets the service owns under their new names: `crucible-github-app`
+      in `crucible` becomes `hades-github-app` in `hades`, and each
+      `crucible-harness-<harness>` in `crucible-workers` becomes
+      `hades-harness-<harness>` in `hades-workers`. For each one:
+      `kubectl -n <old-namespace> get secret <old-name> -o json | jq '.metadata |= {name: "<new-name>", namespace: "<new-namespace>", labels: .labels, annotations: .annotations}' | kubectl apply -f -`.
+      The values travel from one API call to the next and are never printed.
+   7. Start the new api, copy the artifact root across, then start the new supervisor:
+      `kubectl -n hades scale deployment/hades-api --replicas=1`, then
+      `kubectl -n crucible exec deployment/crucible-api -- tar -C /var/lib/crucible/artifacts -cf - . | kubectl -n hades exec -i deployment/hades-api -- tar -C /var/lib/crucible/artifacts -xf -`,
+      then `kubectl -n hades scale deployment/hades-supervisor --replicas=1`. The
+      reference cache is not copied; the new claim fills on the first preparation.
+   8. Check the new deployment ("Verifying" above), then remove the old one: the old
+      Helm release (`helm uninstall <old-release>`) or the old Argo Application, then
+      `kubectl delete namespace crucible crucible-workers crucible-buildkit`. Release
+      or keep the old claims' volumes as their reclaim policy and your backups say.

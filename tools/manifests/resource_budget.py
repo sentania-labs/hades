@@ -1,8 +1,8 @@
 """Render-time resource budget check (issue 93, requirement 5).
 
-Sums the CPU and memory *requests* the rendered `crucible` namespace's own Deployments,
+Sums the CPU and memory *requests* the rendered `hades` namespace's own Deployments,
 StatefulSets and Jobs carry (the control plane: api, supervisor, postgres, the migration
-Job), and adds the `crucible-workers` namespace's ResourceQuota `requests.cpu` /
+Job), and adds the `hades-workers` namespace's ResourceQuota `requests.cpu` /
 `requests.memory`, which is deploy/kubernetes's own record of what the configured
 concurrency requests at once (26, the ResourceQuota comment). That sum is what the
 cluster must have unreserved for Crucible plus one attempt at every running slot before
@@ -138,8 +138,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     objects = [doc for doc in yaml.safe_load_all(args.manifest.read_text()) if doc]
-    control_cpu, control_memory = control_plane_requests(objects, "crucible")
-    quota_cpu, quota_memory = workers_quota_requests(objects, "crucible-workers")
+    control_cpu, control_memory = control_plane_requests(objects, "hades")
+    quota_cpu, quota_memory = workers_quota_requests(objects, "hades-workers")
     total_cpu = control_cpu + quota_cpu
     total_memory = control_memory + quota_memory
 

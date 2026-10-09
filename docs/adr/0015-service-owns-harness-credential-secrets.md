@@ -82,8 +82,8 @@ has to carry the whole flow itself; the deployment only has to give it room to.
   GitOps repository. Argo prunes an object it stops tracking, which would delete the
   credential; either take them out of tracking without pruning, or log each harness in
   again. On its first write the service takes over a Secret that already exists.
-- The Secret name defaults to `crucible-harness-<harness>` with `_` as `-`, a valid
-  Kubernetes name; `CRUCIBLE_KUBERNETES__CREDENTIAL_SECRETS` may name them. An optional
+- The Secret name defaults to `hades-harness-<harness>` (`crucible-harness-<harness>`
+  before hades #609 step 2) with `_` as `-`, a valid Kubernetes name; `CRUCIBLE_KUBERNETES__CREDENTIAL_SECRETS` may name them. An optional
   credential (Hermes) is mounted when its Secret exists, without needing a mapping.
 - Rotate and remove move and shred directories and are refused where the credential is
   a Secret; a login with replace is how a Secret-held credential is replaced.

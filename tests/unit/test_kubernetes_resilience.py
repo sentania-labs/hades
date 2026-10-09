@@ -50,7 +50,7 @@ async def _run_to_exit(provider: KubernetesProvider, handle: Handle) -> Any:
 async def _codex(**build_kwargs: Any) -> Any:
     api, registry, provider = build(harness="codex", **build_kwargs)
     registry.register(CODEX_IMAGE, harness="codex", version="0.153.4")
-    api.put_harness_secret("crucible-harness-codex", {"auth.json": _auth("2026-09-20T00:00:00Z")})
+    api.put_harness_secret("hades-harness-codex", {"auth.json": _auth("2026-09-20T00:00:00Z")})
     launch = spec(harness="codex", image=CODEX_IMAGE)
     workspace = await provider.prepare(launch)
     return api, provider, launch, workspace
@@ -150,9 +150,7 @@ async def test_a_copy_that_could_not_be_read_back_is_kept_and_collected_again() 
     sync = outputs.credential_sync
     assert sync is not None and sync.removed
     assert [(f.name, f.synced) for f in sync.files] == [("auth.json", True)]
-    assert api.harness_secret("crucible-harness-codex")["auth.json"] == _auth(
-        "2026-09-21T00:00:00Z"
-    )
+    assert api.harness_secret("hades-harness-codex")["auth.json"] == _auth("2026-09-21T00:00:00Z")
     assert "credential/auth.json" not in api.claims[CLAIM]
 
 
@@ -407,14 +405,10 @@ async def test_an_exec_the_api_server_broke_keeps_the_copy_too() -> None:
     with pytest.raises(CollectionUnavailableError, match=r"credential/auth\.json"):
         await provider.collect(handle, workspace, launch)
     assert api.claims[CLAIM]["credential/auth.json"] == _auth("2026-09-21T00:00:00Z")
-    assert api.harness_secret("crucible-harness-codex")["auth.json"] == _auth(
-        "2026-09-20T00:00:00Z"
-    )
+    assert api.harness_secret("hades-harness-codex")["auth.json"] == _auth("2026-09-20T00:00:00Z")
     outputs = await provider.collect(handle, workspace, launch)
     assert outputs.credential_sync is not None and outputs.credential_sync.removed
-    assert api.harness_secret("crucible-harness-codex")["auth.json"] == _auth(
-        "2026-09-21T00:00:00Z"
-    )
+    assert api.harness_secret("hades-harness-codex")["auth.json"] == _auth("2026-09-21T00:00:00Z")
 
 
 async def test_a_collection_run_again_records_the_first_sync_not_an_absent_file() -> None:

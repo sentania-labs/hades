@@ -100,13 +100,16 @@ class KubernetesSettings(BaseModel):
     """
 
     enabled: bool = False
-    namespace: str = "crucible"
-    first_run_secret_name: str = "crucible-first-run-admin"
-    workers_namespace: str = "crucible-workers"
+    # The Kubernetes names default to the product's (hades #609 step 2). A deployment
+    # that set the earlier `crucible`, `crucible-workers` and `crucible-*` names keeps
+    # them: every one of these is still read from its setting as written.
+    namespace: str = "hades"
+    first_run_secret_name: str = "hades-first-run-admin"
+    workers_namespace: str = "hades-workers"
     kubeconfig: str | None = None
     kubeconfig_context: str | None = None
     api_timeout_seconds: float = 30.0
-    service_account: str = "crucible-worker"
+    service_account: str = "hades-worker"
     storage_class: str = ""
     workspace_size: str = "20Gi"
     image_pull_secret: str | None = None
@@ -225,8 +228,13 @@ class KubernetesSettings(BaseModel):
             )
         return value
 
-    # The harness credential Secret in the workers namespace, per harness (12, 26).
+    # The harness credential Secret in the workers namespace, per harness (12, 26). A
+    # harness left out is `hades-harness-<harness>`, with `_` as `-`.
     credential_secrets: dict[str, str] = Field(default_factory=dict)
+    # Hades's own BuildKit (hades #475): its namespace, which is also its Service's
+    # name and its Pods' `app.kubernetes.io/name` label, as deploy/kubernetes/base/
+    # buildkit and the chart's `buildkit.namespace` create it.
+    buildkit_namespace: str = "hades-buildkit"
     extra_image_allowlist: list[str] = Field(default_factory=list)
     use_reference_cache: bool = True
     # 26, issue 93: the canary is a shell script with curl, not a role pod, so it asks
@@ -271,7 +279,7 @@ class GitHubAppSettings(BaseModel):
     webhook_secret_path: str | None = None
     # On Kubernetes, the Secret in the service's own namespace that holds the App
     # credential the service owns (ADR 0017).
-    secret_name: str = "crucible-github-app"
+    secret_name: str = "hades-github-app"
 
 
 class GitHubSettings(BaseModel):
@@ -354,7 +362,7 @@ class RoomSettings(BaseModel):
     idle_timeout_minutes: int | None = Field(default=None, ge=1, le=24 * 60)
     identity_path: str | None = None
     runner_script: str | None = None
-    api_namespace: str = "crucible"
+    api_namespace: str = "hades"
     api_pod_labels: dict[str, str] = Field(
         default_factory=lambda: {
             "app.kubernetes.io/name": "crucible",

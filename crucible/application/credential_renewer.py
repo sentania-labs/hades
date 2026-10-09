@@ -116,7 +116,7 @@ class SecretWriter(SecretReader, Protocol):
 class KubernetesCredentialReader:
     """Read the service-held login without a Secret mutation method."""
 
-    def __init__(self, client: SecretReader, secret_name: str = "crucible-harness-codex") -> None:
+    def __init__(self, client: SecretReader, secret_name: str = "hades-harness-codex") -> None:
         self.client = client
         self.secret_name = secret_name
 
@@ -150,7 +150,7 @@ class KubernetesCredentialStore(KubernetesCredentialReader):
     the same document against the new version only if the login token is unchanged.
     """
 
-    def __init__(self, client: SecretWriter, secret_name: str = "crucible-harness-codex") -> None:
+    def __init__(self, client: SecretWriter, secret_name: str = "hades-harness-codex") -> None:
         super().__init__(client, secret_name)
         self.client: SecretWriter = client
         self._resource_version: str | None = None

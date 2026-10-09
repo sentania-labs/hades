@@ -127,7 +127,7 @@ class CredentialScriptAdapter(ScriptHarnessAdapter):
 def api() -> KubernetesClient:
     return RecordingKubernetesClient(
         kubeconfig_access(os.environ["CRUCIBLE_E2E_KIND_KUBECONFIG"]),
-        "crucible-workers",
+        "hades-workers",
         timeout=15,
     )
 
@@ -156,7 +156,7 @@ def _provider(
     settings: dict[str, Any] = {
         "storage_class": "standard",
         "workspace_size": "64Mi",
-        "cache_claim": "crucible-reference-cache",
+        "cache_claim": "hades-reference-cache",
         "poll_interval_seconds": 0.25,
         "launch_timeout_seconds": 45,
         "prepare_timeout_seconds": 90,
@@ -324,11 +324,11 @@ async def _unrestricted_network_control(api: KubernetesClient, destinations: dic
     pod = {
         "apiVersion": "v1",
         "kind": "Pod",
-        "metadata": {"name": name, "namespace": "crucible-workers"},
+        "metadata": {"name": name, "namespace": "hades-workers"},
         "spec": {
             "restartPolicy": "Never",
             "automountServiceAccountToken": False,
-            "serviceAccountName": "crucible-worker",
+            "serviceAccountName": "hades-worker",
             "securityContext": {
                 "runAsNonRoot": True,
                 "runAsUser": 1000,
@@ -855,7 +855,7 @@ async def test_deleted_pod_is_lost_and_sigterm_ignoring_pod_dies_at_grace(
     eviction = {
         "apiVersion": "policy/v1",
         "kind": "Eviction",
-        "metadata": {"name": evicted_name, "namespace": "crucible-workers"},
+        "metadata": {"name": evicted_name, "namespace": "hades-workers"},
         "deleteOptions": {"gracePeriodSeconds": 0},
     }
     subprocess.run(
@@ -863,7 +863,7 @@ async def test_deleted_pod_is_lost_and_sigterm_ignoring_pod_dies_at_grace(
             "kubectl",
             "create",
             "--raw",
-            f"/api/v1/namespaces/crucible-workers/pods/{evicted_name}/eviction",
+            f"/api/v1/namespaces/hades-workers/pods/{evicted_name}/eviction",
             "-f",
             "-",
         ],
@@ -1090,7 +1090,7 @@ async def test_a_failed_attempts_rotated_token_is_written_back_on_a_real_cluster
         {
             "apiVersion": "v1",
             "kind": "Secret",
-            "metadata": {"name": source, "namespace": "crucible-workers"},
+            "metadata": {"name": source, "namespace": "hades-workers"},
             "type": "Opaque",
             "stringData": {"auth.json": json.dumps(seeded)},
         },
@@ -1126,14 +1126,14 @@ async def test_per_attempt_secret_is_removed_under_every_cleanup_policy(
 ) -> None:
     harnesses = HarnessRegistry((CredentialScriptAdapter(),))
     provider = _provider(api, registry, harnesses=harnesses)
-    source = "crucible-harness-script-harness"
+    source = "hades-harness-script-harness"
     try:
         api.create(
             "secrets",
             {
                 "apiVersion": "v1",
                 "kind": "Secret",
-                "metadata": {"name": source, "namespace": "crucible-workers"},
+                "metadata": {"name": source, "namespace": "hades-workers"},
                 "type": "Opaque",
                 "stringData": {"auth.json": json.dumps({"placeholder": "x" * 32})},
             },
@@ -1500,7 +1500,7 @@ async def test_login_from_an_empty_secret_to_a_probe_and_an_attempt_through_the_
         {
             "apiVersion": "v1",
             "kind": "Secret",
-            "metadata": {"name": secret, "namespace": "crucible-workers"},
+            "metadata": {"name": secret, "namespace": "hades-workers"},
             "type": "Opaque",
         },
     )
@@ -1900,7 +1900,7 @@ class CreateRecordingClient(RecordingKubernetesClient):
 def _recording_client() -> CreateRecordingClient:
     return CreateRecordingClient(
         kubeconfig_access(os.environ["CRUCIBLE_E2E_KIND_KUBECONFIG"]),
-        "crucible-workers",
+        "hades-workers",
         timeout=15,
     )
 
@@ -2975,7 +2975,7 @@ async def test_lab_findings_an_api_server_outage_during_collect_loses_no_attempt
     monkeypatch.setattr(supervisor_module, "COLLECT_RETRY_INTERVAL_SECONDS", 5)
     outage_api = OutageKubernetesClient(
         kubeconfig_access(os.environ["CRUCIBLE_E2E_KIND_KUBECONFIG"]),
-        "crucible-workers",
+        "hades-workers",
         timeout=15,
     )
     provider = _provider(outage_api, registry)
@@ -3230,8 +3230,8 @@ async def test_fdy_0223_ro_credential_with_template_starts_on_kubernetes(
                 "apiVersion": "v1",
                 "kind": "Secret",
                 "metadata": {
-                    "name": "crucible-harness-script-harness",
-                    "namespace": "crucible-workers",
+                    "name": "hades-harness-script-harness",
+                    "namespace": "hades-workers",
                 },
                 "type": "Opaque",
                 "stringData": {"auth.json": json.dumps({"ro": True})},

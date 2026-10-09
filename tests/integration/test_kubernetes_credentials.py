@@ -171,14 +171,14 @@ def test_a_codex_login_fills_an_empty_namespace_and_the_probe_validates_it(
     assert before["state"] == "absent"
     assert before["source"] == {
         "kind": "secret",
-        "name": "crucible-harness-codex",
+        "name": "hades-harness-codex",
         "exists": False,
         "service_owned": False,
     }
     k8s_api.login = FakeLogin(files={"/home/worker/.codex/auth.json": CODEX_AUTH}, finish_after=3)
     started = admin.post("/v1/admin/credentials/codex/login", json={"reason": "onboarding"})
     assert started.status_code == 200, started.text
-    assert started.json()["secret"] == "crucible-harness-codex"
+    assert started.json()["secret"] == "hades-harness-codex"
     assert started.json()["retained_as"] is None
     state = poll(admin, "codex", "finished", "failed")
     assert state["state"] == "finished", state
@@ -202,7 +202,7 @@ def test_a_codex_login_fills_an_empty_namespace_and_the_probe_validates_it(
     # The probe left nothing but the harness Secret behind.
     for kind in ("jobs", "pods", "networkpolicies", "configmaps", "persistentvolumeclaims"):
         assert k8s_api.object_names(kind) == [], kind
-    assert k8s_api.object_names("secrets") == ["crucible-harness-codex"]
+    assert k8s_api.object_names("secrets") == ["hades-harness-codex"]
     kinds = [
         row["kind"] for row in admin.get("/v1/admin/audit", params={"limit": 50}).json()["items"]
     ]
@@ -236,7 +236,7 @@ def test_a_claude_login_takes_the_pasted_code_and_never_shows_the_token(
     assert done["state"] == "finished", done
     assert done["token_written"] is True and done["credential_written"] is True
     assert "[captured to oauth-token]" in done["output_tail"]
-    assert k8s_api.harness_secret("crucible-harness-claude-code") == {
+    assert k8s_api.harness_secret("hades-harness-claude-code") == {
         "oauth-token": b"not-a-real-value\n"
     }
     # A second login does not replace a credential that passes the shape check unless
@@ -250,7 +250,7 @@ def test_rotate_and_remove_say_the_credential_is_a_secret(admin: TestClient) -> 
     for verb, body in (("rotate", {"new_path": "/tmp/x"}), ("remove", {})):
         response = admin.post(f"/v1/admin/credentials/codex/{verb}", json={"reason": "r", **body})
         assert response.status_code == 409, response.text
-        assert "crucible-harness-codex" in response.json()["detail"]
+        assert "hades-harness-codex" in response.json()["detail"]
 
 
 def test_the_credentials_page_offers_only_what_applies_to_a_secret(
@@ -296,10 +296,8 @@ def test_the_hermes_key_is_set_from_the_gateway_page_and_never_shown(
         assert saved.status_code in (302, 303), saved.text
         after = browser.get("/ui/gateway").text
         assert api_key not in after
-    assert k8s_api.harness_secret("crucible-harness-hermes") == {
-        "api-key": api_key.encode() + b"\n"
-    }
-    labels = k8s_api.objects[("secrets", "crucible-harness-hermes")].body["metadata"]["labels"]
+    assert k8s_api.harness_secret("hades-harness-hermes") == {"api-key": api_key.encode() + b"\n"}
+    labels = k8s_api.objects[("secrets", "hades-harness-hermes")].body["metadata"]["labels"]
     assert labels[k8sspec.LABEL_MANAGED_BY] == "crucible"
     view = admin.get("/v1/admin/credentials/hermes")
     assert view.json()["key_set"] is True and api_key not in view.text
@@ -335,7 +333,7 @@ async def test_a_login_refuses_while_an_attempt_holds_the_credential(
     # write at the end; this is the check it makes at that moment.
     problems = _accept_login(admin_ctx, "codex", {"auth.json": CODEX_AUTH})
     assert any("came to hold the codex credential" in p for p in problems), problems
-    assert not k8s_api.secret_exists("crucible-harness-codex")
+    assert not k8s_api.secret_exists("hades-harness-codex")
     with live._fenced() as uow:
         attempt = uow.attempts.get(view["latest_attempt"]["id"], for_update=True)
         assert attempt is not None
@@ -453,7 +451,7 @@ def test_a_second_replica_is_refused_while_the_lock_is_held_and_starts_after(
         describe="the second process's codex login to finish",
     )
     assert session is not None and session.state == "finished", session
-    assert k8s_api.harness_secret("crucible-harness-codex") == {"auth.json": CODEX_AUTH}
+    assert k8s_api.harness_secret("hades-harness-codex") == {"auth.json": CODEX_AUTH}
     assert lock_names(k8s_api) == []
 
 
@@ -675,7 +673,7 @@ def test_a_probe_the_job_deadline_ended_is_recorded_as_a_timeout(
 ) -> None:
     """A hanging probe harness is ended by the worker Job's own deadline before the
     provider's longer wait; validation records a timeout, not a crash."""
-    k8s_api.put_harness_secret("crucible-harness-codex", {"auth.json": CODEX_AUTH})
+    k8s_api.put_harness_secret("hades-harness-codex", {"auth.json": CODEX_AUTH})
     k8s_api.script_all("hang")
     k8s_api.job_deadline_fires = True
     validated = admin.post("/v1/admin/credentials/codex/validate", json={"reason": "probe"})

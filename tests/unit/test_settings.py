@@ -113,7 +113,7 @@ def test_without_a_probe_image_the_field_is_empty() -> None:
 def test_the_egress_selectors_default_to_coredns_and_no_in_cluster_endpoint() -> None:
     config = kubernetes_config(Settings())
     assert config.egress == ClusterEgress()
-    assert config.control_namespace == "crucible"
+    assert config.control_namespace == "hades"
 
 
 def test_the_egress_selectors_seed_from_the_settings_file() -> None:
@@ -134,7 +134,7 @@ def test_the_egress_selectors_seed_from_the_settings_file() -> None:
 def test_a_seed_into_the_workers_namespace_stops_the_service_at_start() -> None:
     settings = Settings(
         kubernetes={
-            "local_endpoint_namespace": "crucible-workers",
+            "local_endpoint_namespace": "hades-workers",
             "local_endpoint_pod_labels": {"a": "b"},
         }
     )

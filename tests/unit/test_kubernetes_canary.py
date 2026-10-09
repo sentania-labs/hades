@@ -296,7 +296,7 @@ async def test_no_document_means_the_settings_files_values() -> None:
 
 async def test_a_refused_document_keeps_what_is_in_force() -> None:
     _api, _registry, provider = build(config=config(egress=IN_CLUSTER))
-    bad = {"local_endpoint": {"namespace": "crucible-workers", "pod_labels": {"a": "b"}}}
+    bad = {"local_endpoint": {"namespace": "hades-workers", "pod_labels": {"a": "b"}}}
     provider.apply_settings(bad, None)
     assert provider.config.egress == IN_CLUSTER
 
@@ -459,7 +459,7 @@ async def test_a_launch_after_a_settings_change_is_gated_again() -> None:
 
 async def test_a_refused_document_still_follows_the_endpoint_url() -> None:
     _api, _registry, provider = build(config=config(egress=IN_CLUSTER))
-    bad = {"local_endpoint": {"namespace": "crucible-workers", "pod_labels": {"a": "b"}}}
+    bad = {"local_endpoint": {"namespace": "hades-workers", "pod_labels": {"a": "b"}}}
     provider.apply_settings(bad, LITELLM)
     assert provider.config.egress == IN_CLUSTER
     assert provider.config.local_endpoint_url == LITELLM

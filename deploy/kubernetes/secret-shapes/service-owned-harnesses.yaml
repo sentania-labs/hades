@@ -4,7 +4,7 @@
 # service (the login, the Hermes key, the sync-back of a refreshed token) and GitOps
 # drifts, and every sync would put back a token the harness has already rotated.
 #
-# One Secret per harness in `crucible-workers`, readable only by the supervisor's
+# One Secret per harness in `hades-workers`, readable only by the supervisor's
 # account (12, 26). The service creates it the first time a login or the Hermes key
 # writes it, labels it as its own, and replaces its data whole on each later write. The
 # provider copies the declared auth files into `cred-<attempt>` per attempt and writes
@@ -16,8 +16,8 @@
 # kind: Secret
 # type: Opaque
 # metadata:
-#   name: crucible-harness-claude-code        # also -codex, -agy, -hermes
-#   namespace: crucible-workers
+#   name: hades-harness-claude-code        # also -codex, -agy, -hermes
+#   namespace: hades-workers
 #   labels:
 #     app.kubernetes.io/managed-by: crucible
 #     crucible.credential: claude_code         # the harness name

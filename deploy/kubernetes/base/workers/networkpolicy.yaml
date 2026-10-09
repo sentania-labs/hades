@@ -6,7 +6,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: default-deny
-  namespace: crucible-workers
+  namespace: hades-workers
 spec:
   podSelector: {}
   policyTypes: [Ingress, Egress]

@@ -14,7 +14,7 @@ services (tools/smoke/first_run_stubs.py, run as a Pod in `crucible-stubs`):
 5. the GitHub App is created with one click (crucible#168): the GitHub page's Create
    GitHub App posts the manifest to the GitHub stand-in, whose confirm button redirects
    the browser back with a code; the service checks the state, exchanges the code once,
-   and creates `crucible-github-app` in `crucible`, and the mounted copy appears in the
+   and creates `hades-github-app` in `hades`, and the mounted copy appears in the
    api Pod readable by its user (the #79 fsGroup question); the page's Install button
    installs the App and GitHub sends the browser back to the picker;
 6. a repository is picked from the stand-in installation;
@@ -183,7 +183,7 @@ def deploy_stubs(
     tls: tuple[str, str] | None = None,
 ) -> None:
     """The stand-ins as one Pod behind one Service, in their own namespace so the workers'
-    egress selector can name them (a selector may not name `crucible`). With `git_image`
+    egress selector can name them (a selector may not name `hades`). With `git_image`
     the Pod also runs the git stand-in, behind a headless Service of its own."""
     script = (HERE / "first_run_stubs.py").read_text(encoding="utf-8")
     objects = [
@@ -539,7 +539,7 @@ def github(base_url: str, token: str, jar: http.cookiejar.CookieJar) -> None:
 
         secret = json.loads(
             kubectl(
-                ["-n", "crucible", "get", "secret", "crucible-github-app", "-o", "json"],
+                ["-n", "hades", "get", "secret", "hades-github-app", "-o", "json"],
                 redact=True,
             )
         )
@@ -549,7 +549,7 @@ def github(base_url: str, token: str, jar: http.cookiejar.CookieJar) -> None:
             {"keys": sorted(secret.get("data") or {}), "labels": labels},
         )
         if labels.get("app.kubernetes.io/managed-by") != "crucible":
-            raise SmokeError("crucible-github-app is not labelled as the service's own")
+            raise SmokeError("hades-github-app is not labelled as the service's own")
         stored_id = base64.b64decode(secret["data"]["app-id"]).decode()
         if stored_id != str(APP_ID) or "app.pem" not in secret["data"]:
             raise SmokeError(f"the Secret holds App id {stored_id}")
@@ -581,7 +581,7 @@ def github(base_url: str, token: str, jar: http.cookiejar.CookieJar) -> None:
     deadline = time.monotonic() + 180
     while True:
         seen = kubectl(
-            ["-n", "crucible", "exec", "deployment/crucible-api", "--", "python", "-c", probe],
+            ["-n", "hades", "exec", "deployment/hades-api", "--", "python", "-c", probe],
             check=False,
         ).strip()
         if seen.endswith("True True"):

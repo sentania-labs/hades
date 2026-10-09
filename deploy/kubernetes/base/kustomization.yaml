@@ -1,5 +1,5 @@
-# The deployable shape of Crucible (20 phase C9, 26). Two namespaces: `crucible` for the
-# control plane and `crucible-workers` for everything an attempt becomes.
+# The deployable shape of Crucible (20 phase C9, 26). Two namespaces: `hades` for the
+# control plane and `hades-workers` for everything an attempt becomes.
 #
 # This repository's manifests are examples and track `latest`, never a release tag: a
 # real deployment copies overlays/lab into the deployer's own GitOps repository and pins
