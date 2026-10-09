@@ -37,7 +37,8 @@ the PR; a correction can be attached on the operator's word. It is not a gate.
 | `acceptance_results` | id, task_id, head_sha, principal_id, verdict, reasoning, superseded_at, created_at |
 | `decisions` | id, task_id, escalation_id, principal_id, verbatim TEXT, resolves, created_at |
 | `escalations` | id, task_id, attempt_id, state, question, opened_at, closed_at, decision_id, last_wake_at, reason (hades #393: the `blocked.md` reason, when the worker named one) |
-| `task_notes` | id, task_id, principal_id, author, text TEXT, verbatim, created_at (hades #489: the operator's notes on a task, newest first on the card and at the top of the next IDENTITY.md) |
+| `task_notes` | id, task_id, principal_id, author, text TEXT, verbatim, created_at (hades #489: the operator's notes on a task, newest first on the card and at the top of the next IDENTITY.md); delivery_state (`awaiting`, `acknowledged`, `acted_on`), acknowledged_attempt_id, acknowledged_at, acted_on_attempt_id, acted_on_at, acted_on_commit, acted_on_event_seq (hades #208 item 2, 0057: the state the supervisor set from evidence, 27) |
+| `minion_questions` | id, task_id, asked_by_attempt_id, escalation_id, question_text TEXT, asked_at, answered_by, answered_by_name, answered_at, answer_text TEXT, answer_action, answer_contract_version (hades #208 item 2, 0057: a worker's question and its answer, 27) |
 | `wakes` | id, principal_id, task_id, reason, payload JSONB, created_at, delivered_at, acked_at, attempts |
 | `supervisor_status` | singleton: holder, last_tick_at, last_success_at, last_error, consecutive_failures, tick_ms, counts JSONB |
 | `idempotency_keys` | (principal_id, key) PK, request_sha256, response JSONB, created_at |

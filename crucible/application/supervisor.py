@@ -52,6 +52,7 @@ from crucible.application.delivery_tick import DeliveryConfig, DeliveryCoordinat
 from crucible.application.errors import ApplicationError, NotFoundError
 from crucible.application.evidence import claim_facts, record_collection_evidence, store_artifact
 from crucible.application.gates import evaluate_and_advance, gate_input
+from crucible.application.handoffs import HandoffAction, HandoffDirection, record_handoff
 from crucible.application.harnesses import (
     CREDENTIAL_HOLDING_STATES,
     HarnessRegistry,
@@ -60,6 +61,7 @@ from crucible.application.harnesses import (
     record_credential_observation,
     record_launch_outcome,
 )
+from crucible.application.minion_questions import ask_question
 from crucible.application.review import (
     author_attempt_ids,
     latest_work_attempt,
@@ -76,7 +78,11 @@ from crucible.application.routing import (
     select_model,
 )
 from crucible.application.runtime_settings import resolve as resolve_runtime_setting
-from crucible.application.task_notes import operator_notes_for
+from crucible.application.task_notes import (
+    acknowledge_notes,
+    mark_notes_acted_on,
+    operator_notes_for,
+)
 from crucible.application.transitions import (
     move_attempt,
     move_execution,
@@ -2046,6 +2052,7 @@ class Supervisor:
                     ws,
                     spec.effective_settings,
                     spec.credential_mode,
+                    spec.operator_notes,
                 )
             )
             if not await self._db(partial(self._mark_launching, attempt.id, ws)):
@@ -4076,16 +4083,26 @@ class Supervisor:
         ws: Workspace,
         effective: dict[str, Any] | None = None,
         credential_mode: str | None = None,
+        operator_notes: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         """08 wants it recorded as an event which branch the checkout started from.
         Hades #388: the effective model settings the worker is launched with are recorded
-        on the attempt here, once; a value already recorded is never replaced."""
+        on the attempt here, once; a value already recorded is never replaced.
+        hades #208 item 2: the notes the identity carried are acknowledged here, in the
+        same fenced write, with this attempt and the time as the evidence."""
         with self._fenced() as uow:
             attempt = uow.attempts.get(attempt_id)
             assert attempt is not None
             if effective is not None and attempt.effective_settings is None:
                 attempt.effective_settings = dict(effective)
                 uow.attempts.save(attempt)
+            acknowledge_notes(
+                uow,
+                self._clock,
+                task_id=attempt.task_id,
+                attempt_id=attempt.id,
+                included=operator_notes,
+            )
             record_event(
                 uow,
                 self._clock,
@@ -5976,7 +5993,7 @@ class Supervisor:
                     worker_status = WORKER_REPORT_REDACTED
                 else:
                     worker_document = completed.document
-                record_event(
+                parsed_event = record_event(
                     uow,
                     self._clock,
                     EventKind.REPORT_PARSED if claim_ok else EventKind.REPORT_PARSE_FAILED,
@@ -5989,6 +6006,17 @@ class Supervisor:
                         "filled_by_crucible": list(completed.filled),
                         "differences": [dict(d) for d in completed.differences],
                     },
+                )
+                # hades #208 item 2: a note the worker's report references was acted on;
+                # the collected head and the event that read the report are the evidence.
+                mark_notes_acted_on(
+                    uow,
+                    self._clock,
+                    task_id=attempt.task_id,
+                    attempt_id=attempt.id,
+                    report_text=outputs.report_raw or json.dumps(outputs.report, default=str),
+                    commit=outputs.bundle.head_sha if outputs.bundle else None,
+                    event_seq=parsed_event.seq,
                 )
             record: dict[str, Any] | None = None
             if not cancelled:
@@ -6934,6 +6962,16 @@ class Supervisor:
                 number=attempt.number + 1,
                 excluded_pools=excluded_pools or None,
             )
+            reroute_why = (
+                "previous attempt ended provider_error on its route; rerouted to "
+                "the next eligible candidate"
+                if provider_error
+                else "previous model refused this model only; rerouted within its pool"
+                if excluded_model is not None
+                else "previous pool reported quota exhaustion"
+                if source == "worker"
+                else "launch reservation found the selected pool unavailable"
+            )
             move_task(
                 uow,
                 self._clock,
@@ -6947,16 +6985,7 @@ class Supervisor:
                     "from_attempt_id": attempt.id,
                     "from_pool": attempt.selected_pool,
                     "to_attempt_id": nxt.id,
-                    "why": (
-                        "previous attempt ended provider_error on its route; rerouted to "
-                        "the next eligible candidate"
-                        if provider_error
-                        else "previous model refused this model only; rerouted within its pool"
-                        if excluded_model is not None
-                        else "previous pool reported quota exhaustion"
-                        if source == "worker"
-                        else "launch reservation found the selected pool unavailable"
-                    ),
+                    "why": reroute_why,
                     "source": source,
                     # The next attempt routes with this model excluded (_selection_for
                     # reads it back by next_attempt_id), the path a capacity refusal's
@@ -6985,6 +7014,20 @@ class Supervisor:
                     ),
                     "ordered_candidates": list(selection.candidates),
                 },
+            )
+            # hades #208 item 2: Hades rerouted the work on its own; the handoff tells
+            # Foundry so, in the words the event carries.
+            record_handoff(
+                uow,
+                self._clock,
+                task=task,
+                action=HandoffAction.REROUTE,
+                direction=HandoffDirection.HADES_TO_FOUNDRY,
+                principal=PRINCIPAL_CRUCIBLE,
+                words=reroute_why,
+                execution_id=execution.id,
+                attempt_id=attempt.id,
+                detail={"from_attempt_id": attempt.id, "to_attempt_id": nxt.id},
             )
             if mark is not None and opened:
                 self._wake_pool_exhausted(uow, task, attempt, mark)
@@ -7221,13 +7264,23 @@ class Supervisor:
             # the escalation carries the worker's reason and its statement verbatim, and
             # nothing retries the attempt; the answer comes back as a decision or a
             # correction.
-            open_escalation(
+            escalation = open_escalation(
                 uow,
                 self._clock,
                 task=task,
                 attempt_id=attempt.id,
                 question=blocked_text or BLOCKED_WITHOUT_STATEMENT,
                 reason=blocked_reason,
+            )
+            # hades #208 item 2: the worker's question is a record of its own, answered
+            # through one call that corrects the attempt with the answer.
+            ask_question(
+                uow,
+                self._clock,
+                task=task,
+                attempt=attempt,
+                question_text=blocked_text or BLOCKED_WITHOUT_STATEMENT,
+                escalation=escalation,
             )
             return
         if local_cap is not None:

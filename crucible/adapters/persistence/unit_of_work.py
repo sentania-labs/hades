@@ -55,6 +55,7 @@ from crucible.adapters.persistence.records import (
     GitHubManifestStates,
     HarnessImages,
     HarnessStates,
+    MinionQuestions,
     Policies,
     ProviderSettings,
     ReviewReports,
@@ -115,6 +116,7 @@ from crucible.ports.repository import (
     IdempotencyRepository,
     LeaseRepository,
     LogRepository,
+    MinionQuestionRepository,
     PolicyRepository,
     PoolExhaustionRepository,
     PrincipalRepository,
@@ -1568,6 +1570,7 @@ class SqlUnitOfWork:
     acceptance: AcceptanceRepository
     decisions: DecisionRepository
     task_notes: TaskNoteRepository
+    minion_questions: MinionQuestionRepository
     escalations: EscalationRepository
     dispositions: DispositionRepository
     wakes: WakeRepository
@@ -1625,6 +1628,7 @@ class SqlUnitOfWork:
         self.acceptance = Acceptances(s)
         self.decisions = Decisions(s)
         self.task_notes = TaskNotes(s)
+        self.minion_questions = MinionQuestions(s)
         self.escalations = Escalations(s)
         self.dispositions = Dispositions(s)
         self.wakes = Wakes(s)

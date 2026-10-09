@@ -95,6 +95,17 @@ class EventKind(StrEnum):
     # board card with that note as the decision's verbatim.
     TASK_NOTE_RECORDED = "task_note_recorded"
     TASK_PHASE_ACTION_APPLIED = "task_phase_action_applied"
+    # hades #208 item 2: the supervisor's evidence that a note reached the worker (it was
+    # in an attempt's identity) and that the worker addressed it (its report named it).
+    TASK_NOTE_ACKNOWLEDGED = "task_note_acknowledged"
+    TASK_NOTE_ACTED_ON = "task_note_acted_on"
+    # hades #208 item 2: a worker's question as a record, and its answer.
+    MINION_QUESTION_ASKED = "minion_question_asked"
+    MINION_QUESTION_ANSWERED = "minion_question_answered"
+    # hades #208 item 2: during bootstrap, Foundry hands a decision or an action (accept,
+    # merge, cancel, reroute) to Hades or Hades hands one to Foundry; the event carries
+    # the principal, the local time and the words.
+    HANDOFF_RECORDED = "handoff_recorded"
     DISPOSITION_RECORDED = "disposition_recorded"
     DISPOSITION_INVALIDATED = "disposition_invalidated"
     ESCALATION_OPENED = "escalation_opened"

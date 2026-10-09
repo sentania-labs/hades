@@ -33,6 +33,7 @@ from crucible.domain.entities import (
     Heartbeat,
     Lease,
     LogChunkRecord,
+    MinionQuestion,
     Policy,
     PoolExhaustion,
     Principal,
@@ -395,11 +396,28 @@ class DecisionRepository(Protocol):
 
 
 class TaskNoteRepository(Protocol):
-    """Operator notes on a task (hades #489), newest first when listed."""
+    """Operator notes on a task (hades #489), newest first when listed. `save` writes
+    the delivery state the supervisor set from evidence (hades #208 item 2)."""
 
     def add(self, note: TaskNote) -> None: ...
 
+    def get(self, note_id: str) -> TaskNote | None: ...
+
+    def save(self, note: TaskNote) -> None: ...
+
     def list_for_task(self, task_id: str) -> Sequence[TaskNote]: ...
+
+
+class MinionQuestionRepository(Protocol):
+    """A worker's questions on a task (hades #208 item 2), oldest first when listed."""
+
+    def add(self, question: MinionQuestion) -> None: ...
+
+    def get(self, question_id: str, *, for_update: bool = False) -> MinionQuestion | None: ...
+
+    def save(self, question: MinionQuestion) -> None: ...
+
+    def list_for_task(self, task_id: str) -> Sequence[MinionQuestion]: ...
 
 
 class EscalationRepository(Protocol):
@@ -712,6 +730,7 @@ class UnitOfWork(Protocol):
     acceptance: AcceptanceRepository
     decisions: DecisionRepository
     task_notes: TaskNoteRepository
+    minion_questions: MinionQuestionRepository
     escalations: EscalationRepository
     dispositions: DispositionRepository
     wakes: WakeRepository

@@ -355,7 +355,9 @@ publication to judge them.
 older than `escalation_stale_hours` produces a repeat wake, not a state
 change. An escalation a worker opened carries the reason its `blocked.md`
 named (`reason`, hades #393) and its statement verbatim (`question`); the
-`escalation_opened` event and the wake summary repeat the reason.
+`escalation_opened` event and the wake summary repeat the reason. The same stop records the worker's statement as a
+`MinionQuestion` beside the escalation, answered through one call that corrects the
+attempt with the answer (27).
 
 ## Transition side effects (always in the same transaction)
 

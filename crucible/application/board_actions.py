@@ -10,15 +10,19 @@ from __future__ import annotations
 
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
-from typing import Any
 
 from crucible.application.acceptance import record_acceptance
 from crucible.application.admin.board_lanes import LANES, is_scott_question, lane_for_state
 from crucible.application.cancel_task import cancel_task
-from crucible.application.corrections import CORRECTABLE_STATES, attach_correction
+from crucible.application.corrections import (
+    CORRECTABLE_STATES,
+    attach_correction,
+    correction_document,
+)
 from crucible.application.decisions import record_decision
 from crucible.application.errors import ConflictError, NotFoundError, TransitionNotAllowedError
 from crucible.application.harnesses import HarnessRegistry
+from crucible.application.minion_questions import answer_question, open_question_for
 from crucible.application.proposals import approve_task
 from crucible.application.start_task import start_task
 from crucible.application.task_notes import add_note, require_operator
@@ -90,9 +94,13 @@ MOVES: dict[str, Move] = {
         Move(
             "answer",
             "Answer the open escalation",
-            "record_decision on the escalation (POST /v1/tasks/{id}/decisions)",
-            "A decision with the note as its verbatim closes the escalation; a blocked task "
-            "is scheduled again.",
+            "answer_question with the note as the answer "
+            "(POST /v1/tasks/{id}/questions/{question_id}/answer); record_decision on an "
+            "escalation without a question record (POST /v1/tasks/{id}/decisions)",
+            "The worker's question is answered with the note: a correction with the note "
+            "as its instructions resumes the attempt and closes the escalation. An "
+            "escalation with no question record takes a decision with the note as its "
+            "verbatim; a blocked task is scheduled again.",
         ),
         Move(
             "cancel",
@@ -193,28 +201,6 @@ class CorrectionDeps:
     credential_sources: dict[str, CredentialSource] = field(default_factory=dict)
     secret_providers: Collection[str] = frozenset()
     wired_providers: Collection[str] | None = None
-
-
-def correction_document(
-    document: dict[str, Any],
-    *,
-    of_version: int,
-    reason: str,
-    instructions: str,
-    resume_from: str,
-) -> dict[str, Any]:
-    """The current contract as a correction version: the same contract with a
-    correction section carrying the operator's words as the instructions."""
-    body = dict(document)
-    body["correction"] = {
-        "of_version": of_version,
-        "reason": reason,
-        "addresses": [],
-        "instructions": instructions,
-        "resume_from": resume_from,
-        "request_internal_review": False,
-    }
-    return body
 
 
 @dataclass(slots=True)
@@ -329,20 +315,39 @@ def apply_move(
         message = f"Accepted {task.external_id}."
     else:
         assert escalation is not None
-        task = record_decision(
-            uow,
-            clock,
-            principal=principal,
-            task_id=task.id,
-            request=DecisionRequest(
-                kind="escalation_answer",
-                verbatim=note.text,
-                resolves=escalation.question,
-                escalation_id=escalation.id,
-                reschedule=task.state is _S.BLOCKED,
-            ),
-        )
-        message = f"Answered the escalation on {task.external_id}."
+        question = open_question_for(uow, task.id, escalation)
+        if question is not None:
+            # hades #208 item 2: the board's Answer and a card thread share one record
+            # and one call; the note's words are the answer the worker gets back.
+            task, _answered = answer_question(
+                uow,
+                clock,
+                principal=principal,
+                task_id=task.id,
+                question_id=question.id,
+                answer_text=note.text,
+                harnesses=deps.harnesses,
+                harness_gates=deps.harness_gates,
+                credential_sources=deps.credential_sources,
+                secret_providers=deps.secret_providers,
+                wired_providers=deps.wired_providers,
+            )
+            message = f"Answered the question on {task.external_id}."
+        else:
+            task = record_decision(
+                uow,
+                clock,
+                principal=principal,
+                task_id=task.id,
+                request=DecisionRequest(
+                    kind="escalation_answer",
+                    verbatim=note.text,
+                    resolves=escalation.question,
+                    escalation_id=escalation.id,
+                    reschedule=task.state is _S.BLOCKED,
+                ),
+            )
+            message = f"Answered the escalation on {task.external_id}."
     return MoveResult(task=task, note=note, move=chosen, lane=lane, message=message)
 
 
