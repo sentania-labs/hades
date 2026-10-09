@@ -331,12 +331,15 @@ class ReportMetrics:
     source: str = "none"
     duration_ms: int | None = None
     tool_calls: int | None = None
+    # hades #604: the input read from the provider's prompt cache, where reported.
+    tokens_cache_read: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "model": self.model,
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
+            "tokens_cache_read": self.tokens_cache_read,
             "cost_usd": self.cost_usd,
             "duration_ms": self.duration_ms,
             "tool_calls": self.tool_calls,

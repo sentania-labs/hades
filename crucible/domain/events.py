@@ -249,6 +249,11 @@ class EventKind(StrEnum):
     PRINCIPAL_CREATED = "principal_created"
     PRINCIPAL_REVOKED = "principal_revoked"
     PRINCIPAL_RENAMED = "principal_renamed"
+    # hades #576 (U9): a device token minted, used (on /v1, or exchanged once for a UI
+    # session) and revoked.
+    DEVICE_TOKEN_MINTED = "device_token_minted"
+    DEVICE_TOKEN_USED = "device_token_used"
+    DEVICE_TOKEN_REVOKED = "device_token_revoked"
     REPOSITORY_REGISTERED = "repository_registered"
     REPOSITORY_BATCH_REGISTERED = "repository_batch_registered"
     REPOSITORY_REBOUND = "repository_rebound"

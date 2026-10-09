@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from crucible.application.admin.context import AdminContext, admin_event, guard_mutation
-from crucible.application.auth import MintedToken, mint_token
+from crucible.application.auth import MintedToken, is_device, is_reserved_name, mint_token
 from crucible.application.errors import ConflictError
 from crucible.application.first_run import FIRST_RUN_PREFIX, discard_after_use, is_first_run
 from crucible.domain.entities import Role
@@ -86,8 +86,12 @@ def rename(
         )
     if new == target.name:
         raise ConflictError(f"the principal is already named {new!r}")
-    if new == "crucible" or new.startswith("worker:") or is_first_run(new):
+    if is_reserved_name(new) or is_first_run(new):
         raise ConflictError(f"principal name {new!r} is reserved")
+    if is_device(uow, target):
+        # hades #576 (U9): a device's principal is named for its device row. A principal
+        # that only carries the prefix, from before devices, may be renamed out of it.
+        raise ConflictError("a device's principal keeps its name")
     if is_first_run(target.name):
         # The first-run token is delivered and discarded by this name (ADR 0016).
         raise ConflictError("the first-run principal keeps its name")

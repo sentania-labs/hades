@@ -17,7 +17,7 @@ from fastapi import Depends, Header, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
-from crucible.adapters.api.deps import Ctx, Orchestrator, Reader, UoW
+from crucible.adapters.api.deps import Ctx, Orchestrator, Reader, UoW, note_device_use
 from crucible.adapters.api.problems import problem_response
 from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.application.auth import authenticate
@@ -197,6 +197,8 @@ def stream_reader(
     for minutes and must not hold a pool connection for that long (as the log tail)."""
     with ctx.uow_factory() as uow:
         principal = authenticate(uow, _bearer(authorization))
+        if principal is not None:
+            note_device_use(uow, ctx.clock, principal, request.headers.get("user-agent"))
     if principal is None:
         raise UnauthorizedError("token not recognized")
     request.state.principal = principal

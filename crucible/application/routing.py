@@ -651,6 +651,7 @@ def history(
             "wall_ms": m.wall_ms,
             "tokens_in": m.tokens_in,
             "tokens_out": m.tokens_out,
+            "tokens_cache_read": m.tokens_cache_read,
             "cost_units": m.cost_units,
             "cost_source": m.cost_source,
             "exit_class": m.exit_class,

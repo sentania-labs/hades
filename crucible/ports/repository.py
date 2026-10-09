@@ -18,6 +18,7 @@ from crucible.domain.entities import (
     CIDecision,
     CompletionClaimRecord,
     Decision,
+    Device,
     Escalation,
     Event,
     EvidenceRecord,
@@ -108,6 +109,26 @@ class UiSessionRepository(Protocol):
     def delete_expired(self, now: datetime) -> int: ...
 
     def touch(self, session_id: str, last_seen_at: datetime) -> None: ...
+
+
+class DeviceRepository(Protocol):
+    """hades #576 (U9): devices by their principal's id."""
+
+    def add(self, device: Device) -> None: ...
+
+    def get(self, principal_id: str) -> Device | None: ...
+
+    def get_by_name(self, name: str) -> Device | None: ...
+
+    def list_all(self) -> Sequence[Device]: ...
+
+    def record_use(self, principal_id: str, at: datetime, user_agent: str | None) -> None: ...
+
+    def mark_exchanged(self, principal_id: str, at: datetime, user_agent: str | None) -> bool:
+        """Set the one exchange for a UI session; False when it was already taken."""
+        ...
+
+    def revoke(self, principal_id: str, at: datetime, by: str) -> bool: ...
 
 
 class RepositoryRegistry(Protocol):
@@ -815,6 +836,7 @@ class UnitOfWork(Protocol):
     personas: PersonaRepository
     scheduled_jobs: ScheduledJobRepository
     ui_sessions: UiSessionRepository
+    devices: DeviceRepository
     repositories: RepositoryRegistry
     policies: PolicyRepository
     tasks: TaskRepository

@@ -30,6 +30,18 @@ SameSite=Strict session cookie, not a second identity. Reader roles receive
 read-only pages and the `admin` role receives controls. Every mutating form
 also carries a signed-session CSRF value. Sign-out clears the cookie.
 
+A device token (hades #576, U9) is a bearer token an administrator mints for one
+device, a phone or the iOS app, with `POST /v1/admin/devices` (25). It
+authenticates `/v1` like any bearer token, as the principal `device:<name>` with
+the role it was minted with, and a browser on the device exchanges it once at
+`POST /ui/device-sign-in` (form field `token`, or `Authorization: Bearer`) for the
+same server-side UI session the sign-in form opens (ADR 0030). A second exchange,
+through either door, is refused with 409. The role defaults to `operator` only when
+none is given; an empty role is refused. What makes a principal a device is its
+device row, not its name: a principal named `device:...` from before devices existed
+signs in, rotates and may be renamed as before, and only a new principal may not take
+the prefix.
+
 ## Conventions
 
 - IDs are ULIDs. Orchestrator-stable IDs travel in `external_id`.
@@ -90,7 +102,7 @@ endpoint's existing role requirements.
 |---|---|---|
 | GET | `/executions/{id}` | Execution with its attempts. |
 | POST | `/executions/{id}/retry` | Create a new attempt now, if policy permits; body carries reason. |
-| GET | `/attempts/{id}` | Attempt with worker, lease, heartbeat summary, image digest, exit info. |
+| GET | `/attempts/{id}` | Attempt with worker, lease, heartbeat summary, image digest, exit info, and `usage` (hades #604): `tokens_in`, `tokens_out`, `tokens_cache_read`, `cost_units`, `cost_source` and `model_reported` from the harness's own usage report, each null where the harness reports none (07). `GET /tasks/{id}` carries the same `usage` on each attempt and the attempts' sum as the task's `usage`. |
 | GET | `/attempts/{id}/logs` | Log chunks; `?stream=stdout|stderr&offset=`; `Accept: text/event-stream` for live tail. A process admits at most `service.max_sse_log_tails` live tails (default 20); the next tail receives an RFC 9457 `429` problem with `Retry-After: 1`, while ordinary non-streaming reads remain available. |
 | GET | `/attempts/{id}/artifacts` | List artifacts with type, size, sha256. |
 | POST | `/attempts/{id}/artifacts` | Upload an artifact: raw request body with `type` and `filename` as query parameters (no multipart dependency). The logical filename is kept apart from the content-addressed storage path. Principal recorded. Becomes evidence on the next supervisor tick. Orchestrator role. |
@@ -130,7 +142,7 @@ endpoint's existing role requirements.
 | GET | `/providers` | Registered execution providers and their capabilities. |
 | GET/PUT | `/routing/{name}/{version}` | Read or upload a routing policy (05b). Admin. A PUT's response adds `previous_version` (the highest stored version below it), `overrides` (each entry whose enabled flag, weight, pool or tier membership changed, or that was added or removed, hades #606) and the `reason` given. An unpinned policy routes with the newest version not retired, so an upload is in force at the next task start (hades #605). |
 | GET | `/routing/usage` | Per-pool usage in the current window, from AttemptMetrics, read through the routing version the newest version of the named policy routes new tasks with (pinned, the version it names; unpinned, the newest routing version not retired, hades #605); `?policy_version=` selects another policy version and reports the routing version it names. |
-| GET | `/routing/history` | Per-model outcomes: `?model=&project=&since=`; wall time, cost where reported, exit class, gates passed, corrections, acceptance. Foundry reads this before selecting. |
+| GET | `/routing/history` | Per-model outcomes: `?model=&project=&since=`; wall time, `tokens_in`, `tokens_out`, `tokens_cache_read` and `cost_units` where the harness reported them (hades #604, 07), exit class, gates passed, corrections, acceptance. Foundry reads this before selecting. |
 
 ### Memory and decisions (hades #208, 27)
 

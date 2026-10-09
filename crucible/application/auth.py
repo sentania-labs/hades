@@ -17,6 +17,9 @@ from crucible.ports.clock import Clock
 from crucible.ports.repository import UnitOfWork
 
 TOKEN_PREFIX = "cru_"
+# hades #576 (U9): a device's principal is named for it; only devices.mint creates one
+# now, but a principal of that name from before devices existed is an ordinary one.
+DEVICE_PREFIX = "device:"
 SALT_BYTES = 16
 SECRET_BYTES = 32
 
@@ -31,12 +34,53 @@ class MintedToken:
     token: str
 
 
+def is_reserved_name(name: str) -> bool:
+    return (
+        name == "crucible"
+        or name.startswith("worker:")
+        or name.startswith(DEVICE_PREFIX)
+        or not name.strip()
+    )
+
+
+def has_device_name(principal: Principal) -> bool:
+    """Whether the principal may be a device: the cheap test before the row lookup."""
+    return principal.name.startswith(DEVICE_PREFIX)
+
+
+def is_device(uow: UnitOfWork, principal: Principal) -> bool:
+    """A device is a principal with a device row. The name alone does not make one: a
+    principal named `device:...` before devices existed stays an ordinary principal."""
+    return has_device_name(principal) and uow.devices.get(principal.id) is not None
+
+
 def mint_token(
     uow: UnitOfWork, clock: Clock, *, name: str, role: Role, rotate: bool = False
 ) -> MintedToken:
     """Create a principal with a fresh token, or rotate an existing principal's token."""
-    if name == "crucible" or name.startswith("worker:") or not name.strip():
+    if is_reserved_name(name) and not _legacy_rotation(uow, name, rotate=rotate):
         raise ValueError(f"principal name {name!r} is reserved")
+    return _mint(uow, clock, name=name, role=role, rotate=rotate)
+
+
+def _legacy_rotation(uow: UnitOfWork, name: str, *, rotate: bool) -> bool:
+    """A principal named `device:...` from before devices existed keeps its token
+    rotation; a new one may not take the name, and a device rotates by a new mint."""
+    if not rotate or not name.startswith(DEVICE_PREFIX):
+        return False
+    existing = uow.principals.get_by_name(name)
+    return existing is not None and not is_device(uow, existing)
+
+
+def mint_device_token(uow: UnitOfWork, clock: Clock, *, device: str, role: Role) -> MintedToken:
+    """hades #576 (U9): a new principal `device:<device>` with a fresh token. Its token is
+    an ordinary bearer token; the device row beside it is the caller's."""
+    if not device.strip() or uow.principals.get_by_name(f"{DEVICE_PREFIX}{device}"):
+        raise ValueError(f"device {device!r} exists or is not a name")
+    return _mint(uow, clock, name=f"{DEVICE_PREFIX}{device}", role=role, rotate=False)
+
+
+def _mint(uow: UnitOfWork, clock: Clock, *, name: str, role: Role, rotate: bool) -> MintedToken:
     existing = uow.principals.get_by_name(name)
     secret = secrets.token_urlsafe(SECRET_BYTES)
     salt = secrets.token_bytes(SALT_BYTES)

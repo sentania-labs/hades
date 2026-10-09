@@ -70,6 +70,7 @@ from crucible.ports.execution import (
     WorkspaceState,
 )
 from crucible.ports.github import InstallationToken
+from crucible.ports.harness import ReportMetrics
 
 PROVIDER_NAME = "fake"
 
@@ -373,6 +374,7 @@ class FakeProvider:
         self._workers: dict[str, _Worker] = {}
         self._scripts: dict[str, tuple[str, int]] = {}
         self._reports: dict[str, dict[str, Any]] = {}
+        self._metrics: dict[str, ReportMetrics] = {}
         self._workspaces: dict[str, Workspace] = {}
         self._review_heads: dict[str, str] = {}
         self.cleaned: list[str] = []
@@ -433,6 +435,10 @@ class FakeProvider:
 
     def set_report(self, external_id: str, report: dict[str, Any]) -> None:
         self._reports[external_id] = report
+
+    def set_metrics(self, external_id: str, metrics: ReportMetrics) -> None:
+        """hades #604: the usage a provider read while collecting, as Kubernetes does."""
+        self._metrics[external_id] = metrics
 
     def worker(self, attempt_id: str) -> _Worker | None:
         return self._workers.get(attempt_id)
@@ -713,6 +719,7 @@ class FakeProvider:
                 artifacts=tuple(artifacts),
                 verifications=verification_runs(spec.contract, behavior),
                 workspace_state=workspace_state(behavior, spec.attempt_id),
+                metrics=self._metrics.get(spec.external_id),
             )
         if behavior == "blocked" and worker.exit_code == 75:
             return CollectedOutputs(

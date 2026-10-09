@@ -146,7 +146,15 @@ from crucible.ports.execution import (
     WorkspaceState,
 )
 from crucible.ports.github import InstallationToken
-from crucible.ports.harness import AuthFile, CredentialSpec, ExitInfo, LaunchContext, MountMode
+from crucible.ports.harness import (
+    AuthFile,
+    CredentialSpec,
+    ExitInfo,
+    HarnessAdapter,
+    LaunchContext,
+    MountMode,
+    ReportMetrics,
+)
 
 log = logging.getLogger("crucible.provider.kubernetes")
 
@@ -728,6 +736,22 @@ def _pod_words(pod: Mapping[str, Any]) -> str:
     phase = str(status.get("phase") or "unknown phase")
     terminating = ", deletion under way" if metadata.get("deletionTimestamp") else ""
     return f"Pod {name} was {phase}{terminating}"
+
+
+def _report_metrics(
+    adapter: HarnessAdapter | None, report_dir: Path, observation: Observation
+) -> ReportMetrics | None:
+    """hades #604: the harness's usage report, read while the collected report directory
+    exists. The supervisor parses its local report directory, and a Kubernetes attempt
+    has none, so without this its tokens and cost stayed null. Reading it is never a
+    reason the collection fails."""
+    if adapter is None or not report_dir.is_dir():
+        return None
+    try:
+        parsed = adapter.parse_report(report_dir, ExitInfo(exit_code=observation.exit_code))
+    except Exception:
+        return None
+    return parsed.metrics
 
 
 class KubernetesProvider:
@@ -2850,6 +2874,7 @@ class KubernetesProvider:
                 tail_bytes=self.config.log_tail_bytes,
                 changed_blobs=changed_blobs,
             )
+            metrics = _report_metrics(adapter, root / "output" / "report", observation)
         state = await self._workspace_state(spec.attempt_id)
         return CollectedOutputs(
             report=outputs.report,
@@ -2873,6 +2898,7 @@ class KubernetesProvider:
             checkpoint_refusal=outputs.checkpoint_refusal,
             leftover_committed=outputs.leftover_committed,
             leftover_note=outputs.leftover_note,
+            metrics=metrics,
         )
 
     def _launch_evidence(self, spec: LaunchSpec, observation: Observation) -> CollectedArtifact:
