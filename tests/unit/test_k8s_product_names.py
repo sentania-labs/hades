@@ -312,9 +312,7 @@ def test_the_chart_refuses_a_buildkit_namespace_it_already_creates() -> None:
 
 def test_the_chart_hands_its_namespace_to_room_runners() -> None:
     settings = (CHART / "templates" / "configmap.yaml").read_text()
-    assert (
-        'CRUCIBLE_ROOMS__API_NAMESPACE: {{ include "hades.namespace" . | quote }}' in settings
-    )
+    assert 'CRUCIBLE_ROOMS__API_NAMESPACE: {{ include "hades.namespace" . | quote }}' in settings
     flow = (ROOT / "tools" / "chart" / "flow.py").read_text()
     assert '"CRUCIBLE_ROOMS__API_NAMESPACE": namespace,' in flow
 

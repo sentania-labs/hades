@@ -502,6 +502,7 @@ def _render(name: str, namespace: str, workers: str, *, stale: bool = False) -> 
                 "CRUCIBLE_KUBERNETES__SERVICE_ACCOUNT": f"{owner}-worker",
                 "CRUCIBLE_KUBERNETES__CACHE_CLAIM": f"{name}-reference-cache",
                 "CRUCIBLE_KUBERNETES__BUILDKIT_NAMESPACE": "hades-buildkit",
+                "CRUCIBLE_ROOMS__API_NAMESPACE": namespace,
                 "CRUCIBLE_KUBERNETES__CREDENTIAL_SECRETS": json.dumps(secrets),
             },
         },
