@@ -310,12 +310,19 @@ class VerificationRun:
     command: str
     expect_exit: int
     exit_code: int
+    # The command's output, bounded: the head and the tail of the log (hades #608), so
+    # the first error survives beside the summary pytest prints last.
     log_tail: str
     ran: bool = True
     detail: str = ""
     # hades #184: wall-clock seconds inside the verifier container; None when it did not
     # record one (a verifier that never finished, or an older script).
     seconds: int | None = None
+    # hades #517, #608: the paths the command names that did not exist in the tree it
+    # ran against. The gate probe fills it from the unchanged tree: a required check
+    # naming a file the attempt is to add fails there by definition (pytest's exit 4
+    # or 2 for "file or directory not found"), which is the proof the probe asks for.
+    missing_paths: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
