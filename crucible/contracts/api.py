@@ -25,6 +25,60 @@ class Response(BaseModel):
     schema_version: str = SCHEMA_VERSION
 
 
+class PersonaRequest(StrictModel):
+    name: str = Field(min_length=1, max_length=128)
+    role_text: str = Field(min_length=1)
+    skills: list[str] = Field(default_factory=list)
+    tools: list[str] = Field(default_factory=list)
+    default_harness: str = Field(min_length=1)
+    default_model: str = Field(min_length=1)
+    default_tier: Literal["trivial", "standard", "complex"]
+    budget_usd: float = Field(ge=0)
+
+
+class PersonaView(Response, PersonaRequest):
+    id: str
+    created_by: str
+    created_at: Rfc3339
+    updated_at: Rfc3339
+
+
+class PersonaList(Response):
+    items: list[PersonaView]
+
+
+class ScheduledJobRequest(StrictModel):
+    persona_id: str = Field(min_length=1)
+    name: str = Field(min_length=1, max_length=128)
+    task_kind: Literal["prompt", "script"]
+    task_text: str = Field(min_length=1)
+    cadence: str = Field(min_length=1)
+    cadence_label: str = Field(min_length=1, max_length=128)
+    timezone: Literal["America/Chicago"] = "America/Chicago"
+    results_to: Literal["inbox_card", "chat_message", "report_only"]
+    carry_notes_forward: bool = False
+    project: str = Field(min_length=1)
+    enabled: bool = False
+
+
+class ScheduledJobView(Response, ScheduledJobRequest):
+    last_run: dict[str, Any] | None = None
+    id: str
+    last_run_at: Rfc3339 | None
+    next_run_at: Rfc3339 | None
+    created_by: str
+
+
+class ScheduledJobList(Response):
+    items: list[ScheduledJobView]
+
+
+class ScheduledRunView(Response):
+    job: ScheduledJobView
+    task_id: str
+    contract: dict[str, Any]
+
+
 class ContractVersionView(Response):
     version: int
     sha256: str

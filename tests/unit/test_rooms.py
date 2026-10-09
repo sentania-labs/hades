@@ -484,9 +484,10 @@ def _render(step: Any) -> str:
     return buffer.getvalue()
 
 
-def test_0059_is_the_single_head_on_top_of_0058_and_adr_0031_exists() -> None:
+def test_0059_is_on_top_of_0058_and_adr_0031_exists() -> None:
     script = ScriptDirectory.from_config(migrate.alembic_config("postgresql://unused/unused"))
-    assert script.get_heads() == ["0059_rooms"]
+    # FDY-0591's 0060_personas_scheduled_jobs is the head on top of it now.
+    assert script.get_heads() == ["0060_personas_scheduled_jobs"]
     revision = script.get_revision("0059_rooms")
     assert revision is not None and revision.down_revision == "0058_memory_and_decisions"
     adr = REPO / "docs" / "adr" / "0031-rooms-hades-owns-the-transcript.md"
