@@ -166,15 +166,15 @@ def match_lines(
     *,
     path: str = "",
     fixture: Callable[[str], bool] | None = None,
-    limit: int = 50,
+    limit: int | None = 50,
 ) -> list[SecretMatch]:
-    """Every match in a text, line by line, at most `limit` of them. A match no single
-    line holds (a pattern that may span a line break) is still reported, from the whole
+    """Every match in a text, line by line, at most `limit` of them, or all matches
+    when `limit` is None. A match no single line holds is still reported from the whole
     text, so the line view never reads less than `match_text` does."""
     found: list[SecretMatch] = []
     for number, line in enumerate(text.splitlines(), start=1):
         found.extend(match_line(line, path=path, line=number, fixture=fixture))
-        if len(found) >= limit:
+        if limit is not None and len(found) >= limit:
             return found[:limit]
     if not found:
         whole = match_text(text, path=path, fixture=fixture)
@@ -302,9 +302,7 @@ def named_secret_pattern_expressions() -> tuple[tuple[str, str], ...]:
 
 def _walk(value: object, path: str, fixture: Callable[[str], bool] | None) -> Iterator[SecretMatch]:
     if isinstance(value, str):
-        hit = match_text(value, path=path, fixture=fixture)
-        if hit is not None:
-            yield hit
+        yield from match_lines(value, path=path, fixture=fixture, limit=None)
     elif isinstance(value, dict):
         for key, item in value.items():
             yield from _walk(item, f"{path}.{key}" if path else str(key), fixture)

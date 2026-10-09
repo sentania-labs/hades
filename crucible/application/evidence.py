@@ -36,7 +36,7 @@ from crucible.domain.secret_findings import (
     transcript_command,
     window_document,
 )
-from crucible.domain.secrets import SecretMatch, find_secrets, match_lines, match_text, redact
+from crucible.domain.secrets import SecretMatch, find_secrets, match_lines, redact
 from crucible.ports.artifacts import ArtifactStore, SecretInArtifactError
 from crucible.ports.clock import Clock
 from crucible.ports.execution import (
@@ -224,39 +224,50 @@ def _scanner_findings(
     elif outputs.report_raw:
         # A report that did not parse is still the worker's text, and its parse error
         # goes to the reviewer (ADR 0024).
-        hit = match_text(outputs.report_raw, path="report", fixture=fixture)
-        if hit:
-            findings.append(_finding(hit))
+        findings.extend(
+            _finding(hit)
+            for hit in match_lines(outputs.report_raw, path="report", fixture=fixture, limit=None)
+        )
     if outputs.blocked_md:
-        hit = match_text(outputs.blocked_md, path="report/blocked.md", fixture=fixture)
-        if hit:
-            findings.append(_finding(hit))
+        findings.extend(
+            _finding(hit)
+            for hit in match_lines(
+                outputs.blocked_md, path="report/blocked.md", fixture=fixture, limit=None
+            )
+        )
     if outputs.diff_text is not None:
         # The content, not the path list: a credential committed into a file is what
         # this gate exists to catch (11).
-        hit = match_text(outputs.diff_text, path="diff", fixture=fixture)
-        if hit:
-            findings.append(_finding(hit))
+        findings.extend(
+            _finding(hit)
+            for hit in match_lines(outputs.diff_text, path="diff", fixture=fixture, limit=None)
+        )
     if outputs.diff_findings is not None:
         # hades #398: the adapter streamed the whole diff and every blob the worker
         # added or changed through the scanner; each match names its path and line.
         findings.extend(_finding(m) for m in outputs.diff_findings)
     for path in outputs.diff_paths:
-        hit = match_text(path, path=f"diff-path:{path}", fixture=fixture)
-        if hit:
-            findings.append(_finding(hit))
+        findings.extend(
+            _finding(hit)
+            for hit in match_lines(path, path=f"diff-path:{path}", fixture=fixture, limit=None)
+        )
     if outputs.bundle is not None:
         for index, message in enumerate(outputs.bundle.commit_messages):
-            hit = match_text(message, path=f"commit[{index}].message", fixture=fixture)
-            if hit:
-                findings.append(_finding(hit))
+            findings.extend(
+                _finding(hit)
+                for hit in match_lines(
+                    message, path=f"commit[{index}].message", fixture=fixture, limit=None
+                )
+            )
     for artifact in outputs.artifacts:
         # The review diff is a presentation copy of the authoritative collected patch.
         # Scanning it again would judge deleted and context lines (#488).
         if artifact.name == REVIEW_DIFF_NAME:
             continue
         content = artifact.content.decode("utf-8", "replace")
-        matches = match_lines(content, path=f"artifact:{artifact.name}", fixture=fixture)
+        matches = match_lines(
+            content, path=f"artifact:{artifact.name}", fixture=fixture, limit=None
+        )
         if not matches:
             continue
         lines = content.splitlines() if is_transcript(artifact.name) else []

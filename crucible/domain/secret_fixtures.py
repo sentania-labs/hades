@@ -69,6 +69,10 @@ class Allowlist:
 
     def path_allowed(self, path: str) -> bool:
         """The whole path is allowed: only `paths` are given, or under OR any is."""
+        # A rule-scoped allowlist can only skip matches for those rules. The file must
+        # still be scanned for every other rule.
+        if self.target_rules:
+            return False
         if not self.paths or not any(p.search(path) for p in self.paths):
             return False
         if not self.condition_and:

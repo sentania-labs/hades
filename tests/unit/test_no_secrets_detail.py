@@ -47,12 +47,13 @@ from crucible.domain.secret_findings import (
     transcript_command,
 )
 from crucible.domain.secret_fixtures import (
+    BaseMatch,
     declarations,
     parse_gitleaks_config,
     parse_gitleaksignore,
 )
 from crucible.domain.secrets import match_line, redact_excerpt, redact_line
-from crucible.ports.execution import CollectedArtifact, CollectedOutputs, LaunchSpec
+from crucible.ports.execution import BranchBundle, CollectedArtifact, CollectedOutputs, LaunchSpec
 from tests.collector_tools import collector_env
 from tests.fixtures import contract_document
 
@@ -531,6 +532,79 @@ stopwords = ["bbbb"]
     # An AND allowlist with a stopword does not allow a whole path.
     assert not declared.path_allowed("tests/a.py")
     assert parse_gitleaks_config("not toml [") == ()
+
+
+def test_a_rule_scoped_path_allowlist_does_not_exclude_the_whole_path(
+    tmp_path: Path,
+) -> None:
+    config = """
+[[allowlists]]
+targetRules = ["crucible-github-token"]
+paths = ['''^fixtures/''']
+"""
+    declared = declarations("", config)
+    assert not declared.path_allowed("fixtures/keys.txt")
+    change = {"fixtures/keys.txt": f"allowed = '{KEY}'\nblocked = '{AWS}'\n"}
+    output = _collect(
+        tmp_path,
+        _repository(tmp_path, {".gitleaks.toml": config}, change),
+    )
+    findings, _ = scan_changed_content(output)
+    assert findings is not None
+    assert [(m.path, m.line, m.pattern) for m in findings] == [
+        ("diff:fixtures/keys.txt", 2, "aws_access_key")
+    ]
+
+
+def test_a_commit_message_scans_past_an_advisory_fixture() -> None:
+    config = "[allowlist]\npaths = ['''^fixtures/''']\n"
+    declared = declarations(
+        "",
+        config,
+        [BaseMatch("fixtures/key.txt", "github_token", 1, FIXTURE, FIXTURE)],
+    )
+    bundle = BranchBundle(
+        head_sha="head",
+        base_ref="main",
+        work_branch="crucible/test",
+        commits=1,
+        verified=True,
+        commit_messages=(f"fixture {FIXTURE}; new {KEY}",),
+    )
+    outputs = CollectedOutputs(
+        report=None,
+        report_raw=None,
+        blocked_md=None,
+        diff_findings=(),
+        bundle=bundle,
+        secret_declarations=declared,
+    )
+    findings = _scanner_findings(outputs, None)
+    assert [f.get("advisory", False) for f in findings] == [True, False]
+    assert _gate(findings).result is GateResult.FAIL
+
+
+def test_an_artifact_scans_past_fifty_advisory_fixtures() -> None:
+    config = "[allowlist]\npaths = ['''^fixtures/''']\n"
+    declared = declarations(
+        "",
+        config,
+        [BaseMatch("fixtures/key.txt", "github_token", 1, FIXTURE, FIXTURE)],
+    )
+    content = ((FIXTURE + "\n") * 50 + KEY + "\n").encode()
+    outputs = CollectedOutputs(
+        report=None,
+        report_raw=None,
+        blocked_md=None,
+        diff_findings=(),
+        artifacts=(CollectedArtifact("report/log.txt", "run_evidence", content, "text/plain"),),
+        secret_declarations=declared,
+    )
+    findings = _scanner_findings(outputs, None)
+    assert len(findings) == 51
+    assert all(f.get("advisory") for f in findings[:50])
+    assert not findings[-1].get("advisory", False)
+    assert _gate(findings).result is GateResult.FAIL
 
 
 @pytest.mark.skipif(shutil.which("gitleaks") is None, reason="gitleaks is not on PATH")
