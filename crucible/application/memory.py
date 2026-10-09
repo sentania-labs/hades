@@ -142,7 +142,9 @@ def supersede_memory(
     request: MemorySupersedeRequest,
 ) -> MemoryItem:
     """Edit by superseding: the new item carries the correction, the old one points at
-    it and stays as history. A field the request leaves out keeps the old value."""
+    it and stays as history. A field the request leaves out keeps the old value, the
+    observation time included: an edit corrects the words, it does not make an old fact
+    look newly observed."""
     require_memory_writer(principal)
     old = _current_item(uow, item_id)
     now = clock.now()
@@ -150,7 +152,7 @@ def supersede_memory(
         id=new_id(),
         text=request.text,
         source=request.source or old.source,
-        observed_at=request.observed_at or now,
+        observed_at=request.observed_at if request.observed_at is not None else old.observed_at,
         scope_tags=list(request.scope_tags if request.scope_tags is not None else old.scope_tags),
         promoted_by=principal.name,
         promoted_at=now,

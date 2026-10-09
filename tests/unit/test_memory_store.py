@@ -44,6 +44,7 @@ from crucible.application.errors import ConflictError, ForbiddenError, NotFoundE
 from crucible.application.memory import (
     forget_memory,
     list_ledger_decisions,
+    list_memory,
     promote_memory,
     recall_memory,
     record_ledger_decision,
@@ -452,6 +453,43 @@ def test_supersede_links_the_old_item_to_the_new_one_and_refuses_a_second_time()
     assert store.events.rows[1].payload["superseded_by"] == new.id
 
 
+def test_supersede_keeps_the_observation_time_unless_the_request_gives_one() -> None:
+    """An Edit corrects the words; it must not make an old fact look newly observed, so
+    the superseding item keeps the old observation time when the request leaves it out."""
+    store, clock = _Store(), FakeClock(NOW)
+    observed = NOW - timedelta(days=3)
+    old = promote_memory(
+        store.uow(),
+        clock,
+        principal=ORCHESTRATOR,
+        request=MemoryPromoteRequest(
+            text="The cluster has one node.", source="scott", observed_at=observed
+        ),
+    )
+    clock.advance(3600)
+    kept = supersede_memory(
+        store.uow(),
+        clock,
+        principal=OPERATOR,
+        item_id=old.id,
+        request=MemorySupersedeRequest(text="The cluster has two nodes."),
+    )
+    assert kept.observed_at == observed and kept.promoted_at == clock.now()
+    assert kept.observed_at != kept.promoted_at
+    clock.advance(60)
+    given = supersede_memory(
+        store.uow(),
+        clock,
+        principal=OPERATOR,
+        item_id=kept.id,
+        request=MemorySupersedeRequest(text="The cluster has three nodes.", observed_at=NOW),
+    )
+    assert given.observed_at == NOW
+    # The page lists newest observed first, so the kept time keeps a later fact on top.
+    later = _promote(store, clock, ORCHESTRATOR, "A newer fact.")
+    assert [item.id for item in list_memory(store.uow())] == [later.id, given.id]
+
+
 def test_forget_supersedes_with_no_replacement() -> None:
     store, clock = _Store(), FakeClock(NOW)
     item = _promote(store, clock, ORCHESTRATOR, "The cluster is purple.")
@@ -635,6 +673,71 @@ def test_the_api_recalls_promotes_supersedes_forgets_and_appends() -> None:
     assert store.committed == 5
 
 
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        (
+            "/v1/memory",
+            {"text": "t", "source": "s", "observed_at": "2026-10-08T18:30:00"},
+        ),
+        (
+            "/v1/decisions",
+            {
+                "principal": "scott",
+                "channel": "c",
+                "verbatim": "w",
+                "said_at": "2026-10-08T18:30:00",
+            },
+        ),
+        (
+            "/v1/decisions",
+            {
+                "principal": "scott",
+                "channel": "c",
+                "verbatim": "w",
+                "acted_by": "hades",
+                "acted_at": "2026-10-08T18:30:00",
+            },
+        ),
+    ],
+)
+def test_a_naive_request_timestamp_is_refused_before_anything_is_written(
+    path: str, body: dict[str, Any]
+) -> None:
+    """A timestamp with no offset is a 422 at validation, never a committed row followed
+    by a 500 from the response serializer."""
+    store, clock = _Store(), FakeClock(NOW)
+    with _api(store, clock, ORCHESTRATOR) as client:
+        response = client.post(path, json=body)
+    assert response.status_code == 422, response.text
+    assert store.memory.rows == {} and store.decision_ledger.rows == []
+    assert store.committed == 0
+
+
+def test_a_naive_supersede_timestamp_is_refused_and_an_offset_is_held_as_utc() -> None:
+    store, clock = _Store(), FakeClock(NOW)
+    item = _promote(store, clock, ORCHESTRATOR, "The cluster has one node.")
+    with _api(store, clock, ORCHESTRATOR) as client:
+        naive = client.post(
+            f"/v1/memory/{item.id}/supersede",
+            json={"text": "two", "observed_at": "2026-10-08T18:30:00"},
+        )
+        assert naive.status_code == 422, naive.text
+        assert store.memory.rows[item.id].current
+        aware = client.post(
+            f"/v1/memory/{item.id}/supersede",
+            json={"text": "two", "observed_at": "2026-10-08T13:30:00-05:00"},
+        )
+    assert aware.status_code == 201, aware.text
+    assert aware.json()["observed_at"] == "2026-10-08T18:30:00.000000+00:00"
+    with pytest.raises(ValueError, match="offset"):
+        MemorySupersedeRequest(text="t", observed_at=datetime(2026, 10, 8, 18, 30))
+    with pytest.raises(ValueError, match="offset"):
+        LedgerDecisionRequest(
+            principal="s", channel="c", verbatim="w", said_at=datetime(2026, 10, 8, 18, 30)
+        )
+
+
 def test_the_openapi_document_names_the_memory_and_decisions_paths() -> None:
     from crucible.adapters.api.app import create_app  # noqa: PLC0415
     from crucible.adapters.api.deps import AppContext  # noqa: PLC0415
@@ -722,6 +825,34 @@ def test_the_page_renders_both_tabs_with_local_times(monkeypatch: pytest.MonkeyP
     assert NOW_LOCAL in html and "2026-10-08T18:30" not in html
     assert "/forget" not in html
     assert "The lab cluster has one node." in unknown.text
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("UTC", NOW_LOCAL),
+        ("Etc/UTC", NOW_LOCAL),
+        ("", NOW_LOCAL),
+        ("America/Chicago", NOW_LOCAL),
+        ("Europe/Berlin", "2026-10-08 08:30:00 PM CEST"),
+    ],
+)
+def test_the_page_shows_chicago_time_under_the_default_setting_and_honors_a_set_zone(
+    configured: str, expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repository defaults and the Kubernetes base leave `render_timezone` at UTC,
+    the stored form; the page still shows the operator's local time, with no UTC marker.
+    A zone the operator set explicitly is honored."""
+    store = _populated()
+    with _ui(store, OPERATOR, monkeypatch) as client:
+        client.app.state.ctx.settings = SimpleNamespace(  # type: ignore[attr-defined]
+            service=SimpleNamespace(render_timezone=configured)
+        )
+        memory = client.get("/ui/memory").text
+        decisions = client.get("/ui/memory?tab=decisions").text
+    for html in (memory, decisions):
+        assert expected in html, html
+        assert "UTC" not in html and "2026-10-08T18:30" not in html and " Z" not in html
 
 
 def test_an_observer_reads_the_page_without_the_clicks(monkeypatch: pytest.MonkeyPatch) -> None:

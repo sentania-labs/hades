@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from crucible.contracts.common import SCHEMA_VERSION, Rfc3339, StrictModel
+from crucible.contracts.common import SCHEMA_VERSION, Instant, Rfc3339, StrictModel
 from crucible.contracts.task_contract import HarnessName, ProviderName
 from crucible.domain.entities import (
     CI_RERUN_CAUSES,
@@ -489,7 +488,9 @@ class MemoryPromoteRequest(StrictModel):
         max_length=128,
         description="Where it came from: an operator, a channel, a minion's finding.",
     )
-    observed_at: datetime | None = None
+    observed_at: Instant | None = Field(
+        default=None, description="When the fact was true, with an offset. Default now."
+    )
     scope_tags: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -506,7 +507,11 @@ class MemorySupersedeRequest(StrictModel):
 
     text: str = Field(min_length=1, description="The corrected fact, in words.")
     source: str | None = Field(default=None, min_length=1, max_length=128)
-    observed_at: datetime | None = None
+    observed_at: Instant | None = Field(
+        default=None,
+        description="When the corrected fact was true, with an offset. Left out, the "
+        "superseded item's observation time is kept.",
+    )
     scope_tags: list[str] | None = None
 
     @model_validator(mode="after")
@@ -548,11 +553,11 @@ class LedgerDecisionRequest(StrictModel):
     principal: str = Field(min_length=1, max_length=128)
     channel: str = Field(min_length=1, max_length=64)
     verbatim: str = Field(min_length=1, description="The principal's own words.")
-    said_at: datetime | None = None
+    said_at: Instant | None = None
     transcript_ref: str | None = Field(default=None, max_length=2048)
     applies_to: list[str] = Field(default_factory=list)
     acted_by: str | None = Field(default=None, min_length=1, max_length=128)
-    acted_at: datetime | None = None
+    acted_at: Instant | None = None
 
     @model_validator(mode="after")
     def _shape(self) -> LedgerDecisionRequest:

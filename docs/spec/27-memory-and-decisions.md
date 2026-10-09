@@ -101,8 +101,12 @@ link (`?tab=memory`, `?tab=decisions`), rendered from the same services as the A
   to, and the transcript as a link when the ref is a URL or a `/ui` path, otherwise as
   the words it is.
 
-Times are the operator's local time (`service.render_timezone`, default America/Chicago)
-with no UTC or Z. An observer reads both tabs without the controls. The page has no
+Times are the operator's local time with no UTC or Z. The page renders in
+`service.render_timezone` when the operator configured a zone, and in America/Chicago when
+the setting is absent or still its default, UTC: UTC is the stored form, not a local zone,
+so the default deployment shows Chicago time rather than a UTC marker. A request that
+supplies `observed_at`, `said_at` or `acted_at` must carry an offset; a naive timestamp is
+refused with 422 before anything is written. An observer reads both tabs without the controls. The page has no
 navigation link yet: `base.html` and `render.py` belong to another task in the same
 wave, and the link is a one-line follow-up there.
 

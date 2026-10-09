@@ -3,8 +3,10 @@
 Two tabs over the same application services the API uses: Memory items (text, source,
 when, scope, who promoted it, with Edit and Forget as clicks) and Decisions (the words,
 the channel, when, what they apply to, the transcript link). Times are the operator's
-local time. The page is registered without a navigation link: base.html and render.py
-belong to another task this wave, and the link is a one-line follow-up there."""
+local time: the configured zone when one is set, America/Chicago when the setting is
+absent or still the stored form, UTC. The page is registered without a navigation link:
+base.html and render.py belong to another task this wave, and the link is a one-line
+follow-up there."""
 
 from __future__ import annotations
 
@@ -38,11 +40,19 @@ EXPLANATION = (
 TABS = (("memory", "Memory items"), ("decisions", "Decisions"))
 
 
+LOCAL_ZONE = "America/Chicago"
+
+
 def _timezone(request: Request) -> str:
+    """The zone the page renders in. The page shows the operator's local time, and the
+    operator is in America/Chicago: the setting's own default, UTC, is the stored form
+    and not a local zone, so it is not honored here. A zone the operator configured
+    explicitly (anything other than UTC) is."""
     settings = getattr(request.app.state.ctx, "settings", None)
-    if settings is not None:
-        return str(settings.service.render_timezone)
-    return "America/Chicago"
+    configured = str(settings.service.render_timezone).strip() if settings is not None else ""
+    if not configured or configured.upper() in {"UTC", "ETC/UTC", "Z"}:
+        return LOCAL_ZONE
+    return configured
 
 
 def _transcript_link(ref: str | None) -> dict[str, Any] | None:
