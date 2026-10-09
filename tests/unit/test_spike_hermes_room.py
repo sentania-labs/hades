@@ -14,9 +14,14 @@ from __future__ import annotations
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 from subprocess import TimeoutExpired
 
-HERMES_ROOM = "tools/spikes/hermes_room.py"
+# Derive the repo root from the test file's location so the tests are portable
+# (Finding 1 fix: no longer hard-coded to /crucible/repo).
+_TEST_DIR = Path(__file__).resolve().parent  # tests/unit/
+_REPO_ROOT = _TEST_DIR.parent.parent  # repo root (one up from tests/)
+_SPIKE_SCRIPT = _REPO_ROOT / "tools" / "spikes" / "hermes_room.py"
 _SHORT_TIMEOUT = 2  # seconds — long enough for argparse, short enough for CI
 
 
@@ -25,14 +30,14 @@ class TestHermesRoomParser(unittest.TestCase):
 
     def _check_help(self, subcommand: str | None = None) -> str:
         """Run --help (optionally with a subcommand) and return stdout."""
-        args: list[str] = [sys.executable, HERMES_ROOM, "--help"]
+        args: list[str] = [sys.executable, str(_SPIKE_SCRIPT), "--help"]
         if subcommand:
             args.insert(-1, subcommand)
         result = subprocess.run(
             args,
             capture_output=True,
             text=True,
-            cwd="/crucible/repo",
+            cwd=str(_REPO_ROOT),
             timeout=_SHORT_TIMEOUT,
             check=False,
         )
@@ -72,10 +77,10 @@ class TestHermesRoomParser(unittest.TestCase):
     def test_invalid_subcommand_fails(self) -> None:
         """An invalid subcommand should fail with non-zero exit."""
         result = subprocess.run(
-            [sys.executable, HERMES_ROOM, "bogus"],
+            [sys.executable, str(_SPIKE_SCRIPT), "bogus"],
             capture_output=True,
             text=True,
-            cwd="/crucible/repo",
+            cwd=str(_REPO_ROOT),
             timeout=_SHORT_TIMEOUT,
             check=False,
         )
@@ -93,7 +98,7 @@ class TestHermesRoomParser(unittest.TestCase):
                 args,
                 capture_output=True,
                 text=True,
-                cwd="/crucible/repo",
+                cwd=str(_REPO_ROOT),
                 timeout=_SHORT_TIMEOUT,
                 check=False,
             )
@@ -109,19 +114,19 @@ class TestHermesRoomParser(unittest.TestCase):
     def test_seed_flag_accepted(self) -> None:
         """--seed should be accepted by the parser for 'run'."""
         self._check_flags_accepted(
-            [sys.executable, HERMES_ROOM, "run", "--seed", "42"],
+            [sys.executable, str(_SPIKE_SCRIPT), "run", "--seed", "42"],
         )
 
     def test_stub_dir_flag_accepted(self) -> None:
         """--stub-dir should be accepted by the parser for 'mcp'."""
         self._check_flags_accepted(
-            [sys.executable, HERMES_ROOM, "mcp", "--stub-dir", "/tmp/test"],
+            [sys.executable, str(_SPIKE_SCRIPT), "mcp", "--stub-dir", "/tmp/test"],
         )
 
     def test_verbose_flag_accepted(self) -> None:
         """-v/--verbose should be accepted by the parser."""
         self._check_flags_accepted(
-            [sys.executable, HERMES_ROOM, "run", "-v"],
+            [sys.executable, str(_SPIKE_SCRIPT), "run", "-v"],
         )
 
 
