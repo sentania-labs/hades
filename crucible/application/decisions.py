@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from crucible.application.errors import ForbiddenError, NotFoundError, TransitionNotAllowedError
+from crucible.application.memory import mirror_task_decision
 from crucible.application.task_access import require_task_principal
 from crucible.application.transitions import move_task, record_event, require_contract
 from crucible.application.wakes import create_wake, repeat_allowed
@@ -199,6 +200,9 @@ def record_decision(
         created_at=clock.now(),
     )
     uow.decisions.add(decision)
+    # hades #208: from here on a task decision is also a line of the shared ledger,
+    # channel `task`, with the task id in applies_to. History is not migrated.
+    mirrored = mirror_task_decision(uow, clock, principal=principal, task=task, decision=decision)
     record_event(
         uow,
         clock,
@@ -211,6 +215,7 @@ def record_decision(
             "escalation_id": decision.escalation_id,
             "resolves": decision.resolves,
             "verbatim": decision.verbatim,
+            "ledger_decision_id": mirrored.id,
         },
     )
     if escalation is not None:

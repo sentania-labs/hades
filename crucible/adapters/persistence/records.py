@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from crucible.adapters.persistence.models import (
@@ -15,6 +15,7 @@ from crucible.adapters.persistence.models import (
     ArtifactRow,
     AttemptMetricsRow,
     BootstrapImportRow,
+    DecisionLedgerRow,
     DecisionRow,
     EscalationRow,
     EvidenceRow,
@@ -22,6 +23,7 @@ from crucible.adapters.persistence.models import (
     GitHubManifestStateRow,
     HarnessImageRow,
     HarnessStateRow,
+    MemoryItemRow,
     PolicyRow,
     PrincipalRow,
     ProviderSettingRow,
@@ -47,6 +49,8 @@ from crucible.domain.entities import (
     GitHubManifestState,
     HarnessImage,
     HarnessState,
+    LedgerDecision,
+    MemoryItem,
     Policy,
     ProviderSetting,
     ReviewDisposition,
@@ -482,6 +486,128 @@ class Decisions:
             select(DecisionRow).where(DecisionRow.task_id == task_id).order_by(DecisionRow.id)
         ).all()
         return [self._to_entity(r) for r in rows]
+
+
+class MemoryItems:
+    """The shared memory store (hades #208). The recall rule is crucible.domain.memory's;
+    this is the same rule in SQL: current items whose tags overlap the request or whose
+    text carries one of the subject's words, newest observed first, bounded."""
+
+    def __init__(self, session: Session) -> None:
+        self._s = session
+
+    @staticmethod
+    def _to_entity(row: MemoryItemRow) -> MemoryItem:
+        return MemoryItem(
+            id=row.id,
+            text=row.text,
+            source=row.source,
+            observed_at=ensure_utc(row.observed_at),
+            scope_tags=[str(tag) for tag in (row.scope_tags or [])],
+            promoted_by=row.promoted_by,
+            promoted_at=ensure_utc(row.promoted_at),
+            superseded_by=row.superseded_by,
+            superseded_at=ensure_utc(row.superseded_at) if row.superseded_at else None,
+        )
+
+    def add(self, item: MemoryItem) -> None:
+        self._s.add(
+            MemoryItemRow(
+                id=item.id,
+                text=item.text,
+                source=item.source,
+                observed_at=item.observed_at,
+                scope_tags=list(item.scope_tags),
+                promoted_by=item.promoted_by,
+                promoted_at=item.promoted_at,
+                superseded_by=item.superseded_by,
+                superseded_at=item.superseded_at,
+            )
+        )
+        self._s.flush()
+
+    def get(self, item_id: str, *, for_update: bool = False) -> MemoryItem | None:
+        stmt = select(MemoryItemRow).where(MemoryItemRow.id == item_id)
+        if for_update:
+            stmt = stmt.with_for_update()
+        row = self._s.execute(stmt).scalar_one_or_none()
+        return self._to_entity(row) if row else None
+
+    def retire(self, item_id: str, *, superseded_by: str | None, at: datetime) -> None:
+        self._s.execute(
+            update(MemoryItemRow)
+            .where(MemoryItemRow.id == item_id)
+            .values(superseded_by=superseded_by, superseded_at=at)
+        )
+        self._s.flush()
+
+    def recall(
+        self, *, tags: Sequence[str], keywords: Sequence[str], limit: int
+    ) -> Sequence[MemoryItem]:
+        stmt = select(MemoryItemRow).where(MemoryItemRow.superseded_at.is_(None))
+        conditions = []
+        if tags:
+            conditions.append(MemoryItemRow.scope_tags.overlap(list(tags)))
+        for word in keywords:
+            conditions.append(func.lower(MemoryItemRow.text).contains(word, autoescape=True))
+        if conditions:
+            stmt = stmt.where(or_(*conditions))
+        stmt = stmt.order_by(MemoryItemRow.observed_at.desc(), MemoryItemRow.id.desc()).limit(limit)
+        return [self._to_entity(row) for row in self._s.execute(stmt).scalars()]
+
+    def list_recent(self, *, limit: int, include_superseded: bool = False) -> Sequence[MemoryItem]:
+        stmt = select(MemoryItemRow)
+        if not include_superseded:
+            stmt = stmt.where(MemoryItemRow.superseded_at.is_(None))
+        stmt = stmt.order_by(MemoryItemRow.observed_at.desc(), MemoryItemRow.id.desc()).limit(limit)
+        return [self._to_entity(row) for row in self._s.execute(stmt).scalars()]
+
+
+class DecisionLedger:
+    """The append-only decision ledger (hades #208): add and list, nothing else. The
+    table's trigger refuses an UPDATE or DELETE from anyone."""
+
+    def __init__(self, session: Session) -> None:
+        self._s = session
+
+    @staticmethod
+    def _to_entity(row: DecisionLedgerRow) -> LedgerDecision:
+        return LedgerDecision(
+            id=row.id,
+            principal=row.principal,
+            channel=row.channel,
+            said_at=ensure_utc(row.said_at),
+            verbatim=row.verbatim,
+            transcript_ref=row.transcript_ref,
+            applies_to=[str(name) for name in (row.applies_to or [])],
+            acted_by=row.acted_by,
+            acted_at=ensure_utc(row.acted_at) if row.acted_at else None,
+        )
+
+    def add(self, decision: LedgerDecision) -> None:
+        self._s.add(
+            DecisionLedgerRow(
+                id=decision.id,
+                principal=decision.principal,
+                channel=decision.channel,
+                said_at=decision.said_at,
+                verbatim=decision.verbatim,
+                transcript_ref=decision.transcript_ref,
+                applies_to=list(decision.applies_to),
+                acted_by=decision.acted_by,
+                acted_at=decision.acted_at,
+            )
+        )
+        self._s.flush()
+
+    def list_recent(self, *, limit: int, channel: str | None = None) -> Sequence[LedgerDecision]:
+        stmt = select(DecisionLedgerRow)
+        if channel is not None:
+            stmt = stmt.where(DecisionLedgerRow.channel == channel)
+        stmt = stmt.order_by(DecisionLedgerRow.said_at.desc(), DecisionLedgerRow.id.desc()).limit(
+            limit
+        )
+        return [self._to_entity(row) for row in self._s.execute(stmt).scalars()]
 
 
 class TaskNotes:

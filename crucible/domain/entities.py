@@ -391,6 +391,52 @@ class Decision:
 
 
 @dataclass(slots=True)
+class MemoryItem:
+    """One remembered fact in the store every Hades channel reads (hades #208).
+
+    `text` is the fact in words, `source` says where it came from (an operator, a
+    channel, a minion's finding), `observed_at` is when it was true, and `scope_tags`
+    are the hints a recall matches against (a project, a channel, a persona). A minion's
+    finding becomes an item only when Hades or the operator promotes it, which is what
+    `promoted_by` and `promoted_at` record. An item is never edited in place: a change
+    is a new item that supersedes it (`superseded_by`), and a forget retires it with no
+    replacement, so `superseded_at` alone says it is no longer current."""
+
+    id: str
+    text: str
+    source: str
+    observed_at: datetime
+    scope_tags: list[str]
+    promoted_by: str
+    promoted_at: datetime
+    superseded_by: str | None = None
+    superseded_at: datetime | None = None
+
+    @property
+    def current(self) -> bool:
+        return self.superseded_at is None
+
+
+@dataclass(slots=True)
+class LedgerDecision:
+    """One line of the append-only decision ledger shared by every channel (hades #208):
+    whose words (`principal`), where they were said (`channel`), when, the words
+    themselves (`verbatim`), where in that channel's transcript they sit
+    (`transcript_ref`), what they apply to (`applies_to`, task ids or other names), and
+    who acted on them and when. A line is never edited or deleted."""
+
+    id: str
+    principal: str
+    channel: str
+    said_at: datetime
+    verbatim: str
+    transcript_ref: str | None
+    applies_to: list[str]
+    acted_by: str | None = None
+    acted_at: datetime | None = None
+
+
+@dataclass(slots=True)
 class TaskNote:
     """An operator's note on a task (hades #489): who wrote it, when, and the words as
     typed. `verbatim` says the text is the operator's own words rather than a summary

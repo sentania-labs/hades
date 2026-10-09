@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from crucible.contracts.common import SCHEMA_VERSION, Rfc3339, StrictModel
+from crucible.contracts.common import SCHEMA_VERSION, Instant, Rfc3339, StrictModel
 from crucible.contracts.task_contract import HarnessName, ProviderName
 from crucible.domain.entities import (
     CI_RERUN_CAUSES,
@@ -458,6 +458,133 @@ class NoteRequest(StrictModel):
     verbatim: bool = Field(
         default=True, description="True when the text is the operator's own words."
     )
+
+
+# ----- hades #208: the shared memory store and the decision ledger ---------
+
+
+def _clean_tags(tags: list[str]) -> list[str]:
+    from crucible.domain.memory import (  # noqa: PLC0415
+        MAX_SCOPE_TAGS,
+        MAX_TAG_LENGTH,
+        normalize_tags,
+    )
+
+    cleaned = normalize_tags(tags)
+    if len(cleaned) > MAX_SCOPE_TAGS:
+        raise ValueError(f"at most {MAX_SCOPE_TAGS} scope tags")
+    if any(len(tag) > MAX_TAG_LENGTH for tag in cleaned):
+        raise ValueError(f"a scope tag is at most {MAX_TAG_LENGTH} characters")
+    return cleaned
+
+
+class MemoryPromoteRequest(StrictModel):
+    """Promote a finding into memory: the fact in words, where it came from, when it
+    was true (default now), and the scope tags a recall matches."""
+
+    text: str = Field(min_length=1, description="The fact, in words.")
+    source: str = Field(
+        min_length=1,
+        max_length=128,
+        description="Where it came from: an operator, a channel, a minion's finding.",
+    )
+    observed_at: Instant | None = Field(
+        default=None, description="When the fact was true, with an offset. Default now."
+    )
+    scope_tags: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _tags(self) -> MemoryPromoteRequest:
+        self.scope_tags = _clean_tags(self.scope_tags)
+        if not self.text.strip():
+            raise ValueError("text needs some words")
+        return self
+
+
+class MemorySupersedeRequest(StrictModel):
+    """Edit by superseding: a new item replaces the old one, which stays as history.
+    A field left out keeps the superseded item's value."""
+
+    text: str = Field(min_length=1, description="The corrected fact, in words.")
+    source: str | None = Field(default=None, min_length=1, max_length=128)
+    observed_at: Instant | None = Field(
+        default=None,
+        description="When the corrected fact was true, with an offset. Left out, the "
+        "superseded item's observation time is kept.",
+    )
+    scope_tags: list[str] | None = None
+
+    @model_validator(mode="after")
+    def _tags(self) -> MemorySupersedeRequest:
+        if self.scope_tags is not None:
+            self.scope_tags = _clean_tags(self.scope_tags)
+        if not self.text.strip():
+            raise ValueError("text needs some words")
+        return self
+
+
+class MemoryItemView(Response):
+    id: str
+    text: str
+    source: str
+    observed_at: Rfc3339
+    scope_tags: list[str]
+    promoted_by: str
+    promoted_at: Rfc3339
+    superseded_by: str | None
+    superseded_at: Rfc3339 | None
+
+
+class MemoryRecall(Response):
+    """What `GET /memory` returns: the request as understood and the current items that
+    answer it, newest observed first, at most `limit` of them."""
+
+    subject: str | None
+    tags: list[str]
+    limit: int
+    items: list[MemoryItemView]
+
+
+class LedgerDecisionRequest(StrictModel):
+    """Append one line to the decision ledger: whose words, in which channel, the words
+    verbatim. `said_at` defaults to now; `transcript_ref` is where in that channel's
+    transcript the words sit, when there is one."""
+
+    principal: str = Field(min_length=1, max_length=128)
+    channel: str = Field(min_length=1, max_length=64)
+    verbatim: str = Field(min_length=1, description="The principal's own words.")
+    said_at: Instant | None = None
+    transcript_ref: str | None = Field(default=None, max_length=2048)
+    applies_to: list[str] = Field(default_factory=list)
+    acted_by: str | None = Field(default=None, min_length=1, max_length=128)
+    acted_at: Instant | None = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> LedgerDecisionRequest:
+        if not self.verbatim.strip():
+            raise ValueError("verbatim needs some words")
+        self.applies_to = [name.strip() for name in self.applies_to if name.strip()]
+        if len(self.applies_to) > 64 or any(len(name) > 128 for name in self.applies_to):
+            raise ValueError("applies_to holds at most 64 names of at most 128 characters")
+        if self.acted_at is not None and self.acted_by is None:
+            raise ValueError("acted_at needs acted_by")
+        return self
+
+
+class LedgerDecisionView(Response):
+    id: str
+    principal: str
+    channel: str
+    said_at: Rfc3339
+    verbatim: str
+    transcript_ref: str | None
+    applies_to: list[str]
+    acted_by: str | None
+    acted_at: Rfc3339 | None
+
+
+class LedgerDecisionList(Response):
+    items: list[LedgerDecisionView]
 
 
 # ----- C4: GitHub delivery (04, 23) --------------------------------------
