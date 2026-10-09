@@ -28,6 +28,7 @@ from crucible.adapters.api.problems import install_problem_handlers
 from crucible.adapters.api.routers import tasks as tasks_router
 from crucible.adapters.persistence.migrations.versions import _0057_comment_delivery as m0057
 from crucible.adapters.persistence.models import MinionQuestionRow, TaskNoteRow
+from crucible.application import supervisor as supervisor_module
 from crucible.application.acceptance import record_acceptance
 from crucible.application.board_actions import apply_move
 from crucible.application.cancel_task import cancel_task
@@ -61,6 +62,7 @@ from crucible.domain.entities import (
 from crucible.domain.events import EventKind
 from crucible.domain.lifecycle import TaskState
 from crucible.domain.time import local_text
+from crucible.ports.execution import CollectedOutputs
 from tests.fixtures import FakeClock
 from tests.unit.test_gates import HEAD as HEAD_498
 from tests.unit.test_issue_360_ready_for_merge_correction import NOW
@@ -77,6 +79,7 @@ from tests.unit.test_issue_489_card_actions import (
     _sealed_last_attempt,
     store_for,
 )
+from tests.unit.test_issue_498_gates_judge_the_work import _bundle, _finished
 
 ATTEMPT_ID = "01ATTEMPT48900000000000001"
 LOCAL_TIME = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2} C[DS]T$")
@@ -355,14 +358,13 @@ def test_a_report_that_does_not_parse_still_marks_the_notes_it_names(
 ) -> None:
     """Review finding 01M4F894YGP8PN64E9FZBEQAAF: the raw text of a report that is not
     YAML is read for note references, with the `report_parse_failed` event as evidence."""
-    from crucible.application import supervisor as supervisor_module
-    from crucible.ports.execution import CollectedOutputs
-    from tests.unit.test_issue_498_gates_judge_the_work import _bundle, _finished
-
     calls: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        supervisor_module, "mark_notes_acted_on", lambda *a, **kw: calls.append(kw) or []
-    )
+
+    def record_call(*_args: Any, **kwargs: Any) -> list[TaskNote]:
+        calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(supervisor_module, "mark_notes_acted_on", record_call)
     supervisor, pending, _, _, _ = _finished(monkeypatch)
     raw = "summary: addressed note 01NOTE0000000000000000000A: renamed: the flag\n  bad: [\n"
     outputs = CollectedOutputs(
