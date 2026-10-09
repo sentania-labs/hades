@@ -28,7 +28,7 @@ ROOM_COOKIE = "crucible_ui_room"
 
 
 def _can_write(principal: Principal) -> bool:
-    return principal.role in {Role.OPERATOR, Role.ORCHESTRATOR}
+    return principal.role in {Role.OPERATOR, Role.ORCHESTRATOR, Role.ADMIN}
 
 
 def _principal_room(uow: Any, principal: Principal, remembered: str | None = None) -> Any | None:

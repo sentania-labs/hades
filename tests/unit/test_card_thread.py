@@ -110,7 +110,7 @@ def test_observer_never_creates_a_room_and_can_read_notes_and_existing_turns(
     with client_for(store, monkeypatch, observer=True) as client:
         empty = client.get(f"/ui/tasks/{TASK_ID}").text
     assert not store.rooms.rows
-    assert "There is no card room to observe yet" in empty
+    assert "You are signed in as an observer; the card thread is read-only" in empty
     assert "Second line, kept as typed." in empty
     with client_for(store, monkeypatch) as client:
         client.get(f"/ui/tasks/{TASK_ID}")

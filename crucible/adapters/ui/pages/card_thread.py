@@ -104,5 +104,5 @@ def card_thread_context(
         ),
         "target_label": label,
         "history_url": f"/ui/tasks/{card['id']}",
-        "empty_room": "There is no card room to observe yet.",
+        "empty_room": "You are signed in as an observer; the card thread is read-only.",
     }

@@ -92,8 +92,8 @@ log = logging.getLogger("crucible.rooms")
 RUNNER_TOKEN_PREFIX = "crr_"
 SALT_BYTES = 16
 SECRET_BYTES = 32
-# Who creates rooms and talks in them: Hades (orchestrator) and the operator.
-ROOM_WRITER_ROLES = frozenset({Role.ORCHESTRATOR, Role.OPERATOR})
+# Who creates rooms and talks in them: Hades (orchestrator), the operator, and the admin.
+ROOM_WRITER_ROLES = frozenset({Role.ORCHESTRATOR, Role.OPERATOR, Role.ADMIN})
 # A launched runner that has not polled the inbox by then is taken as never started
 # (an image pull, the `uv run --with claude-agent-sdk` install: about 21 s cold in the
 # spike, so ten minutes is generous). A warm runner that has not polled for longer
