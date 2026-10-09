@@ -65,9 +65,7 @@ def test_live_board_builds_no_collapsed_cards_and_keeps_their_counts() -> None:
     uow, calls = fixture(len(TaskState) * 2)
     uow.contracts = CountingRepo(uow.contracts.rows, calls)
     terminal = {
-        task.id
-        for task in uow.tasks.rows
-        if LANE_BY_STATE[task.state] in {"wins", "graveyard"}
+        task.id for task in uow.tasks.rows if LANE_BY_STATE[task.state] in {"wins", "graveyard"}
     }
     live = frozenset({"inbox", "waiting_on_me", "stuck", "in_progress", "holding_pen"})
     document = board_resource(uow, NOW, principal(Role.OPERATOR), cards_for=live)
