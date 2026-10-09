@@ -101,6 +101,7 @@ class KubernetesSettings(BaseModel):
 
     enabled: bool = False
     namespace: str = "crucible"
+    first_run_secret_name: str = "crucible-first-run-admin"
     workers_namespace: str = "crucible-workers"
     kubeconfig: str | None = None
     kubeconfig_context: str | None = None

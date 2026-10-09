@@ -425,6 +425,14 @@ jobs:
             ${{ steps.worker_decision.outputs.reuse == 'true' && steps.worker_decision.outputs.harness_reuse == 'true' && steps.previous.outputs.version || '' }}
         run: make release-notes > release-notes.md
 
+      - name: package and publish the Helm chart
+        run: |
+          set -euo pipefail
+          helm package charts/hades --version "$VERSION" --app-version "$VERSION" \
+            --destination "$RUNNER_TEMP"
+          helm push "$RUNNER_TEMP/hades-${VERSION}.tgz" oci://ghcr.io/sentania-labs/charts
+          cp "$RUNNER_TEMP/hades-${VERSION}.tgz" .
+
       # Gate 5. The release is created last, so a GitHub release never points at
       # a version that is not consumable from the registry.
       - name: create the GitHub release
@@ -436,5 +444,6 @@ jobs:
             echo "release ${GITHUB_REF_NAME} already exists"
           else
             gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" \
-              --notes-file release-notes.md --generate-notes
+              --notes-file release-notes.md --generate-notes "hades-${VERSION}.tgz"
           fi
+          gh release upload "${GITHUB_REF_NAME}" "hades-${VERSION}.tgz" --clobber

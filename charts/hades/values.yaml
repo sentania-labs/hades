@@ -1,0 +1,54 @@
+serviceImage:
+  repository: ghcr.io/sentania-labs/crucible
+  tag: latest
+  digest: ""
+workerImage:
+  repository: ghcr.io/sentania-labs/crucible-worker
+  tag: latest
+  digest: ""
+postgres:
+  bundled: true
+  image: postgres:16@sha256:f1c3376c26f2609ab9f29f71f824103fe2fcd8ee0346485cb6122a4f93df6f94
+  databaseSecretName: crucible-database
+  storageClass: ""
+  size: 20Gi
+ingress:
+  enabled: true
+  className: ""
+  host: crucible.invalid
+  tlsSecretName: ""
+storage:
+  storageClass: ""
+  artifactsSize: 50Gi
+  referenceCacheSize: 20Gi
+  buildkitCacheSize: 50Gi
+egress:
+  allowlist: []
+workerQuota:
+  jobs: "17"
+  persistentVolumeClaims: "12"
+  requestsCpu: "3"
+  requestsMemory: 12Gi
+  limitsCpu: "6"
+  limitsMemory: 12Gi
+secrets:
+  githubApp: crucible-github-app
+  # Empty names use githubApp; overrides mount app.pem and webhook.secret respectively.
+  githubAppPrivateKey: ""
+  githubAppWebhook: ""
+  firstRunToken: crucible-first-run-admin
+roomRunner:
+  apiUrl: ""
+  provider: kubernetes
+  image: ""
+  idleTimeoutMinutes: 60
+  maxRunnerSeconds: 43200
+  defaultHarness: claude_code
+  defaultModel: claude-opus-5-5
+  models: [claude-opus-5-5]
+  workspaceSize: 20Gi
+  maxConcurrency: 3
+  launchTimeoutSeconds: 300
+  prepareTimeoutSeconds: 900
+  collectorTimeoutSeconds: 900
+  verifierTimeoutSeconds: 3600

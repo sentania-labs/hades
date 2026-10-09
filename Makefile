@@ -65,7 +65,7 @@ CRUCIBLE_DEPLOY_PORT ?= 8080
 
 .PHONY: up dev down reset lint check-image-manifest scan scan-tree scan-history smoke test test-shell test-unit test-unit-in-image \
 	test-integration e2e e2e-github e2e-live e2e-admin e2e-image build proxy-config proxies preflight \
-	e2e-kind e2e-kind-self-hosting e2e-command-timeout registry-check manifests deploy-kind first-run-kind release-images-classify release-images-pull release-images-verify \
+	e2e-kind e2e-kind-self-hosting e2e-command-timeout registry-check manifests chart chart-sync-check deploy-kind first-run-kind release-images-classify release-images-pull release-images-verify \
 	deploy-local deploy-local-down images images-check images-policy-check release-notes flakes
 
 up: preflight proxy-config ## normal mode: postgres, proxies, migrate, crucible
@@ -127,9 +127,9 @@ reset: ## DESTRUCTIVE: down plus postgres, artifact, and credential volumes
 
 lint: check-image-manifest
 	$(UV) sync --frozen --quiet
-	$(UV) run ruff format --check crucible tests tools/release tools/smoke tools/registry tools/images tools/ci
-	$(UV) run ruff check crucible tests tools/release tools/smoke tools/registry tools/images tools/ci
-	$(UV) run mypy crucible tests tools/release tools/smoke tools/registry tools/images tools/ci
+	$(UV) run ruff format --check crucible tests tools/release tools/smoke tools/registry tools/images tools/ci tools/chart
+	$(UV) run ruff check crucible tests tools/release tools/smoke tools/registry tools/images tools/ci tools/chart
+	$(UV) run mypy crucible tests tools/release tools/smoke tools/registry tools/images tools/ci tools/chart
 	$(UV) run lint-imports
 
 check-image-manifest: ## fail when a declared worker-image tag is stale
@@ -332,6 +332,12 @@ manifests: ## render deploy/kubernetes and validate every object; needs kubectl 
 	CRUCIBLE_CLUSTER_CPU_BUDGET="$(CRUCIBLE_CLUSTER_CPU_BUDGET)" \
 	CRUCIBLE_CLUSTER_MEMORY_BUDGET_GI="$(CRUCIBLE_CLUSTER_MEMORY_BUDGET_GI)" \
 	UV="$(UV)" tools/manifests/validate.sh
+
+chart: ## lint and validate the default and lab-like Helm renders; needs helm and kubeconform
+	UV="$(UV)" tools/chart/check.sh
+
+chart-sync-check: ## fail when the Helm chart drifts from the kustomize source; needs helm and kubectl
+	UV="$(UV)" tools/chart/sync.sh
 
 # Bring the deployment manifests up on a disposable kind cluster and run one task through
 # the deployed API on the Kubernetes provider (C9, sdlc skill step 3). This is the

@@ -1,0 +1,62 @@
+# The namespace's resource ceiling, and the bound on what one runaway attempt can leave
+# behind: an attempt is one claim and a Job per role, so a namespace that is full refuses
+# a launch rather than wedging. The lab overlay sets the sizes; these fit three
+# concurrent Pods of the default shape. The provider keeps one of them for Hades's own
+# short-role Pods (the gate probe, the preparer, the collector, a login; hades #423,
+# `kubernetes.short_role_pods`), so this base admits two workers at once and holds
+# launches past that rather than letting the quota refuse a probe. Size a quota for
+# N + 1 Pods to run N workers. A short-role Pod already running satisfies the
+# reservation because ResourceQuota usage already counts it.
+#
+# `count/jobs.batch` is five Jobs per attempt: preparer, worker, collector,
+# bundle-verifier and verifier. The provider divides this count by five when it reports
+# attempt capacity, so this limit of 17 reports three attempts rather than 17 (integer
+# division). The extra two Jobs are headroom for the Kubernetes publisher, which creates
+# two additional Jobs (a preparer-role Job and the publisher Job) per publish attempt
+# (issue #226): without them a full namespace refuses the publish and the task sits in
+# `publishing` forever.
+#
+# Sizing rule for any worker count N with the default policy:
+#   count/jobs.batch   = 5N + 2     (5 Jobs per attempt + 2 for the publisher)
+#   persistentvolumeclaims = 4N     (each attempt claims four PVCs: workspace,
+#                                   reference cache, bundle output, and artifact root)
+#   requests.cpu       = N          (2 CPU limit x 0.5 fraction = 1 CPU per attempt)
+#   limits.cpu         = 2N         (2 CPU limit per attempt)
+#   requests.memory    = 4N GiB     (4 GiB per attempt)
+#   limits.memory      = 4N GiB     (4 GiB per attempt, Guaranteed-for-memory)
+# Worked example for N = 10 (the lab's default): 52 Jobs, 40 claims, 10 CPU requested,
+# 20 CPU limit, 40 GiB memory. The quota is the deployer's overlay to set; the provider
+# advertises capacity from it, so a stale quota shows up as a smaller max_concurrency on
+# the Providers page, never as an unbounded launch.
+# The claim count is the structural cap, one claim per attempt. No Pod count is used,
+# because a Pod count also cannot distinguish attempts from their supporting Pods.
+#
+# `requests.cpu` is three attempts at the default policy's request, not its limit
+# (issue 93): the default `cpu_request_fraction` is 0.5 of the 2-CPU default limit, so
+# one attempt requests 1 CPU even though it may burst to 2. `requests.cpu` therefore
+# stays below `limits.cpu`, and `make manifests` prints the sum this quota implies
+# against a stated cluster budget (docs/deployment.md). `requests.memory` stays equal to
+# `limits.memory`: the default `memory_request_fraction` is 1, unchanged from before
+# issue 93 (Guaranteed-for-memory, 16). A policy that changes either fraction, or a
+# deployment that changes `max_concurrency`, keeps this quota's requests consistent with
+# that math by hand; it is not computed from the running configuration. Raising
+# `cpu_request_fraction` above 0.5 without raising `requests.cpu` to match does not
+# break anything, it only shrinks how many attempts admit at once (a policy at fraction
+# 1 fits one attempt in the 3 CPU this quota allows, not three), so a stale quota fails
+# closed: fewer concurrent launches, never an unbounded one.
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: crucible-workers
+  namespace: crucible-workers
+  labels:
+    app.kubernetes.io/name: crucible
+spec:
+  hard:
+    count/jobs.batch: {{ .Values.workerQuota.jobs | quote }}
+    persistentvolumeclaims: {{ .Values.workerQuota.persistentVolumeClaims | quote }}
+    requests.cpu: {{ .Values.workerQuota.requestsCpu | quote }}
+    requests.memory: {{ .Values.workerQuota.requestsMemory }}
+    limits.cpu: {{ .Values.workerQuota.limitsCpu | quote }}
+    limits.memory: {{ .Values.workerQuota.limitsMemory }}

@@ -1,0 +1,47 @@
+# Lab-like, non-secret deployment pins. Secret objects must be provisioned separately.
+serviceImage:
+  repository: ghcr.io/sentania-labs/crucible
+  tag: latest
+  digest: ""
+workerImage:
+  repository: ghcr.io/sentania-labs/crucible-worker
+  tag: latest
+  digest: ""
+postgres:
+  bundled: true
+  databaseSecretName: crucible-database
+ingress:
+  enabled: true
+  className: ""
+  host: crucible.invalid
+  tlsSecretName: ""
+storage:
+  storageClass: ""
+  artifactsSize: 50Gi
+  referenceCacheSize: 20Gi
+egress:
+  allowlist: []
+workerQuota:
+  jobs: "17"
+  persistentVolumeClaims: "12"
+  requestsCpu: "3"
+  requestsMemory: 12Gi
+  limitsCpu: "6"
+  limitsMemory: 12Gi
+secrets:
+  githubApp: crucible-github-app
+  # Empty names use githubApp; overrides mount app.pem and webhook.secret respectively.
+  githubAppPrivateKey: ""
+  githubAppWebhook: ""
+  firstRunToken: crucible-first-run-admin
+roomRunner:
+  apiUrl: ""
+  provider: kubernetes
+  image: ""
+  idleTimeoutMinutes: 60
+  maxRunnerSeconds: 43200
+  defaultHarness: claude_code
+  defaultModel: claude-opus-5-5
+  models: [claude-opus-5-5]
+  workspaceSize: 20Gi
+  maxConcurrency: 3

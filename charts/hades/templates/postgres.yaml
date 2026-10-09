@@ -1,0 +1,126 @@
+{{- if .Values.postgres.bundled }}
+# PostgreSQL for the lab: one instance, one claim (26). A deployment with an
+# operator-managed or external server deletes this file from its overlay's resources and
+# points `url` in the `crucible-database` Secret at that server instead; nothing else in
+# the base refers to this StatefulSet except the Service name inside that DSN.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: crucible-postgres
+  namespace: crucible
+  labels:
+    app.kubernetes.io/name: crucible
+    app.kubernetes.io/component: postgres
+spec:
+  # A normal ClusterIP rather than a headless Service. A headless Service with no ready
+  # endpoint does not resolve at all, so every first boot would fail on name resolution
+  # instead of on a refused connection, which is a much worse thing to read in a log.
+  # Nothing here uses per-Pod DNS, which is the only thing headless would buy.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: crucible
+    app.kubernetes.io/component: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: crucible-postgres
+  namespace: crucible
+  labels:
+    app.kubernetes.io/name: crucible
+    app.kubernetes.io/component: postgres
+spec:
+  serviceName: crucible-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: crucible
+      app.kubernetes.io/component: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: crucible
+        app.kubernetes.io/component: postgres
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: POSTGRES_USER
+              value: crucible
+            - name: POSTGRES_DB
+              value: crucible
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.databaseSecretName }}
+                  key: password
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "crucible", "-d", "crucible"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "crucible", "-d", "crucible"]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            # The image's entrypoint writes a socket and a lock file here, and the root
+            # filesystem is read-only.
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: {{ .Values.postgres.size }}
+        {{- if .Values.postgres.storageClass }}
+        storageClassName: {{ .Values.postgres.storageClass | quote }}
+        {{- end }}
+{{- end }}
