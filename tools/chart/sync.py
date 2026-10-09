@@ -34,6 +34,9 @@ def objects(path: Path) -> dict[tuple[str, str, str], dict[str, Any]]:
                 if name.startswith("CRUCIBLE_ROOMS__") or name in {
                     "CRUCIBLE_KUBERNETES__IMAGE_REPOSITORIES",
                     "CRUCIBLE_KUBERNETES__PROBE_IMAGE",
+                    # The chart derives it from `serviceImage`; kustomize's image pin
+                    # cannot reach a ConfigMap value, so the base leaves it unset.
+                    "CRUCIBLE_SERVICE__IMAGE",
                 }:
                     data.pop(name)
         _normalise_latest_images(item)

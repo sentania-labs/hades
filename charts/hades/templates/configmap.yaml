@@ -32,6 +32,9 @@ CRUCIBLE_SERVICE__LOG_LEVEL: INFO
 # 01: stored UTC, rendered in the operator's zone. The default is UTC and
 # `cluster.renderTimezone` sets the deployment's own zone.
 CRUCIBLE_SERVICE__RENDER_TIMEZONE: {{ .Values.cluster.renderTimezone | quote }}
+# hades #214: the image the api and supervisor run, as their Pods name it, so the Admin
+# About block reports the release and, when `serviceImage.digest` is set, its digest.
+CRUCIBLE_SERVICE__IMAGE: {{ include "hades.serviceImage" . | quote }}
 
 # 01: exactly one active supervisor, enforced by the database lease. The holder names
 # the deployment, not the Pod, so a restarted Pod re-takes its own lease.

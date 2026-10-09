@@ -76,6 +76,10 @@ def test_a_fresh_deployment_has_every_step_to_do(routing: set[str]) -> None:
     assert setup.undone_count(steps) == 5
 
 
+def _client(*, configured: bool) -> Any:
+    return SimpleNamespace(configured=lambda: configured)
+
+
 def test_each_step_is_done_from_live_state(routing: set[str]) -> None:
     routing.add("codex")
     uow = _uow(
@@ -83,17 +87,24 @@ def test_each_step_is_done_from_live_state(routing: set[str]) -> None:
         harnesses=[_harness("codex", last_validated_at=NOW)],
         tasks=[object()],
     )
-    assert _done(_ctx(), uow) == dict.fromkeys(
+    ctx = _ctx(github=_client(configured=True))
+    assert _done(ctx, uow) == dict.fromkeys(
         ("github_app", "repository", "harness_login", "routing", "first_task"), True
     )
-    assert setup.undone_count(setup.setup_steps(_ctx(), uow)) == 0
+    assert setup.undone_count(setup.setup_steps(ctx, uow)) == 0
 
 
-def test_the_github_app_is_done_by_a_wired_client_or_an_installation(routing: set[str]) -> None:
-    assert _done(_ctx(github=object()), _uow())["github_app"] is True
-    covered = _uow(repositories=[SimpleNamespace(installation_id=None)])
-    assert _done(_ctx(), covered)["github_app"] is False
-    assert _done(_ctx(), covered)["repository"] is True
+def test_the_github_app_is_done_only_while_a_credential_is_configured(
+    routing: set[str],
+) -> None:
+    assert _done(_ctx(github=_client(configured=True)), _uow())["github_app"] is True
+    # Kubernetes wires a client for the service's Secret before the operator fills it.
+    assert _done(_ctx(github=_client(configured=False)), _uow())["github_app"] is False
+    # An installation id registered earlier does not stand in for a removed credential.
+    stale = _uow(repositories=[SimpleNamespace(installation_id=7)])
+    assert _done(_ctx(github=_client(configured=False)), stale)["github_app"] is False
+    assert _done(_ctx(), stale)["github_app"] is False
+    assert _done(_ctx(), stale)["repository"] is True
 
 
 def test_a_harness_login_counts_until_a_later_refusal(routing: set[str]) -> None:
@@ -120,7 +131,7 @@ def test_a_test_fixture_harness_never_counts_as_a_login(routing: set[str]) -> No
 
 def test_the_checklist_marks_the_first_undone_step_as_next(routing: set[str]) -> None:
     uow = _uow(repositories=[SimpleNamespace(installation_id=7)])
-    marked = checklist(setup.setup_steps(_ctx(), uow))
+    marked = checklist(setup.setup_steps(_ctx(github=_client(configured=True)), uow))
     assert [s["key"] for s in marked if s["next"]] == ["harness_login"]
     routing.add("codex")
     done = _uow(
@@ -128,4 +139,5 @@ def test_the_checklist_marks_the_first_undone_step_as_next(routing: set[str]) ->
         harnesses=[_harness("codex", last_validated_at=NOW)],
         tasks=[object()],
     )
-    assert not any(s["next"] for s in checklist(setup.setup_steps(_ctx(), done)))
+    ready = _ctx(github=_client(configured=True))
+    assert not any(s["next"] for s in checklist(setup.setup_steps(ready, done)))

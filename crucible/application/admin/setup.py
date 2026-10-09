@@ -1,9 +1,10 @@
 """hades #169: the first-run Set up steps, in the order an operator does them.
 
 Each step is done or not done from live state, and names the page where it is done.
-Every read is a database row or a field already on the context: the navigation counts
-the undone steps on every page, so nothing here reads a Secret, a registry or a
-provider. The Set up page and the navigation read this one list, so they never disagree.
+Every read is a database row, a field already on the context, or the GitHub App
+credential store the delivery path itself reads (ADR 0017); nothing here reads a
+registry or a provider. The Set up page and the navigation read this one list, so they
+never disagree.
 """
 
 from __future__ import annotations
@@ -14,11 +15,17 @@ from crucible.application.admin import status
 from crucible.ports.repository import UnitOfWork
 
 
-def _github_app_done(ctx: Any, uow: UnitOfWork) -> bool:
-    """A GitHub client is wired, or a registered repository has an App installation."""
-    if getattr(ctx, "github", None) is not None:
-        return True
-    return any(repo.installation_id is not None for repo in uow.repositories.list_all())
+def _github_app_done(ctx: Any) -> bool:
+    """An App credential is in place right now. A wired client alone is not enough: on
+    Kubernetes the client is wired for the service's Secret before the operator fills
+    it, and its `configured()` is the check delivery and the GitHub page already use. A
+    repository's installation id is not evidence either, since it outlives the
+    credential it was registered under."""
+    client = getattr(ctx, "github", None)
+    if client is None:
+        return False
+    configured = getattr(client, "configured", None)
+    return not callable(configured) or bool(configured())
 
 
 def _harness_login_done(ctx: Any, uow: UnitOfWork) -> bool:
@@ -70,7 +77,7 @@ def setup_steps(ctx: Any, uow: UnitOfWork) -> list[dict[str, Any]]:
             "key": "github_app",
             "label": "GitHub App",
             "link": "/ui/github",
-            "done": _github_app_done(ctx, uow),
+            "done": _github_app_done(ctx),
             "detail": "Create or connect the GitHub App that opens pull requests.",
         },
         {

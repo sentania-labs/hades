@@ -592,7 +592,13 @@ page's Service and Each harness sections read the status document's
 `readiness` part (crucible#123), so they can never disagree with the pages they
 link to. The former Status page is folded into the Board's service strip and
 the Admin About block on Settings, which shows the running version and the
-image digest the deployment names in `service.image` (hades #214).
+image digest the deployment names in `service.image` (hades #214). Compose and
+the Helm chart set it from the image they run (`CRUCIBLE_IMAGE`,
+`serviceImage`); kustomize's image pin cannot reach a ConfigMap value, so a
+kustomize deployment sets `CRUCIBLE_SERVICE__IMAGE` itself or it reads "not
+reported". The GitHub App step is done only while the App credential is in
+place (the client's `configured()`, ADR 0017); a wired client or a repository's
+installation id alone does not count.
 
 The navigation (hades #576 U5) groups the pages as Work (Board, Hades,
 Personas, Jobs, Workers, All tasks, Usage), Admin (Routing, Policies, Settings,

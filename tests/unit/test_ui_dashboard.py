@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import html
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+import yaml
 from starlette.requests import Request
 
 import crucible
@@ -541,6 +543,20 @@ def test_the_about_block_shows_the_version_first() -> None:
     assert rows[1][0] == "Image digest" and rows[1][1]["value"] == digest
     unreported = about_rows(SimpleNamespace(service=SimpleNamespace(image="")))
     assert unreported[1][1]["value"] == "not reported"
+
+
+def test_the_supported_deployments_report_the_image_they_run() -> None:
+    """hades #214: compose and the Helm chart pass their own image reference into
+    `service.image`, so the About block is not "not reported" by default."""
+    root = Path(__file__).resolve().parents[2]
+    compose = yaml.safe_load((root / "compose.yaml").read_text())
+    service = compose["services"]["crucible"]
+    assert service["environment"]["CRUCIBLE_SERVICE__IMAGE"] == service["image"]
+    config = (root / "charts/hades/templates/configmap.yaml").read_text()
+    assert 'CRUCIBLE_SERVICE__IMAGE: {{ include "hades.serviceImage" . | quote }}' in config
+    for template in ("api.yaml", "supervisor.yaml"):
+        text = (root / "charts/hades/templates" / template).read_text()
+        assert 'image: {{ include "hades.serviceImage" . }}' in text
 
 
 def test_ui_sends_the_operator_to_set_up_or_the_board(monkeypatch: pytest.MonkeyPatch) -> None:
