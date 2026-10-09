@@ -83,7 +83,69 @@ def routing_ref(policy_document: dict[str, Any]) -> tuple[str, int] | None:
     return str(ref.get("name")), int(ref.get("version", 0))
 
 
+@dataclass(frozen=True, slots=True)
+class RoutingResolution:
+    """Which routing version a delivery policy routes with now, and why (hades #605).
+
+    `named_version` is the version the policy document names; `version` is the one an
+    attempt routes with. `why` says it in plain words for the Routing page."""
+
+    name: str
+    named_version: int
+    version: int
+    pinned: bool
+    why: str
+
+
+def resolve_routing(uow: UnitOfWork, policy_document: dict[str, Any]) -> RoutingResolution | None:
+    """hades #605: the routing version a policy routes with at task start. Pinned keeps
+    the named version. Unpinned (the default) follows the newest version of the named
+    routing policy that is not retired, whether it was published from a page or only
+    uploaded with PUT /routing/{name}/{version}, so a version the operator uploads is
+    the one new attempts use. When every version is retired the named one is kept, and
+    the caller refuses it as it refuses any retired version."""
+    ref = routing_ref(policy_document)
+    if ref is None:
+        return None
+    name, named = ref
+    if (policy_document.get("routing") or {}).get("policy", {}).get("pinned") is True:
+        return RoutingResolution(
+            name=name,
+            named_version=named,
+            version=named,
+            pinned=True,
+            why=f"pinned: the delivery policy names version {named} and keeps it",
+        )
+    live = [
+        record.version
+        for record in uow.routing_policies.list_versions(name)
+        if record.retired_at is None
+    ]
+    if not live:
+        return RoutingResolution(
+            name=name,
+            named_version=named,
+            version=named,
+            pinned=False,
+            why=(
+                f"unpinned, but every version of {name} is retired, so the named version "
+                f"{named} is kept"
+            ),
+        )
+    newest = max(live)
+    if newest == named:
+        why = f"unpinned: version {named}, which the delivery policy names, is the newest"
+    else:
+        why = (
+            f"unpinned: follows the newest version not retired; the delivery policy "
+            f"names version {named}"
+        )
+    return RoutingResolution(name=name, named_version=named, version=newest, pinned=False, why=why)
+
+
 def load_routing(uow: UnitOfWork, policy_document: dict[str, Any]) -> RoutingPolicyV1 | None:
+    """The routing version `policy_document` names, as written (GET /routing/usage reads
+    it). An attempt routes with `load_attempt_routing` instead."""
     ref = routing_ref(policy_document)
     if ref is None:
         return None
@@ -94,35 +156,13 @@ def load_routing(uow: UnitOfWork, policy_document: dict[str, Any]) -> RoutingPol
 
 
 def current_routing_version(uow: UnitOfWork, policy_document: dict[str, Any]) -> int | None:
-    """hades #254: the routing version an attempt routes with now. A pinned reference
-    keeps its version; an unpinned one follows the newest published version of the
-    routing policy it names, so a correction or retry never routes with a model the
-    routing policy has since removed or disabled. The policy snapshot is not changed.
-
-    A version counts as published when it is not retired and some policy references
-    it, as `publish_routing` always writes: a version only uploaded with
-    PUT /routing/{name}/{version} has no egress set for it yet and is never chosen.
-    Only versions newer than the referenced one are considered, so when the referenced
-    version is retired and nothing newer is published the attempt keeps the referenced
-    version rather than falling back to an older one."""
-    ref = routing_ref(policy_document)
-    if ref is None:
-        return None
-    name, version = ref
-    if (policy_document.get("routing") or {}).get("policy", {}).get("pinned") is True:
-        return version
-    newer = sorted(
-        (
-            record.version
-            for record in uow.routing_policies.list_versions(name)
-            if record.version > version and record.retired_at is None
-        ),
-        reverse=True,
-    )
-    return next(
-        (candidate for candidate in newer if uow.routing_policies.is_referenced(name, candidate)),
-        version,
-    )
+    """hades #254, #605: the routing version an attempt routes with now. A pinned
+    reference keeps its version; an unpinned one follows the newest version of the
+    routing policy it names that is not retired (`resolve_routing`), so a correction or
+    retry never routes with a model the routing policy has since removed or disabled.
+    The policy snapshot is not changed."""
+    resolved = resolve_routing(uow, policy_document)
+    return resolved.version if resolved is not None else None
 
 
 def load_attempt_routing(

@@ -521,11 +521,17 @@ version of the policy is the one that applies.
 `routing.policy.pinned` (a strict boolean, default false) decides which routing
 version an attempt routes with (hades #254). Unpinned, every attempt, including a
 correction or retry inside an existing execution, routes with the newest version of
-the named routing policy at the moment it is routed: the newest version above the
-referenced one that is not retired and that some policy references, as publishing
-leaves it. A version only uploaded and never published is not chosen, and a retired
-reference never falls back to an older version. Pinned, the referenced version is
-used. A quota reroute and a resumed quota wait follow the same rule, with the
+the named routing policy at the moment it is routed (task start): the newest version
+that is not retired, whether a page published it or it was only uploaded with `PUT
+/routing/{name}/{version}` (hades #605; before that, only a version some policy
+referenced was chosen, so uploaded versions 39 and 40 never applied). Retiring the
+newest version takes routing back to the newest one left, older than the referenced
+one or not; when every version is retired the referenced version is kept and refused
+as retired. Pinned, the referenced version is used. The Routing page's 'In force' row
+names the version tasks route with now and why: pinned, or unpinned and following the
+newest version not retired, with the version the policy names. The admin panels that
+publish routing build on that same version, and an upload that becomes the version in
+force sets the worker egress as a publish does. A quota reroute and a resumed quota wait follow the same rule, with the
 exhausted pool excluded from the reroute. The task's policy snapshot is never
 rewritten. The version used is recorded on the attempt as `routing_version`, and the
 attempt's spec, pool reservation, harness count and exit read that version, not a

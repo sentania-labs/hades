@@ -16,6 +16,7 @@ from crucible.adapters.ui.pages import (
     images,
     memory,
     personas_jobs,
+    policies,
     proposals,
     repositories,
     retention,
@@ -63,3 +64,6 @@ router.routes.extend(catalog.router.routes)
 # Personas and jobs are intentionally registered without navigation links because
 # base.html and render.py are protected by FDY-0591.
 router.routes.extend(personas_jobs.router.routes)
+# hades #606: the Admin policies page, registered without a navigation link; the
+# navigation task owns base.html and render.py and adds the link there.
+router.routes.extend(policies.router.routes)

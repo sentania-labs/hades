@@ -45,6 +45,7 @@ from crucible.application.harnesses import (
     record_launch_outcome,
     set_harness_enabled,
 )
+from crucible.application.routing import resolve_routing
 from crucible.application.runtime_settings import RuntimeValue, resolve, save_scalar
 from crucible.contracts.policy import routing_model_name
 from crucible.domain.events import EventKind
@@ -1220,6 +1221,11 @@ def _routing_document(uow: UnitOfWork) -> tuple[dict[str, Any] | None, str]:
             f"default-software version {newest.version} names routing policy {name} with a "
             "version that is not a number"
         )
+    # hades #605: the version tasks route with now, the newest one not retired when the
+    # policy follows routing unpinned.
+    resolved = resolve_routing(uow, newest.document)
+    if resolved is not None:
+        version = resolved.version
     record = uow.routing_policies.get(name, version)
     if record is None or record.retired_at is not None:
         # A retired routing policy is one the operator took out of service, which is one

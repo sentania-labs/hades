@@ -10,7 +10,11 @@ from fastapi import Body, Query
 from crucible.adapters.api.deps import Admin, Ctx, Mutator, Reader, UoW
 from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.application.admin import credentials, gateway
-from crucible.application.admin.routing import gateway_url
+from crucible.application.admin.routing import (
+    gateway_url,
+    sync_upload_egress,
+    upload_overrides,
+)
 from crucible.application.errors import ContractValidationError, NotFoundError
 from crucible.application.policies import (
     get_policy,
@@ -22,6 +26,7 @@ from crucible.application.routing import history, load_routing, usage_report
 from crucible.contracts.api import (
     PolicyView,
     RoutingHistoryView,
+    RoutingOverride,
     RoutingPolicyView,
     RoutingUsageView,
 )
@@ -156,6 +161,11 @@ def upload_routing(
                 errors=[{"path": "models", "message": "the gateway could not be listed"}],
             )
         listing = gateway.fetch_models(endpoint, bearer)
+    # hades #606: the publish names the entries it overrides against the version below
+    # it, and the event records them with the reason for the Routing page's history.
+    previous_version, overrides = upload_overrides(
+        uow, name=name, version=version, document=document
+    )
     routing = put_routing_policy(
         uow,
         ctx.clock,
@@ -164,8 +174,13 @@ def upload_routing(
         version=version,
         document=document,
         reason=reason,
+        extra={"previous_version": previous_version, "overrides": overrides},
         local_model_listing=listing,
     )
+    # hades #605: an unpinned policy routes with this version from now on when it is the
+    # newest one not retired, so its egress is set as a page publish sets it.
+    if ctx.admin is not None:
+        sync_upload_egress(ctx.admin, uow, name=name, version=version)
     uow.commit()
     return RoutingPolicyView(
         name=routing.name,
@@ -173,4 +188,7 @@ def upload_routing(
         document=routing.document,
         created_at=routing.created_at,
         retired_at=routing.retired_at,
+        previous_version=previous_version,
+        overrides=[RoutingOverride.model_validate(item) for item in overrides],
+        reason=reason,
     )

@@ -526,6 +526,33 @@ what it changed, who published it and the reason. The Local gateway page says th
 save publishes for every unpinned project, and a model save shows the delta and asks
 for confirmation before it publishes. Pinning routing per policy is not part of this.
 
+A routing publish also names the entries it overrides (hades #606): each entry
+(`harness:model`) whose enabled flag, weight, pool or tier membership (the tiers whose
+`allowed_capability` includes its capability) differs from the version before it, and
+each entry added or removed. A page publish carries them in its delta; `PUT
+/routing/{name}/{version}` compares with the highest stored version below it and
+returns `previous_version`, `overrides` and the `reason` given, and its
+`routing_policy_uploaded` event records the first two. The Routing page's versions list
+shows them under "What changed" beside the reason, computed from the documents, so a
+version uploaded before this shows them too.
+
+## Policies (hades #606)
+
+`/ui/policies` is the Admin policies page, for administrators only (anyone else gets
+403 and none of the document). It lists every delivery policy with the version in
+force (the newest not retired) and, for the policy shown, its versions newest first
+with who published each and the reason. It shows the version in force in groups:
+routing (`routing.policy` name, version, pinned), services (one block per service
+kind, with a "declared" box), gates, network allowlist (`network.egress_allowlist`),
+limits and concurrency. The edit form lists the same groups as plain inputs, lists
+comma separated, with one reason box, the publish reason, which is required. Publishing
+writes the next version of the policy, built on the version in force, through
+`put_policy`, the service behind `PUT /v1/policies/{name}/{version}`, so it validates
+the same way and its `policy_uploaded` event records the administrator and the reason.
+An edit that changes nothing is refused. Each version opens against the version before
+it, one row per changed setting with its old and new value. Times are local Central
+time. The page is registered without a navigation link; the navigation task adds it.
+
 ## Rotation and removal
 
 Rotation takes a directory the operator prepared themselves. Crucible

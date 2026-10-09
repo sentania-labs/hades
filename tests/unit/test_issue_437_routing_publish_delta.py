@@ -232,6 +232,19 @@ def test_delta_names_models_caps_and_tier_order() -> None:
         "models_disabled": ["codex:codex-sub"],
         "pool_caps": [{"pool": "lab-local", "before": 2, "after": 6}],
         "tier_pool_order": [{"tier": "trivial", "before": None, "after": ["lab-local"]}],
+        # hades #606: each entry whose enabled flag, weight, pool or tiers change.
+        "entries": [
+            {
+                "entry": "codex:codex-sub",
+                "change": "changed",
+                "fields": [{"field": "enabled", "before": True, "after": False}],
+            },
+            {
+                "entry": "hermes:qwen-local",
+                "change": "changed",
+                "fields": [{"field": "enabled", "before": False, "after": True}],
+            },
+        ],
     }
     assert routing.delta_needs_reason(delta)
     assert not routing.delta_needs_reason(

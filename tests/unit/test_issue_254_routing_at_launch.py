@@ -213,21 +213,21 @@ def test_a_routed_attempt_keeps_the_version_it_was_routed_with() -> None:
     assert current is not None and current.version == 4
 
 
-def test_a_version_only_uploaded_is_not_the_current_one(tmp_path: Path) -> None:
-    """A version no policy references was never published: publish_routing has not set
-    the egress for it, so an unpinned correction keeps routing with the published one."""
+def test_a_version_only_uploaded_is_the_current_one(tmp_path: Path) -> None:
+    """hades #605: a version no policy references (uploaded with PUT /routing only) is
+    still the newest one not retired, so an unpinned correction routes with it."""
     store = _store(_version(4, [_model("gpt-new")]))
     store.routing_policies.unpublished = {4}  # type: ignore[attr-defined]
 
-    assert current_routing_version(store.uow(), store.policies.policy.document) == 3
+    assert current_routing_version(store.uow(), store.policies.policy.document) == 4
     _execution, attempt = _route_correction(store, tmp_path)
-    assert attempt.selected_model == "gpt-test"
-    assert attempt.routing_version == 3
+    assert attempt.selected_model == "gpt-new"
+    assert attempt.routing_version == 4
 
 
-def test_a_retired_reference_never_falls_back_to_an_older_version() -> None:
-    """The referenced version retired with nothing newer published: the attempt keeps the
-    referenced version, not an older live one."""
+def test_a_retired_reference_follows_the_newest_live_version() -> None:
+    """hades #605: the referenced version and everything newer retired, an unpinned
+    policy routes with the newest version that is not retired, older or not."""
     store = _store(_version(4, [_model("gpt-new")]))
     store.routing_policies.records.insert(  # type: ignore[attr-defined]
         0, _version(2, [_model("gpt-old")])
@@ -237,7 +237,7 @@ def test_a_retired_reference_never_falls_back_to_an_older_version() -> None:
         for r in store.routing_policies.records  # type: ignore[attr-defined]
     ]
 
-    assert current_routing_version(store.uow(), store.policies.policy.document) == 3
+    assert current_routing_version(store.uow(), store.policies.policy.document) == 2
 
 
 class _Metrics(_NoHistory):

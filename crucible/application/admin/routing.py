@@ -22,6 +22,7 @@ from crucible.application.proxy_config import (
     install_worker_proxy_config,
     worker_proxy_config,
 )
+from crucible.application.routing import resolve_routing
 from crucible.application.wakes import create_wake
 from crucible.contracts.policy import RoutingModel, routing_model_name
 from crucible.contracts.wake import WakeReason
@@ -66,9 +67,14 @@ def active_policy(uow: UnitOfWork) -> Policy:
 
 
 def _active_documents(uow: UnitOfWork) -> tuple[Any, Any]:
+    """The delivery policy in force and the routing version it routes with now: the
+    named one when pinned, else the newest one not retired (hades #605). Every edit
+    builds on this version, so a page never publishes over an older one than tasks use."""
     policy = active_policy(uow)
-    ref = (policy.document.get("routing") or {}).get("policy") or {}
-    routing = uow.routing_policies.get(str(ref.get("name", "")), int(ref.get("version", 0)))
+    resolved = resolve_routing(uow, policy.document)
+    routing = (
+        uow.routing_policies.get(resolved.name, resolved.version) if resolved is not None else None
+    )
     if routing is None or routing.retired_at is not None:
         raise NotFoundError("the routing policy named by default-software is not available")
     return policy, routing
@@ -124,12 +130,115 @@ def _models_enabled(document: Mapping[str, Any]) -> dict[str, bool]:
     }
 
 
+# hades #606: the parts of a routing entry whose change overrides an earlier decision.
+OVERRIDE_FIELDS = ("enabled", "weight", "pool", "tiers")
+
+
+def _entry_tiers(entry: Mapping[str, Any], tiers: Mapping[str, Any]) -> list[str]:
+    """The tiers an entry belongs to: those whose allowed capabilities include its own."""
+    capability = entry.get("capability")
+    return sorted(
+        name
+        for name, rule in tiers.items()
+        if capability is not None and capability in ((rule or {}).get("allowed_capability") or [])
+    )
+
+
+def _override_values(entry: Mapping[str, Any] | None, tiers: Mapping[str, Any]) -> dict[str, Any]:
+    if entry is None:
+        return dict.fromkeys(OVERRIDE_FIELDS)
+    return {
+        "enabled": entry.get("enabled") is True,
+        "weight": entry.get("weight"),
+        "pool": entry.get("pool"),
+        "tiers": _entry_tiers(entry, tiers),
+    }
+
+
+def entry_overrides(before: Mapping[str, Any], after: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """hades #606: each routing entry (harness:model) whose enabled flag, weight, pool or
+    tier membership differs between two versions, with each changed field's old and new
+    value. An entry only in `after` is `added`, one only in `before` is `removed`."""
+
+    def entries(document: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+        return {
+            f"{model.get('harness')}:{routing_model_name(model)}": model
+            for model in document.get("models") or []
+        }
+
+    old, new = entries(before), entries(after)
+    old_tiers, new_tiers = before.get("tiers") or {}, after.get("tiers") or {}
+    found: list[dict[str, Any]] = []
+    for key in sorted(set(old) | set(new)):
+        was = _override_values(old.get(key), old_tiers)
+        now = _override_values(new.get(key), new_tiers)
+        change = "added" if key not in old else "removed" if key not in new else "changed"
+        fields = [
+            {"field": field, "before": was[field], "after": now[field]}
+            for field in OVERRIDE_FIELDS
+            if was[field] != now[field] and (change != "removed")
+        ]
+        if change == "removed" or fields:
+            found.append({"entry": key, "change": change, "fields": fields})
+    return found
+
+
+def _override_value_words(field: str, value: Any) -> str:
+    if value is None:
+        return "unset"
+    if field == "enabled":
+        return "enabled" if value else "disabled"
+    if field == "tiers":
+        return ", ".join(value) if value else "no tier"
+    return str(value)
+
+
+def override_words(override: Mapping[str, Any]) -> str:
+    """One overridden entry in plain words (hades #606)."""
+    entry = override["entry"]
+    if override["change"] == "removed":
+        return f"removes {entry}"
+
+    def label(field: str) -> str:
+        # The enabled flag reads as its own words: "disabled to enabled".
+        return "" if field == "enabled" else f"{field} "
+
+    if override["change"] == "added":
+        parts = [
+            label(item["field"]) + _override_value_words(item["field"], item["after"])
+            for item in override["fields"]
+        ]
+        return f"adds {entry} ({', '.join(parts)})"
+    parts = [
+        label(item["field"])
+        + f"{_override_value_words(item['field'], item['before'])} to "
+        + _override_value_words(item["field"], item["after"])
+        for item in override["fields"]
+    ]
+    return f"{entry}: {', '.join(parts)}"
+
+
+def upload_overrides(
+    uow: UnitOfWork, *, name: str, version: int, document: Mapping[str, Any]
+) -> tuple[int | None, list[dict[str, Any]]]:
+    """hades #606: the version an upload of `name` version `version` is compared with
+    (the highest stored version below it) and the entries it overrides there. None and
+    every entry `added` when it is the first version."""
+    earlier = [item for item in uow.routing_policies.list_versions(name) if item.version < version]
+    previous = max(earlier, key=lambda item: item.version) if earlier else None
+    return (
+        previous.version if previous is not None else None,
+        entry_overrides(previous.document if previous is not None else {}, document),
+    )
+
+
 def routing_delta(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any]:
     """What a routing version changes against the one it replaces (hades #437): the
     models it enables or disables (a new enabled entry is enabled, a removed enabled one
     disabled), each pool whose max_concurrency changes, and each tier whose pool order
-    changes. The projects that follow routing unpinned are added by the caller, which
-    knows the policies."""
+    changes, and (hades #606) each entry whose enabled flag, weight, pool or tier
+    membership changes. The projects that follow routing unpinned are added by the
+    caller, which knows the policies."""
     old_models, new_models = _models_enabled(before), _models_enabled(after)
     enabled = sorted(i for i, on in new_models.items() if on and not old_models.get(i, False))
     disabled = sorted(i for i, on in old_models.items() if on and not new_models.get(i, False))
@@ -162,6 +271,7 @@ def routing_delta(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[s
         "models_disabled": disabled,
         "pool_caps": caps,
         "tier_pool_order": orders,
+        "entries": entry_overrides(before, after),
     }
 
 
@@ -194,6 +304,9 @@ def delta_words(delta: Mapping[str, Any]) -> list[str]:
             f"tier {order['tier']} pool order {_order_words(order['before'])} "
             f"to {_order_words(order['after'])}"
         )
+    overrides = delta.get("entries") or []
+    if overrides:
+        lines.append("overrides " + "; ".join(override_words(item) for item in overrides))
     if not lines:
         lines.append("no model, pool cap or tier order change")
     if "unpinned_projects" in delta:
@@ -432,6 +545,13 @@ def publish_routing(
         if referenced_routing is None:
             raise NotFoundError("the routing policy named by the pinned policy is not available")
         egress_document = referenced_routing.document
+    _apply_egress(ctx, egress_document)
+    return next_policy_version, next_routing_version
+
+
+def _apply_egress(ctx: AdminContext, egress_document: Mapping[str, Any]) -> None:
+    """Bring the worker egress in line with the routing version in force: the proxy
+    allowlist, the Docker provider's allowlist, and the Kubernetes provider's settings."""
     if ctx.proxy_config_path:
         rendered = worker_proxy_config(ctx.proxy_subnet, list(ctx.proxy_hosts), [egress_document])
         install_worker_proxy_config(
@@ -459,7 +579,20 @@ def publish_routing(
     reload = getattr(kubernetes, "reload_settings", None)
     if callable(reload):
         reload()
-    return next_policy_version, next_routing_version
+
+
+def sync_upload_egress(ctx: AdminContext, uow: UnitOfWork, *, name: str, version: int) -> bool:
+    """hades #605: an uploaded routing version that the policy in force now routes with
+    (it follows routing unpinned and this is the newest version not retired) gets the
+    egress a page publish sets. False, and nothing changes, when it is not in force."""
+    try:
+        _policy, routing = _active_documents(uow)
+    except NotFoundError:
+        return False
+    if (routing.name, routing.version) != (name, version):
+        return False
+    _apply_egress(ctx, routing.document)
+    return True
 
 
 def active_documents(uow: UnitOfWork) -> tuple[Any, Any]:

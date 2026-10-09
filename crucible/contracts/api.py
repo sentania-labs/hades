@@ -1019,12 +1019,28 @@ class PolicyView(Response):
     retired_at: Rfc3339 | None
 
 
+class RoutingOverride(BaseModel):
+    """hades #606: one routing entry (harness:model) whose enabled flag, weight, pool or
+    tier membership a published version changes against the version before it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entry: str
+    change: Literal["added", "removed", "changed"]
+    fields: list[dict[str, Any]]
+
+
 class RoutingPolicyView(Response):
     name: str
     version: int
     document: dict[str, Any]
     created_at: Rfc3339
     retired_at: Rfc3339 | None
+    # hades #606: on a publish (PUT), the version it was compared with, the entries it
+    # overrides, and the reason given. A read leaves them empty.
+    previous_version: int | None = None
+    overrides: list[RoutingOverride] = Field(default_factory=list)
+    reason: str | None = None
 
 
 class RoutingUsageView(Response):
