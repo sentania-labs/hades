@@ -18,6 +18,7 @@ from crucible.contracts.api import (
     ArtifactList,
     ArtifactView,
     AttemptSummary,
+    AttemptUsage,
     AttemptView,
     CICertificationView,
     CIDecisionView,
@@ -54,6 +55,7 @@ from crucible.domain.entities import (
     AcceptanceResult,
     Artifact,
     Attempt,
+    AttemptMetrics,
     Decision,
     Escalation,
     EscalationState,
@@ -238,7 +240,46 @@ def clamp_limit(limit: int | None) -> int:
     return max(1, min(limit, MAX_LIMIT))
 
 
-def _attempt_summary(a: Attempt, reroute_from_attempt_id: str | None = None) -> AttemptSummary:
+def _usage(metrics: AttemptMetrics | None) -> AttemptUsage | None:
+    """hades #604: the attempt's usage as its metrics row holds it, or None before the
+    attempt launched."""
+    if metrics is None:
+        return None
+    return AttemptUsage(
+        tokens_in=metrics.tokens_in,
+        tokens_out=metrics.tokens_out,
+        tokens_cache_read=metrics.tokens_cache_read,
+        cost_units=metrics.cost_units,
+        cost_source=metrics.cost_source,
+        model_reported=metrics.model_reported,
+    )
+
+
+def _usage_total(usages: list[AttemptUsage]) -> AttemptUsage | None:
+    """The attempts' usage summed field by field; a field no attempt reported stays null."""
+    if not usages:
+        return None
+
+    def total(values: list[Any]) -> Any:
+        present = [value for value in values if value is not None]
+        return sum(present) if present else None
+
+    sources = sorted({u.cost_source for u in usages if u.cost_source != "none"})
+    return AttemptUsage(
+        tokens_in=total([u.tokens_in for u in usages]),
+        tokens_out=total([u.tokens_out for u in usages]),
+        tokens_cache_read=total([u.tokens_cache_read for u in usages]),
+        cost_units=total([u.cost_units for u in usages]),
+        cost_source=",".join(sources) or "none",
+        model_reported=None,
+    )
+
+
+def _attempt_summary(
+    a: Attempt,
+    reroute_from_attempt_id: str | None = None,
+    usage: AttemptUsage | None = None,
+) -> AttemptSummary:
     return AttemptSummary(
         id=a.id,
         execution_id=a.execution_id,
@@ -259,11 +300,15 @@ def _attempt_summary(a: Attempt, reroute_from_attempt_id: str | None = None) -> 
         ordered_candidates=a.ordered_candidates,
         reroute_from_attempt_id=reroute_from_attempt_id,
         resume_from_remote=a.resume_from_remote,
+        usage=usage,
     )
 
 
 def _execution_summary(
-    e: Execution, attempts: list[Attempt], reroute_from: dict[str, str]
+    e: Execution,
+    attempts: list[Attempt],
+    reroute_from: dict[str, str],
+    usage: dict[str, AttemptUsage] | None = None,
 ) -> ExecutionSummary:
     return ExecutionSummary(
         id=e.id,
@@ -277,7 +322,9 @@ def _execution_summary(
         max_attempts=e.max_attempts,
         created_at=e.created_at,
         ended_at=e.ended_at,
-        attempts=[_attempt_summary(a, reroute_from.get(a.id)) for a in attempts],
+        attempts=[
+            _attempt_summary(a, reroute_from.get(a.id), (usage or {}).get(a.id)) for a in attempts
+        ],
     )
 
 
@@ -309,8 +356,13 @@ def task_view(uow: UnitOfWork, task_id: str) -> TaskView:
         and event.payload.get("to_attempt_id")
         and event.payload.get("from_attempt_id")
     }
+    usage = {
+        m.attempt_id: found
+        for m in uow.attempt_metrics.list_since(since=None, model=None, task_ids=[task.id])
+        if (found := _usage(m)) is not None
+    }
     summaries = [
-        _execution_summary(e, list(uow.attempts.list_for_execution(e.id)), reroute_from)
+        _execution_summary(e, list(uow.attempts.list_for_execution(e.id)), reroute_from, usage)
         for e in executions
     ]
     all_attempts = [a for s in summaries for a in s.attempts]
@@ -383,6 +435,7 @@ def task_view(uow: UnitOfWork, task_id: str) -> TaskView:
         questions=[question_view(q) for q in list_questions(uow, task.id)],
         handoffs=handoff_views(task_events),
         warnings=warnings,
+        usage=_usage_total(list(usage.values())),
     )
 
 
@@ -598,6 +651,7 @@ def attempt_view(uow: UnitOfWork, attempt_id: str) -> AttemptView:
         termination_detail=a.termination_detail,
         blocked_reason=a.blocked_reason,
         blocked_statement=a.blocked_statement,
+        usage=_usage(uow.attempt_metrics.get(a.id)),
     )
 
 

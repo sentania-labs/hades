@@ -5,7 +5,7 @@ import hmac
 import os
 from datetime import timedelta
 from typing import Any
-from urllib.parse import parse_qs, quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -14,9 +14,12 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from crucible.adapters.api.deps import Ctx, UoW
 from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.adapters.ui.render import _base, templates
-from crucible.application.auth import authenticate
+from crucible.application.admin import devices
+from crucible.application.auth import authenticate, is_device
 from crucible.application.errors import (
+    ConflictError,
     ForbiddenError,
+    UnauthorizedError,
 )
 from crucible.application.first_run import discard_after_use
 from crucible.domain.entities import Principal, Role, UiSession
@@ -161,6 +164,98 @@ async def sign_in(request: Request, ctx: Ctx, uow: UoW) -> Response:
             message="Token not recognized.",
             status_code=401,
         )
+    if is_device(principal):
+        # hades #576 (U9): a device token opens a session once, whichever door it uses.
+        refused = _exchange(request, ctx, uow, principal, next_path=form.get("next", "/ui"))
+        if refused is not None:
+            return refused
+    return await _open_session(ctx, uow, principal, target=form.get("next", "/ui/board"))
+
+
+def _same_site(request: Request) -> bool:
+    """A cross-site form may not sign a browser in to someone else's device session: an
+    Origin, when the browser sends one, names this host."""
+    origin = request.headers.get("origin")
+    if not origin:
+        return True
+    host = urlsplit(origin).netloc.lower()
+    allowed = {
+        value.strip().lower()
+        for value in (
+            request.headers.get("host", ""),
+            *request.headers.get("x-forwarded-host", "").split(","),
+        )
+        if value.strip()
+    }
+    return host in allowed
+
+
+def _exchange(
+    request: Request, ctx: Any, uow: UnitOfWork, principal: Principal, *, next_path: str
+) -> Response | None:
+    """Take the device token's one exchange, or the sign-in form saying why not."""
+    try:
+        devices.exchange(uow, ctx.clock, principal, user_agent=request.headers.get("user-agent"))
+    except UnauthorizedError:
+        return _sign_in_form(
+            request,
+            ctx,
+            next_path=next_path,
+            message="That is not a device token.",
+            status_code=401,
+        )
+    except ConflictError:
+        uow.rollback()
+        return _sign_in_form(
+            request,
+            ctx,
+            next_path=next_path,
+            message=(
+                "This device token has already been exchanged for a session. "
+                "Ask an administrator to mint a new one."
+            ),
+            status_code=409,
+        )
+    return None
+
+
+@router.post("/device-sign-in")
+async def device_sign_in(request: Request, ctx: Ctx, uow: UoW) -> Response:
+    """hades #576 (U9): a browser on a device exchanges its device token, once, for an
+    ordinary server-side UI session (ADR 0030). The token comes in the form field
+    `token` or as `Authorization: Bearer`; it never reaches the cookie."""
+    form = await _form(request)
+    next_path = form.get("next", "/ui/board")
+    if not _same_site(request):
+        return _sign_in_form(
+            request,
+            ctx,
+            next_path=next_path,
+            message="The device sign-in came from another site.",
+            status_code=403,
+        )
+    token = form.get("token", "")
+    authorization = request.headers.get("authorization", "")
+    if not token and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    principal = authenticate(uow, token)
+    if principal is None or not is_device(principal):
+        return _sign_in_form(
+            request,
+            ctx,
+            next_path=next_path,
+            message="That is not a device token.",
+            status_code=401,
+        )
+    refused = _exchange(request, ctx, uow, principal, next_path=next_path)
+    if refused is not None:
+        return refused
+    return await _open_session(ctx, uow, principal, target=next_path)
+
+
+async def _open_session(
+    ctx: Any, uow: UnitOfWork, principal: Principal, *, target: str
+) -> RedirectResponse:
     now = ctx.clock.now()
     csrf = os.urandom(24).hex()
     session_id = os.urandom(32).hex()
@@ -180,7 +275,6 @@ async def sign_in(request: Request, ctx: Ctx, uow: UoW) -> Response:
     # so a failed insert or commit leaves the token available for a retry.
     await asyncio.to_thread(discard_after_use, ctx.first_run, principal.name)
     value = _serializer(ctx).dumps(session_id)
-    target = form.get("next", "/ui/board")
     if not target.startswith("/ui") or target.startswith("//"):
         target = "/ui"
     response = RedirectResponse(target, status_code=303)

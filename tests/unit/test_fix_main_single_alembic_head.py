@@ -43,7 +43,9 @@ MERGED = {"0044_attempt_stall_shape", "0044_editor_leftovers_policy", "0044_merg
 # delivery: note delivery states, minion questions and handoffs) was assigned 0057 but
 # reached main after all three, so it is numbered past 0060 and chains from
 # 0060_personas_scheduled_jobs; the merge-main of #447 may renumber it again, so its id
-# is read from the chain by its slug, not pinned.
+# is read from the chain by its slug, not pinned. hades #576 and #604 (device tokens and
+# the cache reads of an attempt) add 0062_device_tokens_usage on top, provisionally
+# numbered and read by its slug for the same reason.
 ABOVE = "0046_blocked_reason"
 PROBE = "0047_attempt_egress_probe"
 LAUNCH = "0047_successful_launch_time"
@@ -60,7 +62,8 @@ MEMORY = "0058_memory_and_decisions"
 ROOMS = "0059_rooms"
 PERSONAS = "0060_personas_scheduled_jobs"
 COMMENT_DELIVERY = migration_by_slug("comment_delivery").revision
-HEAD = COMMENT_DELIVERY
+DEVICE_TOKENS = migration_by_slug("device_tokens_usage").revision
+HEAD = DEVICE_TOKENS
 
 
 def _script() -> ScriptDirectory:
@@ -111,8 +114,10 @@ def test_the_0045_merge_joins_the_three_0044_heads() -> None:
     assert rooms is not None and rooms.down_revision == MEMORY
     personas = script.get_revision(PERSONAS)
     assert personas is not None and personas.down_revision == ROOMS
+    comment_delivery = script.get_revision(COMMENT_DELIVERY)
+    assert comment_delivery is not None and comment_delivery.down_revision == PERSONAS
     head = script.get_revision(HEAD)
-    assert head is not None and head.down_revision == PERSONAS
+    assert head is not None and head.down_revision == COMMENT_DELIVERY
 
 
 def test_the_cli_config_sees_the_same_single_head() -> None:
@@ -140,7 +145,7 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
         plan = [step.revision.revision for step in script._upgrade_revs("head", head)]
         assert plan.index("0043_credential_mount_mode") < plan.index("0044_merge_423_424")
         assert plan.index("0044_merge_423_424") < plan.index(MERGE)
-        assert plan[-20:] == [
+        assert plan[-21:] == [
             "0043_credential_mount_mode",
             "0044_merge_423_424",
             ("0044_editor_leftovers_policy", "0044_attempt_stall_shape")[
@@ -162,6 +167,7 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
             MEMORY,
             ROOMS,
             PERSONAS,
+            COMMENT_DELIVERY,
             HEAD,
         ]
 

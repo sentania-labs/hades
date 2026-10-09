@@ -137,6 +137,8 @@ def _metrics(document: Mapping[str, Any] | None) -> ReportMetrics:
         model=str(document["model"]) if isinstance(document.get("model"), str) else None,
         tokens_in=integer("input_tokens"),
         tokens_out=integer("output_tokens"),
+        # hades #604: the wrapper's usage record names the cache reads `cache_read_tokens`.
+        tokens_cache_read=integer("cache_read_tokens"),
         cost_usd=float(cost)
         if isinstance(cost, int | float) and not isinstance(cost, bool)
         else None,

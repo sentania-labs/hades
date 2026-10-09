@@ -48,6 +48,25 @@ class UiSession:
 
 
 @dataclass(slots=True)
+class Device:
+    """hades #576 (U9): a named, long-lived bearer token for one device, such as a
+    phone or the iOS app. The token is its principal's (`device:<name>`), so it
+    authenticates /v1 like any other; this row adds what a device needs beyond that:
+    who minted it, when and from what user agent it was last used, and the one time it
+    was exchanged for a UI session."""
+
+    principal_id: str
+    name: str
+    created_by: str
+    created_at: datetime
+    last_used_at: datetime | None = None
+    last_user_agent: str | None = None
+    exchanged_at: datetime | None = None
+    revoked_at: datetime | None = None
+    revoked_by: str | None = None
+
+
+@dataclass(slots=True)
 class Persona:
     id: str
     name: str
@@ -590,6 +609,8 @@ class AttemptMetrics:
     tool_calls: int | None = None
     tokens_in: int | None = None
     tokens_out: int | None = None
+    # hades #604: the input tokens the harness read from its prompt cache, where reported.
+    tokens_cache_read: int | None = None
     cost_units: float | None = None
     cost_source: str = "none"
     # The model the harness's own transcript named, when it did (05b, C5).

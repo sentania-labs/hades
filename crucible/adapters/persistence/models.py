@@ -52,6 +52,22 @@ class UiSessionRow(Base):
     last_seen_at: Mapped[datetime] = mapped_column(TZ)
 
 
+class DeviceRow(Base):
+    """hades #576 (U9): a device's principal and what it did with its token. The token
+    hash stays on the principal; nothing here is a credential."""
+
+    __tablename__ = "devices"
+    principal_id: Mapped[str] = mapped_column(ID, ForeignKey("principals.id"), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(TZ)
+    last_used_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    last_user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    exchanged_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    revoked_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
 class RepositoryRow(Base):
     __tablename__ = "repositories"
     id: Mapped[str] = mapped_column(ID, primary_key=True)
@@ -673,6 +689,7 @@ class AttemptMetricsRow(Base):
     tool_calls: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     tokens_in: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     tokens_out: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    tokens_cache_read: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     cost_units: Mapped[float | None] = mapped_column(Float, nullable=True)
     cost_source: Mapped[str] = mapped_column(String(24))
     model_reported: Mapped[str | None] = mapped_column(String(128), nullable=True)

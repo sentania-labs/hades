@@ -13,6 +13,7 @@ from crucible.domain.gates import SHIM_IDENTITY_MOUNT
 from crucible.domain.infrastructure import Interruption
 from crucible.domain.secrets import SecretMatch
 from crucible.ports.github import InstallationToken
+from crucible.ports.harness import ReportMetrics
 
 # Where the workspace appears inside every Crucible-created container (06, 08).
 REPO_MOUNT = "/crucible/repo"
@@ -389,6 +390,11 @@ class CollectedOutputs:
     leftover_committed: bool = False
     leftover_note: str | None = None
     interruption: Interruption | None = None
+    # hades #604: what the harness's own usage report said, read by a provider whose
+    # report directory exists only while it collects (Kubernetes reads it into a
+    # scratch directory), so the supervisor has no local report directory to parse.
+    # None where the provider leaves the report directory in the workspace.
+    metrics: ReportMetrics | None = None
 
 
 @dataclass(frozen=True, slots=True)

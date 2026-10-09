@@ -538,30 +538,27 @@ def _toml_string(value: str) -> str:
 
 
 def _metrics(transcript: Path) -> tuple[ReportMetrics, int]:
-    """`turn.completed` events carry `usage`; any event naming a `model` names it."""
+    """`turn.completed` events carry `usage`; any event naming a `model` names it. Each
+    turn's usage is that turn's, so the run is their sum; `cached_input_tokens` is the
+    part of the input read from the prompt cache (hades #604). Codex reports no cost."""
     model: str | None = None
-    tokens_in = 0
-    tokens_out = 0
-    seen_usage = False
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    cache: int | None = None
     count = 0
     for event in base.json_lines(transcript):
         count += 1
         if isinstance(event.get("model"), str):
             model = str(event["model"])
         if event.get("type") == "turn.completed":
-            i, o = base.usage_totals(event.get("usage"))
+            usage = event.get("usage")
+            i, o = base.usage_totals(usage)
             if i is not None or o is not None:
-                seen_usage = True
-                tokens_in += i or 0
-                tokens_out += o or 0
+                tokens_in = base.add(tokens_in, i or 0)
+                tokens_out = base.add(tokens_out, o or 0)
+                cache = base.add(cache, base.cache_read(usage))
     source = "harness_transcript" if count else "none"
     return (
-        ReportMetrics(
-            model,
-            tokens_in if seen_usage else None,
-            tokens_out if seen_usage else None,
-            None,
-            source,
-        ),
+        ReportMetrics(model, tokens_in, tokens_out, None, source, tokens_cache_read=cache),
         count,
     )

@@ -12,7 +12,7 @@ from fastapi import Header, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
-from crucible.adapters.api.deps import Admin, Ctx, Orchestrator, Reader, UoW
+from crucible.adapters.api.deps import Admin, Ctx, Orchestrator, Reader, UoW, note_device_use
 from crucible.adapters.api.problems import problem_response
 from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.application.artifacts import read_artifact, upload_artifact
@@ -99,6 +99,7 @@ async def get_attempt_logs(
         if principal is None:
             raise UnauthorizedError("token not recognized")
         request.state.principal = principal
+        note_device_use(initial, ctx.clock, principal, request.headers.get("user-agent"))
         attempt = initial.attempts.get(attempt_id)
         if attempt is None:
             raise NotFoundError(f"attempt {attempt_id} not found")

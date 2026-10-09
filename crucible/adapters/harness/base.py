@@ -380,6 +380,11 @@ def _int(value: Any) -> int | None:
     return None
 
 
+def integer(value: Any) -> int | None:
+    """A JSON number as a whole count, or None (a boolean is not a count)."""
+    return _int(value)
+
+
 def _float(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
@@ -403,6 +408,26 @@ def usage_totals(usage: Any) -> tuple[int | None, int | None]:
     if tokens_out is None:
         tokens_out = _int(usage.get("candidatesTokenCount"))
     return tokens_in, tokens_out
+
+
+def cache_read(usage: Any) -> int | None:
+    """hades #604: the prompt-cache reads in a usage object, in the name each CLI uses:
+    Claude Code `cache_read_input_tokens`, Codex `cached_input_tokens`, Qwen Code
+    `cache_read_input_tokens` (or `cached` in its stats)."""
+    if not isinstance(usage, dict):
+        return None
+    for key in ("cache_read_input_tokens", "cached_input_tokens", "cacheReadInputTokens"):
+        found = _int(usage.get(key))
+        if found is not None:
+            return found
+    return None
+
+
+def add(total: int | None, value: int | None) -> int | None:
+    """A running sum that stays None until something was reported."""
+    if value is None:
+        return total
+    return (total or 0) + value
 
 
 def cost_usd(value: Any) -> float | None:

@@ -85,6 +85,21 @@ class ContractVersionView(Response):
     submitted_at: Rfc3339
 
 
+class AttemptUsage(Response):
+    """hades #604: what the harness's own usage report said the attempt spent. Each field
+    is null where the harness reports nothing: Codex and Qwen Code report no cost, and
+    an attempt that never reached its result reports nothing at all. `cost_units` is in
+    the harness's unit, US dollars for Claude Code and Hermes (`cost_source` says which
+    report it came from)."""
+
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    tokens_cache_read: int | None = None
+    cost_units: float | None = None
+    cost_source: str = "none"
+    model_reported: str | None = None
+
+
 class AttemptSummary(Response):
     ordered_candidates: list[dict[str, Any]] = Field(default_factory=list)
     id: str
@@ -109,6 +124,8 @@ class AttemptSummary(Response):
     egress_probe: dict[str, Any] | None = None
     reroute_from_attempt_id: str | None = None
     resume_from_remote: bool = False
+    # hades #604: tokens and cost, null until the attempt was collected.
+    usage: AttemptUsage | None = None
 
 
 class ExecutionSummary(Response):
@@ -206,6 +223,8 @@ class TaskView(Response):
         ),
     )
     warnings: list[str] = Field(default_factory=list)
+    # hades #604: the attempts' usage summed; a field stays null when no attempt reported it.
+    usage: AttemptUsage | None = None
 
 
 class TaskListItem(Response):
@@ -303,6 +322,8 @@ class AttemptView(Response):
     # ambiguous_contract) and what it said, verbatim. Both None for any other ending.
     blocked_reason: str | None = None
     blocked_statement: str | None = None
+    # hades #604: tokens in, out and read from cache, and cost, from the harness's report.
+    usage: AttemptUsage | None = None
 
 
 class ExecutionView(Response):

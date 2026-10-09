@@ -625,6 +625,35 @@ reason required (ADR 0029). Its tasks and token follow it by id; events keep the
 name they were written with. A taken or reserved name is refused, and the
 first-run principal keeps its name.
 
+### Device tokens (hades #576, U9)
+
+An administrator mints a named, long-lived token for one device, such as a phone or
+the iOS app, with `POST /admin/devices` (`name`, 1 to 100 printable characters;
+`role`, `operator` unless another role is named; an optional `reason`). The response
+carries the token once, beside the device, and nothing serves it again. The token is
+the token of the device's own principal, `device:<name>`, stored as a salted hash
+like any other, so it authenticates `/v1` as any bearer token does; the `device:`
+prefix is reserved, so `token create` refuses it and a device's principal keeps its
+name. `GET /admin/devices` lists every device with its role, state, who minted it,
+`last_used_at` and the last user agent, the time of its one UI exchange, and its
+revocation, each time also as local Central text (`*_local`), and never a token.
+
+A browser on the device exchanges the token once for an ordinary server-side UI
+session at `POST /ui/device-sign-in` (form field `token`, or `Authorization: Bearer`;
+an `Origin` naming another host is refused). The exchange is taken in one
+conditional update, so two browsers racing with one token cannot both win; a second
+exchange, through this door or the sign-in form, is refused with 409 and an
+administrator mints a new token. The API keeps accepting the token afterwards.
+
+Each `/v1` request a device token authenticates records the time and user agent,
+written at most once a minute unless the user agent changed. The audit records
+`device_token_minted` (principal, reason, device, role), `device_token_used` (the
+first use, a use from a new user agent, a use after an hour without one, and the UI
+exchange, with `via` `api` or `ui_session`) and `device_token_revoked`.
+`POST /admin/devices/{id}/revoke`, reason required, disables the device's principal,
+which ends the token and every UI session it opened (ADR 0030). A credential-shaped
+user agent is recorded as withheld.
+
 ## What Foundry may do
 
 Read `/v1/admin/status` parts that its role permits (orchestrator role
