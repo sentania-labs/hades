@@ -1,0 +1,46 @@
+<script>
+(() => {
+  const shell = document.querySelector('.room-shell');
+  const roomId = shell.dataset.roomId;
+  const csrf = shell.dataset.csrf;
+  const transcript = document.querySelector('#room-transcript');
+  const form = document.querySelector('#room-composer');
+  const message = document.querySelector('#room-message');
+  const send = document.querySelector('#room-send');
+  const interrupt = document.querySelector('#room-interrupt');
+  const status = document.querySelector('#room-status');
+  let source;
+  let lastSeq = Math.max(0, ...Array.from(transcript.querySelectorAll('[data-seq]'), n => Number(n.dataset.seq)));
+
+  const post = async (path, body = {}) => {
+    const response = await fetch(`/ui/room/${encodeURIComponent(roomId)}/${path}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf}, body: JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error((await response.json()).detail || `Request failed (${response.status})`);
+    return response.json();
+  };
+  const turn = data => {
+    let node = transcript.querySelector(`[data-seq="${data.seq}"]`);
+    if (!node) {
+      transcript.querySelector('.room-empty')?.remove();
+      node = document.createElement('article'); node.className = `room-turn room-turn--${data.role}`; node.dataset.seq = data.seq; node.dataset.role = data.role;
+      const header = document.createElement('header'); const who = document.createElement('b'); who.textContent = data.role === 'assistant' ? 'Hades' : data.role === 'user' ? 'You' : 'System'; header.append(who);
+      const text = document.createElement('div'); text.className = 'room-turn-text'; node.append(header, text); transcript.append(node);
+    }
+    node.querySelector('.room-turn-text').textContent = data.text || '';
+    lastSeq = Math.max(lastSeq, Number(data.seq)); transcript.scrollTop = transcript.scrollHeight; return node;
+  };
+  const connect = () => {
+    source?.close(); source = new EventSource(`/ui/room/${encodeURIComponent(roomId)}/stream?after_seq=${lastSeq}`);
+    source.addEventListener('turn', event => { const data = JSON.parse(event.data); turn(data); if (data.role === 'assistant' && !data.ended_at) { interrupt.hidden = false; send.disabled = true; } });
+    source.addEventListener('delta', event => { const data = JSON.parse(event.data); const node = transcript.querySelector(`[data-seq="${data.seq}"]`); if (node) { node.querySelector('.room-turn-text').textContent += data.text; transcript.scrollTop = transcript.scrollHeight; } });
+    source.addEventListener('turn_end', event => { const data = JSON.parse(event.data); if (data.role === 'assistant') { interrupt.hidden = true; send.disabled = false; status.textContent = data.interrupted ? 'Reply interrupted.' : ''; window.setTimeout(() => window.location.reload(), 100); } });
+    source.addEventListener('room', event => { const data = JSON.parse(event.data); if (['starting','warm','interrupted'].includes(data.state)) interrupt.hidden = false; });
+    source.onerror = () => { source.close(); window.setTimeout(connect, 1000); };
+  };
+  form.addEventListener('submit', async event => { event.preventDefault(); const text = message.value.trim(); if (!text) return; send.disabled = true; status.textContent = 'Sending…'; try { const data = await post('messages', {text}); turn(data); message.value = ''; status.textContent = 'Hades is replying…'; interrupt.hidden = false; connect(); } catch (error) { status.textContent = error.message; send.disabled = false; } });
+  interrupt.addEventListener('click', async () => { interrupt.disabled = true; try { await post('interrupt'); status.textContent = 'Interrupt requested.'; } catch (error) { status.textContent = error.message; } finally { interrupt.disabled = false; } });
+  document.querySelector('#room-target').addEventListener('change', async event => { const [harness, model] = event.target.value.split('|'); status.textContent = 'Switching…'; try { const data = await post('switch', {harness, model}); turn(data.turn); status.textContent = 'Switched. The next message starts this connection.'; } catch (error) { status.textContent = error.message; } });
+  connect();
+})();
+</script>

@@ -362,6 +362,9 @@ class RoomSettings(BaseModel):
     )
     api_port: int = Field(default=8080, ge=1, le=65535)
     max_runner_seconds: int = Field(default=12 * 3600, ge=600)
+    default_harness: str = "claude_code"
+    default_model: str = "claude-opus-5-5"
+    models: list[str] = Field(default_factory=lambda: ["claude-opus-5-5"])
 
 
 class Settings(BaseSettings):

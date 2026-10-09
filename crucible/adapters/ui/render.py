@@ -41,6 +41,7 @@ NAV = (
     ("/ui/repositories", "Repositories"),
     ("/ui/routing", "Routing"),
     ("", "Work"),
+    ("/ui/room", "Hades"),
     ("/ui/tasks", "Tasks"),
     ("/ui/board", "Board"),
     ("/ui/usage", "Usage"),

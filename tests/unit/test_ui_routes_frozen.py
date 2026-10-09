@@ -27,6 +27,8 @@ FROZEN_ROUTES = [
     ("GET", "/ui/memory"),
     ("GET", "/ui/repositories"),
     ("GET", "/ui/retention"),
+    ("GET", "/ui/room"),
+    ("GET", "/ui/room/{room_id}/stream"),
     ("GET", "/ui/routing"),
     ("GET", "/ui/routing/models"),
     ("GET", "/ui/routing/tiers"),
@@ -46,6 +48,9 @@ FROZEN_ROUTES = [
     # hades #208: Edit (supersede) and Forget as clicks on the Memory page.
     ("POST", "/ui/memory/{item_id}/forget"),
     ("POST", "/ui/memory/{item_id}/supersede"),
+    ("POST", "/ui/room/{room_id}/interrupt"),
+    ("POST", "/ui/room/{room_id}/messages"),
+    ("POST", "/ui/room/{room_id}/switch"),
     ("POST", "/ui/sign-in"),
     ("POST", "/ui/sign-out"),
     # hades #424: the operator's answers to proposed tasks, one at a time and as a batch.
