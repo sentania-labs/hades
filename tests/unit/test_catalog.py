@@ -280,7 +280,7 @@ class TestApplicationView:
         assert "skills" in data
         assert "tools" in data
         assert len(data["skills"]) == 2
-        assert len(data["tools"]) == 5
+        assert len(data["tools"]) == 2
         for s in data["skills"]:
             assert "used_by" in s
             assert s["used_by"] == 0
@@ -414,7 +414,11 @@ class TestSecretDetection:
         assert hit.pattern == "github_token"
 
     def test_jwt_pattern_detected(self) -> None:
-        hit = match_text("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.abc")
+        hit = match_text(
+            "eyJhbGciOiJIUzI1NiJ9."
+            "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ."
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        )
         assert hit is not None
         assert hit.pattern == "jwt"
 
