@@ -102,6 +102,7 @@ from crucible.domain.role_timeouts import (
 from crucible.domain.secrets import redact
 from crucible.domain.test_services import DeclaredService, declared_services, services_env
 from crucible.domain.time import parse_rfc3339
+from crucible.domain.verification import named_paths
 from crucible.ports.execution import (
     IDENTITY_MOUNT,
     OUTPUT_MOUNT,
@@ -1378,6 +1379,7 @@ class KubernetesProvider:
             endpoints=tuple(sorted(set(plan.endpoints) | set(checkout.endpoints))),
         )
         checkout_mount = Mount("probe-work", WORK_MOUNT)
+        services = self._services(spec)
         init_mounts: list[Mount] = [checkout_mount, *token_mounts]
         volumes: list[dict[str, Any]] = [
             {"name": "probe-work", "emptyDir": {}},
@@ -1417,6 +1419,10 @@ class KubernetesProvider:
                 spec,
                 role=role,
                 image=image,
+                # hades #608: the probe runs the checks beside the same declared services
+                # as the attempt's worker, told the same CRUCIBLE_TEST_DATABASE_URL.
+                env=services_env(services),
+                services=services,
                 script=scripts.gate_probe_script(
                     f"{WORK_MOUNT}/repo",
                     list(checks),
@@ -1514,6 +1520,10 @@ class KubernetesProvider:
                 continue
             if not isinstance(result["exit"], int):
                 raise ProviderError("gate probe returned an invalid exit")
+            # hades #517, #608: only a path this check's command names counts; the line
+            # is the probe's own, but its paths are matched against what was asked.
+            named = named_paths(str(result["command"]))
+            missing = result.get("missing") or []
             rows.append(
                 VerificationRun(
                     id=result["id"],
@@ -1525,6 +1535,9 @@ class KubernetesProvider:
                         if check["id"] == result["id"]
                     ),
                     log_tail=str(result.get("detail", "")),
+                    missing_paths=tuple(
+                        path for path in named if isinstance(missing, list) and path in missing
+                    ),
                 )
             )
         return tuple(rows)
@@ -4986,6 +4999,7 @@ class KubernetesProvider:
         init_containers: Sequence[Mapping[str, Any]] = (),
         stall_seconds: int = 0,
         keep_log: list[str] | None = None,
+        services: Sequence[DeclaredService] = (),
     ) -> int:
         """Run one single-purpose Job to completion and delete it. With `cancelled`, a
         cancel ends the wait (hades #189): the Job and its policy are deleted on the way
@@ -5045,6 +5059,10 @@ class KubernetesProvider:
                         image_pull_secret=self.config.image_pull_secret,
                         host_aliases=k8sspec.host_aliases(resolved_plan),
                         init_containers=init_containers,
+                        # hades #608: the verifier and the gate probe carry the
+                        # attempt's declared services as native sidecars, as the
+                        # worker does.
+                        services=services,
                     )
                 ),
                 # The Job's own deadline counts from its start, image pull included;
@@ -5207,6 +5225,7 @@ class KubernetesProvider:
         if not checks:
             return ()
         launched = self._launched.get(spec.attempt_id)
+        services = self._services(spec)
         code = await self._run_role_job(
             spec,
             role=k8sspec.ROLE_VERIFIER,
@@ -5224,9 +5243,12 @@ class KubernetesProvider:
                 **(
                     {"BUILDKIT_HOST": BUILDKIT_HOST} if requires_image_checks(spec.contract) else {}
                 ),
+                # hades #608: the re-run sees the same database the worker's run did.
+                **services_env(services),
             },
             timeout=self.config.verifier_timeout_seconds,
             plan=self._egress_plan(spec, k8sspec.ROLE_VERIFIER),
+            services=services,
         )
         self._raise_if_unavailable(k8sspec.ROLE_VERIFIER, spec.attempt_id, code)
         # None means "the verifier could not be re-run": the caller marks every command

@@ -303,7 +303,11 @@ way as `kubernetes.probe_image`.
 ### Declared test services as native sidecars (hades #558, #85)
 
 A policy's or a contract's `services` list (05b, 05) adds one container per
-service to the worker Job's Pod and nothing to any other role. The container
+service to the worker Job's Pod, the verifier Job's and the gate probe Job's
+(hades #608: the re-run and the probe see the database the worker saw, and their
+main container is told the same `CRUCIBLE_TEST_DATABASE_URL`), and nothing to any
+other role. In the gate probe it follows the checkout init container, so the
+server starts once the checkout is done and before the first check. The container
 is a native sidecar (KEP-753, GA in Kubernetes 1.29): an entry of
 `initContainers` with `restartPolicy: Always`, named `svc-<kind>`, after the
 credential seed. That one field is the whole mechanism: the kubelet starts it

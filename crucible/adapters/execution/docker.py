@@ -1126,7 +1126,7 @@ class DockerProvider:
         }
 
     async def _create_service(
-        self, spec: LaunchSpec, service: DeclaredService, worker_id: str
+        self, spec: LaunchSpec, service: DeclaredService, worker_id: str, name: str = ""
     ) -> _LaunchedService:
         """hades #558, #85: one declared service as a container of the attempt.
 
@@ -1154,7 +1154,7 @@ class DockerProvider:
             raise ProviderError(
                 f"create-request policy refused the {service.kind} service: {exc}"
             ) from exc
-        name = f"{service.name}-{spec.attempt_id}"
+        name = name or f"{service.name}-{spec.attempt_id}"
         container_id = str(await self._call(self.client.create_container, name, body))
         return _LaunchedService(service=service, container_id=container_id, image_digest=digest)
 
@@ -1723,10 +1723,18 @@ class DockerProvider:
         _, env = (
             self._network_and_env(spec) if network != "none" else ("none", dict(PACKAGE_CACHE_ENV))
         )
+        # hades #608: the re-run gets the attempt's declared services, each a companion
+        # container in the verifier's own network namespace, and the same
+        # CRUCIBLE_TEST_DATABASE_URL the worker was told.
+        services = declared_services(spec.policy, spec.contract)
+        env = {**env, **services_env(services)}
         code = await self._run_throwaway(
             spec,
             role=ROLE_VERIFIER,
-            script=scripts.verifier_script(checks),
+            services=services,
+            script=scripts.verifier_script(
+                checks, wait_ports=tuple(service.port for service in services)
+            ),
             mounts=[
                 self._daemon_mount(spec.attempt_id, "output/tree", REPO_MOUNT, read_only=False),
                 self._daemon_mount(spec.attempt_id, "verify", VERIFY_MOUNT, read_only=False),
@@ -1764,8 +1772,13 @@ class DockerProvider:
         image: str | None = None,
         secret_stdin: InstallationToken | None = None,
         cancelled: CancelCheck | None = None,
+        services: Sequence[DeclaredService] = (),
     ) -> int:
         """Run one hardened, single-purpose container to completion and remove it.
+
+        `services` (hades #608) are declared test services started as companion
+        containers in this container's network namespace, the way `launch` starts the
+        worker's, and removed with it on every path.
 
         `secret_stdin` is a token the container reads from its stdin onto a tmpfs of its
         own (ADR 0019, S10): never `Env`, `Cmd`, a bind source or the writable layer,
@@ -1800,11 +1813,29 @@ class DockerProvider:
         check_create(body, self._create_policy(spec, resolved=str(image)))
         name = f"crucible-{role}-{spec.attempt_id}"
         container_id = ""
+        companions: list[_LaunchedService] = []
         try:
             if cancelled is not None and await cancelled():
                 raise LaunchCancelledError(f"the task was cancelled before the {role} started")
             container_id = await self._call(self.client.create_container, name, body)
+            for service in services:
+                try:
+                    companions.append(
+                        await self._create_service(
+                            spec,
+                            service,
+                            container_id,
+                            name=f"{service.name}-{role}-{spec.attempt_id}",
+                        )
+                    )
+                except ProviderError as exc:
+                    self.last_error[role] = str(exc)
+                    log.warning("%s service failed", role, extra={"error": str(exc)})
+                    return THROWAWAY_API_ERROR
             await self._call(self.client.start_container, container_id)
+            # Docker lets a container join another's namespace only once that one runs.
+            for companion in companions:
+                await self._call(self.client.start_container, companion.container_id)
             if secret_stdin is not None:
                 await self._call(
                     self.client.write_stdin,
@@ -1841,6 +1872,11 @@ class DockerProvider:
                     await self._call(self.client.kill_container, container_id)
             return THROWAWAY_TIMED_OUT
         finally:
+            for companion in companions:
+                with contextlib.suppress(Exception):
+                    await self._call(
+                        self.client.remove_container, companion.container_id, force=True
+                    )
             if container_id:
                 with contextlib.suppress(Exception):
                     await self._call(self.client.remove_container, container_id, force=True)

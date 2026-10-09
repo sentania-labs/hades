@@ -50,6 +50,39 @@ those rows before any pull request is opened:
 Like `report_present` and `commit_policy`, the gate always runs and is not listed in a
 policy's gate groups. It launches no review attempt: the judgement is mechanical.
 
+## The verifier's log (`verification_ran`, hades #608)
+
+The verifier runs beside the attempt's declared test services, told the same
+`CRUCIBLE_TEST_DATABASE_URL` as the worker (05b, 08, 26). Each command's log is kept
+as a `verify/<id>.log` artifact of at most 64 KB. A longer log keeps its head and its
+tail, half each, with one line in place of the middle saying how many bytes the log
+had: the first error is near the head, and the summary the runner prints last is at
+the tail.
+
+## The gate probe (`gate_proves_nothing`, `check_cannot_run`; hades #412, #517, #608)
+
+Before a worker is prepared, the provider runs the task's own required checks (the
+`required_verification` commands the policy's `repository.required_checks` does not
+name) on a fresh checkout of `base_ref`, beside the same declared services as the
+attempt. A check proves something only when it fails on the unchanged tree:
+
+- A check whose command names a repository path the unchanged tree lacks (a word with
+  a `/` or ending in `.py`, a pytest node id's `::name` cut off) fails there by
+  definition, whatever its runner exits (pytest exits 4, or 2, for a path it cannot
+  find). The probe's evidence records it as `new file named` with the paths. This is
+  how a new test file the attempt adds is proof; it is never a reason to block.
+- A check that exits other than its `expect_exit` fails on its own.
+- A check that passes on the unchanged tree is not proof.
+- Exit 127 (the program is missing) blocks the task as `check_cannot_run`.
+
+When no probed check fails, the task is blocked as `gate_proves_nothing`. The refusal
+names every probed check by id with its command and exit, and gives the fix: amend the
+contract to add a check that fails on the unchanged repo, for example a
+`uv run pytest -q tests/unit/test_issue_<n>_<slug>.py` naming the new test file, under
+the next free `V<n>` id. A blocked task accepts that amendment; rescheduling it runs
+the probe again before any worker, and neither refusal counts against `max_attempts`.
+The Docker provider has no probe yet, and its evidence says so.
+
 ## Injected instruction, harness, and identity files (`no_injected_files`)
 
 The gate catches three categories:

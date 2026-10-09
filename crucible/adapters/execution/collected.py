@@ -42,8 +42,10 @@ from crucible.ports.execution import (
 )
 
 __all__ = [
+    "VERIFICATION_LOG_LIMIT",
     "BlobTarScan",
     "Outputs",
+    "head_and_tail",
     "lists_over_limit",
     "read_base_paths",
     "read_commit_policy",
@@ -100,6 +102,47 @@ def tail(path: Path, limit: int) -> str:
             return handle.read().decode("utf-8", "replace")
     except OSError:
         return ""
+
+
+# hades #608: what one verification log artifact keeps, at most.
+VERIFICATION_LOG_LIMIT = 64 * 1024
+
+
+def head_and_tail(path: Path, limit: int = VERIFICATION_LOG_LIMIT) -> str:
+    """A log bounded at `limit` bytes that keeps both ends (hades #608): a check's first
+    error is near the head, and the summary its runner prints last is at the tail. A
+    longer log loses its middle, and a line in its place says how many bytes went."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            if size <= limit:
+                whole = handle.read(limit).decode("utf-8", "replace")
+                half = len(whole) // 2
+                return _bounded(whole[:half], "", whole[half:], limit)
+            marker = (
+                f"\n[... {size} bytes in all: the middle is omitted, "
+                "the head and the tail are kept ...]\n"
+            )
+            half = (limit - len(marker.encode("utf-8"))) // 2
+            head = handle.read(half)
+            handle.seek(size - half)
+            last = handle.read(half)
+    except OSError:
+        return ""
+    return _bounded(head.decode("utf-8", "replace"), marker, last.decode("utf-8", "replace"), limit)
+
+
+def _bounded(head: str, marker: str, last: str, limit: int) -> str:
+    """`head`, `marker` and `last` within `limit` bytes once encoded. A byte that decoded
+    as a replacement character grows to three, so what is over comes off the head's end
+    first, and off the tail's start only when the head is gone."""
+    excess = len((head + marker + last).encode("utf-8")) - limit
+    if excess > 0:
+        head = head[: max(0, len(head) - excess)]
+        excess = len((head + marker + last).encode("utf-8")) - limit
+        if excess > 0:
+            last = last[excess:]
+    return head + marker + last
 
 
 def read_outputs(
@@ -570,7 +613,7 @@ def read_verifications(
                     command=command,
                     expect_exit=expected.get(check_id, 0),
                     exit_code=-1,
-                    log_tail=tail(log_file, 32 * 1024),
+                    log_tail=head_and_tail(log_file),
                     ran=False,
                     detail="the verifier container recorded no exit for this command",
                 )
@@ -585,7 +628,7 @@ def read_verifications(
                 command=command,
                 expect_exit=expected.get(check_id, 0),
                 exit_code=int(raw) if raw.lstrip("-").isdigit() else -1,
-                log_tail=tail(log_file, 32 * 1024),
+                log_tail=head_and_tail(log_file),
                 # ASCII digits and a sane length only: the verifier ran worker code,
                 # which may have left anything in this file.
                 seconds=int(seconds) if re.fullmatch(r"[0-9]{1,9}", seconds) else None,

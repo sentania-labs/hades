@@ -178,7 +178,16 @@ It is a test fixture: wired only when `test_fixtures` is on (18).
   container of the attempt; nothing connects to it after the worker. When a
   service was declared, `collect` adds a `report/docker-launch.json` artifact
   (type `run_evidence`) recording the worker's digest and, per service, the
-  declaration, the container id and the digest the daemon resolved.
+  declaration, the container id and the digest the daemon resolved. The
+  verifier gets the same services (hades #608): each is a companion container,
+  `svc-<kind>-verifier-<attempt>`, in the verifier's network namespace, started
+  right after it and removed with it on every path, and the verifier is told the
+  same `CRUCIBLE_TEST_DATABASE_URL`. Its script waits up to 120 seconds for each
+  service's port to take a TCP connection before the first check (bash's
+  `/dev/tcp`, else python3, else no wait). A service image the daemon lacks
+  leaves every check unverified with the reason. The Docker provider has no
+  gate probe (`probe_checks` answers unsupported), so the probe half of #608 is
+  the Kubernetes provider's.
 - `terminate`: `drain` sends SIGTERM and waits the policy grace; `kill`
   sends SIGKILL.
 - `cleanup`: only for attempts whose exit path recorded `logs_drained`;
