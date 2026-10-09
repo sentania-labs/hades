@@ -77,7 +77,7 @@ def test_added_fixture_fails_with_path_rule_and_excerpt(tmp_path: Path, prefix: 
     findings, _ = scan_changed_content(_output(repo, tmp_path))
     assert findings is not None
     assert [(m.path, m.pattern, m.excerpt) for m in findings] == [
-        ("diff:fixture.py", "github_token", "ghp...AAA")
+        ("diff:fixture.py", "github_token", "ghp_...AAA (40 chars)")
     ]
     item = type(
         "Item",
@@ -96,7 +96,7 @@ def test_added_fixture_fails_with_path_rule_and_excerpt(tmp_path: Path, prefix: 
     gate_input = type("Input", (), {"one": lambda self, kind: item})()
     outcome = no_secrets(gate_input)
     assert outcome.result is GateResult.FAIL
-    assert "diff:fixture.py:github_token:ghp...AAA" in outcome.detail
+    assert "diff:fixture.py, rule github_token, value ghp_...AAA (40 chars)" in outcome.detail
 
 
 def test_header_shaped_content_cannot_change_path_or_exclude_hunk(tmp_path: Path) -> None:
@@ -202,6 +202,6 @@ def test_resume_reports_match_and_still_prepares_a_correction(tmp_path: Path, pr
     ).replace(WORK_MOUNT, str(work))
     result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0
-    assert "path=fixture.py rule=github_token excerpt=ghp...AAA" in result.stderr
+    assert "path=fixture.py rule=github_token excerpt=ghp_...AAA (40 chars)" in result.stderr
     assert KEY not in result.stderr
     assert _git(work / "repo", "rev-parse", "HEAD") == head

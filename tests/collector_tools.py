@@ -33,6 +33,7 @@ def collector_env(root: Path) -> dict[str, str]:
         "test",
         "printf",
         "tee",
+        "timeout",
     ):
         target = shutil.which(name)
         assert target is not None, name

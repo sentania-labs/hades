@@ -17,9 +17,10 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tarfile
 import threading
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
@@ -31,7 +32,8 @@ from crucible.adapters.execution.injected_collection import classify_collected, 
 from crucible.adapters.execution.workspace import harness_private_path
 from crucible.contracts.evidence import REVIEW_DIFF_NAME, REVIEW_DIFF_TYPE
 from crucible.domain.acceptance_checks import verifier_checks
-from crucible.domain.secrets import SecretMatch, match_text, scan_chunks
+from crucible.domain.secret_fixtures import BaseMatch, SecretDeclarations, declarations
+from crucible.domain.secrets import SecretMatch, match_line, scan_chunks
 from crucible.ports.execution import (
     BranchBundle,
     CollectedArtifact,
@@ -52,6 +54,7 @@ __all__ = [
     "read_outputs",
     "read_path_changes",
     "read_path_list",
+    "read_secret_declarations",
     "read_verifications",
     "scan_blob",
     "scan_changed_content",
@@ -80,15 +83,36 @@ class Outputs:
     base_paths: tuple[str, ...] | None = None
     over_limit: tuple[str, ...] = ()
     diff_unscanned: tuple[str, ...] = ()
+    secret_declarations: SecretDeclarations | None = None
 
 
 TEXT_LIMIT = 8 * 1024 * 1024
+ARTIFACT_LIMIT = 4 * 1024 * 1024
+
+
+@contextlib.contextmanager
+def _open_regular(path: Path) -> Iterator[IO[bytes]]:
+    """Open without following links or waiting on a FIFO.
+
+    Check the opened descriptor, so replacing a checked path cannot make the read
+    block.
+    """
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise OSError("not a regular collected file")
+        yield handle
+
+
+def _read_regular(path: Path, limit: int) -> bytes:
+    """A growing file cannot extend the read beyond the byte budget."""
+    with _open_regular(path) as handle:
+        return handle.read(limit)
 
 
 def text(path: Path, limit: int = TEXT_LIMIT) -> str:
     try:
-        with path.open("rb") as handle:
-            return handle.read(limit).decode("utf-8", "replace")
+        return _read_regular(path, limit).decode("utf-8", "replace")
     except OSError:
         return ""
 
@@ -183,7 +207,8 @@ def read_outputs(
     blocked_md = text(blocked) if blocked.is_file() else None
 
     changed = read_path_list(output / "changed.txt")
-    diff_findings, diff_unscanned = scan_changed_content(output, changed_blobs)
+    declared = read_secret_declarations(output)
+    diff_findings, diff_unscanned = scan_changed_content(output, changed_blobs, declared)
     commit_paths = read_path_list(output / "commit-paths.txt")
     diff_changes: tuple[PathChange, ...] | None
     commit_changes: tuple[PathChange, ...] | None
@@ -231,11 +256,15 @@ def read_outputs(
             name = f"report/{path.relative_to(report_dir)}"
             if path.name in ("report.yaml", "blocked.md"):
                 continue
+            try:
+                content = _read_regular(path, ARTIFACT_LIMIT)
+            except OSError:
+                continue
             artifacts.append(
                 CollectedArtifact(
                     name=name,
                     type="run_evidence",
-                    content=path.read_bytes()[: 4 * 1024 * 1024],
+                    content=content,
                     content_type="text/plain",
                 )
             )
@@ -247,7 +276,7 @@ def read_outputs(
             CollectedArtifact(
                 name=REVIEW_DIFF_NAME,
                 type=REVIEW_DIFF_TYPE,
-                content=review_diff.read_bytes()[: 4 * 1024 * 1024],
+                content=_read_regular(review_diff, ARTIFACT_LIMIT),
                 content_type="text/x-diff",
             )
         )
@@ -277,6 +306,7 @@ def read_outputs(
         diff_changes=diff_changes,
         base_paths=base_paths,
         over_limit=over_limit,
+        secret_declarations=declared,
         bundle=bundle,
         artifacts=tuple(artifacts),
         verifications=verifications,
@@ -410,8 +440,72 @@ class BlobTarScan:
                 self._reader.close()
 
 
+_BASE_RECORD = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64}):(.*)", re.DOTALL)
+
+
+def _base_matches(directory: Path) -> Iterator[BaseMatch]:
+    """The `git grep -z -n -o` records the collector wrote for each rule: the merge
+    base's tree, the path, the line and the value."""
+    if not directory.is_dir() or directory.is_symlink():
+        return
+    for path in sorted(directory.iterdir()):
+        if path.is_symlink() or not path.is_file():
+            continue
+        rule = path.name
+        for record in text(path, scripts.SECRET_DECLARATION_CAP_BYTES).split("\n"):
+            fields = record.split("\0")
+            if len(fields) != 3 or not fields[1].isdigit():
+                continue
+            named = _BASE_RECORD.fullmatch(fields[0])
+            if named is None:
+                continue
+            yield BaseMatch(path=named.group(1), pattern=rule, line=int(fields[1]), value=fields[2])
+
+
+def read_secret_declarations(output: Path) -> SecretDeclarations | None:
+    """What the merge base declares about secret-shaped text (FDY-0618): its
+    `.gitleaksignore`, `.gitleaks.toml`, and the digests of the values it holds at the
+    places those allow. None for a collector that exported nothing of it."""
+    directory = output / scripts.SECRET_DECLARATIONS_DIR
+    if not directory.is_dir() or directory.is_symlink():
+        return None
+
+    def read(name: str) -> str:
+        path = directory / name
+        if path.is_symlink() or not path.is_file():
+            return ""
+        return text(path, scripts.SECRET_DECLARATION_CAP_BYTES)
+
+    return declarations(
+        read("gitleaksignore"), read("gitleaks.toml"), _base_matches(directory / "base")
+    )
+
+
+def _allowed_by(
+    declared: SecretDeclarations | None, path: str, line: int
+) -> Callable[[str, str, str], bool] | None:
+    """What `match_line` asks of each match on one diff line: would `make scan` allow
+    it, by its fingerprint or an allowlist the merge base declares."""
+    if declared is None:
+        return None
+
+    def skip(rule: str, value: str, whole: str) -> bool:
+        return declared.allowed(path, rule, line, value, whole)
+
+    return skip
+
+
+_HUNK = re.compile(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+# Refuse oversized inputs explicitly rather than silently accepting an unscanned tail.
+DIFF_SCAN_LIMIT = 256 * 1024 * 1024
+DIFF_LINE_LIMIT = 16 * 1024 * 1024
+DIFF_FINDING_LIMIT = 10_000
+
+
 def scan_changed_content(
-    output: Path, blobs: Mapping[str, str | bool | None] | None = None
+    output: Path,
+    blobs: Mapping[str, str | bool | None] | None = None,
+    declared: SecretDeclarations | None = None,
 ) -> tuple[tuple[SecretMatch, ...] | None, tuple[str, ...]]:
     """Scan only lines added relative to the prepared base.
 
@@ -419,30 +513,64 @@ def scan_changed_content(
     are repository content the attempt did not add. Exported blobs remain integrity
     coverage for newly added files, but their complete contents are not judged because
     doing so would make an edit beside old secret-shaped fixture data fail (#488).
+
+    FDY-0618: each match names the new file's line. What the merge base declares
+    (`declared`, read from `output` when not given) is honoured as `make scan` honours
+    it: a path an allowlist names and a listed `path:rule:line` fingerprint are skipped,
+    and a value the repository declares as a fixture is reported as advisory.
     """
     patch = output / "diff.patch"
     if not patch.is_file():
         return None, ()
+    if declared is None:
+        declared = read_secret_declarations(output)
     found: list[SecretMatch] = []
     unscanned: list[str] = []
     current_path = "diff"
     in_hunk = False
     excluded = False
+    line_number = 0
+    fixture = declared.is_fixture if declared is not None else None
     try:
-        with patch.open("r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
+        with _open_regular(patch) as handle:
+            remaining = os.fstat(handle.fileno()).st_size
+            if remaining > DIFF_SCAN_LIMIT:
+                return None, ("diff.patch",)
+            while remaining:
+                raw_line = handle.readline(min(remaining, DIFF_LINE_LIMIT) + 1)
+                if not raw_line or len(raw_line) > min(remaining, DIFF_LINE_LIMIT):
+                    return tuple(found), ("diff.patch",)
+                remaining -= len(raw_line)
+                line = raw_line.decode("utf-8", "replace")
+                del raw_line
                 # Inside a hunk, even +++ b/ is source content, not a path header.
                 if line.startswith("diff --git "):
                     in_hunk = False
                 elif line.startswith("@@ "):
                     in_hunk = True
+                    hunk = _HUNK.match(line)
+                    line_number = int(hunk.group(1)) if hunk else 0
                 elif not in_hunk and line.startswith("+++ b/"):
                     current_path = line[6:].rstrip("\n")
-                    excluded = harness_private_path(current_path)
-                elif in_hunk and line.startswith("+") and not excluded:
-                    hit = match_text(line[1:], path=f"diff:{current_path}")
-                    if hit is not None:
-                        found.append(hit)
+                    excluded = harness_private_path(current_path) or (
+                        declared is not None and declared.path_allowed(current_path)
+                    )
+                elif in_hunk and line.startswith("+"):
+                    if not excluded:
+                        found.extend(
+                            match_line(
+                                line[1:],
+                                path=f"diff:{current_path}",
+                                line=line_number,
+                                fixture=fixture,
+                                skip=_allowed_by(declared, current_path, line_number),
+                            )
+                        )
+                    line_number += 1
+                elif in_hunk and line.startswith(" "):
+                    line_number += 1
+                if len(found) > DIFF_FINDING_LIMIT:
+                    return tuple(found[:DIFF_FINDING_LIMIT]), ("diff.patch",)
     except OSError:
         return None, ()
     raw = output / "diff-raw.txt"

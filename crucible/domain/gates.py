@@ -30,6 +30,7 @@ from crucible.domain.injected import (
 from crucible.domain.injected import (
     instruction_name_error,
 )
+from crucible.domain.secret_findings import describe as describe_secret
 from crucible.domain.secrets import redact
 
 
@@ -753,13 +754,24 @@ def no_secrets(gi: GateInput) -> GateOutcome:
     item = gi.one("scanner_result")
     if item is None:
         return _missing("scanner_result")
-    findings = item.payload.get("findings") or []
-    if findings:
-        # Findings carry the location and the pattern name, never the matched value.
-        where = [f"{f.get('where')}:{f.get('pattern')}:{f.get('excerpt', '')}" for f in findings][
-            :10
-        ]
-        return GateOutcome(GateResult.FAIL, f"secret pattern matched at {where}", (item.id,))
+    findings = [f for f in item.payload.get("findings") or [] if isinstance(f, dict)]
+    # FDY-0618: each match names its input, line, rule and a redacted excerpt, never the
+    # value. A match of a fixture value the repository declares is for the reviewer.
+    blocking = [f for f in findings if not f.get("advisory")]
+    advisory = tuple(
+        f"advisory, a fixture value the repository declares: {describe_secret(f)}"
+        for f in findings
+        if f.get("advisory")
+    )[:10]
+    if blocking:
+        shown = "; ".join(describe_secret(f) for f in blocking[:10])
+        more = f"; and {len(blocking) - 10} more" if len(blocking) > 10 else ""
+        return GateOutcome(
+            GateResult.FAIL,
+            f"secret pattern matched at {len(blocking)} place(s): {shown}{more}",
+            (item.id,),
+            findings=advisory,
+        )
     scanned = item.payload.get("scanned") or []
     unscanned = item.payload.get("unscanned") or []
     if unscanned:
@@ -783,6 +795,14 @@ def no_secrets(gi: GateInput) -> GateOutcome:
             GateResult.PENDING,
             f"{COLLECTOR_MARKER}: the scanner reported no inputs",
             (item.id,),
+        )
+    if advisory:
+        return GateOutcome(
+            GateResult.PASS,
+            f"scanner found nothing blocking across {len(scanned)} input(s); "
+            f"{len(findings)} advisory match(es) of a fixture value the repository declares",
+            (item.id,),
+            findings=advisory,
         )
     return GateOutcome(
         GateResult.PASS, f"scanner found nothing across {len(scanned)} input(s)", (item.id,)

@@ -24,6 +24,9 @@ COMPOSE ?= $(DOCKER) compose
 # `--pull never` here after it has built and classified the candidate image.
 COMPOSE_UP_FLAGS ?= --build
 UV ?= uv
+# SQLite cache commits can stall on an NFS checkout. Export this for the mypy
+# subprocess in the unit suite too, so every check uses local temporary storage.
+export MYPY_CACHE_DIR ?= /tmp/hades-mypy-$(shell id -u)
 
 # The cluster budget `make manifests` checks the rendered requests against (issue 93).
 # Left blank by default: tools/manifests/validate.sh falls back to the lab's own stated
@@ -196,9 +199,13 @@ release-notes: ## release only: print the published service and worker image dig
 
 scan: scan-tree scan-history ## secret scan; needs gitleaks on PATH
 
+# FDY-0618: gitleaks runs from inside the copy with `--source .`, so a finding's path, and
+# the `path:rule:line` fingerprint a .gitleaksignore lists for it, is the path in the
+# repository, the same fingerprint the no_secrets scanner honours (docs/spec/11).
 scan-tree: ## every tracked file as it is in the working tree (caches and .venv excluded)
 	@T=$$(mktemp -d) && git ls-files -z | tar --null -T - -cf - | tar -xf - -C "$$T" \
-	  && gitleaks detect --no-git --redact --no-banner --source "$$T"; S=$$?; rm -rf "$$T"; exit $$S
+	  && (cd "$$T" && gitleaks detect --no-git --redact --no-banner --source .); S=$$?; \
+	  rm -rf "$$T"; exit $$S
 
 # In a Crucible checkout (hades #184) origin/main is still there, with the origin URL a
 # placeholder: the worker's clone has the remote-tracking ref from its preparer, and the

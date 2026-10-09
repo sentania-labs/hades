@@ -139,7 +139,7 @@ def test_preparer_checks_seal_and_task_ancestry_before_using_bundle(
         if mode == "secret":
             assert "path=credential.txt" in result.stderr
             assert "rule=github_installation_token" in result.stderr
-            assert "excerpt=ghs...AAA" in result.stderr
+            assert "excerpt=ghs_...AAA (" in result.stderr
     else:
         assert result.returncode == 4
         assert (

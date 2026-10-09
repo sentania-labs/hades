@@ -184,7 +184,7 @@ are always advisory (hades #498).
 | `commits_present` | blocking | the collected `work_branch` has at least one commit beyond `base_ref`, the bundle verifies, and the bundle names its head. The head is the bundle's; a reported `head_sha` that differs is noted in the gate's detail and does not fail it (hades #187, 2026-09-28) | branch bundle from `collect` |
 | `scope_contained` | advisory, except a prohibited path | every changed path matches `allowed_paths` and none matches `prohibited_paths`. A path matching `prohibited_paths` stops the task even when the gate is advisory; a path merely outside `allowed_paths` is for the reviewer | diff path list from `collect` |
 | `no_injected_files` | blocking | no instruction additions, harness paths or normalized shim content in the diff or any commit on `work_branch`; unclassifiable evidence fails closed (details below) | normalized path records, base paths and blob classifications from the collector |
-| `no_secrets` | always blocking | secret scanner over the diff, every blob the worker added or changed, every commit message, and the report finds nothing; `pending` when a changed path's content was not exported to scan (details below) | scanner output artifact |
+| `no_secrets` | always blocking | secret scanner over the diff, every blob the worker added or changed, every commit message, and the report finds nothing it blocks on; a match of a fixture value the repository declares is advisory; `pending` when a changed path's content was not exported to scan (details below) | scanner output artifact |
 | `verification_ran` | blocking | for each `required_verification` command: Crucible itself re-ran the command after exit, in a fresh verifier container from the collected tree (same image, `network` per policy), and its exit matches `expect_exit`. The worker's own check logs are stored as a claim and shown to Foundry, never consumed by the gate. A check the worker's report says passed and the re-run failed is also recorded as the advisory finding "the worker reported V3 passing; Crucible's re-run failed it" (ADR 0024) | verifier exit and log (verified) |
 | `run_evidence_present` | advisory | each `kind: artifact` verification path exists and is non-empty | artifacts |
 | `criteria_mapped` | advisory | every `acceptance_criteria.id` appears in `acceptance_mapping` with a status | report |
@@ -237,6 +237,63 @@ copy of the diff keeps its own size bound for people; the scan does not read it.
 Kubernetes the blobs never reach the supervisor's disk: the reader Pod streams them
 through the scanner, apart from the output archive (26); the Docker provider scans them
 from the output directory.
+
+What a match says (FDY-0618, hades #488, #556, #559). Each finding names its input
+(`diff:<path>` with the new file's line, or `artifact:<name>`, `report...`,
+`commit[i].message` with the line in that text), the rule, and a redacted excerpt: the
+value as its first four and last three characters and its length (`ghp_...AAA (40
+chars)`), in the text around it on its line, where every other secret-shaped string is
+redacted the same way. The gate's detail lists every match that way, and no value is
+ever stored. A match in a harness transcript (`report/transcript.jsonl`) also names the
+command the transcript recorded last at or before it, and keeps the redacted
+transcript lines around each match (three before, three after, each cut at 400
+characters) as the attempt artifact `secret-scan/transcript-windows.txt` (type
+`secret_scan_window`), because the store refuses the transcript itself: a person reads
+the window to see which command printed it.
+
+Collected artifact reads stop at 4 MiB before allocating their content and refuse
+symlinks and non-regular files without waiting on a pipe. Command attribution looks
+back at most 200 lines and parses only JSON lines up to 64 KiB; oversized or deeply
+nested tool output does not prevent keeping the redacted window. At most ten windows
+are retained per transcript. These operations use local collected bytes, not network
+requests.
+The diff reader scans a fixed file-size snapshot, with a 256 MiB total budget,
+16 MiB per line and 10,000 findings. Exceeding a budget records `diff.patch` as
+unscanned, so the gate cannot pass on a silently truncated diff.
+
+The repository's own declarations are honoured, and the scanner and `make scan` agree
+on them. The collector reads `.gitleaksignore` and `.gitleaks.toml` from the merge
+base, never from the worker's tree, so an entry a worker adds does not allow its own
+match (it takes effect once merged). In the diff, a match whose `path:rule:line`
+fingerprint `.gitleaksignore` lists (the form gitleaks writes for a scan of a directory,
+which `make scan-tree` runs from inside its copy of the tree with `--source .`; rule ids
+are `crucible-<rule>` as in `.gitleaks.toml`) is skipped, and so is a match an allowlist
+in `.gitleaks.toml` allows (`[allowlist]` or `[[allowlists]]`: `paths` skip a whole
+path; `regexes` with `regexTarget`, `stopwords`, `targetRules` and `condition` as
+gitleaks reads them; a `commits` criterion never holds for a diff line). A
+`commit:path:rule:line` fingerprint names history and does not apply to a new diff
+line. The collector also lists, with `git grep -P` over the merge base's tree, each
+secret-shaped value the base holds; a value at a place those declarations allow is a
+fixture value the repository declares, and a match of that same value anywhere (a new
+file that copies it, a transcript line that printed it) is reported as advisory: it is
+listed for the reviewer in the gate's findings and does not fail the gate. Only digests
+of those values are kept. A git without PCRE lists none, and every match then blocks.
+Gitleaks' own default rules and their allowlist, and per-rule allowlists, are not read
+by the scanner.
+Each merge-base fixture search has a ten-second deadline and disables Git's lazy
+fetch. Its output is capped at 1 MiB per rule. A fixture outside those bounds is not
+recognised as advisory and remains blocking unless a declaration directly allows
+the diff match.
+
+The correction Hades composes. When the latest attempt failed `no_secrets`, a
+correction attached to the task carries, after the principal's own instructions, what
+Hades composed from the findings: which file and line, which transcript command, which
+commit message or report field produced each blocking match and its rule, and how to
+avoid it: angle-bracket placeholders such as `<github-token>` in place of anything
+token-shaped, fake values built at run time, and `grep -l` or `grep -c` rather than a
+command that prints the matching line into the transcript. The `pre_pr_gates_failed`
+wake shows Foundry the same words. The handoff and the decision keep the principal's
+words alone.
 
 `commit_policy` is evaluated whatever `gates.pre_pr` lists, and a policy may
 not name it, so the reviewer always sees who authored the commits and a
