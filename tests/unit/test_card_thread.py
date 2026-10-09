@@ -17,10 +17,18 @@ from crucible.adapters.api.deps import app_context, unit_of_work
 from crucible.adapters.api.routers import tasks as tasks_api
 from crucible.adapters.persistence.records import Rooms
 from crucible.adapters.ui.pages import board, room, tasks
+from crucible.application.errors import ForbiddenError
 from crucible.application.queries import task_view
-from crucible.application.rooms import _card_context, session_start, switch_room
+from crucible.application.rooms import (
+    _card_context,
+    close_room,
+    inject_message,
+    interrupt_room,
+    session_start,
+    switch_room,
+)
 from crucible.contracts.api import TaskView
-from crucible.domain.entities import LedgerDecision
+from crucible.domain.entities import LedgerDecision, Principal, Role
 from crucible.domain.lifecycle import TaskState
 from crucible.domain.rooms import RoomKind, RoomState, RoomTurn, TurnRole
 from crucible.settings import ServiceSettings, Settings
@@ -110,6 +118,42 @@ def test_observer_never_creates_a_room_and_can_read_notes_and_existing_turns(
     assert 'id="room-composer"' not in html and "new EventSource" not in html
     assert 'id="room-target" disabled' in html
     assert len(store.rooms.rows) == 1
+
+
+def test_second_writer_reads_shared_card_room_but_cannot_write_as_its_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = stuck_fixture()
+    with client_for(store, monkeypatch) as client:
+        client.get(f"/ui/tasks/{TASK_ID}")
+    card_room = next(iter(store.rooms.rows.values()))
+    second = Principal(id="principal-2", name="second", role=Role.OPERATOR, created_at=NOW)
+    with client_for(store, monkeypatch) as client:
+        monkeypatch.setattr(board, "_require", lambda *args: (second, "csrf"))
+        html = client.get(f"/ui/tasks/{TASK_ID}").text
+
+    assert len(store.rooms.rows) == 1
+    assert card_room.created_by == OPERATOR.id
+    assert 'id="room-composer"' not in html
+    assert 'id="room-target" disabled' in html
+    with pytest.raises(ForbiddenError, match="only the principal who created"):
+        inject_message(
+            store.uow(), FakeClock(NOW), principal=second, room_id=card_room.id, text="Ship it"
+        )
+    with pytest.raises(ForbiddenError, match="only the principal who created"):
+        interrupt_room(store.uow(), FakeClock(NOW), principal=second, room_id=card_room.id)
+    with pytest.raises(ForbiddenError, match="only the principal who created"):
+        switch_room(
+            store.uow(),
+            FakeClock(NOW),
+            principal=second,
+            room_id=card_room.id,
+            harness="claude_code",
+            model="claude-sonnet-4-6",
+        )
+    with pytest.raises(ForbiddenError, match="only the principal who created"):
+        close_room(store.uow(), FakeClock(NOW), principal=second, room_id=card_room.id)
+    assert not store.room_turns.rows
 
 
 def test_history_matches_card_ids_only_and_uses_local_time(monkeypatch: pytest.MonkeyPatch) -> None:

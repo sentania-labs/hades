@@ -275,6 +275,12 @@ def require_room_writer(principal: Principal) -> None:
         raise ForbiddenError("orchestrator or operator role required")
 
 
+def require_card_room_owner(principal: Principal, room: Room) -> None:
+    """Keep card-room writes aligned with the principal used by its tools."""
+    if room.kind is RoomKind.CARD and room.created_by != principal.id:
+        raise ForbiddenError("only the principal who created this room may write to it")
+
+
 def refuse_harness(harness: str) -> None:
     refusal = harness_refusal(harness)
     if refusal is not None:
@@ -441,6 +447,7 @@ def inject_message(
     `starting` so this request, and only this one, launches it."""
     require_room_writer(principal)
     room = get_room(uow, room_id, for_update=True)
+    require_card_room_owner(principal, room)
     _require_open(room)
     now = clock.now()
     stale = reap_gone_runner(uow, clock, room, now=now)
@@ -458,6 +465,7 @@ def interrupt_room(uow: UnitOfWork, clock: Clock, *, principal: Principal, room_
     on its next poll and ends the turn itself; with none, the turn is ended here."""
     require_room_writer(principal)
     room = get_room(uow, room_id, for_update=True)
+    require_card_room_owner(principal, room)
     _require_open(room)
     now = clock.now()
     reap_gone_runner(uow, clock, room, now=now)
@@ -529,6 +537,7 @@ def switch_room(
     require_room_writer(principal)
     refuse_harness(harness)
     room = get_room(uow, room_id, for_update=True)
+    require_card_room_owner(principal, room)
     _require_open(room)
     before = {"harness": room.harness, "model": room.model}
     handle = _stop(uow, clock, room, why="switch", principal=principal.name)
@@ -558,6 +567,7 @@ def close_room(
 ) -> tuple[Room, str | None]:
     require_room_writer(principal)
     room = get_room(uow, room_id, for_update=True)
+    require_card_room_owner(principal, room)
     _require_open(room)
     handle = _stop(uow, clock, room, why="close", principal=principal.name)
     _move(room, RoomEvent.CLOSE)

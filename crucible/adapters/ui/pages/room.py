@@ -113,7 +113,12 @@ def room_panel_context(
         "turns": turns,
         "turns_total": detail.turns_total if detail else 0,
         "window": detail.window if detail else window,
-        "can_write": bool(room and room.state is not RoomState.CLOSED and _can_write(principal)),
+        "can_write": bool(
+            room
+            and room.state is not RoomState.CLOSED
+            and _can_write(principal)
+            and (room.kind is not RoomKind.CARD or room.created_by == principal.id)
+        ),
         "connected": _connected(room, ctx.clock.now()) if room else "No principal room yet",
         "harness": settings.default_harness,
         "models": models,
