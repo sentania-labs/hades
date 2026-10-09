@@ -37,6 +37,8 @@ FROZEN_ROUTES = [
     ("GET", "/ui/routing/models"),
     ("GET", "/ui/routing/tiers"),
     ("GET", "/ui/settings"),
+    # hades #169: the ordered first-run steps.
+    ("GET", "/ui/setup"),
     ("GET", "/ui/sign-in"),
     ("GET", "/ui/tasks"),
     ("GET", "/ui/tasks/{task_id}"),

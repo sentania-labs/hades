@@ -27,6 +27,9 @@ class ServiceSettings(BaseModel):
     # Each live log tail polls the database every quarter second. This is a
     # process-local admission limit, sized from the issue 37 benchmark.
     max_sse_log_tails: int = Field(default=20, ge=1)
+    # hades #214: the image this service runs from, as the deployment names it. Shown in
+    # the Admin About block; its digest is the part after `@`. Empty: not reported.
+    image: str = ""
 
     @property
     def host(self) -> str:

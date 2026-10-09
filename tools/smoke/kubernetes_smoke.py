@@ -685,11 +685,13 @@ def walk_status_ui(base_url: str) -> None:
             page = response.read().decode("utf-8", "replace")
     except urllib.error.URLError as exc:
         raise SmokeError(f"the first-run administrator sign-in failed: {exc}") from None
-    if "<h1>Status</h1>" not in page:
-        raise SmokeError("the first-run administrator sign-in did not render the Status page")
+    # hades #169: /ui lands a deployment with a first-run step to do on Set up, whose
+    # Service section names each execution provider.
+    if "<h1>Set up</h1>" not in page:
+        raise SmokeError("the first-run administrator sign-in did not render the Set up page")
     if "kubernetes" not in page:
-        raise SmokeError("the rendered status page does not name the kubernetes provider")
-    log("the rendered /ui status page names the kubernetes provider")
+        raise SmokeError("the rendered Set up page does not name the kubernetes provider")
+    log("the rendered /ui/setup page names the kubernetes provider")
     await_first_run_secret_gone()
 
 

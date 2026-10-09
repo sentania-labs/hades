@@ -172,6 +172,9 @@ services:
       CRUCIBLE_DATABASE__URL: postgresql+psycopg://crucible:${POSTGRES_PASSWORD}@postgres:5432/crucible
       CRUCIBLE_SERVICE__BIND: 0.0.0.0:8080
       CRUCIBLE_SERVICE__RENDER_TIMEZONE: America/Chicago
+      # hades #214: the image this container runs, for the Admin About block. The same
+      # expression as `image:` above, so a deployment that pins a digest there reports it.
+      CRUCIBLE_SERVICE__IMAGE: ${CRUCIBLE_IMAGE:-ghcr.io/sentania-labs/crucible:latest}
       CRUCIBLE_SUPERVISOR__HOLDER: crucible-compose
       # The fake provider and the script harness are test fixtures (crucible#124): off
       # unless the environment turns them on, as CI's compose smoke does.

@@ -15,7 +15,7 @@ from starlette.testclient import TestClient
 from crucible.adapters.api.deps import app_context, unit_of_work
 from crucible.adapters.ui import session
 from crucible.adapters.ui.router import router
-from crucible.application.admin import status
+from crucible.application.admin import setup, status
 from crucible.application.admin.board_lanes import LANE_BY_STATE
 from crucible.application.board_resource import board_resource
 from crucible.domain.entities import EscalationState, Principal, PullRequestState, Role
@@ -43,6 +43,21 @@ def test_first_run_sign_in_renders_the_smoke_landing_and_empty_board(
     uow.principals = SimpleNamespace(get=lambda key: admin if key == admin.id else None)
     uow.commit = Mock()
     monkeypatch.setattr(session, "authenticate", lambda _uow, _token: admin)
+    # hades #169: a fresh deployment has every first-run step to do.
+    monkeypatch.setattr(
+        setup,
+        "setup_steps",
+        lambda _ctx, _uow: [
+            {
+                "number": 1,
+                "key": "github_app",
+                "label": "GitHub App",
+                "link": "/ui/github",
+                "done": False,
+                "detail": "Create or connect the GitHub App.",
+            }
+        ],
+    )
     monkeypatch.setattr(
         status,
         "status",
@@ -81,11 +96,15 @@ def test_first_run_sign_in_renders_the_smoke_landing_and_empty_board(
             data={"csrf": "preauth-csrf", "token": "fixture-only", "next": "/ui"},
         )
         assert landing.status_code == 200
-        assert landing.url.path == "/ui"
-        assert [response.headers["location"] for response in landing.history] == ["/ui"]
+        # hades #169: /ui sends a deployment with a step to do to Set up.
+        assert landing.url.path == "/ui/setup"
+        assert [response.headers["location"] for response in landing.history] == [
+            "/ui",
+            "/ui/setup",
+        ]
         assert compose_smoke.FIRST_RUN_LANDING_MARKER in landing.content
-        assert "Before a task" in landing.text
-        assert "Local gateway" in landing.text
+        assert "First-run steps" in landing.text
+        assert "GitHub App" in landing.text
         ctx.first_run.discard.assert_called_once()
 
         board = client.get("/ui/board")

@@ -414,4 +414,4 @@ def test_jobs_page_renders_presets_and_click_actions(monkeypatch: pytest.MonkeyP
     assert 'method="post" action="/ui/jobs/j/toggle"' in html
     assert "Disable" in html
     assert 'name="viewport" content="width=device-width, initial-scale=1"' in html
-    assert "lat-table-scroll" in html
+    assert "neon-table" in html and "lat-table-scroll" not in html

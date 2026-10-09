@@ -30,12 +30,15 @@ existing notes under the clearly named Thread section. When an attempt recorded 
 before the harness started, as the earlier task page did.
 
 The root `/` redirects to `/ui/board`, as does sign-in without an explicit return
-destination. Sign-in honors `next=/ui`: that route is the Status page and shows the
-ordered setup steps while setup is incomplete. A fresh installation can also open
+destination. Sign-in honors `next=/ui`: that route leads to Set up (`/ui/setup`, the
+ordered first-run steps) while a step is undone, and to the Board once every step is
+done (hades #169). The Status page it used to be is folded into the Board's service
+strip and the Admin About block on Settings (hades #214). A fresh installation can also open
 `/ui/board` immediately, with seven empty lanes.
 
 FDY-0585 correction note: compose smoke explicitly posts `next=/ui`, so its first-run
-landing check uses the rendered `<h1>Status</h1>` heading and then fetches `/ui/board`
+landing check uses the rendered `<h1>Set up</h1>` heading (`<h1>Status</h1>` before
+hades #169) and then fetches `/ui/board`
 separately to check `<h1>Board</h1>`. The regression test renders both pages through a
 first-run session with incomplete setup. Docker is unavailable in the worker; this
 route trace and unit test cover the correction locally, and the compose run stays in CI.
