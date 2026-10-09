@@ -1336,6 +1336,7 @@ def publisher_script(
     token_source: str = "stdin",
     bundle_sha256: str = "",
     owned_remote_heads: tuple[str, ...] = (),
+    owner: str = "",
 ) -> str:
     """Fetch the base from the remote and the branch from the bundle, then push (23).
 
@@ -1376,6 +1377,7 @@ EXPECTED={_quote(expected_head)}
 CLONE_URL={_quote(clone_url)}
 SEAL={_quote(bundle_sha256)}
 OWNED_HEADS={_quote(" ".join(owned_remote_heads))}
+TASK_OWNER={_quote(owner)}
 # hades #443: digest-commit author and message prefix for remote-branch checks.
 DIGEST_AUTHOR={_quote(DIGEST_AUTHOR_LOGIN)}
 DIGEST_MSG_PREFIX={_quote(DIGEST_MESSAGE_PREFIX)}
@@ -1462,15 +1464,11 @@ if [ -n "$REMOTE" ]; then
   echo remote-ownership > "$OUT/step.txt"
   OWNED=no
   case " $OWNED_HEADS " in *" $REMOTE "*) OWNED=yes ;; esac
-  # hades #564: a trailer proves ownership only when it names this task, as the sealed
-  # bundle's own commits name it. A tip Hades pushed for another task is foreign, and
-  # one that is the head of a pull request is named with that pull request.
-  OWN_ATTEMPTS=$(git log --format='%(trailers:key=Crucible-Attempt,valueonly)' \
-      "refs/remotes/origin/$BASE_REF..refs/heads/crucible-publish" | attempt_values)
+  # Compare with the trusted publish plan, never worker-controlled bundle trailers.
   REMOTE_ATTEMPT=$(git show -s --format='%(trailers:key=Crucible-Attempt,valueonly)' "$REMOTE" \
       | attempt_values | head -n 1)
   if [ "$OWNED" != yes ] && [ -n "$REMOTE_ATTEMPT" ]; then
-    if printf '%s\n' "$OWN_ATTEMPTS" | grep -Fxq -- "$REMOTE_ATTEMPT"; then
+    if [ -n "$TASK_OWNER" ] && [ "$REMOTE_ATTEMPT" = "$TASK_OWNER" ]; then
       OWNED=yes
     else
       PULL=$(pull_request_at "$REMOTE")

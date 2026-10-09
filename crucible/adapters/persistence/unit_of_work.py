@@ -4,6 +4,7 @@ token with SET LOCAL at the start of every transaction, never per connection (14
 from __future__ import annotations
 
 import gzip
+import hashlib
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
@@ -363,6 +364,13 @@ class Repositories:
 
 
 class Tasks:
+    def lock_work_branch(self, repository_id: str, work_branch: str) -> None:
+        # A stable, namespaced key across processes. Hash collisions only serialize
+        # unrelated branches; ownership is still checked using the full values.
+        key = f"work-branch:{repository_id}:{work_branch}".encode()
+        lock_id = int.from_bytes(hashlib.sha256(key).digest()[:8], "big", signed=True)
+        self._s.execute(select(func.pg_advisory_xact_lock(lock_id)))
+
     def __init__(self, session: Session) -> None:
         self._s = session
 

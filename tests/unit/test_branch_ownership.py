@@ -178,7 +178,9 @@ def _foreign_tip(tmp_path: Path, *, pull: int | None) -> tuple[Path, Path, str, 
 
 def test_the_publisher_refuses_the_head_of_another_tasks_pull_request(tmp_path: Path) -> None:
     repo, origin, foreign, head = _foreign_tip(tmp_path, pull=7)
-    outcome = _run(tmp_path / "run", origin, _bundle(repo, tmp_path / "bundle"), head)
+    outcome = _run(
+        tmp_path / "run", origin, _bundle(repo, tmp_path / "bundle"), head, owner="FDY-0579"
+    )
     assert not outcome.pushed
     assert outcome.step == "remote-ownership"
     assert "pull request #7" in outcome.detail and f"task {OWNER}" in outcome.detail
@@ -189,20 +191,30 @@ def test_another_tasks_trailer_is_no_proof_of_ownership(tmp_path: Path) -> None:
     """Before #564 any Crucible-Attempt trailer made the tip Hades's own; now it must name
     the task whose bundle is published."""
     repo, origin, foreign, head = _foreign_tip(tmp_path, pull=None)
-    outcome = _run(tmp_path / "run", origin, _bundle(repo, tmp_path / "bundle"), head)
+    outcome = _run(
+        tmp_path / "run", origin, _bundle(repo, tmp_path / "bundle"), head, owner="FDY-0579"
+    )
     assert not outcome.pushed and outcome.step == "remote-ownership"
     assert f"task {OWNER}" in outcome.detail and foreign in outcome.detail
     assert _git(origin, "rev-parse", f"refs/heads/{BRANCH}").strip() == foreign
 
 
-def test_this_tasks_own_trailer_still_proves_ownership(tmp_path: Path) -> None:
+@pytest.mark.parametrize("bundle_trailer", [False, True])
+def test_this_tasks_own_trailer_still_proves_ownership(
+    tmp_path: Path, bundle_trailer: bool
+) -> None:
     repo, origin, _, head = _foreign_tip(tmp_path, pull=7)
+    if not bundle_trailer:
+        _git(repo, "commit", "--amend", "-qm", "accepted work without a trailer")
+        head = _git(repo, "rev-parse", "HEAD").strip()
     _git(repo, "reset", "-q", "--hard", "main")
     checkpoint = _commit(repo, "cp.txt", "cp\n", "checkpoint\n\nCrucible-Attempt: FDY-0579")
     _put(repo, origin, checkpoint, f"refs/heads/{BRANCH}")
     _put(repo, origin, checkpoint, "refs/pull/7/head")
     _git(repo, "reset", "-q", "--hard", head)
-    outcome = _run(tmp_path / "run", origin, _bundle(repo, tmp_path / "bundle"), head)
+    outcome = _run(
+        tmp_path / "run", origin, _bundle(repo, tmp_path / "bundle"), head, owner="FDY-0579"
+    )
     assert outcome.pushed, outcome
     assert _git(origin, "rev-parse", f"refs/heads/{BRANCH}").strip() == head
 
@@ -214,7 +226,9 @@ def test_an_untrailed_foreign_tip_names_the_pull_request_it_heads(tmp_path: Path
     _put(repo, origin, someone, f"refs/heads/{BRANCH}")
     _put(repo, origin, someone, "refs/pull/9/head")
     _git(repo, "reset", "-q", "--hard", head)
-    outcome = _run(tmp_path / "run", origin, _bundle(repo, tmp_path / "bundle"), head)
+    outcome = _run(
+        tmp_path / "run", origin, _bundle(repo, tmp_path / "bundle"), head, owner="FDY-0579"
+    )
     assert not outcome.pushed and outcome.step == "remote-ownership"
     assert "foreign remote commit" in outcome.detail and "pull request #9" in outcome.detail
 
@@ -240,3 +254,34 @@ def test_the_refusal_leaves_the_task_publish_failed_with_the_reason(tmp_path: Pa
     detail = str(failed.payload["detail"])
     assert "pull request #7" in detail and f"task {OWNER}" in detail
     assert _git(origin, "rev-parse", f"refs/heads/{plan.work_branch}").strip() == foreign
+
+
+@pytest.mark.parametrize("descended", [False, True])
+def test_bundle_trailers_cannot_claim_a_foreign_remote(tmp_path: Path, descended: bool) -> None:
+    repo, origin, foreign, _ = _foreign_tip(tmp_path, pull=7)
+    _git(repo, "reset", "-q", "--hard", foreign if descended else "main")
+    trailer = "FDY-0579" if descended else OWNER
+    head = _commit(
+        repo, "copied.txt", "copied\n", f"worker-controlled trailer\n\nCrucible-Attempt: {trailer}"
+    )
+    outcome = _run(
+        tmp_path / "run", origin, _bundle(repo, tmp_path / "bundle"), head, owner="FDY-0579"
+    )
+    assert not outcome.pushed and outcome.step == "remote-ownership"
+    assert f"task {OWNER}" in outcome.detail and "pull request #7" in outcome.detail
+    assert _git(origin, "rev-parse", f"refs/heads/{BRANCH}").strip() == foreign
+
+
+def test_ownership_is_read_only_after_locking_the_branch(monkeypatch: pytest.MonkeyPatch) -> None:
+    store, clock = _store(), FakeClock(NOW)
+
+    def lock(repository_id: str, work_branch: str) -> None:
+        # Simulate a competing submission becoming visible as the lock is acquired.
+        monkeypatch.setattr(store.tasks, "lock_work_branch", lambda *_: None)
+        submit_task(store.uow(), clock, principal=ORCHESTRATOR, body=_document(OWNER))
+
+    monkeypatch.setattr(store.tasks, "lock_work_branch", lock)
+    with pytest.raises(ContractValidationError) as exc:
+        submit_task(store.uow(), clock, principal=ORCHESTRATOR, body=_document("FDY-0589"))
+    assert OWNER in str(exc.value.errors)
+    assert [task.external_id for task in store.tasks.rows.values()] == [OWNER]

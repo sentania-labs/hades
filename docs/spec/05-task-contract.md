@@ -176,7 +176,9 @@ recorded only after the correction attempt succeeds.
   repository, in any state including `merged` and `cancelled`, is refused
   with 422 and a problem at `repository.work_branch` naming the owning
   task's `external_id`. (The submitter's own `external_id` again is the
-  duplicate answer above, 409.)
+  duplicate answer above, 409.) Ownership checks for the same repository and
+  branch are serialized until the submission transaction commits or rolls back,
+  so overlapping submissions cannot both claim an unowned branch.
 - `repository.name` is registered (04); `base_ref` exists on the remote at
   validation time; `work_branch` matches the repository policy's branch
   pattern and is not a protected branch; both refs contain only

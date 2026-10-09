@@ -41,7 +41,7 @@ from tests.unit.test_issue_379_merge_during_publish import (
 
 BRANCH = "crucible/test"
 # hades #564: the trailer a task's commits carry; a remote tip is this task's own only
-# when it names the same task as the bundle's commits do.
+# when it names the trusted task owner.
 TRAILER = "\n\nCrucible-Attempt: prior-attempt"
 
 
@@ -82,6 +82,7 @@ def _run(
     branch: str = BRANCH,
     owned: tuple[str, ...] = (),
     race: str = "",
+    owner: str = "prior-attempt",
 ) -> PublishOutcome:
     for name in ("tmp", "token", "out", "home", "bin"):
         (root / name).mkdir(parents=True, exist_ok=True)
@@ -94,6 +95,7 @@ def _run(
         author_email="hades@example.test",
         bundle_sha256=hashlib.sha256(bundle.read_bytes()).hexdigest(),
         owned_remote_heads=owned,
+        owner=owner,
     )
     script = script.replace("/tmp/", f"{root}/tmp/")
     for old, new in (
@@ -213,6 +215,7 @@ class _RealPublisher(_Publisher):
             request.expected_head,
             branch=request.work_branch,
             owned=request.owned_remote_heads,
+            owner=request.owner,
         )
 
 

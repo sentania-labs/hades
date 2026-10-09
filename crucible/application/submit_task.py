@@ -495,6 +495,7 @@ def submit_task(
             _problem("correction", "must be null on submit; corrections use /corrections")
         )
     if repository is not None:
+        uow.tasks.lock_work_branch(repository.id, contract.resolved_work_branch)
         owner = work_branch_owner(
             uow,
             repository_id=repository.id,

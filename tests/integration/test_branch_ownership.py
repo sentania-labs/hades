@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from time import monotonic, sleep
 
 import pytest
 from fastapi.testclient import TestClient
 from httpx import Response
+from sqlalchemy import Engine, text
 
 from crucible.adapters.api.deps import AppContext
+from crucible.application.submit_task import submit_task
 from crucible.domain.lifecycle import TaskState
 from tests.fixtures import contract_document
 
@@ -72,3 +76,38 @@ def test_an_omitted_branch_is_derived_and_owned(client: TestClient) -> None:
     view = client.get(f"/v1/tasks/{response.json()['id']}").json()
     assert view["contract"]["repository"]["work_branch"] == BRANCH
     _refused_naming(client.post("/v1/tasks", json=_document("FDY-0600")), "FDY-0524")
+
+
+def test_overlapping_submissions_serialize_branch_ownership(
+    client: TestClient, ctx: AppContext, engine: Engine
+) -> None:
+    """The second transaction waits, then sees the first transaction's committed owner."""
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with ctx.uow_factory() as first:
+            principal = first.principals.get_by_name("orchestrator-principal")
+            assert principal is not None
+            submit_task(first, ctx.clock, principal=principal, body=_document("FDY-0524"))
+            pending = executor.submit(client.post, "/v1/tasks", json=_document("FDY-0601"))
+            try:
+                deadline = monotonic() + 10
+                while monotonic() < deadline:
+                    with engine.connect() as connection:
+                        waiting = connection.scalar(
+                            text(
+                                "SELECT count(*) FROM pg_locks "
+                                "WHERE locktype = 'advisory' AND NOT granted "
+                                "AND database = (SELECT oid FROM pg_database "
+                                "WHERE datname = current_database())"
+                            )
+                        )
+                    if waiting:
+                        break
+                    assert not pending.done(), "second submission did not wait for the owner"
+                    sleep(0.01)
+                else:
+                    pytest.fail("second submission never waited for the ownership lock")
+            finally:
+                first.commit()
+        _refused_naming(pending.result(timeout=10), "FDY-0524")
+    listed = client.get("/v1/tasks", params={"repository": "example-service"}).json()
+    assert [task["external_id"] for task in listed["items"]] == ["FDY-0524"]

@@ -135,6 +135,10 @@ class PoolExhaustionRepository(Protocol):
 
 
 class TaskRepository(Protocol):
+    def lock_work_branch(self, repository_id: str, work_branch: str) -> None:
+        """Serialize ownership checks until transaction end, before reading owners."""
+        ...
+
     def add(self, task: Task) -> None: ...
 
     def get(self, task_id: str, *, for_update: bool = False) -> Task | None: ...

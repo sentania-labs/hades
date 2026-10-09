@@ -78,6 +78,9 @@ NOTE = "Keep the 409 body short.\n  Two spaces and a second line, exactly as wri
 
 
 class _ProposalTasks(_Tasks):
+    def lock_work_branch(self, repository_id: str, work_branch: str) -> None:
+        pass
+
     def get_by_external_id(self, principal_id: str, external_id: str) -> Task | None:
         return next(
             (
