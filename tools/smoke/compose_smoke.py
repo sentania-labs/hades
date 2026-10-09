@@ -289,8 +289,8 @@ def walk_first_run_ui(base_url: str) -> None:
     )
     try:
         with opener.open(request_object, timeout=DEFAULT_TIMEOUT) as response:
-            if response.status != 200 or b"<h1>Status</h1>" not in response.read():
-                raise SmokeError("first-run administrator sign-in did not render the Status page")
+            if response.status != 200 or b"<h1>Board</h1>" not in response.read():
+                raise SmokeError("first-run administrator sign-in did not render the Board page")
         for path in (
             "/ui/harnesses",
             "/ui/credentials",
@@ -308,7 +308,7 @@ def walk_first_run_ui(base_url: str) -> None:
             "/ui/settings",
         ):
             with opener.open(f"{base_url}{path}", timeout=DEFAULT_TIMEOUT) as response:
-                if response.status != 200 or b"Crucible" not in response.read():
+                if response.status != 200 or b"Hades" not in response.read():
                     raise SmokeError(f"the first-run UI page {path} did not render")
     except urllib.error.URLError as exc:
         raise SmokeError(f"the first-run UI walk failed: {exc}") from None
