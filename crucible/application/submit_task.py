@@ -34,6 +34,7 @@ from crucible.domain.exit_class import ExitClass
 from crucible.domain.ids import new_id
 from crucible.domain.injected import INJECTED_PREFIXES
 from crucible.domain.lifecycle import TaskState
+from crucible.domain.refs import ref_problem
 from crucible.domain.verification import task_specific_checks
 from crucible.ports.clock import Clock
 from crucible.ports.harness import CredentialSource, HarnessGate, HarnessUnavailableError
@@ -47,15 +48,57 @@ def _problem(path: str, message: str) -> Problem:
 
 
 def parse_contract(body: object) -> TaskContractV1:
-    """Shape validation. Errors name the path and the rule, never a secret value."""
+    """Shape validation. Errors name the path and the rule, never a secret value.
+
+    hades #564: a contract without `repository.work_branch` gets the derived branch
+    (`TaskContractV1.resolved_work_branch`) here, so submissions, corrections and
+    amendments all store a contract that names its branch."""
     try:
-        return TaskContractV1.model_validate(body)
+        contract = TaskContractV1.model_validate(body)
     except ValidationError as exc:
         problems = [
             _problem(".".join(str(p) for p in err["loc"]) or "$", err["msg"])
             for err in exc.errors(include_url=False, include_input=False)
         ]
         raise ContractValidationError("task contract failed validation", errors=problems) from None
+    if contract.repository.work_branch is not None:
+        return contract
+    branch = contract.resolved_work_branch
+    problem = ref_problem(branch)
+    if problem is not None:
+        raise ContractValidationError(
+            "task contract failed validation",
+            errors=[_problem("repository.work_branch", f"derived {branch!r}: {problem}")],
+        )
+    repository = contract.repository.model_copy(update={"work_branch": branch})
+    return contract.model_copy(update={"repository": repository})
+
+
+def work_branch_owner(
+    uow: UnitOfWork, *, repository_id: str, work_branch: str, principal_id: str, external_id: str
+) -> Task | None:
+    """hades #564: the task on `repository_id` whose branch is `work_branch`, in any
+    state, merged and cancelled included; a branch belongs to one task for good. The
+    submitter's own `external_id` is left to the duplicate check (409)."""
+    after: str | None = None
+    while page := uow.tasks.search(
+        state=None,
+        project=None,
+        repository_id=repository_id,
+        external_id=None,
+        updated_since=None,
+        after_id=after,
+        limit=500,
+    ):
+        for task in page:
+            if (task.principal_id, task.external_id) == (principal_id, external_id):
+                continue
+            stored = uow.contracts.get(task.id, task.contract_version)
+            document = stored.document if stored else {}
+            if (document.get("repository") or {}).get("work_branch") == work_branch:
+                return task
+        after = page[-1].id
+    return None
 
 
 def require_operator_for_pin(principal: Principal, contract: TaskContractV1) -> None:
@@ -266,12 +309,13 @@ def _check_against_registry(
             )
     git = doc.get("git", {})
     branch_pattern = str(git.get("work_branch_pattern", "*"))
-    if not fnmatch.fnmatchcase(contract.repository.work_branch, branch_pattern):
+    work_branch = contract.resolved_work_branch
+    if not fnmatch.fnmatchcase(work_branch, branch_pattern):
         problems.append(
             _problem("repository.work_branch", f"does not match policy pattern {branch_pattern!r}")
         )
     for protected in git.get("protected_branches", []):
-        if fnmatch.fnmatchcase(contract.repository.work_branch, str(protected)):
+        if fnmatch.fnmatchcase(work_branch, str(protected)):
             problems.append(_problem("repository.work_branch", "names a protected branch"))
             break
     required_checks = [str(c) for c in doc.get("repository", {}).get("required_checks", [])]
@@ -450,6 +494,22 @@ def submit_task(
         problems.append(
             _problem("correction", "must be null on submit; corrections use /corrections")
         )
+    if repository is not None:
+        owner = work_branch_owner(
+            uow,
+            repository_id=repository.id,
+            work_branch=contract.resolved_work_branch,
+            principal_id=principal.id,
+            external_id=contract.external_id,
+        )
+        if owner is not None:
+            problems.append(
+                _problem(
+                    "repository.work_branch",
+                    f"{contract.resolved_work_branch!r} is the work branch of task "
+                    f"{owner.external_id} ({owner.state.value}); a branch belongs to one task",
+                )
+            )
     if problems:
         # The request transaction rolls back; the API records this event on its own.
         rejection = Event(

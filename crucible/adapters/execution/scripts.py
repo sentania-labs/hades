@@ -1380,6 +1380,15 @@ OWNED_HEADS={_quote(" ".join(owned_remote_heads))}
 DIGEST_AUTHOR={_quote(DIGEST_AUTHOR_LOGIN)}
 DIGEST_MSG_PREFIX={_quote(DIGEST_MESSAGE_PREFIX)}
 drop_token() {{ {drop}; }}
+# hades #564: the non-empty Crucible-Attempt values on stdin, one per line, trimmed.
+attempt_values() {{ sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d'; }}
+# hades #564: the number of a pull request whose head is commit $1 on the remote, from
+# its refs/pull/<n>/head refs; git only, as the API calls stay on Crucible's side.
+pull_request_at() {{
+  git ls-remote origin 'refs/pull/*/head' 2>> "$OUT/publisher.log" \
+    | awk -v sha="$1" '$1 == sha {{ print $2; exit }}' \
+    | sed -e 's|^refs/pull/||' -e 's|/head$||' || true
+}}
 mkdir -p "$OUT"
 # A retried publication of the same attempt writes into the same directory; nothing a
 # previous run left may be read back as this run's outcome.
@@ -1453,9 +1462,28 @@ if [ -n "$REMOTE" ]; then
   echo remote-ownership > "$OUT/step.txt"
   OWNED=no
   case " $OWNED_HEADS " in *" $REMOTE "*) OWNED=yes ;; esac
-  if git show -s --format='%(trailers:key=Crucible-Attempt,valueonly)' "$REMOTE" \
-      | grep -q '[^[:space:]]'; then
-    OWNED=yes
+  # hades #564: a trailer proves ownership only when it names this task, as the sealed
+  # bundle's own commits name it. A tip Hades pushed for another task is foreign, and
+  # one that is the head of a pull request is named with that pull request.
+  OWN_ATTEMPTS=$(git log --format='%(trailers:key=Crucible-Attempt,valueonly)' \
+      "refs/remotes/origin/$BASE_REF..refs/heads/crucible-publish" | attempt_values)
+  REMOTE_ATTEMPT=$(git show -s --format='%(trailers:key=Crucible-Attempt,valueonly)' "$REMOTE" \
+      | attempt_values | head -n 1)
+  if [ "$OWNED" != yes ] && [ -n "$REMOTE_ATTEMPT" ]; then
+    if printf '%s\n' "$OWN_ATTEMPTS" | grep -Fxq -- "$REMOTE_ATTEMPT"; then
+      OWNED=yes
+    else
+      PULL=$(pull_request_at "$REMOTE")
+      if [ -n "$PULL" ]; then
+        printf '%s %s; a branch belongs to one task\n' \
+          "branch $WORK_BRANCH is the head of pull request #$PULL" \
+          "of task $REMOTE_ATTEMPT (tip $REMOTE)" > "$OUT/error.txt"
+      else
+        printf 'foreign remote commit %s pushed for task %s; a branch belongs to one task\n' \
+          "$REMOTE" "$REMOTE_ATTEMPT" > "$OUT/error.txt"
+      fi
+      drop_token; exit 5
+    fi
   fi
   # hades #443: if the remote is ahead only by digest commits, treat it as owned.
   if [ "$OWNED" != yes ]; then
@@ -1483,8 +1511,9 @@ if [ -n "$REMOTE" ]; then
   fi
   if [ "$OWNED" != yes ]; then
     AUTHOR=$(git show -s --format='%an <%ae>' "$REMOTE")
-    printf 'foreign remote commit %s by %s; no Hades push record or attempt trailer\n' \
-      "$REMOTE" "$AUTHOR" > "$OUT/error.txt"
+    PULL=$(pull_request_at "$REMOTE")
+    printf 'foreign remote commit %s by %s; no Hades push record or attempt trailer%s\n' \
+      "$REMOTE" "$AUTHOR" "${{PULL:+; it is the head of pull request #$PULL}}" > "$OUT/error.txt"
     drop_token; exit 5
   fi
 fi

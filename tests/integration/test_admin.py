@@ -1710,8 +1710,13 @@ def test_capabilities_show_an_orchestrator_its_own_work_only(
         return TestClient(create_app(ctx), headers={"Authorization": f"Bearer {token}"})
 
     with client(tokens["orchestrator"]) as mine, client(other.token) as theirs:
-        own = mine.post("/v1/tasks", json=contract_document(external_id="EX-MINE"))
-        foreign = theirs.post("/v1/tasks", json=contract_document(external_id="EX-THEIRS"))
+        # hades #564: a branch belongs to one task, so each names its own.
+        mine_doc = contract_document(external_id="EX-MINE")
+        mine_doc["repository"]["work_branch"] = "crucible/EX-MINE"
+        theirs_doc = contract_document(external_id="EX-THEIRS")
+        theirs_doc["repository"]["work_branch"] = "crucible/EX-THEIRS"
+        own = mine.post("/v1/tasks", json=mine_doc)
+        foreign = theirs.post("/v1/tasks", json=theirs_doc)
         assert own.status_code == 201 and foreign.status_code == 201
         asyncio.run(live_supervisor.tick())
         assert live_supervisor.fenced_token is not None
@@ -3273,7 +3278,9 @@ def test_recently_updated_reads_the_newest_tasks_only(
     ids = []
     for n in range(3):
         clock.advance(60)
-        response = client.post("/v1/tasks", json=contract_document(external_id=f"EX-RU{n}"))
+        document = contract_document(external_id=f"EX-RU{n}")
+        document["repository"]["work_branch"] = f"crucible/EX-RU{n}"
+        response = client.post("/v1/tasks", json=document)
         assert response.status_code == 201, response.text
         ids.append(response.json()["id"])
     with ctx.uow_factory() as uow:
