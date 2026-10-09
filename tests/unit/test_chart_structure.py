@@ -48,6 +48,29 @@ def test_chart_metadata_values_and_schema_parse() -> None:
     assert set(values) == set(schema["required"])
 
 
+def test_chart_and_deploy_examples_contain_no_credential_values() -> None:
+    example_files = [
+        *CHART.glob("**/*"),
+        ROOT / "docs/deploy.md",
+        Path(__file__),
+    ]
+    credential_prefixes = (
+        "sk-" + "ant-",
+        "gh" + "p_",
+        "gh" + "s_",
+        "github" + "_pat_",
+        "AK" + "IA",
+    )
+    offenders = {
+        str(path.relative_to(ROOT)): prefix
+        for path in example_files
+        if path.is_file()
+        for prefix in credential_prefixes
+        if prefix in path.read_text()
+    }
+    assert not offenders
+
+
 def test_every_template_value_is_declared_in_schema() -> None:
     schema = json.loads((CHART / "values.schema.json").read_text())
     paths = [*CHART.glob("templates/*"), *CHART.glob("base/**/*.yaml")]
