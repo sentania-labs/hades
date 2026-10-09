@@ -29,3 +29,5 @@ h1, h2, h3, .admin-brand { font-family: var(--font-display); }
   .card-actions-panel { grid-column: 1; position: static; }
   pre, code { white-space: pre-wrap; overflow-wrap: anywhere; }
 }
+.card-action-list { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 10px; }
+.card-waivers { margin-top: 10px; overflow-wrap: anywhere; }

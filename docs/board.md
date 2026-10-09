@@ -38,3 +38,13 @@ separately to check `<h1>Board</h1>`. The regression test renders both pages thr
 first-run session with incomplete setup. Docker is unavailable in the worker; this
 route trace and unit test cover the correction locally, and the compose run stays in CI.
 No application routing workaround was needed.
+
+The card page's Actions panel keeps every operator action the earlier task page offered,
+each as one click: the card's board moves (Cancel and Decline confirm with a second
+click), the proposal answers for a proposed task (Approve with an optional note, Send back
+with an optional note, Reject when the board offers no Decline), and, for an admin while a
+pull request waits, the two ADR 0025 waivers (Waive the remaining external review rounds,
+Accept that this repository has no CI). The waivers post to the same
+`POST /ui/tasks/{id}/decisions` handler and record the same decision kinds; a blank reason
+records what the waiver resolves, with the operator and the time. Recorded waivers are
+listed under Operator waivers in the panel.
