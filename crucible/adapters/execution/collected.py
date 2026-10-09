@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tarfile
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -86,12 +87,32 @@ class Outputs:
 
 
 TEXT_LIMIT = 8 * 1024 * 1024
+ARTIFACT_LIMIT = 4 * 1024 * 1024
+
+
+@contextlib.contextmanager
+def _open_regular(path: Path) -> Iterator[IO[bytes]]:
+    """Open without following links or waiting on a FIFO.
+
+    Check the opened descriptor, so replacing a checked path cannot make the read
+    block.
+    """
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise OSError("not a regular collected file")
+        yield handle
+
+
+def _read_regular(path: Path, limit: int) -> bytes:
+    """A growing file cannot extend the read beyond the byte budget."""
+    with _open_regular(path) as handle:
+        return handle.read(limit)
 
 
 def text(path: Path, limit: int = TEXT_LIMIT) -> str:
     try:
-        with path.open("rb") as handle:
-            return handle.read(limit).decode("utf-8", "replace")
+        return _read_regular(path, limit).decode("utf-8", "replace")
     except OSError:
         return ""
 
@@ -235,11 +256,15 @@ def read_outputs(
             name = f"report/{path.relative_to(report_dir)}"
             if path.name in ("report.yaml", "blocked.md"):
                 continue
+            try:
+                content = _read_regular(path, ARTIFACT_LIMIT)
+            except OSError:
+                continue
             artifacts.append(
                 CollectedArtifact(
                     name=name,
                     type="run_evidence",
-                    content=path.read_bytes()[: 4 * 1024 * 1024],
+                    content=content,
                     content_type="text/plain",
                 )
             )
@@ -251,7 +276,7 @@ def read_outputs(
             CollectedArtifact(
                 name=REVIEW_DIFF_NAME,
                 type=REVIEW_DIFF_TYPE,
-                content=review_diff.read_bytes()[: 4 * 1024 * 1024],
+                content=_read_regular(review_diff, ARTIFACT_LIMIT),
                 content_type="text/x-diff",
             )
         )
@@ -471,6 +496,10 @@ def _allowed_by(
 
 
 _HUNK = re.compile(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+# Refuse oversized inputs explicitly rather than silently accepting an unscanned tail.
+DIFF_SCAN_LIMIT = 256 * 1024 * 1024
+DIFF_LINE_LIMIT = 16 * 1024 * 1024
+DIFF_FINDING_LIMIT = 10_000
 
 
 def scan_changed_content(
@@ -503,8 +532,17 @@ def scan_changed_content(
     line_number = 0
     fixture = declared.is_fixture if declared is not None else None
     try:
-        with patch.open("r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
+        with _open_regular(patch) as handle:
+            remaining = os.fstat(handle.fileno()).st_size
+            if remaining > DIFF_SCAN_LIMIT:
+                return None, ("diff.patch",)
+            while remaining:
+                raw_line = handle.readline(min(remaining, DIFF_LINE_LIMIT) + 1)
+                if not raw_line or len(raw_line) > min(remaining, DIFF_LINE_LIMIT):
+                    return tuple(found), ("diff.patch",)
+                remaining -= len(raw_line)
+                line = raw_line.decode("utf-8", "replace")
+                del raw_line
                 # Inside a hunk, even +++ b/ is source content, not a path header.
                 if line.startswith("diff --git "):
                     in_hunk = False
@@ -531,6 +569,8 @@ def scan_changed_content(
                     line_number += 1
                 elif in_hunk and line.startswith(" "):
                     line_number += 1
+                if len(found) > DIFF_FINDING_LIMIT:
+                    return tuple(found[:DIFF_FINDING_LIMIT]), ("diff.patch",)
     except OSError:
         return None, ()
     raw = output / "diff-raw.txt"

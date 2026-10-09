@@ -286,6 +286,8 @@ CHANGED_BLOBS_DIR = "changed-blobs"
 # one. Each file is bounded; what is cut is not read as declared (fail closed).
 SECRET_DECLARATIONS_DIR = "secret-declarations"
 SECRET_DECLARATION_CAP_BYTES = 1024 * 1024
+# Each local search has a deadline even when a large tree contains no matches.
+SECRET_DECLARATION_SECONDS = 10
 
 # Every diff the collector runs: no textconv, no external diff driver. Never `--text`
 # on the raw diff: a binary must stay "Binary files differ" there, or its bytes fill the
@@ -714,8 +716,9 @@ def _secret_declarations_script() -> str:
     `cat-file blob` reads each file as stored at the merge base, so nothing the worker
     changed is read. `git grep -P` over the merge base's tree lists each secret-shaped
     value it holds; a git without PCRE lists none, and every match then blocks."""
+    local_git = f"GIT_NO_LAZY_FETCH=1 timeout --signal=KILL {SECRET_DECLARATION_SECONDS} {GIT}"
     rules = "\n".join(
-        f'  {GIT} -C "$REPO" grep --no-textconv -P -I -z -n -o \\\n'
+        f'  {local_git} -C "$REPO" grep --no-textconv -P -I -z -n -o \\\n'
         f'    -e {_quote(pattern)} "$MB" 2>/dev/null \\\n'
         f'    | head -c "$DECLARATION_CAP" > "$DECLARED/base/{name}" || true'
         for name, pattern in named_secret_pattern_expressions()
@@ -724,8 +727,9 @@ def _secret_declarations_script() -> str:
   DECLARATION_CAP={SECRET_DECLARATION_CAP_BYTES}
   mkdir -p "$DECLARED/base"
   for declared in .gitleaksignore .gitleaks.toml; do
-    if [ "$({GIT} -C "$REPO" cat-file -t "$MB:$declared" 2>/dev/null || true)" = "blob" ]; then
-      {GIT} -C "$REPO" cat-file blob "$MB:$declared" 2>/dev/null \
+    kind=$({local_git} -C "$REPO" cat-file -t "$MB:$declared" 2>/dev/null || true)
+    if [ "$kind" = "blob" ]; then
+      {local_git} -C "$REPO" cat-file blob "$MB:$declared" 2>/dev/null \
         | head -c "$DECLARATION_CAP" > "$DECLARED/${{declared#.}}" || true
     fi
   done

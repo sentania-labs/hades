@@ -28,6 +28,8 @@ WINDOW_LINE_LIMIT = 400
 # How far back from a match a transcript is read for the command that produced it.
 COMMAND_LOOKBACK = 200
 COMMAND_LIMIT = 300
+# JSON command attribution is optional; do not repeatedly parse megabyte tool output.
+COMMAND_INPUT_LIMIT = 64 * 1024
 # At most this many windows go into the artifact.
 WINDOW_LIMIT = 10
 
@@ -64,13 +66,13 @@ def transcript_command(lines: Sequence[str], line: int) -> str | None:
     first = max(line - COMMAND_LOOKBACK, 1)
     for number in range(min(line, len(lines)), first - 1, -1):
         text = lines[number - 1]
-        if "command" not in text and "cmd" not in text:
+        if len(text) > COMMAND_INPUT_LIMIT or ("command" not in text and "cmd" not in text):
             continue
         try:
             parsed = json.loads(text)
-        except ValueError:
+            found = list(_commands(parsed))
+        except (ValueError, RecursionError):
             continue
-        found = list(_commands(parsed))
         if found:
             return redact_line(found[-1].replace("\n", " "), COMMAND_LIMIT)
     return None

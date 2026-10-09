@@ -6,8 +6,10 @@ Every secret-shaped value here is built at run time; none is written out.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import tracemalloc
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from crucible.adapters.execution import collected, scripts
 from crucible.adapters.execution.collected import read_outputs, scan_changed_content
 from crucible.adapters.execution.scripts import collector_script
 from crucible.adapters.storage.disk import DiskArtifactStore
@@ -37,9 +40,11 @@ from crucible.domain.entities import (
 from crucible.domain.gates import EvidenceItem, GateInput, GateResult, no_secrets
 from crucible.domain.lifecycle import AttemptState, ExecutionState, TaskState
 from crucible.domain.secret_findings import (
+    COMMAND_INPUT_LIMIT,
     NO_SECRETS_ADVICE,
     TRANSCRIPT_WINDOW_ARTIFACT,
     no_secrets_correction,
+    transcript_command,
 )
 from crucible.domain.secret_fixtures import (
     declarations,
@@ -708,3 +713,79 @@ def test_the_gate_failure_wake_carries_the_composed_correction() -> None:
     assert "Hades adds this to that correction's instructions" in text
     assert "the file `src/app.py` you changed, line 1" in text
     assert _secret_guidance(GateInput(contract={}, policy={}, head_sha=None, evidence=())) == ""
+
+
+@pytest.mark.timeout(5)
+def test_collected_text_does_not_wait_for_a_fifo_or_follow_a_link(tmp_path: Path) -> None:
+    pipe = tmp_path / "pipe"
+    os.mkfifo(pipe)
+    link = tmp_path / "link"
+    link.symlink_to(pipe)
+    for path in (pipe, link):
+        assert collected.text(path) == ""
+        with pytest.raises(OSError):
+            collected._read_regular(path, 1024)
+
+
+def test_artifact_read_is_bounded_before_allocation(tmp_path: Path) -> None:
+    output = tmp_path / "output"
+    report = output / "report"
+    report.mkdir(parents=True)
+    transcript = report / "transcript.jsonl"
+    # A sparse file costs little disk space but would force the old reader to allocate
+    # the entire 64 MiB before slicing it down to 4 MiB.
+    with transcript.open("wb") as handle:
+        handle.write(b"plain transcript\n")
+        handle.seek(64 * 1024 * 1024 - 1)
+        handle.write(b"\n")
+    tracemalloc.start()
+    try:
+        result = _read(tmp_path, output)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert len(result.artifacts) == 1
+    assert len(result.artifacts[0].content) == collected.ARTIFACT_LIMIT
+    assert peak < 3 * collected.ARTIFACT_LIMIT
+
+
+@pytest.mark.parametrize("budget", ["DIFF_SCAN_LIMIT", "DIFF_LINE_LIMIT", "DIFF_FINDING_LIMIT"])
+def test_diff_budget_exhaustion_is_explicitly_unscanned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, budget: str
+) -> None:
+    (tmp_path / "diff.patch").write_text(
+        "diff --git a/app b/app\n+++ b/app\n@@ -0,0 +1,2 @@\n" + f"+{KEY}\n+{OTHER}\n"
+    )
+    monkeypatch.setattr(collected, budget, 1)
+    _, unscanned = scan_changed_content(tmp_path)
+    assert unscanned == ("diff.patch",)
+
+
+def test_command_attribution_bounds_json_and_tolerates_deep_output() -> None:
+    oversized = json.dumps({"command": "x" * COMMAND_INPUT_LIMIT})
+    deep = '{"command":' + "[" * 2000 + "0" + "]" * 2000 + "}"
+    lines = [json.dumps({"command": "grep -l pattern config"}), oversized, deep]
+    assert transcript_command(lines, 3) == "grep -l pattern config"
+
+
+def test_fixture_search_has_a_deadline_and_disables_lazy_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scripts, "SECRET_DECLARATION_SECONDS", 1)
+    monkeypatch.setattr(scripts, "named_secret_pattern_expressions", lambda: (("test", "test"),))
+    git = tmp_path / "git"
+    git.write_text(
+        '#!/bin/sh\ncase " $* " in\n'
+        '  *" grep "*) printf "%s" "$GIT_NO_LAZY_FETCH" > "$OUT/lazy-fetch"; sleep 60;;\n'
+        "  *) exit 1;;\nesac\n"
+    )
+    git.chmod(0o755)
+    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "OUT": str(tmp_path)}
+    subprocess.run(
+        ["sh", "-c", scripts._secret_declarations_script()],
+        env=env,
+        capture_output=True,
+        check=True,
+        timeout=5,
+    )
+    assert (tmp_path / "lazy-fetch").read_text() == "1"

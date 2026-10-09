@@ -251,6 +251,16 @@ characters) as the attempt artifact `secret-scan/transcript-windows.txt` (type
 `secret_scan_window`), because the store refuses the transcript itself: a person reads
 the window to see which command printed it.
 
+Collected artifact reads stop at 4 MiB before allocating their content and refuse
+symlinks and non-regular files without waiting on a pipe. Command attribution looks
+back at most 200 lines and parses only JSON lines up to 64 KiB; oversized or deeply
+nested tool output does not prevent keeping the redacted window. At most ten windows
+are retained per transcript. These operations use local collected bytes, not network
+requests.
+The diff reader scans a fixed file-size snapshot, with a 256 MiB total budget,
+16 MiB per line and 10,000 findings. Exceeding a budget records `diff.patch` as
+unscanned, so the gate cannot pass on a silently truncated diff.
+
 The repository's own declarations are honoured, and the scanner and `make scan` agree
 on them. The collector reads `.gitleaksignore` and `.gitleaks.toml` from the merge
 base, never from the worker's tree, so an entry a worker adds does not allow its own
@@ -270,6 +280,10 @@ listed for the reviewer in the gate's findings and does not fail the gate. Only 
 of those values are kept. A git without PCRE lists none, and every match then blocks.
 Gitleaks' own default rules and their allowlist, and per-rule allowlists, are not read
 by the scanner.
+Each merge-base fixture search has a ten-second deadline and disables Git's lazy
+fetch. Its output is capped at 1 MiB per rule. A fixture outside those bounds is not
+recognised as advisory and remains blocking unless a declaration directly allows
+the diff match.
 
 The correction Hades composes. When the latest attempt failed `no_secrets`, a
 correction attached to the task carries, after the principal's own instructions, what

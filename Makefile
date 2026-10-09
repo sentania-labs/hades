@@ -129,7 +129,7 @@ lint: check-image-manifest
 	$(UV) sync --frozen --quiet
 	$(UV) run ruff format --check crucible tests tools/release tools/smoke tools/registry tools/images tools/ci tools/chart
 	$(UV) run ruff check crucible tests tools/release tools/smoke tools/registry tools/images tools/ci tools/chart
-	$(UV) run mypy crucible tests tools/release tools/smoke tools/registry tools/images tools/ci tools/chart
+	$(UV) run mypy --cache-dir "$${MYPY_CACHE_DIR:-/tmp/hades-mypy-$$(id -u)}" crucible tests tools/release tools/smoke tools/registry tools/images tools/ci tools/chart
 	$(UV) run lint-imports
 
 check-image-manifest: ## fail when a declared worker-image tag is stale

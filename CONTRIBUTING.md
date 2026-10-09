@@ -121,6 +121,10 @@ published until it finishes.
 
 ## Style
 
+`make lint` keeps mypy's cache in `/tmp/hades-mypy-<uid>` by default. Its SQLite
+cache can stall on NFS-backed worker checkouts. Set `MYPY_CACHE_DIR` to override
+that location; the type checks are unchanged.
+
 Typed Python 3.12, `ruff` formatting, `mypy --strict`, no em-dashes in
 prose, comments, or commit messages. Use plain words. Use local Central
 time in operator-facing text.
