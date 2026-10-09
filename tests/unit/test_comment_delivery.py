@@ -13,7 +13,7 @@ are on the task's events. AC4: migration 0057 owns the new columns, table and ki
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -47,10 +47,12 @@ from crucible.application.task_notes import (
     list_notes,
     mark_notes_acted_on,
     note_view,
+    report_references,
 )
 from crucible.contracts.api import AcceptRequest, CancelRequest, NoteRequest
 from crucible.domain.entities import (
     AcceptanceVerdict,
+    Escalation,
     EscalationState,
     MinionQuestion,
     NoteDeliveryState,
@@ -60,6 +62,7 @@ from crucible.domain.events import EventKind
 from crucible.domain.lifecycle import TaskState
 from crucible.domain.time import local_text
 from tests.fixtures import FakeClock
+from tests.unit.test_gates import HEAD as HEAD_498
 from tests.unit.test_issue_360_ready_for_merge_correction import NOW
 from tests.unit.test_issue_489_card_actions import (
     ADMIN,
@@ -318,6 +321,63 @@ def test_a_note_the_report_references_is_acted_on_with_commit_and_event() -> Non
     }
 
 
+@pytest.mark.parametrize(
+    ("text", "report", "referenced"),
+    [
+        # Review finding 01M4F894YJCAZERP586AED00JQ: a short note is never quoted by
+        # accident, and a quotation stands on word boundaries.
+        ("a", "summary: a change was made", False),
+        ("fix", "summary: added a prefix to the flag", False),
+        ("fix the flag", "summary: prefix the flags", False),
+        ("Rename the flag", "summary: rename the flags", False),
+        ("Rename the flag", "summary: I did  rename\n the flag as asked", True),
+        ("Rename the flag.\nThen go.", "self_review: 'rename the flag.' done", True),
+    ],
+)
+def test_a_quotation_is_long_enough_and_on_word_boundaries(
+    text: str, report: str, referenced: bool
+) -> None:
+    note = TaskNote(
+        id="01NOTE0000000000000000000A",
+        task_id=TASK_ID,
+        principal_id=OPERATOR.id,
+        author="scott",
+        text=text,
+        created_at=NOW,
+    )
+    assert report_references(note, report) is referenced
+    # The id is matched exactly whatever the note's length.
+    assert report_references(note, f"addressed {note.id}") is True
+
+
+def test_a_report_that_does_not_parse_still_marks_the_notes_it_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review finding 01M4F894YGP8PN64E9FZBEQAAF: the raw text of a report that is not
+    YAML is read for note references, with the `report_parse_failed` event as evidence."""
+    from crucible.application import supervisor as supervisor_module
+    from crucible.ports.execution import CollectedOutputs
+    from tests.unit.test_issue_498_gates_judge_the_work import _bundle, _finished
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        supervisor_module, "mark_notes_acted_on", lambda *a, **kw: calls.append(kw) or []
+    )
+    supervisor, pending, _, _, _ = _finished(monkeypatch)
+    raw = "summary: addressed note 01NOTE0000000000000000000A: renamed: the flag\n  bad: [\n"
+    outputs = CollectedOutputs(
+        report=None,
+        report_raw=raw,
+        blocked_md=None,
+        diff_paths=("src/ledger/a.py",),
+        bundle=_bundle("src/ledger/a.py"),
+    )
+    supervisor._finish_exited(pending.attempt.id, 0, outputs)
+    (call,) = calls
+    assert call["report_text"] == raw and call["attempt_id"] == pending.attempt.id
+    assert call["commit"] == HEAD_498
+
+
 def test_an_empty_report_moves_nothing() -> None:
     store, clock = _store(_S.SUBMITTED), FakeClock(NOW)
     note = add_note(store.uow(), clock, principal=OPERATOR, task_id=TASK_ID, text=NOTE)
@@ -430,6 +490,67 @@ def test_one_post_answers_the_question_and_corrects_the_attempt_with_the_answer(
     )
     assert again.status_code == 409
     assert store.minion_questions.get(question.id) == stored
+
+
+def test_an_answer_resumed_from_the_branch_starts_at_its_tip_and_closes_its_own_escalation() -> (
+    None
+):
+    """Review findings 01M4F894YBNWW9FYASC2X5QME0 and 01M4F894YEWCG4KBQK4PVFQ3HP:
+    `remote_branch` reaches the scheduling event the supervisor reads, and of two open
+    escalations the one the question names is the one the correction closes."""
+    store, clock = _store(_S.BLOCKED), FakeClock(NOW)
+    other = Escalation(
+        id="01ESC489000000000000000001",
+        task_id=TASK_ID,
+        attempt_id=ATTEMPT_ID,
+        state=EscalationState.OPEN,
+        question="An earlier, unrelated question.",
+        opened_at=NOW - timedelta(minutes=30),
+        reason="ambiguous_contract",
+    )
+    store.escalations.add(other)
+    question, escalation = _question(store, clock)
+    answer = "Keep the published layout and add the sidebar."
+
+    task, answered = answer_question(
+        store.uow(),
+        clock,
+        principal=OPERATOR,
+        task_id=TASK_ID,
+        question_id=question.id,
+        answer_text=answer,
+        resume_from="remote_branch",
+    )
+
+    assert task.state is _S.SCHEDULED and answered.answer_action == ACTION_CORRECTED
+    version = store.contracts.get(TASK_ID, 2)
+    assert version is not None and version.document["correction"]["resume_from"] == "remote_branch"
+    scheduled = _events(store, EventKind.TASK_SCHEDULED)[-1]
+    assert scheduled.payload["resume_from_work_branch"] is True
+    closed = store.escalations.get(escalation.id)
+    assert closed is not None and closed.state is EscalationState.CLOSED
+    untouched = store.escalations.get(other.id)
+    assert untouched is not None and untouched.state is EscalationState.OPEN
+    (decision,) = store.decisions.list_for_task(TASK_ID)
+    assert decision.escalation_id == escalation.id and decision.verbatim == answer
+
+
+def test_an_answer_from_the_last_attempt_does_not_resume_from_the_branch(
+    tmp_path: Path,
+) -> None:
+    store, clock = _store(_S.BLOCKED, pull_request=False), FakeClock(NOW)
+    _sealed_last_attempt(store, tmp_path)
+    question, _ = _question(store, clock)
+    answer_question(
+        store.uow(),
+        clock,
+        principal=OPERATOR,
+        task_id=TASK_ID,
+        question_id=question.id,
+        answer_text="Use the two-column layout.",
+    )
+    scheduled = _events(store, EventKind.TASK_SCHEDULED)[-1]
+    assert "resume_from_work_branch" not in scheduled.payload
 
 
 def test_the_boards_answer_move_goes_through_the_question_record(tmp_path: Path) -> None:

@@ -157,7 +157,9 @@ def answer_question(
     When the task can take a correction (every blocked task can), a correction version
     is attached with the answer as its instructions and resumed from `resume_from`
     (`last_attempt`, the sealed bundle, or `remote_branch`, the pushed branch); that
-    schedules the task again and closes the open escalation with a `correction` decision.
+    schedules the task again (with `resume_from_work_branch` on the scheduling event when
+    the branch was chosen, so the execution starts at its tip) and closes the question's
+    own escalation with a `correction` decision.
     When it cannot (the task moved on, or was cancelled), the answer is recorded and an
     escalation still open is answered with an `escalation_answer` decision, so the words
     are kept either way. The question's `answer_action` says which happened."""
@@ -203,6 +205,8 @@ def answer_question(
             credential_sources=credential_sources,
             secret_providers=secret_providers,
             wired_providers=wired_providers,
+            escalation_id=question.escalation_id,
+            resume_from_work_branch=resume_from == "remote_branch",
         )
         action = ACTION_CORRECTED
         version: int | None = task.contract_version

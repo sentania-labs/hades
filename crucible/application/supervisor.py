@@ -5928,7 +5928,7 @@ class Supervisor:
                 unparsed_errors = load_report(outputs.report_raw)[1] or [
                     {"loc": [], "msg": "report is not a mapping", "type": "shape"}
                 ]
-                record_event(
+                unparsed_event = record_event(
                     uow,
                     self._clock,
                     EventKind.REPORT_PARSE_FAILED,
@@ -5937,6 +5937,17 @@ class Supervisor:
                     execution_id=attempt.execution_id,
                     attempt_id=attempt.id,
                     payload={"errors": unparsed_errors},
+                )
+                # hades #208 item 2: a report that does not parse still names the notes
+                # it addressed; the raw text is read for references and never stored.
+                mark_notes_acted_on(
+                    uow,
+                    self._clock,
+                    task_id=attempt.task_id,
+                    attempt_id=attempt.id,
+                    report_text=outputs.report_raw,
+                    commit=outputs.bundle.head_sha if outputs.bundle else None,
+                    event_seq=unparsed_event.seq,
                 )
             completed: CompletedClaim | None = None
             claim = None

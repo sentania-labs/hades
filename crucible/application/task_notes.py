@@ -14,6 +14,7 @@ evidence). The supervisor sets the state from that evidence; the author never do
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -27,6 +28,9 @@ from crucible.ports.clock import Clock
 from crucible.ports.repository import UnitOfWork
 
 OPERATOR_ROLES = frozenset({Role.OPERATOR, Role.ADMIN})
+# A quotation shorter than this is too likely to occur by chance ("a", "fix", "ok"), so
+# a short note is referenced by its id only.
+MIN_QUOTE_CHARS = 12
 
 
 def require_operator(principal: Principal) -> None:
@@ -175,16 +179,24 @@ def acknowledge_notes(
     return moved
 
 
+def _words(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
 def report_references(note: TaskNote, report_text: str) -> bool:
     """Whether the worker's report names the note: by its id, or by quoting its words
-    (the first line as typed, case folded, is enough)."""
+    (the first line as typed, case folded, whitespace collapsed, is enough). A quotation
+    is at least MIN_QUOTE_CHARS long and stands on word boundaries, so `fix` is not found
+    in `prefix` and a one-letter note is never quoted by accident."""
     if not report_text:
         return False
-    haystack = report_text.casefold()
-    if note.id.casefold() in haystack:
+    if note.id.casefold() in report_text.casefold():
         return True
-    first_line = note.text.strip().splitlines()[0].strip().casefold() if note.text.strip() else ""
-    return bool(first_line) and first_line in haystack
+    first_line = _words(note.text.strip().splitlines()[0]) if note.text.strip() else ""
+    if len(first_line) < MIN_QUOTE_CHARS:
+        return False
+    pattern = rf"(?<!\w){re.escape(first_line)}(?!\w)"
+    return re.search(pattern, _words(report_text)) is not None
 
 
 def mark_notes_acted_on(
@@ -246,6 +258,7 @@ def operator_notes_for(uow: UnitOfWork, task_id: str) -> tuple[dict[str, Any], .
 
 
 __all__ = [
+    "MIN_QUOTE_CHARS",
     "OPERATOR_ROLES",
     "acknowledge_notes",
     "add_note",

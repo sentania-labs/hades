@@ -18,7 +18,7 @@ unknown field (422). `add_note` stores every note `awaiting`.
 |---|---|---|
 | `awaiting` | Written; no attempt has been given it yet. | none |
 | `acknowledged` | The supervisor put the note at the top of an attempt's `IDENTITY.md` (06), on a first attempt, a retry or a correction. | `acknowledged.attempt_id`, `acknowledged.at` (local Central time) |
-| `acted_on` | That attempt's report references the note, by its id or by quoting its first line as typed. | `acted_on.attempt_id`, `acted_on.at`, `acted_on.commit` (the head the attempt's bundle collected, when there is one), `acted_on.event_seq` (the `report_parsed` or `report_parse_failed` event that read the report) |
+| `acted_on` | That attempt's report references the note, by its id or by quoting its first line as typed (case and runs of whitespace ignored; the quotation is at least 12 characters and stands on word boundaries, so a shorter note is referenced by its id only). This holds for a report that does not parse as well: the raw text is read for references and never stored. | `acted_on.attempt_id`, `acted_on.at`, `acted_on.commit` (the head the attempt's bundle collected, when there is one), `acted_on.event_seq` (the `report_parsed` or `report_parse_failed` event that read the report) |
 
 Transitions are forward only and happen once:
 
@@ -65,8 +65,11 @@ work, records a `MinionQuestion` beside it (`minion_questions.ask_question`):
 3. Hades records the answer on the question (who, when, the words) and brings it back to
    the worker. When the task can take a correction (every `blocked` task can, 05), a
    correction version is attached with the answer as its `correction.instructions`,
-   resumed from the sealed bundle; that schedules the task again and closes the open
-   escalation with a `correction` decision whose verbatim is the answer
+   resumed from the sealed bundle (`last_attempt`) or from the pushed branch tip
+   (`remote_branch`, which puts `resume_from_work_branch` on the `task_scheduled`
+   event the next execution reads); that schedules the task again and closes the
+   question's own escalation (and only that one) with a `correction` decision whose
+   verbatim is the answer
    (`answer_action: corrected`). When the task cannot (it moved on, or was cancelled), the
    answer is kept and an escalation still open is closed with an `escalation_answer`
    decision (`answer_action: recorded`).

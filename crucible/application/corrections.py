@@ -221,7 +221,14 @@ def attach_correction(
     credential_sources: dict[str, CredentialSource] | None = None,
     secret_providers: Collection[str] = (),
     wired_providers: Collection[str] | None = None,
+    escalation_id: str | None = None,
+    resume_from_work_branch: bool = False,
 ) -> Task:
+    """`escalation_id` names the open escalation the correction answers (a worker's
+    question names its own, and only that one is closed); without it the first open
+    one is.
+    `resume_from_work_branch` puts the flag on the scheduling event that makes the next
+    execution start at the pushed branch tip rather than a sealed bundle."""
     task = uow.tasks.get(task_id, for_update=True)
     if task is None:
         raise NotFoundError(f"task {task_id} not found")
@@ -364,10 +371,18 @@ def attach_correction(
             ),
             "provider": contract.execution_request.provider.value,
             "policy": {"name": contract.policy.name, "version": contract.policy.version},
+            **({"resume_from_work_branch": True} if resume_from_work_branch else {}),
         },
     )
     if _from_state is TaskState.BLOCKED:
-        for escalation in uow.escalations.list_for_task(task.id):
+        open_escalations = [
+            escalation
+            for escalation in uow.escalations.list_for_task(task.id)
+            if escalation.state is EscalationState.OPEN
+        ]
+        if escalation_id is not None:
+            open_escalations = [e for e in open_escalations if e.id == escalation_id]
+        for escalation in open_escalations:
             if escalation.state is EscalationState.OPEN:
                 decision = Decision(
                     id=new_id(),
