@@ -418,7 +418,9 @@ def build_plan(uow: UnitOfWork, task: Task, work: tuple[Attempt, Execution]) -> 
     composed = record.get("composed") if record else None
     repo_section = contract.get("repository", {})
     base_ref = str(repo_section.get("base_ref") or repository.default_branch or "main")
-    work_branch = str(repo_section.get("work_branch") or f"crucible/{task.external_id}")
+    # hades #564: submission stores the branch (derived when the contract omitted it),
+    # so the stored contract is the one source; nothing here makes a branch up.
+    work_branch = str(repo_section["work_branch"])
     deliverables = [
         d for d in contract.get("deliverables", []) if d.get("kind") in ("pull_request", "branch")
     ]

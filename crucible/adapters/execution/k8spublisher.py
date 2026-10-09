@@ -171,6 +171,7 @@ class KubernetesPublisher:
             token_source="file",
             bundle_sha256=request.bundle_sha256,
             owned_remote_heads=request.owned_remote_heads,
+            owner=request.owner,
         )
         exit_code, failed = await self._run_with_token(
             spec,

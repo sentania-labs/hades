@@ -31,7 +31,7 @@ parent_external_id: null
 repository:
   name: "example-service"          # a repository registered with Crucible (04); carries URL and auth
   base_ref: "main"                 # where the worker branches from
-  work_branch: "crucible/FDY-0042" # created by Crucible; worker must not rename
+  work_branch: "crucible/FDY-0042" # optional; omitted, it is crucible/<external_id>; created by Crucible; worker must not rename
 
 scope:
   allowed_paths: ["src/ledger/**", "tests/ledger/**", "docs/ledger.md"]
@@ -162,9 +162,23 @@ recorded only after the correction attempt succeeds.
 
 ## Validation rules (deterministic, on submit)
 
-- Every field above present; unknown fields rejected.
+- Every field above present (but `repository.work_branch`, below); unknown
+  fields rejected.
 - `schema_version` major supported.
 - `external_id` unique within the submitting principal's namespace.
+- `repository.work_branch` is optional (hades #564). A contract without it
+  is stored with `crucible/<external_id>`, derived at submit (and the same
+  way for a correction or amendment), so every stored contract names its
+  branch and nothing later makes one up. The derived branch is validated
+  like an explicit one.
+- A work branch belongs to one task (hades #564): a submission whose
+  `work_branch` is already the branch of another task on the same
+  repository, in any state including `merged` and `cancelled`, is refused
+  with 422 and a problem at `repository.work_branch` naming the owning
+  task's `external_id`. (The submitter's own `external_id` again is the
+  duplicate answer above, 409.) Ownership checks for the same repository and
+  branch are serialized until the submission transaction commits or rolls back,
+  so overlapping submissions cannot both claim an unowned branch.
 - `repository.name` is registered (04); `base_ref` exists on the remote at
   validation time; `work_branch` matches the repository policy's branch
   pattern and is not a protected branch; both refs contain only

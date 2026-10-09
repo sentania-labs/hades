@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from fastapi.testclient import TestClient
 
 from crucible.adapters.api.deps import AppContext
 from crucible.adapters.execution.fake import FakeProvider
+from crucible.application.submit_task import parse_contract
 from crucible.application.supervisor import Supervisor
+from crucible.contracts.common import to_document
+from crucible.contracts.task_contract import contract_sha256
+from crucible.domain.entities import Task, TaskContract
+from crucible.domain.ids import new_id
+from crucible.domain.lifecycle import TaskState
 from crucible.ports.execution import LogChunk
 from tests.fixtures import FakeClock, contract_document
 from tests.integration.conftest import event_kinds, submit_and_start
@@ -71,18 +79,61 @@ async def test_stall_warns_then_drains_and_kills_as_timeout(
     assert "worker_stalled" in event_kinds(client, task_id)
 
 
+def _stored_as_submitted(ctx: AppContext, like: str, document: dict[str, Any]) -> str:
+    """A task and its contract, written the way submission writes them: a task row and
+    a version 1 contract row, appended. hades #564: submission refuses a contract naming
+    another task's branch now, so a second task on one branch, as one submitted before
+    that refusal existed, is seeded here. `task_contracts` is append-only; a stored
+    contract is never updated, here or anywhere."""
+    contract = parse_contract(document)
+    stored = to_document(contract)
+    now = ctx.clock.now()
+    with ctx.uow_factory() as uow:
+        sibling = uow.tasks.get(like)
+        assert sibling is not None
+        task = Task(
+            id=new_id(),
+            external_id=contract.external_id,
+            principal_id=sibling.principal_id,
+            project=contract.project,
+            title=contract.title,
+            state=TaskState.SUBMITTED,
+            contract_version=1,
+            policy_name=contract.policy.name,
+            policy_version=contract.policy.version,
+            repository_id=sibling.repository_id,
+            created_at=now,
+            updated_at=now,
+        )
+        uow.tasks.add(task)
+        uow.contracts.add(
+            TaskContract(
+                id=new_id(),
+                task_id=task.id,
+                version=1,
+                document=stored,
+                sha256=contract_sha256(stored),
+                submitted_at=now,
+            )
+        )
+        uow.commit()
+    return task.id
+
+
 async def test_second_checkout_waits_once_and_launches_after_release(
     client: TestClient,
     supervisor: Supervisor,
     clock: FakeClock,
+    ctx: AppContext,
 ) -> None:
     first = submit_and_start(client, "crucible-worker:fake-hang", external_id="LEASE-A")
     document = contract_document(external_id="LEASE-B")
-    document["repository"]["work_branch"] = "crucible/LEASE-A"
     document["execution_request"]["image"] = "crucible-worker:fake-succeed"
-    response = client.post("/v1/tasks", json=document)
-    assert response.status_code == 201, response.text
-    second = response.json()["id"]
+    document["repository"]["work_branch"] = "crucible/LEASE-A"
+    # A branch belongs to one task (hades #564), so this second task on LEASE-A's branch
+    # cannot be submitted; it is stored as one from before the refusal, and the checkout
+    # lease of 10 still keeps the two attempts off one checkout.
+    second = _stored_as_submitted(ctx, first, document)
     response = client.post(
         f"/v1/tasks/{second}/start",
         json={"provider": "fake", "image": "crucible-worker:fake-succeed", "policy_version": 2},
