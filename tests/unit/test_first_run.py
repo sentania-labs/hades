@@ -13,6 +13,8 @@ from crucible.adapters.execution.k8sapi import KubernetesApiError
 from crucible.adapters.execution.k8sfake import FakeKubernetesApi
 from crucible.adapters.first_run import SECRET_NAME, FileDelivery, SecretDelivery
 from crucible.application.first_run import discard_after_use, is_first_run
+from crucible.cli import wiring
+from crucible.settings import Settings
 
 TOKEN = "cru_" + "0" * 26 + "." + "s" * 40
 
@@ -88,3 +90,27 @@ def test_a_failed_discard_is_logged_without_the_token(caplog: pytest.LogCaptureF
     with caplog.at_level(logging.WARNING):
         discard_after_use(Failing(), "first-run-admin")
     assert "could not be removed" in caplog.text and "cru_" not in caplog.text
+
+
+def test_wiring_uses_configured_first_run_secret_for_create_reset_and_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CRUCIBLE_KUBERNETES__ENABLED", "true")
+    monkeypatch.setenv("CRUCIBLE_KUBERNETES__FIRST_RUN_SECRET_NAME", "lab-bootstrap")
+    settings = Settings()
+    api = FakeKubernetesApi(namespace=settings.kubernetes.namespace)
+    monkeypatch.setattr(wiring, "in_cluster_access", lambda: None)
+    monkeypatch.setattr(wiring, "KubernetesClient", lambda *args, **kwargs: api)
+    delivery = wiring.first_run_delivery(settings)
+    assert isinstance(delivery, SecretDelivery)
+    assert delivery.name == "lab-bootstrap"
+    delivery.deliver("cru_stale.value")
+    delivery.deliver(TOKEN)
+    secret = api.get("secrets", "lab-bootstrap")
+    assert base64.b64decode(secret["data"]["token"]).decode() == TOKEN
+    assert "crucible/lab-bootstrap" in delivery.where()
+    discard_after_use(delivery, "first-run-admin")
+    with pytest.raises(KubernetesApiError):
+        api.get("secrets", "lab-bootstrap")
+    with pytest.raises(KubernetesApiError):
+        api.get("secrets", SECRET_NAME)

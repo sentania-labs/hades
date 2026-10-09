@@ -56,3 +56,20 @@ accepts or creates secret values. Create the named Kubernetes Secrets separately
 Run `make chart` to lint and validate the default and lab-like renders. Run
 `make chart-sync-check` to compare chart objects with the kustomize base. Both targets
 name any missing command directly.
+
+Helm names the migration Job `crucible-migrate-REVISION`, creating a fresh Job on
+install and each upgrade, including image tag or digest changes. Helm removes the
+previous revision's Job as an obsolete release resource. This is a regular Job so
+its bundled database, ConfigMap and RBAC can be installed together. The services
+refuse to start until the schema is at head. Use `--wait --wait-for-jobs` to wait
+for migrations and readiness; size `--timeout` for the migration workload.
+The sync check normalizes only this Job's revision suffix when comparing names.
+
+`secrets.githubApp` names the application-managed GitHub App Secret and is passed
+to the application and RBAC. Optional `secrets.githubAppPrivateKey` and
+`secrets.githubAppWebhook` names mount the `app.pem` and `webhook.secret` keys from
+separate operator-managed Secrets. An empty name inherits `secrets.githubApp`.
+The GitHub setup UI continues to manage only `secrets.githubApp`; operators maintain
+any separate credential Secrets themselves. `secrets.firstRunToken` configures both
+RBAC and `CRUCIBLE_KUBERNETES__FIRST_RUN_SECRET_NAME`, so migration delivery and
+API cleanup use the same Secret, including after a database reset.

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,10 @@ def objects(path: Path) -> dict[tuple[str, str, str], dict[str, Any]]:
         if not item:
             continue
         metadata = item.get("metadata", {})
+        if item["kind"] == "Job" and metadata.get("namespace") == "crucible":
+            metadata["name"] = re.sub(
+                r"^crucible-migrate-[0-9]+$", "crucible-migrate", metadata["name"]
+            )
         key = (item["kind"], metadata.get("namespace", ""), metadata["name"])
         metadata.pop("creationTimestamp", None)
         labels = metadata.get("labels", {})

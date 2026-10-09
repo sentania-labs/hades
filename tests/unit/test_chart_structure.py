@@ -10,6 +10,8 @@ from typing import Any
 
 import yaml
 
+from tools.chart.sync import objects
+
 ROOT = Path(__file__).parents[2]
 CHART = ROOT / "charts/hades"
 VALUE_REFERENCE = re.compile(r"\.Values\.([A-Za-z0-9_.]+)")
@@ -90,3 +92,44 @@ def test_chart_sync_comparison_fails_on_injected_drift(tmp_path: Path) -> None:
     )
     assert result.returncode == 1
     assert "drift in Service//example" in result.stdout
+
+
+def test_chart_secret_settings_reach_application_and_mounts() -> None:
+    config = (CHART / "base/crucible/configmap.yaml").read_text()
+    assert "CRUCIBLE_GITHUB__APP__SECRET_NAME: {{ .Values.secrets.githubApp | quote }}" in config
+    assert (
+        "CRUCIBLE_KUBERNETES__FIRST_RUN_SECRET_NAME: {{ .Values.secrets.firstRunToken | quote }}"
+        in config
+    )
+    for component in ("api", "supervisor"):
+        template = (CHART / f"base/crucible/{component}.yaml").read_text()
+        assert "projected:" in template
+        for field, key in (
+            ("githubAppPrivateKey", "app.pem"),
+            ("githubAppWebhook", "webhook.secret"),
+        ):
+            assert f".Values.secrets.{field} | default .Values.secrets.githubApp" in template
+            assert f"key: {key}\n                      path: {key}" in template
+
+
+def test_migration_job_name_changes_with_release_revision() -> None:
+    template = (CHART / "base/crucible/migrate-job.yaml").read_text()
+    assert "  name: crucible-migrate-{{ .Release.Revision }}\n" in template
+    assert "helm.sh/hook" not in template  # Dependencies are ordinary release resources.
+
+
+def test_migration_name_normalization_preserves_image_drift(tmp_path: Path) -> None:
+    source = tmp_path / "source.yaml"
+    chart = tmp_path / "chart.yaml"
+    job: dict[str, Any] = {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {"name": "crucible-migrate", "namespace": "crucible"},
+        "spec": {"template": {"spec": {"containers": [{"name": "migrate", "image": "svc:v1"}]}}},
+    }
+    source.write_text(yaml.safe_dump(job))
+    job["metadata"]["name"] = "crucible-migrate-2"
+    chart.write_text(yaml.safe_dump(job))
+    assert objects(source) == objects(chart)
+    chart.write_text(chart.read_text().replace("svc:v1", "svc:v2"))
+    assert objects(source) != objects(chart)

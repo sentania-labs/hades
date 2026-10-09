@@ -372,7 +372,10 @@ def first_run_delivery(settings: Settings) -> FirstRunDelivery | None:
         except (KubernetesApiError, OSError) as exc:
             log.error("the first-run token Secret is unreachable: %s", exc)
             return None
-        return SecretDelivery(KubernetesClient(access, k.namespace, timeout=k.api_timeout_seconds))
+        return SecretDelivery(
+            KubernetesClient(access, k.namespace, timeout=k.api_timeout_seconds),
+            name=k.first_run_secret_name,
+        )
     if settings.docker.credential_root:
         return FileDelivery(Path(settings.docker.credential_root) / FILE_NAME)
     return None

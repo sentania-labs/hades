@@ -1,3 +1,5 @@
+# Helm gives each release revision a new Job, avoiding immutable pod-template patches.
+# It stays a regular resource so the database, ConfigMap and RBAC install together.
 # Migrations run once per sync, before anything serves: `crucible serve` refuses to start
 # when the schema is not at head, so a deployment without this Job is a CrashLoopBackOff
 # with the right reason rather than a corrupt database.
@@ -8,7 +10,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: crucible-migrate
+  name: crucible-migrate-{{ .Release.Revision }}
   namespace: crucible
   labels:
     app.kubernetes.io/name: crucible

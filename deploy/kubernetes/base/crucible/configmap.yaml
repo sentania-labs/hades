@@ -28,6 +28,7 @@ data:
   # The Kubernetes execution provider (26).
   CRUCIBLE_KUBERNETES__ENABLED: "true"
   CRUCIBLE_KUBERNETES__NAMESPACE: crucible
+  CRUCIBLE_KUBERNETES__FIRST_RUN_SECRET_NAME: crucible-first-run-admin
   CRUCIBLE_KUBERNETES__WORKERS_NAMESPACE: crucible-workers
   CRUCIBLE_KUBERNETES__SERVICE_ACCOUNT: crucible-worker
   CRUCIBLE_KUBERNETES__CACHE_CLAIM: crucible-reference-cache

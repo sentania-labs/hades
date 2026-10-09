@@ -11,3 +11,11 @@ helm template hades charts/hades -f charts/hades/values-lab-example.yaml > "$tmp
 kubeconform -strict -summary "$tmp/default.yaml"
 kubeconform -strict -summary "$tmp/lab.yaml"
 
+# Exercise independent credential mounts and external database configuration as well.
+helm template hades charts/hades --is-upgrade \
+  --set postgres.bundled=false \
+  --set secrets.githubApp=lab-app \
+  --set secrets.githubAppPrivateKey=lab-key \
+  --set secrets.githubAppWebhook=lab-webhook \
+  --set secrets.firstRunToken=lab-bootstrap > "$tmp/custom.yaml"
+kubeconform -strict -summary "$tmp/custom.yaml"

@@ -30,8 +30,9 @@ workerQuota:
   limitsMemory: 12Gi
 secrets:
   githubApp: crucible-github-app
-  githubAppPrivateKey: crucible-github-app
-  githubAppWebhook: crucible-github-app
+  # Empty names use githubApp; overrides mount app.pem and webhook.secret respectively.
+  githubAppPrivateKey: ""
+  githubAppWebhook: ""
   firstRunToken: crucible-first-run-admin
 roomRunner:
   apiUrl: ""

@@ -171,10 +171,28 @@ spec:
         # secret to the webhook route, and a missing key is named on the GitHub page and
         # at startup when `github.enabled` says one should be there.
         - name: github
+{{- if or .Values.secrets.githubAppPrivateKey .Values.secrets.githubAppWebhook }}
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: {{ .Values.secrets.githubAppPrivateKey | default .Values.secrets.githubApp | quote }}
+                  optional: true
+                  items:
+                    - key: app.pem
+                      path: app.pem
+              - secret:
+                  name: {{ .Values.secrets.githubAppWebhook | default .Values.secrets.githubApp | quote }}
+                  optional: true
+                  items:
+                    - key: webhook.secret
+                      path: webhook.secret
+{{- else }}
           secret:
             secretName: {{ .Values.secrets.githubApp }}
             optional: true
             defaultMode: 0400
+{{- end }}
         - name: tmp
           emptyDir: {}
 ---

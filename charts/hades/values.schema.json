@@ -46,7 +46,7 @@
     "secrets": {
       "type": "object", "additionalProperties": false,
       "required": ["githubApp", "githubAppPrivateKey", "githubAppWebhook", "firstRunToken"],
-      "properties": {"githubApp": {"$ref": "#/$defs/name"}, "githubAppPrivateKey": {"$ref": "#/$defs/name"}, "githubAppWebhook": {"$ref": "#/$defs/name"}, "firstRunToken": {"$ref": "#/$defs/name"}}
+      "properties": {"githubApp": {"$ref": "#/$defs/name"}, "githubAppPrivateKey": {"anyOf": [{"const": ""}, {"$ref": "#/$defs/name"}]}, "githubAppWebhook": {"anyOf": [{"const": ""}, {"$ref": "#/$defs/name"}]}, "firstRunToken": {"$ref": "#/$defs/name"}}
     },
     "roomRunner": {
       "type": "object", "additionalProperties": false,

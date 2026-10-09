@@ -28,6 +28,7 @@ data:
   # The Kubernetes execution provider (26).
   CRUCIBLE_KUBERNETES__ENABLED: "true"
   CRUCIBLE_KUBERNETES__NAMESPACE: crucible
+  CRUCIBLE_KUBERNETES__FIRST_RUN_SECRET_NAME: {{ .Values.secrets.firstRunToken | quote }}
   CRUCIBLE_KUBERNETES__WORKERS_NAMESPACE: crucible-workers
   CRUCIBLE_KUBERNETES__SERVICE_ACCOUNT: crucible-worker
   CRUCIBLE_KUBERNETES__CACHE_CLAIM: crucible-reference-cache
@@ -110,7 +111,7 @@ data:
   # off in the base.
   CRUCIBLE_GITHUB__ENABLED: "false"
   CRUCIBLE_GITHUB__APP__APP_ID: "0"
-  CRUCIBLE_GITHUB__APP__SECRET_NAME: crucible-github-app
+  CRUCIBLE_GITHUB__APP__SECRET_NAME: {{ .Values.secrets.githubApp | quote }}
   CRUCIBLE_GITHUB__APP__PRIVATE_KEY_PATH: /var/lib/crucible/credentials/github/app.pem
   CRUCIBLE_GITHUB__APP__WEBHOOK_SECRET_PATH: /var/lib/crucible/credentials/github/webhook.secret
   CRUCIBLE_GITHUB__WEBHOOK_ENABLED: "false"
