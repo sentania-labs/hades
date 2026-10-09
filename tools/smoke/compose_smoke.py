@@ -248,9 +248,28 @@ def mint_token(principal: str) -> str:
 
 
 FIRST_RUN_FILE = "/var/lib/crucible/credentials/first-run-admin-token"
-FIRST_RUN_LANDING_MARKER = b"<h1>Status</h1>"
-BOARD_MARKER = b"<h1>Board</h1>"
 TOKEN_PATTERN = re.compile(r"\bcru_[A-Z0-9]{26}\.[A-Za-z0-9_-]+\b")
+# Stable page markers; grep the data-page attribute on <main>, never a product name.
+# The board uses a separate template (board.html) outside _page, so it carries no marker.
+_PAGE_MARKERS: dict[str, str] = {
+    "/ui": "status",
+    "/ui/harnesses": "harnesses",
+    "/ui/credentials": "credentials",
+    "/ui/images": "images",
+    "/ui/routing": "routing",
+    "/ui/repositories": "repositories",
+    "/ui/tokens": "tokens",
+    "/ui/github": "github",
+    "/ui/workers": "workers",
+    "/ui/tasks": "tasks",
+    "/ui/wakes": "wakes",
+    "/ui/retention": "retention",
+    "/ui/audit": "audit",
+    "/ui/bootstrap": "bootstrap",
+    "/ui/settings": "settings",
+}
+# The board page template (not rendered by _page) uses a product-name check.
+BOARD_MARKER = b"<h1>Board</h1>"
 
 
 def walk_first_run_ui(base_url: str) -> None:
@@ -292,31 +311,21 @@ def walk_first_run_ui(base_url: str) -> None:
     try:
         # The explicit next=/ui returns to Status and its first-run setup steps.
         # The root and the default sign-in destination instead lead to the board.
-        with opener.open(request_object, timeout=DEFAULT_TIMEOUT) as response:
-            if response.status != 200 or FIRST_RUN_LANDING_MARKER not in response.read():
-                raise SmokeError("first-run administrator sign-in did not render the Status page")
-        with opener.open(f"{base_url}/ui/board", timeout=DEFAULT_TIMEOUT) as response:
-            if response.status != 200 or BOARD_MARKER not in response.read():
-                raise SmokeError("the first-run Board page did not render")
-        for path in (
-            "/ui/harnesses",
-            "/ui/credentials",
-            "/ui/images",
-            "/ui/routing",
-            "/ui/repositories",
-            "/ui/tokens",
-            "/ui/github",
-            "/ui/workers",
-            "/ui/tasks",
-            "/ui/wakes",
-            "/ui/retention",
-            "/ui/audit",
-            "/ui/bootstrap",
-            "/ui/settings",
-        ):
+        for path, marker in _PAGE_MARKERS.items():
             with opener.open(f"{base_url}{path}", timeout=DEFAULT_TIMEOUT) as response:
-                if response.status != 200 or b"Hades" not in response.read():
-                    raise SmokeError(f"the first-run UI page {path} did not render")
+                if response.status != 200:
+                    raise SmokeError(f"the first-run UI page {path} returned HTTP {response.status}")
+                body = response.read()
+                if f'data-page="{marker}"'.encode() not in body:
+                    raise SmokeError(
+                        f"the first-run UI page {path} lacks data-page={marker!r}"
+                    )
+        # The board uses board.html directly (not _page), so we check for its heading.
+        with opener.open(f"{base_url}/ui/board", timeout=DEFAULT_TIMEOUT) as response:
+            if response.status != 200:
+                raise SmokeError("the first-run Board page returned HTTP {}".format(response.status))
+            if BOARD_MARKER not in response.read():
+                raise SmokeError("the first-run Board page did not render")
     except urllib.error.URLError as exc:
         raise SmokeError(f"the first-run UI walk failed: {exc}") from None
     left = compose(

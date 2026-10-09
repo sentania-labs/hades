@@ -70,6 +70,7 @@ def bootstrap_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         principal,
         csrf,
         active="/ui/bootstrap",
+        data_page="bootstrap",
         heading="Bootstrap imports",
         intro=(
             "Ledgers imported from Foundry, the commit that makes one authoritative, and the "
@@ -113,6 +114,7 @@ def bootstrap_import_page(request: Request, import_id: str, ctx: Ctx, uow: UoW) 
         principal,
         csrf,
         active="/ui/bootstrap",
+        data_page="bootstrap",
         heading="Bootstrap manifest",
         intro=import_id,
         sections=[_document_section("Manifest", document)],

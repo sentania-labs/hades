@@ -252,6 +252,7 @@ async def credentials_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         principal,
         csrf,
         active="/ui/credentials",
+        data_page="credentials",
         heading="Credentials",
         intro="Each harness's credential and what to do about it. Values are never shown.",
         sections=sections,
@@ -281,7 +282,7 @@ def login_page(request: Request, harness: str, ctx: Ctx, uow: UoW) -> Response:
             0, round((moment - datetime.now(UTC)).total_seconds())
         )
     context = _base(request, principal, csrf, title=f"{harness} login", active="/ui/credentials")
-    context.update(harness=harness, login=document)
+    context.update(harness=harness, login=document, data_page="credentials")
     return templates.TemplateResponse(request=request, name="login.html", context=context)
 
 

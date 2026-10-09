@@ -113,6 +113,7 @@ def tokens_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         principal,
         csrf,
         active="/ui/tokens",
+        data_page="tokens",
         heading="Tokens",
         intro="Who can sign in or call the API, and with which role.",
         sections=sections,

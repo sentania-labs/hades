@@ -299,6 +299,7 @@ async def dashboard(request: Request, ctx: Ctx, uow: UoW) -> Response:
         principal,
         csrf,
         active="/ui",
+        data_page="status",
         heading="Status",
         intro=(
             f"Ready for a task on {ready_names}."

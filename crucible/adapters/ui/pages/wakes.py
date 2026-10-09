@@ -27,6 +27,7 @@ def wakes_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         principal,
         csrf,
         active="/ui/wakes",
+        data_page="wakes",
         heading="Wakes",
         intro=(
             f"Notifications for {principal.name}. {summary['unacked']} pending across "

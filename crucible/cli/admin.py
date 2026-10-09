@@ -934,13 +934,16 @@ def _local_login(args: argparse.Namespace, wiring: Wiring, admin: AdminContext) 
     session = registry.get(args.harness)
     assert session is not None
     shown = 0
-    while session.state not in ("finished", "failed"):
+    deadline = time.monotonic() + admin.login_timeout_seconds
+    while time.monotonic() < deadline and session.state not in ("finished", "failed"):
         for line in session.lines[shown:]:
             print(line, file=sys.stderr)
         shown = len(session.lines)
         if session.state == "waiting_for_code":
             session.submit_code(_read_code())
-        time.sleep(0.5)
+        remaining = max(0.0, deadline - time.monotonic())
+        session.wait_for_change(remaining)
+        session._state_changed.clear()
     for line in session.lines[shown:]:
         print(line, file=sys.stderr)
     with wiring.ctx.uow_factory() as uow:

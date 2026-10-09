@@ -194,6 +194,7 @@ def github_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         principal,
         csrf,
         active="/ui/github",
+        data_page="github",
         heading="GitHub",
         intro=(
             "Create the App and install it. Pick the repositories Crucible delivers to on "
