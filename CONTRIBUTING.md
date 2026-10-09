@@ -45,14 +45,16 @@ The tiers split by who has the tools:
   These are the only checks a contract may require; the contract model
   refuses a `required_verification` command that runs `docker`, `kind` or
   `kubectl`, or a `make` target named for one of them, naming the program.
-- CI-only tiers, run by the branch's CI on the pushed head: the integration
-  tier (`make test-integration`, a Postgres container), the compose smoke
+- CI-only tiers, run by the branch's CI on the pushed head: the compose smoke
   (`make up` and `make smoke`), the Docker e2e tier (`make e2e`), the kind
   tier (`make e2e-kind`), and the image builds and digests (the `images` job
   and `images-digest.yml`). A worker does not run them, does not write a
   substitute for them, and does not write `blocked.md` because they are
   missing. The PR body says which of them the author could not exercise, and
-  CI's run is the proof of record.
+  CI's run is the proof of record. The integration tier (`make
+  test-integration`, a Postgres container) is CI-only unless `CRUCIBLE_TEST_DATABASE_URL`
+  is set, in which case the worker runs it against that server and skips the
+  container; see rule 3 below.
 
 `make deploy-kind` is not in either list: CI does not run it, and a worker
 cannot. A worker-authored change to the manifests relies on `make manifests`

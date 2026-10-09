@@ -520,8 +520,12 @@ _injected = injected_name
 
 def injected_shim_text(identity_mount: str = SHIM_IDENTITY_MOUNT) -> str:
     """The line the preparer writes into every shim it creates (06), without the newline
-    `printf '%s\\n'` adds."""
-    return f"Read {identity_mount}/IDENTITY.md first; it is the task contract for this run."
+    `printf '%s\\n'` adds.  References both IDENTITY.md and CONTRIBUTING.md's
+    'Rules for workers' section."""
+    return (
+        f"Read {identity_mount}/IDENTITY.md first; it is the task contract for this run. "
+        "See CONTRIBUTING.md#Rules-for-workers for project rules."
+    )
 
 
 @lru_cache(maxsize=1)

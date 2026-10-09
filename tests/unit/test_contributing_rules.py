@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from crucible.domain.gates import injected_shim_text
+
 REPO = Path(__file__).resolve().parents[2]
 
 
@@ -42,3 +44,17 @@ def test_contributing_rules_has_all_six_key_phrases() -> None:
 
     for phrase in key_phrases:
         assert phrase in normalised, f'Missing key phrase: "{phrase}"'
+
+
+def test_shim_references_contributing_rules_section() -> None:
+    """AC2: the generated worker instructions reference the rules section."""
+    shim = injected_shim_text()
+    assert "CONTRIBUTING.md" in shim
+    assert "Rules-for-workers" in shim or "Rules for workers" in shim
+
+
+def test_shim_references_identity_md() -> None:
+    """The shim still points at IDENTITY.md."""
+    shim = injected_shim_text("/crucible/identity")
+    assert "IDENTITY.md" in shim
+    assert "task contract" in shim

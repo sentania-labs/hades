@@ -108,7 +108,8 @@ def test_shim_policy_runs_the_rendered_prepare_script(
     else:
         assert shim.is_file()
         assert shim.read_text(encoding="utf-8") == (
-            "Read /crucible/identity/IDENTITY.md first; it is the task contract for this run.\n"
+            "Read /crucible/identity/IDENTITY.md first; it is the task contract for this run. "
+            "See CONTRIBUTING.md#Rules-for-workers for project rules.\n"
         )
 
 
