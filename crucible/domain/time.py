@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
+
+# The operator's zone (CONTRIBUTING: operator-facing text uses local Central time).
+OPERATOR_ZONE = "America/Chicago"
 
 
 def utcnow() -> datetime:
@@ -38,3 +42,11 @@ def parse_rfc3339(value: str) -> datetime:
             index += 1
         text = f"{head}.{digits[:6]:0<6}{rest[index:]}"
     return ensure_utc(datetime.fromisoformat(text))
+
+
+def local_text(value: datetime, zone: str = OPERATOR_ZONE) -> str:
+    """The wall time an operator reads: "YYYY-MM-DD HH:MM CDT", local to `zone`, with
+    the zone abbreviation and never "UTC" or "Z". The same shape the Foundry ledger
+    writes (domain.bootstrap.LOCAL_TIMESTAMP), so both sides read alike."""
+    local = ensure_utc(value).astimezone(ZoneInfo(zone))
+    return f"{local:%Y-%m-%d %H:%M} {local.tzname() or ''}".rstrip()

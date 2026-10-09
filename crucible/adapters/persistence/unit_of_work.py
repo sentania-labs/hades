@@ -61,6 +61,7 @@ from crucible.adapters.persistence.records import (
     HarnessImages,
     HarnessStates,
     MemoryItems,
+    MinionQuestions,
     Policies,
     ProviderSettings,
     ReviewReports,
@@ -127,6 +128,7 @@ from crucible.ports.repository import (
     LeaseRepository,
     LogRepository,
     MemoryRepository,
+    MinionQuestionRepository,
     PersonaRepository,
     PolicyRepository,
     PoolExhaustionRepository,
@@ -1711,6 +1713,7 @@ class SqlUnitOfWork:
     task_notes: TaskNoteRepository
     memory: MemoryRepository
     decision_ledger: DecisionLedgerRepository
+    minion_questions: MinionQuestionRepository
     rooms: RoomRepository
     room_turns: RoomTurnRepository
     escalations: EscalationRepository
@@ -1774,6 +1777,7 @@ class SqlUnitOfWork:
         self.task_notes = TaskNotes(s)
         self.memory = MemoryItems(s)
         self.decision_ledger = DecisionLedger(s)
+        self.minion_questions = MinionQuestions(s)
         self.rooms = Rooms(s)
         self.room_turns = RoomTurns(s)
         self.escalations = Escalations(s)

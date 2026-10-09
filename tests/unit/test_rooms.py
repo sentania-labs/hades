@@ -504,8 +504,13 @@ def _render(step: Any) -> str:
 
 def test_0059_is_on_top_of_0058_and_adr_0031_exists() -> None:
     script = ScriptDirectory.from_config(migrate.alembic_config("postgresql://unused/unused"))
-    # FDY-0591's 0060_personas_scheduled_jobs is the head on top of it now.
-    assert script.get_heads() == ["0060_personas_scheduled_jobs"]
+    # FDY-0591's 0060_personas_scheduled_jobs sits on top of it and hades #208 item 2
+    # (comment delivery) is numbered above that; the chain stays single and linear, with
+    # 0059 on 0058 in it.
+    heads = script.get_heads()
+    assert len(heads) == 1
+    chain = {r.revision for r in script.iterate_revisions(heads[0], "base")}
+    assert {"0059_rooms", "0060_personas_scheduled_jobs"} <= chain
     revision = script.get_revision("0059_rooms")
     assert revision is not None and revision.down_revision == "0058_memory_and_decisions"
     adr = REPO / "docs" / "adr" / "0031-rooms-hades-owns-the-transcript.md"
@@ -583,7 +588,9 @@ def test_the_orm_mirrors_0059_and_the_event_kinds_match_the_enum() -> None:
     } <= rooms
     for column in re.findall(r'sa\.Column\(\s*"(\w+)"', (REPO / m59.__file__).read_text()):
         assert column in rooms | set(Base.metadata.tables["room_turns"].columns.keys())
-    assert set(m59._event_kinds()) == {k.value for k in EventKind}
+    # 0059's kinds are all in the enum; the chain's head, 0061_comment_delivery now, owns
+    # the CHECK constraint and test_schema_hygiene holds it to the whole enum.
+    assert set(m59._event_kinds()) <= {k.value for k in EventKind}
 
 
 def test_the_room_routes_are_in_openapi() -> None:

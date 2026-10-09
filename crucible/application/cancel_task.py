@@ -9,6 +9,7 @@ minimum on verbatim).  Finding 01M4CFEK8DMF8V23ZB56ZC7S17.
 from __future__ import annotations
 
 from crucible.application.errors import NotFoundError
+from crucible.application.handoffs import HandoffAction, HandoffDirection, record_handoff
 from crucible.application.task_access import require_task_principal
 from crucible.application.transitions import move_task, record_event
 from crucible.contracts.api import CancelRequest
@@ -39,6 +40,18 @@ def cancel_task(
         principal=principal.name,
         task_id=task.id,
         payload=payload,
+    )
+    # hades #208 item 2: a cancel is a decision handed to Hades; the words are the
+    # cancel's verbatim, the principal the one who asked.
+    record_handoff(
+        uow,
+        clock,
+        task=task,
+        action=HandoffAction.CANCEL,
+        direction=HandoffDirection.FOUNDRY_TO_HADES,
+        principal=principal.name,
+        words=request.verbatim or request.reason,
+        detail={"decided_by": request.decided_by},
     )
     if task.state is TaskState.RUNNING:
         move_task(

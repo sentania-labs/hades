@@ -1,4 +1,4 @@
-"""/tasks (04): submit, list, get, start, cancel, events."""
+"""/tasks (04): submit, list, get, start, cancel, events, notes, questions."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from crucible.application.cancel_task import cancel_task
 from crucible.application.corrections import amend_task, attach_correction
 from crucible.application.decisions import record_decision, record_disposition
 from crucible.application.delivery_decisions import record_ci_decision, record_head_decision
+from crucible.application.minion_questions import answer_question
 from crucible.application.proposals import (
     approve_batch,
     approve_task,
@@ -36,6 +37,7 @@ from crucible.application.task_notes import add_note
 from crucible.contracts.api import (
     AcceptRequest,
     AmendRequest,
+    AnswerRequest,
     ApproveRequest,
     BatchApprovalView,
     BatchApproveRequest,
@@ -555,6 +557,52 @@ async def notes(
             verbatim=body.verbatim,
         )
         return 201, task_view(uow, task_id).model_dump(mode="json")
+
+    return await with_idempotency(
+        uow_factory=ctx.uow_factory,
+        clock=ctx.clock,
+        principal=principal,
+        key=idempotency_key,
+        body=raw,
+        scope=str(request.url.path),
+        produce=produce,
+    )
+
+
+@router.post("/{task_id}/questions/{question_id}/answer", response_model=TaskView)
+async def answer(
+    task_id: str,
+    question_id: str,
+    body: AnswerRequest,
+    request: Request,
+    ctx: Ctx,
+    principal: Mutator,
+    idempotency_key: IdemKey = None,
+) -> JSONResponse:
+    """hades #208 item 2: answer a worker's question in one call. The answer is recorded
+    on the question (who, when, the words) and brought back to the worker as a correction
+    version with the answer as its instructions, resumed from `resume_from`; a task that
+    cannot take a correction keeps the answer and closes its escalation with an
+    `escalation_answer` decision. Operator, admin or orchestrator; the task view returned
+    lists the question under `questions` with `answer_action` saying which happened."""
+    raw = await request.body()
+
+    async def produce(uow: UnitOfWork) -> tuple[int, dict[str, Any]]:
+        task, _question = answer_question(
+            uow,
+            ctx.clock,
+            principal=principal,
+            task_id=task_id,
+            question_id=question_id,
+            answer_text=body.answer_text,
+            resume_from=body.resume_from,
+            harnesses=ctx.harnesses,
+            harness_gates=ctx.harness_gates,
+            credential_sources=ctx.credential_sources,
+            secret_providers=ctx.secret_providers,
+            wired_providers=frozenset(provider.name for provider in ctx.providers),
+        )
+        return 200, task_view(uow, task.id).model_dump(mode="json")
 
     return await with_idempotency(
         uow_factory=ctx.uow_factory,

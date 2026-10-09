@@ -15,6 +15,7 @@ from crucible.application.acceptance import (
     deliverable_kinds,
     record_gate_acceptance,
 )
+from crucible.application.handoffs import HandoffAction, HandoffDirection, record_handoff
 from crucible.application.routing import load_attempt_routing
 from crucible.application.transitions import move_task, record_event
 from crucible.application.wakes import create_wake
@@ -300,16 +301,17 @@ def evaluate_and_advance(
                     "reason": "advisory_gate_failure",
                 },
             )
+            advisory_words = (
+                f"the blocking gates pass on {task.head_sha}; "
+                "an orchestrator review is required for advisory gate failures."
+                + reviewer_note(summary["for_reviewer"])
+            )
             create_wake(
                 uow,
                 clock,
                 principal_id=task.principal_id,
                 reason=WakeReason.INTERNAL_REVIEW_NEEDED,
-                summary=(
-                    f"the blocking gates pass on {task.head_sha}; "
-                    "an orchestrator review is required for advisory gate failures."
-                    + reviewer_note(summary["for_reviewer"])
-                ),
+                summary=advisory_words,
                 task=task,
                 attempt_id=attempt.id,
                 extra_links={
@@ -317,6 +319,19 @@ def evaluate_and_advance(
                     "gates": f"/v1/attempts/{attempt.id}/gates",
                 },
                 for_reviewer=summary["for_reviewer"],
+            )
+            # hades #208 item 2: Hades hands the acceptance decision to Foundry.
+            record_handoff(
+                uow,
+                clock,
+                task=task,
+                action=HandoffAction.ACCEPT,
+                direction=HandoffDirection.HADES_TO_FOUNDRY,
+                principal=PRINCIPAL_CRUCIBLE,
+                words=advisory_words,
+                execution_id=execution.id,
+                attempt_id=attempt.id,
+                detail={"head_sha": task.head_sha, "for_reviewer": summary["for_reviewer"]},
             )
         return outcomes
     move_task(

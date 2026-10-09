@@ -11,6 +11,7 @@ from crucible.application.errors import (
     NotFoundError,
     TransitionNotAllowedError,
 )
+from crucible.application.handoffs import HandoffAction, HandoffDirection, record_handoff
 from crucible.application.task_access import require_task_principal
 from crucible.application.transitions import move_task, record_event, require_contract
 from crucible.application.wakes import create_wake
@@ -123,6 +124,18 @@ def record_acceptance(
             "verdict": request.verdict.value,
             "reasoning": request.reasoning,
         },
+    )
+    # hades #208 item 2: the acceptance decision is Foundry's (or the operator's) hand
+    # to Hades; the handoff carries who, the local time and the reasoning as written.
+    record_handoff(
+        uow,
+        clock,
+        task=task,
+        action=HandoffAction.ACCEPT,
+        direction=HandoffDirection.FOUNDRY_TO_HADES,
+        principal=principal.name,
+        words=request.reasoning,
+        detail={"verdict": request.verdict.value, "head_sha": head, "acceptance_id": result.id},
     )
     if request.verdict is AcceptanceVerdict.REJECTED:
         move_task(

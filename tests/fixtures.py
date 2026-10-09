@@ -262,3 +262,21 @@ def promote_for_test(
                 reason=reason,
             )
         )
+
+
+def migration_by_slug(slug: str) -> Any:
+    """The alembic `Script` of the one revision whose id ends in `_<slug>`.
+
+    A branch's new migration is numbered provisionally: Hades renumbers it past main's
+    highest and points it at main's head when it merges main into the branch (hades
+    #447, CONTRIBUTING). A test that imports the module by its number breaks at
+    collection the moment that happens, so tests find the revision by its slug."""
+    from alembic.script import ScriptDirectory  # noqa: PLC0415
+
+    from crucible.adapters.persistence import migrate  # noqa: PLC0415
+
+    script = ScriptDirectory.from_config(migrate.alembic_config("postgresql://unused/unused"))
+    matches = [r for r in script.walk_revisions() if r.revision.endswith(f"_{slug}")]
+    if len(matches) != 1:
+        raise AssertionError(f"expected one revision ending in _{slug}, found {matches}")
+    return matches[0]

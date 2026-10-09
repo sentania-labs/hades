@@ -22,6 +22,7 @@ from typing import Any
 from crucible.application.auto_merge import auto_merge_enabled, certified_jobs_green
 from crucible.application.ci_junit import JUnitFindings, junit_sentence
 from crucible.application.decisions import open_escalation
+from crucible.application.handoffs import HandoffAction, HandoffDirection, record_handoff
 from crucible.application.publish import (
     external_review_trigger,
     open_review_cycle,
@@ -58,7 +59,7 @@ from crucible.domain.entities import (
     Task,
     TaskContract,
 )
-from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
+from crucible.domain.events import PRINCIPAL_CRUCIBLE, PRINCIPAL_GITHUB, EventKind
 from crucible.domain.external_review import (
     CLEAN_REACTION,
     Cycle,
@@ -1445,6 +1446,18 @@ def settle_pull_request_state(
             summary += head_check
         elif early:
             summary += f", before Crucible saw it ready for merge (the task was {merged_from})"
+        # hades #208 item 2: the merge observed on GitHub is the action handed back to
+        # Hades, under the name of whoever merged.
+        record_handoff(
+            uow,
+            clock,
+            task=task,
+            action=HandoffAction.MERGE,
+            direction=HandoffDirection.FOUNDRY_TO_HADES,
+            principal=pull_request.merged_by or PRINCIPAL_GITHUB,
+            words=summary,
+            detail={"pull_request": pull_request.number, "merge_sha": pull_request.merge_sha},
+        )
         if not head_matches or checkpoint or later_push is not None:
             if not head_matches:
                 problem = "What was merged is not a head Crucible pushed"
@@ -2073,14 +2086,27 @@ def advance_delivery(
                     "detail": certification.detail,
                 },
             )
+            ready_words = ready_summary(uow, task, pull_request, certification, gates)
             create_wake(
                 uow,
                 clock,
                 principal_id=task.principal_id,
                 reason=WakeReason.READY_FOR_MERGE,
-                summary=ready_summary(uow, task, pull_request, certification, gates),
+                summary=ready_words,
                 task=task,
                 extra_links={"pull_request": f"/v1/tasks/{task.id}/pull-request"},
+            )
+            # hades #208 item 2: the merge is handed to Foundry with Hades's own sentence,
+            # which says whether Hades will merge or the operator performs it.
+            record_handoff(
+                uow,
+                clock,
+                task=task,
+                action=HandoffAction.MERGE,
+                direction=HandoffDirection.HADES_TO_FOUNDRY,
+                principal=PRINCIPAL_CRUCIBLE,
+                words=ready_words,
+                detail={"pull_request": pull_request.number, "head_sha": certification.head_sha},
             )
 
 

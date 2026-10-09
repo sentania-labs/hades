@@ -21,6 +21,7 @@ from crucible.adapters.persistence.migrations.versions import _0043_proposed_tas
 from crucible.adapters.persistence.migrations.versions import (
     _0044_merge_runtime_settings_proposals as merge_423_424,
 )
+from tests.fixtures import migration_by_slug
 
 REPO = Path(__file__).resolve().parents[2]
 MERGE = "0045_merge_0044_heads"
@@ -35,11 +36,14 @@ MERGED = {"0044_attempt_stall_shape", "0044_editor_leftovers_policy", "0044_merg
 # 0055_task_notes for operator notes on a task. hades #447 adds 0056 for the schema a
 # pull request's migrations touch; it was written as 0052, renumbered past main's 0053
 # at one merge-main, past 0054 at the next and past #489's 0055 at the one after, which
-# is the provisional numbering #447 itself describes. hades #208 adds 0058 for the shared
-# memory store and the decision ledger; its number is the one Hades assigned and its
-# down_revision is provisional until merge. hades #208 then adds 0059_rooms on top for the
-# rooms and their transcripts, numbered and provisional the same way. FDY-0591 adds
-# assigned revision 0060 for personas and scheduled jobs on top of 0059_rooms.
+# is the provisional numbering #447 itself describes. hades #208 adds 0058 for the
+# shared memory store and the decision ledger and 0059_rooms on top for the rooms and
+# their transcripts, each the number Hades assigned. FDY-0591 adds assigned revision 0060
+# for personas and scheduled jobs on top of 0059_rooms. hades #208 item 2 (comment
+# delivery: note delivery states, minion questions and handoffs) was assigned 0057 but
+# reached main after all three, so it is numbered past 0060 and chains from
+# 0060_personas_scheduled_jobs; the merge-main of #447 may renumber it again, so its id
+# is read from the chain by its slug, not pinned.
 ABOVE = "0046_blocked_reason"
 PROBE = "0047_attempt_egress_probe"
 LAUNCH = "0047_successful_launch_time"
@@ -54,7 +58,9 @@ TASK_NOTES = "0055_task_notes"
 SCHEMA_OVERLAP = "0056_pull_request_schema_overlap"
 MEMORY = "0058_memory_and_decisions"
 ROOMS = "0059_rooms"
-HEAD = "0060_personas_scheduled_jobs"
+PERSONAS = "0060_personas_scheduled_jobs"
+COMMENT_DELIVERY = migration_by_slug("comment_delivery").revision
+HEAD = COMMENT_DELIVERY
 
 
 def _script() -> ScriptDirectory:
@@ -103,8 +109,10 @@ def test_the_0045_merge_joins_the_three_0044_heads() -> None:
     assert memory is not None and memory.down_revision == SCHEMA_OVERLAP
     rooms = script.get_revision(ROOMS)
     assert rooms is not None and rooms.down_revision == MEMORY
+    personas = script.get_revision(PERSONAS)
+    assert personas is not None and personas.down_revision == ROOMS
     head = script.get_revision(HEAD)
-    assert head is not None and head.down_revision == ROOMS
+    assert head is not None and head.down_revision == PERSONAS
 
 
 def test_the_cli_config_sees_the_same_single_head() -> None:
@@ -132,7 +140,7 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
         plan = [step.revision.revision for step in script._upgrade_revs("head", head)]
         assert plan.index("0043_credential_mount_mode") < plan.index("0044_merge_423_424")
         assert plan.index("0044_merge_423_424") < plan.index(MERGE)
-        assert plan[-19:] == [
+        assert plan[-20:] == [
             "0043_credential_mount_mode",
             "0044_merge_423_424",
             ("0044_editor_leftovers_policy", "0044_attempt_stall_shape")[
@@ -153,6 +161,7 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
             SCHEMA_OVERLAP,
             MEMORY,
             ROOMS,
+            PERSONAS,
             HEAD,
         ]
 

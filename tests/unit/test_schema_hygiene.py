@@ -23,12 +23,19 @@ def test_no_secret_bearing_column_names() -> None:
 
 
 def test_migration_event_kinds_match_enum() -> None:
-    from crucible.adapters.persistence.migrations.versions import (  # noqa: PLC0415
-        _0059_rooms as m,
-    )
+    from alembic.script import ScriptDirectory  # noqa: PLC0415
 
-    # The latest migration owns the current CHECK constraint (10).
-    assert set(m._event_kinds()) == {k.value for k in EventKind}
+    from crucible.adapters.persistence import migrate  # noqa: PLC0415
+
+    # The latest migration owns the current CHECK constraint (10). It is reached through
+    # the chain's head, not imported by number: a new migration's number is provisional
+    # until merge (hades #447), and a pinned import breaks at collection when it changes.
+    script = ScriptDirectory.from_config(migrate.alembic_config("postgresql://unused/unused"))
+    current = script.get_current_head()
+    assert current is not None
+    head = script.get_revision(current)
+    assert head is not None
+    assert set(head.module._event_kinds()) == {k.value for k in EventKind}
 
 
 def test_openapi_generates_from_the_pydantic_models() -> None:
