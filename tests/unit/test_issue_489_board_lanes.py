@@ -120,7 +120,7 @@ def test_card_fields_scott_question_and_graveyard_replacement() -> None:
             row(
                 task_id=blocked.id,
                 opened_at=NOW - timedelta(minutes=3),
-                kind="design_question",
+                reason="design_question",
                 question="Which layout should we use? More context follows.",
             )
         ]

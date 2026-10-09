@@ -9,7 +9,12 @@ from datetime import datetime
 from typing import Any
 
 from crucible.application.admin.board import age_words
-from crucible.application.admin.stuck import STUCK_EVENT_KINDS, is_operator_question, stuck_facts
+from crucible.application.admin.stuck import (
+    STUCK_EVENT_KINDS,
+    ci_cause_for_event,
+    is_operator_question,
+    stuck_facts,
+)
 from crucible.application.personas_jobs import inbox_run, run_findings
 from crucible.application.queries import board_batch_records, board_imported_attempts
 from crucible.domain.entities import PullRequestState
@@ -308,6 +313,23 @@ def board_lanes_view(
         if task_ids
         else {}
     )
+    ci_events = {
+        task.id: event
+        for task in built
+        if task.state is _S.CI_CERTIFICATION_FAILED
+        and (event := events.get((task.id, EventKind.CI_CERTIFICATION_RECORDED.value))) is not None
+    }
+    certification_ids = [
+        str(event.payload["certification_id"])
+        for event in ci_events.values()
+        if (event.payload or {}).get("certification_id")
+    ]
+    decisions = getattr(uow, "ci_decisions", None)
+    ci_decisions = (
+        decisions.list_for_certifications(certification_ids)
+        if certification_ids and decisions is not None
+        else ()
+    )
     tasks_by_external = {task.external_id: task for task in tasks}
     live_external = {
         task.external_id for task in tasks if LANE_BY_STATE[task.state] not in COLLAPSED_LANES
@@ -348,6 +370,7 @@ def board_lanes_view(
                         if (event := events.get((task.id, kind))) is not None
                     },
                     other_tasks=live_external,
+                    ci_cause=ci_cause_for_event(ci_events.get(task.id), ci_decisions),
                 )
             )
             if lane_key in REASON_LANES or task.state is _S.AWAITING_INTERNAL_REVIEW

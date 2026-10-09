@@ -91,3 +91,16 @@ questions on work that is not stuck.
 start and heartbeat in Central time, its log, and the identifiers under Details).
 `/ui/tasks` (All tasks) renders the same sections as before through `work.html`, whose
 tables fold into labelled rows below 700 px, so neither page scrolls sideways on a phone.
+
+Stuck ownership reads the escalation's persisted `reason`, including `decision`,
+`design`, `design_question` and `decision_question` for operator questions. Callers
+asking the operator to decide a branch or merge conflict record `decision`; a missing
+reason and worker blockers remain Foundry's. No ownership is inferred from question
+wording. Existing unclassified escalations remain with Foundry because their intended
+audience was not recorded.
+
+Both the board and card use only the CI diagnosis whose `ci_certification_id` matches
+the latest `ci_certification_recorded` event's `certification_id`. An undiagnosed new
+certification waits on Foundry, even if a previous head needed a worker correction.
+The board loads these diagnoses in one query. A blocked event older than the latest
+schedule or retry belongs to the previous attempt and cannot hide a current failure.

@@ -8,6 +8,7 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from crucible.domain.entities import CIDecision
 from crucible.domain.events import EventKind
 from crucible.domain.lifecycle import TASK_TERMINAL
 from crucible.domain.stuck_reasons import (
@@ -35,9 +36,7 @@ def is_operator_question(escalation: Any) -> bool:
     """An escalation addressed to the operator rather than to Foundry."""
     if escalation is None:
         return False
-    kind = str(
-        getattr(escalation, "kind", None) or getattr(escalation, "reason", None) or ""
-    ).lower()
+    kind = str(getattr(escalation, "reason", None) or "").lower()
     return kind in OPERATOR_QUESTION_KINDS
 
 
@@ -92,7 +91,7 @@ def stuck_facts(
         question=question,
         for_operator=is_operator_question(escalation),
         blocked_reason=str((blocked.payload or {}).get("reason") or "") or None
-        if blocked is not None
+        if blocked is not None and _seq(blocked) > scheduled
         else None,
         harness_refused=refused is not None and _seq(refused) > scheduled,
         failing_gates=tuple(str(g) for g in ((gates.payload or {}).get("failing") or []))
@@ -119,15 +118,29 @@ def task_stuck_reason(uow: UnitOfWork, task: Any, escalation: Any | None) -> Stu
             if other is not None and other.id != task.id and other.state not in TASK_TERMINAL:
                 others.append(candidate)
     decisions = getattr(uow, "ci_decisions", None)
-    cause = None
-    if decisions is not None and hasattr(decisions, "list_for_task"):
-        latest = max(decisions.list_for_task(task.id), key=lambda row: row.created_at, default=None)
-        cause = str(latest.cause) if latest is not None else None
+    ci = events.get(EventKind.CI_CERTIFICATION_RECORDED.value)
+    cause = ci_cause_for_event(
+        ci, decisions.list_for_task(task.id) if ci is not None and decisions is not None else ()
+    )
     return stuck_reason(stuck_facts(task, escalation, events, other_tasks=others, ci_cause=cause))
+
+
+def ci_cause_for_event(event: Any | None, decisions: Iterable[CIDecision]) -> str | None:
+    """Only a diagnosis for this certification can explain its failure."""
+    certification_id = (event.payload or {}).get("certification_id") if event is not None else None
+    if not certification_id:
+        return None
+    latest = max(
+        (row for row in decisions if row.ci_certification_id == certification_id),
+        key=lambda row: (row.created_at, row.id),
+        default=None,
+    )
+    return str(latest.cause) if latest is not None else None
 
 
 __all__ = [
     "STUCK_EVENT_KINDS",
+    "ci_cause_for_event",
     "failing_jobs",
     "is_operator_question",
     "stuck_facts",

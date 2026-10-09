@@ -6,6 +6,7 @@ Foundry and needs_me counts only the first; Workers and All tasks fold to phone 
 from __future__ import annotations
 
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -16,7 +17,12 @@ from crucible.adapters.ui.pages import proposals as proposals_page
 from crucible.adapters.ui.pages import workers as ui_workers
 from crucible.adapters.ui.pages.work import work_page
 from crucible.adapters.ui.render import templates
-from crucible.application.admin.stuck import failing_jobs, stuck_facts
+from crucible.application.admin.stuck import (
+    failing_jobs,
+    is_operator_question,
+    stuck_facts,
+    task_stuck_reason,
+)
 from crucible.application.board_actions import apply_move
 from crucible.application.board_resource import board_resource
 from crucible.application.transitions import record_event
@@ -34,7 +40,13 @@ from crucible.domain.stuck_reasons import (
 from tests.fixtures import FakeClock
 from tests.unit.test_board import NOW as BOARD_NOW
 from tests.unit.test_board import Repo, row
-from tests.unit.test_issue_360_ready_for_merge_correction import NOW
+from tests.unit.test_issue_360_ready_for_merge_correction import NOW, OLD_HEAD
+from tests.unit.test_issue_379_merge_during_publish import (
+    _correcting,
+    _merged,
+    _open,
+    _publish,
+)
 from tests.unit.test_issue_424_proposed_tasks import OPERATOR as PROPOSAL_OPERATOR
 from tests.unit.test_issue_424_proposed_tasks import _propose
 from tests.unit.test_issue_424_proposed_tasks import _store as proposal_store
@@ -237,13 +249,13 @@ def _two_stuck_tasks() -> tuple[Any, Any, Any]:
     )
     uow.escalations = Repo(
         [
-            row(
+            Escalation(
                 id="e1",
                 task_id=mine.id,
+                attempt_id=None,
                 state=EscalationState.OPEN,
                 opened_at=BOARD_NOW - timedelta(minutes=3),
-                kind="design_question",
-                reason=None,
+                reason="design_question",
                 question=QUESTION,
             ),
             row(
@@ -511,3 +523,107 @@ def test_the_all_tasks_page_folds_tables_into_labelled_rows(
     assert 'data-label="Order"' in html
     assert "Importing a duplicate ID must fail with 409" in html
     assert html.count("<summary>Details</summary>") <= 1
+
+
+@pytest.mark.parametrize("race", ["poll", "lookup"])
+def test_production_decision_escalations_persist_operator_routing(
+    tmp_path: Path, race: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, clock, supervisor, github, publisher = _correcting(tmp_path)
+    if race == "poll":
+        github.polled = _merged(OLD_HEAD)
+        clock.advance(300)
+
+        async def poll_during_push() -> object:
+            return await supervisor.delivery.observe()
+
+        publisher.during_push = poll_during_push
+    else:
+        github.lookups = [_open(OLD_HEAD), _merged(OLD_HEAD)]
+    assert _publish(supervisor) == 0
+    [escalation] = store.escalations.rows
+    assert isinstance(escalation, Escalation)
+    assert escalation.reason == "decision"
+    assert is_operator_question(escalation)
+    # Exercise the persisted discriminator on an active stuck card too.
+    card_store = store_for(_S.BLOCKED)
+    escalation.task_id = TASK_ID
+    card_store.escalations.add(escalation)
+    html = render_card_html(card_store, OPERATOR, monkeypatch)
+    assert "Whose move: You" in html
+    assert 'value="answer"' in html
+
+
+@pytest.mark.parametrize(
+    "schedule_kind", [EventKind.TASK_SCHEDULED, EventKind.TASK_RETRY_SCHEDULED]
+)
+@pytest.mark.parametrize("state", [_S.PRE_PR_GATES_FAILED, _S.CI_CERTIFICATION_FAILED])
+def test_rescheduled_task_ignores_the_previous_blocker(
+    schedule_kind: EventKind, state: TaskState
+) -> None:
+    facts = stuck_facts(
+        task(1, state),
+        None,
+        {
+            EventKind.TASK_BLOCKED.value: row(seq=1, payload={"reason": "gate_proves_nothing"}),
+            schedule_kind.value: row(seq=2, payload={}),
+        },
+    )
+    found = stuck_reason(facts)
+    assert facts.blocked_reason is None
+    assert found is not None and found.key == state.value
+
+
+class _CIDecisions(Repo):
+    def list_for_certifications(self, ids: list[str]) -> list[Any]:
+        return [item for item in self.rows if item.ci_certification_id in ids]
+
+
+@pytest.mark.parametrize(
+    ("certification_id", "owner"),
+    [("current-ci", Owner.WORKER), ("previous-ci", Owner.FOUNDRY), (None, Owner.FOUNDRY)],
+)
+@pytest.mark.parametrize("unrelated", [False, True])
+def test_board_and_detail_use_only_the_current_ci_diagnosis(
+    certification_id: str | None, owner: Owner, unrelated: bool
+) -> None:
+    uow, _calls = fixture(0)
+    failed = task(1, _S.CI_CERTIFICATION_FAILED)
+    uow.tasks.rows = [failed]
+    uow.contracts = Repo([row(task_id=failed.id, version=1, document={})])
+    event = row(
+        task_id=failed.id,
+        seq=8,
+        ts=BOARD_NOW,
+        kind=EventKind.CI_CERTIFICATION_RECORDED.value,
+        payload={"certification_id": "current-ci", "failure": {"check": "unit"}},
+    )
+    uow.events = Events([event])
+    uow.events.latest_for_task_kind = lambda _id, kind: event if kind == event.kind else None
+    uow.ci_decisions = _CIDecisions(
+        [
+            row(
+                id="d1",
+                task_id=failed.id,
+                ci_certification_id=certification_id,
+                cause="implementation_defect",
+                created_at=BOARD_NOW,
+            ),
+            # A newer decision for an unrelated certification must not replace the match.
+            row(
+                id="d2",
+                task_id=failed.id,
+                ci_certification_id="unrelated-ci",
+                cause="flaky_test",
+                created_at=BOARD_NOW + timedelta(seconds=1),
+            ),
+        ]
+    )
+    if not unrelated:
+        uow.ci_decisions.rows.pop()
+    detail = task_stuck_reason(uow, failed, None)
+    assert detail is not None and detail.owner is owner
+    document = board_resource(uow, BOARD_NOW, _operator())
+    [card] = next(lane for lane in document["lanes"] if lane["key"] == "stuck")["cards"]
+    assert card["stuck"] == detail.as_dict()
+    assert "the unit job failed" in card["stuck"]["sentence"]

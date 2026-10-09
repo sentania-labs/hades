@@ -184,7 +184,7 @@ def test_waiting_on_me_card_with_pull_request_keeps_answer() -> None:
                 task_id=waiting.id,
                 state=EscalationState.OPEN,
                 opened_at=NOW - timedelta(minutes=3),
-                kind="decision",
+                reason="decision",
                 question="Which layout should we use?",
             )
         ]
