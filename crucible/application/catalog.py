@@ -1,4 +1,4 @@
-"""Catalog loader: reads config/catalog.yaml, validates schema and values.
+"""Catalog loader: reads catalog.yaml bundled inside the package, validates schema and values.
 
 Refuses unknown kinds, credential_ref values that look like secrets, and
 any field that does not match the documented schema.
@@ -14,10 +14,6 @@ from typing import Any
 import yaml
 
 from crucible.domain.secrets import scan_text
-
-CATALOG_PATH = Path(__file__).resolve().parents[3] / "config" / "catalog.yaml"
-
-VALID_KINDS = frozenset({"mcp_server", "cli", "script"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +53,12 @@ class Catalog:
     skills: list[SkillEntry]
     tools: list[ToolEntry]
     errors: list[CatalogError] = field(default_factory=list)
+
+
+VALID_KINDS = frozenset({"mcp_server", "cli", "script"})
+
+# The catalog YAML lives in the package so it is always present at runtime.
+_CATALOG_DIR = Path(__file__).resolve().parent
 
 
 def _check_secret(value: str, field: str) -> CatalogError | None:
@@ -139,7 +141,7 @@ def _validate_tool(data: dict[str, Any]) -> list[CatalogError]:
             )
     # credential_ref must look like a name (no whitespace, no colons)
     cr = data["credential_ref"]
-    if re.search(r"\s", cr) or ":" in cr:
+    if isinstance(cr, str) and (re.search(r"\s", cr) or ":" in cr):
         errors.append(
             CatalogError(
                 path="credential_ref",
@@ -167,10 +169,10 @@ def _validate_tool(data: dict[str, Any]) -> list[CatalogError]:
 def load_catalog(path: Path | None = None) -> Catalog:
     """Read, validate, and return the catalog from *path*.
 
-    The path defaults to ``config/catalog.yaml`` relative to the project
-    root (the directory that contains ``crucible/``).
+    The path defaults to the bundled ``catalog.yaml`` inside the
+    ``crucible.application`` package.
     """
-    loc = path or CATALOG_PATH
+    loc = path or _CATALOG_DIR / "catalog.yaml"
     raw = loc.read_text(encoding="utf-8")
     data = yaml.safe_load(raw)
     if data is None:

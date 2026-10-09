@@ -11,9 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from crucible.adapters.catalog.loader import (
-    load_catalog,
-)
+from crucible.application.catalog import load_catalog
 
 
 @dataclass(frozen=True, slots=True)

@@ -11,14 +11,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from crucible.adapters.catalog.loader import (
+from crucible.adapters.ui.pages import catalog as catalog_page_module
+from crucible.application.admin.catalog import view
+from crucible.application.catalog import (
     _check_secret,
     _validate_skill,
     _validate_tool,
     load_catalog,
 )
-from crucible.adapters.ui.pages import catalog as catalog_page_module
-from crucible.application.admin.catalog import view
 from crucible.domain.secrets import match_text
 
 
@@ -162,6 +162,20 @@ class TestValidateTool:
             }
         )
         assert any("colons" in e.message or "colon" in e.message for e in errors)
+
+    def test_non_string_credential_ref_does_not_crash(self) -> None:
+        """A non-string credential_ref must not cause TypeError on re.search."""
+        errors = _validate_tool(
+            {
+                "name": "x",
+                "kind": "cli",
+                "command": "x",
+                "credential_ref": 123,
+            }
+        )
+        # Should get the type error, not a TypeError from re.search
+        assert len(errors) > 0
+        assert any(e.path == "credential_ref" for e in errors)
 
     def test_mcp_server_rejects_command(self) -> None:
         errors = _validate_tool(
