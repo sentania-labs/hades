@@ -243,7 +243,12 @@ async def stream(
     async def events() -> AsyncIterator[str]:
         sent: dict[int, int] = {}
         ended: set[int] = set()
-        floor = after_seq
+        # A reconnect names the last turn the client saw. Keep an open turn at that
+        # sequence in the query so its current text, later deltas and turn_end are
+        # replayed. An ended turn needs no replay and can remain behind the floor.
+        with ctx.uow_factory() as fresh:
+            resume_turn = fresh.room_turns.get(room_id, after_seq) if after_seq else None
+        floor = after_seq - 1 if resume_turn is not None and resume_turn.open else after_seq
         state: RoomState | None = None
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max_seconds

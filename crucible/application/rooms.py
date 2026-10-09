@@ -55,7 +55,6 @@ from crucible.domain.memory import normalize_tags, recall, subject_keywords
 from crucible.domain.room_session import (
     DECISION_LIMIT,
     RECALL_LIMIT,
-    SUMMARY_LINES,
     VERBATIM_TURNS,
     CardContext,
     SessionStart,
@@ -105,9 +104,6 @@ STALE_RUNNER = timedelta(seconds=POLL_SECONDS * 4)
 SEEN_EVERY = timedelta(seconds=10)
 IDLE_SETTING = "rooms.idle_timeout"
 IDLE_FIELD = "minutes"
-# Up to this many of the room's newest turns are read for the session start: the
-# verbatim window and the summary's lines, with room to spare.
-SESSION_TURNS_READ = VERBATIM_TURNS + SUMMARY_LINES * 5
 DEFAULT_EGRESS: tuple[str, ...] = ("api.anthropic.com", "pypi.org", "files.pythonhosted.org")
 
 
@@ -701,7 +697,7 @@ def session_start(
     record: the user turns not yet handed out are left for the inbox to deliver."""
     turns = [
         t
-        for t in uow.room_turns.list_for_room(room.id, limit=SESSION_TURNS_READ)
+        for t in uow.room_turns.list_for_room(room.id)
         if not (t.role is TurnRole.USER and t.seq > room.inbox_cursor)
     ]
     card = _card_context(uow, room)

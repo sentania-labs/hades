@@ -440,27 +440,35 @@ class RoomRunner:
 
         async def watch() -> None:
             nonlocal interrupted
-            while not done.is_set():
-                try:
+            try:
+                while not done.is_set():
                     inbox = await asyncio.to_thread(self.hades.inbox, self.config.turn_poll_seconds)
-                except HadesError as exc:
-                    if exc.status in GONE:
-                        self.stopping = True
+                    control = inbox.get("control")
+                    if control in ("interrupt", "stop"):
                         interrupted = True
+                        if control == "stop":
+                            self.stopping = True
                         await client.interrupt()
                         return
-                    raise
-                control = inbox.get("control")
-                if control in ("interrupt", "stop"):
+                    # A reply that pauses still reaches the stream within a poll.
+                    await flush()
+                    if not self.config.turn_poll_seconds:
+                        await asyncio.sleep(0.01)
+            except HadesError as exc:
+                if exc.status in GONE:
+                    self.stopping = True
                     interrupted = True
-                    if control == "stop":
-                        self.stopping = True
                     await client.interrupt()
                     return
-                # A reply that pauses still reaches the stream within a poll.
-                await flush()
-                if not self.config.turn_poll_seconds:
-                    await asyncio.sleep(0.01)
+                interrupted = True
+                with contextlib.suppress(BaseException):
+                    await client.interrupt()
+                raise
+            except BaseException:
+                interrupted = True
+                with contextlib.suppress(BaseException):
+                    await client.interrupt()
+                raise
 
         watcher = asyncio.create_task(watch())
         try:
@@ -498,9 +506,10 @@ class RoomRunner:
         finally:
             # The watcher's poll in flight is let finish, not cancelled: a poll that
             # outlived its task could be handed the next message after this turn ends.
+            # Its failure is part of the turn: propagating it prevents the runner from
+            # continuing a response with no way to observe interrupt or stop controls.
             done.set()
-            with contextlib.suppress(BaseException):
-                await watcher
+            await watcher
         await flush(force=True)
         end: dict[str, Any] = {"kind": "end", "interrupted": interrupted}
         if not streamed and final_text:

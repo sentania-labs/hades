@@ -801,6 +801,8 @@ def test_inject_stream_interrupt_idle_reclaim_and_switch_end_to_end() -> None:
     runner.events(rid, 4, {"kind": "delta", "text": "First"})
     streamed = _sse(api.client.get(f"/v1/rooms/{rid}/stream?after_seq=3&max_seconds=1").text)
     assert ("turn", streamed[1][1]) == streamed[1] and streamed[1][1]["text"] == "First"
+    reconnected = _sse(api.client.get(f"/v1/rooms/{rid}/stream?after_seq=4&max_seconds=1").text)
+    assert any(event == "turn" and data["seq"] == 4 for event, data in reconnected)
 
     # Interrupt: the runner reads `interrupt` once, then ends the turn as interrupted.
     interrupted = api.client.post(f"/v1/rooms/{rid}/interrupt")
@@ -1319,6 +1321,31 @@ def test_the_runner_rebuilds_a_resumed_client_when_the_child_dies() -> None:
     assert turn.interrupted and turn.text == "par" and turn.ended_at is not None
 
 
+def test_an_interrupt_watcher_failure_stops_the_model_and_propagates() -> None:
+    api = _Api()
+    room = api.create()
+    rid = room["id"]
+    api.say(rid, "long: keep going")
+    runner, clients = _runner(api, rid)
+
+    async def drive() -> None:
+        client = await runner.client_factory(None)
+        message = await asyncio.to_thread(runner.hades.inbox, 0)
+
+        def failed_poll(_wait: int) -> dict[str, Any]:
+            raise room_runner.HadesError(503, "temporary inbox failure")
+
+        runner.hades.inbox = failed_poll  # type: ignore[assignment]
+        with pytest.raises(room_runner.HadesError, match="temporary inbox failure"):
+            await runner.answer(client, message["message"])
+
+    asyncio.run(drive())
+    assert clients[0].interrupted.is_set()
+    # A failed watcher must not post a successful end and move the room back to warm.
+    assert cast(RoomTurn, api.store.room_turns.get(rid, 2)).open
+    assert api.room(rid).state is RoomState.WARM
+
+
 # ----- AC3: the session start -----------------------------------------------------------
 
 
@@ -1482,6 +1509,21 @@ def test_the_rolling_summary_covers_exactly_the_older_turns() -> None:
     )
     assert "5 earlier turns" in start.summary and "- #5 " in start.summary
     assert "- #6 " not in start.summary and "[#6 Hades" in start.turns
+
+
+def test_session_start_summarizes_the_complete_transcript_before_its_window() -> None:
+    store = _Store()
+    turns = _turns(260)
+    store.room_turns.rows.extend(turns)
+    room = replace(_room(), inbox_cursor=260)
+    start = session_start(store.uow(), room, identity=IDENTITY)
+    assert (
+        "240 earlier turns, from 2026-10-09 10:01 AM CDT to 2026-10-09 2:00 PM CDT."
+        in start.summary
+    )
+    assert "(200 older turns are not shown.)" in start.summary
+    assert "- #201 " in start.summary and "- #240 " in start.summary
+    assert "[#241 " in start.turns and "[#260 " in start.turns
 
 
 def test_the_session_start_is_the_same_assembly_for_every_room_kind() -> None:
