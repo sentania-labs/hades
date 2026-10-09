@@ -25,7 +25,7 @@ from tests.unit.test_issue_489_card_actions import (
 
 PROBE = {
     "hosts": [
-        {"host": "github.com", "reachable": True, "curl_exit": 0},
+        {"host": "github.com", "reachable": True, "curl_exit": 0, "ms": 120},
         {"host": "pypi.org", "reachable": False, "curl_exit": 28, "detail": "Timeout"},
     ],
     "recorded_at": NOW.isoformat(),
@@ -80,7 +80,15 @@ def test_the_egress_rows_name_each_probed_host() -> None:
     view = SimpleNamespace(
         executions=[SimpleNamespace(attempts=[SimpleNamespace(id="A1", egress_probe=PROBE)])]
     )
-    assert board_page.egress_rows(view) == [
-        ["A1", "github.com", "reachable"],
-        ["A1", "pypi.org", "unreachable (curl 28: Timeout)"],
-    ]
+    rows = board_page.egress_rows(view)
+    assert len(rows) == 2
+    assert rows[0]["attempt_id"] == "A1"
+    assert rows[0]["host"] == "github.com"
+    assert rows[0]["result"] == "reachable"
+    assert rows[0]["ms"] == 120
+    assert rows[0]["detail"] == ""
+    assert rows[0]["recorded_at"] is not None
+    assert rows[1]["host"] == "pypi.org"
+    assert rows[1]["result"] == "unreachable (curl 28: Timeout)"
+    assert rows[1]["ms"] is None
+    assert rows[1]["detail"] == "Timeout"
