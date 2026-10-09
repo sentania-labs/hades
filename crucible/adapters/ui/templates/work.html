@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% import "page.html" as page with context %}
 {% macro work_table(section) -%}
-  <table class="work-table"><thead><tr>{% for column in section.columns %}<th>{{ column }}</th>{% endfor %}</tr></thead><tbody>
+  <table class="work-table neon-table"><thead><tr>{% for column in section.columns %}<th>{{ column }}</th>{% endfor %}</tr></thead><tbody>
   {% for row in section.rows %}<tr>{% for cell in row %}<td data-label="{{ section.columns[loop.index0] }}">{{ page.render_cell(cell, section.columns[loop.index0]) }}</td>{% endfor %}</tr>{% endfor %}
   </tbody></table>
 {%- endmacro %}
@@ -48,7 +48,6 @@
     .work-table td { display: grid; grid-template-columns: minmax(0, 6.5rem) minmax(0, 1fr); gap: 6px; padding: 3px 0; border: 0; }
     .work-table td::before { content: attr(data-label); color: var(--ink-subtle); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
     .work-page .admin-table td { padding: 3px 0; border: 0; white-space: normal; }
-    .work-page .admin-table-wrap, .work-page .lat-table-scroll { overflow-x: visible; }
     .work-page pre, .work-page code { white-space: pre-wrap; overflow-wrap: anywhere; }
     .work-page .admin-form-grid { grid-template-columns: minmax(0, 1fr); }
     .work-page input, .work-page select, .work-page textarea { max-width: 100%; box-sizing: border-box; }
@@ -68,7 +67,7 @@
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="return_to" value="{{ section.form.return_to or active }}">
       <div class="admin-form-grid">{% for field in section.form.fields %}{% if field.kind == "grid" %}<div class="admin-form-wide">{% if field.label %}<span class="lat-label">{{ field.label }}</span>{% endif %}
-        <table class="work-table"><thead><tr>{% for column in field.columns %}<th>{{ column }}</th>{% endfor %}</tr></thead><tbody>
+        <table class="work-table neon-table"><thead><tr>{% for column in field.columns %}<th>{{ column }}</th>{% endfor %}</tr></thead><tbody>
         {% for row in field.rows %}<tr>{% for cell in row %}<td data-label="{{ field.columns[loop.index0] }}">{% if cell.kind == "select" %}<select class="lat-select" name="{{ cell.name }}" aria-label="{{ cell.label or cell.name }}">{% for value, label in cell.options %}<option value="{{ value }}" {% if value == cell.value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
           {% elif cell.kind == "checkbox" %}<input type="checkbox" name="{{ cell.name }}" value="true" aria-label="{{ cell.label or cell.name }}" {% if cell.value %}checked{% endif %}>
           {% elif cell.kind == "hidden" %}<input type="hidden" name="{{ cell.name }}" value="{{ cell.value }}">{{ cell.label or cell.value }}

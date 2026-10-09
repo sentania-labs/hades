@@ -384,7 +384,8 @@ def test_a_foundry_card_shows_the_sentence_owner_and_only_send_back_and_cancel(
     assert "Next phase:" not in html
     # The probe's sentence is shown once, under the one collapsed Details line.
     assert html.count("<summary>Details</summary>") == 1
-    details = html[html.index("<summary>Details</summary>") : html.index("</details>")]
+    details_start = html.index("<summary>Details</summary>")
+    details = html[details_start : html.index("</details>", details_start)]
     assert probe in details
     before = html[: html.index("<summary>Details</summary>")]
     assert probe not in before[before.index("Where it is and what it is stuck on") :]

@@ -53,7 +53,7 @@ NOT_PAGES = {
 
 PATH_VALUES = {"{task_id}": TASK, "{attempt_id}": ATTEMPT, "{harness}": "codex"}
 
-OVERFLOW_MARKUP = ("lat-table-scroll", "admin-table-wrap", "overflow-x", "overflow:")
+OVERFLOW_MARKUP = ("lat-table-scroll", "admin-table-wrap", "overflow-x")
 
 
 class _NoSession:

@@ -739,6 +739,16 @@ def _page(
     return templates.TemplateResponse(request=request, name="page.html", context=context)
 
 
+def _empty_sections(request: Request) -> frozenset[str]:
+    """Compatibility for page renderers that still pass the old hidden-nav value.
+
+    Diagnostics now remain present in a collapsed group even when they have no rows, so
+    the shell no longer hides empty destinations.
+    """
+    del request
+    return frozenset()
+
+
 def _localize(value: Any, timezone: str) -> Any:
     """Render stored UTC instants in the operator's configured local zone."""
     if isinstance(value, dict):
