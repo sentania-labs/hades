@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="lat-card admin-signin">
-  <h1 class="page-title">Sign in to Crucible</h1>
+  <h1 class="page-title">Sign in to Hades</h1>
   {% if first_run_where %}
-  <p>Use an existing Crucible token. On a fresh deployment, the one-time administrator token is in {{ first_run_where }}. It is removed from there the first time it signs in here.</p>
+  <p>Use an existing Hades token. On a fresh deployment, the one-time administrator token is in {{ first_run_where }}. It is removed from there the first time it signs in here.</p>
   {% else %}
-  <p>Use an existing Crucible token. This deployment has no private place for a first-run administrator token, so none was created: with the supervisor running, make one with <code>crucible admin --reason "&lt;why&gt;" token create --principal &lt;name&gt; --role admin</code> on a host that reaches the database.</p>
+  <p>Use an existing Hades token. This deployment has no private place for a first-run administrator token, so none was created: with the supervisor running, make one with <code>crucible admin --reason "&lt;why&gt;" token create --principal &lt;name&gt; --role admin</code> on a host that reaches the database.</p>
   {% endif %}
   <form class="admin-form" method="post" action="/ui/sign-in">
     <input type="hidden" name="csrf" value="{{ csrf }}">

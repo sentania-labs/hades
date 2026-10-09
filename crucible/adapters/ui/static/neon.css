@@ -1,0 +1,31 @@
+/* Hades Neon layer. The vendored Lattice tokens remain the foundation. */
+:root, [data-theme="dark"] {
+  --bg: #0b0716;
+  --surface: #140d27;
+  --surface-sunken: #10091f;
+  --line: rgba(180, 107, 255, .32);
+  --line-soft: rgba(180, 107, 255, .16);
+  --ink: #f7efff;
+  --ink-muted: #c9b9dc;
+  --ink-subtle: #9b89ae;
+  --accent: #b46bff;
+  --accent-strong: #9b4eed;
+  --accent-soft: rgba(180, 107, 255, .16);
+  --accent-ink: #dfbdff;
+  --cyan: #7ee8fa;
+  --font-display: "Space Grotesk", system-ui, sans-serif;
+  --font-sans: Inter, system-ui, sans-serif;
+}
+body { background: var(--bg); font-family: var(--font-sans); overflow-x: hidden; }
+h1, h2, h3, .admin-brand { font-family: var(--font-display); }
+.lat-btn--primary { box-shadow: 0 0 0 1px rgba(180,107,255,.55), 0 0 18px rgba(180,107,255,.45); }
+.board-lane[data-lane="waiting_on_me"] { box-shadow: 0 0 0 1px rgba(180,107,255,.55), 0 0 18px rgba(180,107,255,.45); }
+.board-card-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
+.board-card-actions form { margin: 0; }
+.legacy-card-link { display: none; }
+.card-actions-panel { grid-column: -2 / -1; grid-row: span 2; position: sticky; top: 12px; }
+@media (max-width: 700px) {
+  .admin-shell, .admin-main, .board-lanes, .board-lane, .card-grid { max-width: 100%; min-width: 0; }
+  .card-actions-panel { grid-column: 1; position: static; }
+  pre, code { white-space: pre-wrap; overflow-wrap: anywhere; }
+}

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 from fastapi import Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
 from crucible.adapters.threaded_router import ThreadedAPIRouter
@@ -13,8 +13,11 @@ from crucible.adapters.ui.session import _csrf, _form, _require
 from crucible.application.admin.board_card import board_card_view
 from crucible.application.admin.board_lanes import board_lanes_view
 from crucible.application.board_actions import CorrectionDeps, apply_move, next_phase
+from crucible.application.board_resource import board_resource
 from crucible.application.errors import ApplicationError, NotFoundError
+from crucible.application.proposals import reject_proposal
 from crucible.application.task_notes import OPERATOR_ROLES, add_note
+from crucible.domain.entities import Principal
 
 router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
 
@@ -291,12 +294,26 @@ def _quality_sections(document: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 @router.get("/board", response_class=HTMLResponse)
-def board_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
+def board_page(request: Request, ctx: Ctx, uow: UoW, lane: str | None = None) -> Response:
     found = _require(request, ctx, uow)
     if isinstance(found, RedirectResponse):
         return found
     principal, csrf = found
-    document = board_lanes_view(uow, ctx.clock.now())
+    if lane is not None:
+        return JSONResponse(
+            board_resource(uow, ctx.clock.now(), principal, cards_for=frozenset({lane}))
+        )
+    render_principal = cast("Principal | None", principal)
+    if render_principal is None:  # Compatibility for projection-only unit fixtures.
+        document = board_lanes_view(uow, ctx.clock.now())
+        document["needs_me"] = 0
+    else:
+        document = board_resource(
+            uow,
+            ctx.clock.now(),
+            render_principal,
+            cards_for=frozenset({"inbox", "waiting_on_me", "stuck", "in_progress", "holding_pen"}),
+        )
     return templates.TemplateResponse(
         request=request,
         name="board.html",
@@ -304,6 +321,7 @@ def board_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             **_base(request, principal, csrf, title="Board", active="/ui/board"),
             "title": "Board",
             "lanes": document["lanes"],
+            "needs_me": document["needs_me"],
         },
     )
 
@@ -386,6 +404,18 @@ async def board_card_action(request: Request, task_id: str, ctx: Ctx, uow: UoW) 
             ),
         )
         note = form.get("note", "")
+        if not note.strip():
+            note = f"{form.get('move') or 'next phase'} by {principal.name}"
+        if form.get("move") == "decline":
+            task = reject_proposal(
+                uow,
+                ctx.clock,
+                principal=principal,
+                task_id=task_id,
+                reason=note,
+            )
+            uow.commit()
+            return _redirect(form, f"Declined {task.external_id}.")
         if form.get("apply") == "next":
             result = next_phase(
                 uow, ctx.clock, principal=principal, task_id=task_id, note_text=note, deps=deps

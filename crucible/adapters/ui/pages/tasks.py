@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
 from crucible.adapters.threaded_router import ThreadedAPIRouter
+from crucible.adapters.ui.pages.board import board_card_page
 from crucible.adapters.ui.pages.proposals import (
     action_forms,
     batch_section,
@@ -368,6 +369,9 @@ WAIVER_FORMS = (
 
 @router.get("/tasks/{task_id}", response_class=HTMLResponse)
 def task_page(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Response:
+    database_url = str(getattr(ctx, "database_url", ""))
+    if database_url.startswith("postgres"):
+        return board_card_page(request, task_id, ctx, uow)
     found = _require(request, ctx, uow)
     if isinstance(found, RedirectResponse):
         return found
