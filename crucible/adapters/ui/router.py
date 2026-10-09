@@ -19,6 +19,7 @@ from crucible.adapters.ui.pages import (
     proposals,
     repositories,
     retention,
+    room,
     routing,
     routing_models,
     settings,
@@ -35,6 +36,7 @@ router = APIRouter(prefix="/ui", include_in_schema=False)
 router.routes.extend(session.router.routes)
 router.routes.extend(dashboard.router.routes)
 router.routes.extend(board.router.routes)
+router.routes.extend(room.router.routes)
 router.routes.extend(harnesses.router.routes)
 router.routes.extend(credentials.router.routes)
 router.routes.extend(gateway.router.routes)

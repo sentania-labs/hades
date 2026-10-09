@@ -59,7 +59,7 @@ from crucible.domain.entities import (
     Wake,
 )
 from crucible.domain.lifecycle import AttemptState, ExecutionState, TaskState
-from crucible.domain.rooms import Room, RoomTurn
+from crucible.domain.rooms import Room, RoomKind, RoomTurn
 
 
 class PrincipalRepository(Protocol):
@@ -467,7 +467,14 @@ class RoomRepository(Protocol):
 
     def save(self, room: Room) -> None: ...
 
-    def list_recent(self, *, limit: int, include_closed: bool = True) -> Sequence[Room]: ...
+    def list_recent(
+        self,
+        *,
+        limit: int,
+        include_closed: bool = True,
+        kind: RoomKind | None = None,
+        created_by: str | None = None,
+    ) -> Sequence[Room]: ...
 
     def list_live(self) -> Sequence[Room]:
         """The rooms whose runner is up or meant to be: starting, warm, interrupted."""

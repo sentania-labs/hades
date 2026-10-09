@@ -23,6 +23,7 @@
 {%- endmacro %}
 {% block content %}
 <div class="admin-title"><div><h1>Board</h1><p><b>{{ needs_me }}</b> need me. Work grouped by what happens next. Open a card for the contract, where it is stuck, its notes and actions.</p></div></div>
+<nav class="board-service-strip" aria-label="Services"><a href="/ui/room">Talk to Hades</a></nav>
 <div class="board-lanes">
 {% for lane in lanes %}
   {% if lane.collapsed %}<details class="board-lane" data-lane="{{ lane.key }}"><summary><span><b>{{ lane.name }}</b> <span class="board-count">{% if lane.key == "wins" %}{{ lane.count_today }} today · {{ lane.count_all_time }} all time{% else %}{{ lane.count }}{% endif %}</span></span><small>{{ lane.meaning }}</small></summary>
