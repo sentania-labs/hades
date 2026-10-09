@@ -268,35 +268,35 @@ async def test_the_run_completes_with_no_client_attached(
     assert wake.payload["links"]["artifacts"].endswith("/artifacts")
 
 
-async def test_a_second_attempt_on_the_same_branch_waits_for_the_checkout_lease(
+async def test_a_second_task_on_the_same_branch_is_refused_at_submit(
     ctx: AppContext,
     client: TestClient,
-    supervisor: Supervisor,
     origin: OriginFactory,
     worker_image: str,
 ) -> None:
-    """10: one checkout lease per repository url and work branch."""
+    """hades #564: a work branch belongs to one task. This case used to submit a second
+    task on the first one's branch and watch the checkout lease of 10 hold it pending.
+    The lease is released with every terminal attempt state, and a retry or correction
+    attempt of the same task is only created after that, so no path of one task's own
+    reaches a held lease; the second task never reaches the lease at all now, because
+    its submission is refused, naming the owner. The lease itself is proven on the
+    integration tier (test_readiness_gaps)."""
     url = origin("lease", "hang")
     register(ctx, "lease", url)
-    first = submit_and_start(client, e2e_contract("E2E-0014", "lease", worker_image))
-    second_document = e2e_contract("E2E-0015", "lease", worker_image)
-    second_document["repository"]["work_branch"] = "crucible/E2E-0014"
-    second = submit_and_start(client, second_document)
-
-    deadline = time.monotonic() + WAIT_SECONDS
-    while time.monotonic() < deadline:
-        await supervisor.tick()
-        view = client.get(f"/v1/tasks/{first}").json()
-        if view.get("latest_attempt") and view["latest_attempt"]["state"] == "running":
-            break
-        await asyncio.sleep(0.2)
-
-    await supervisor.tick()
-    blocked = client.get(f"/v1/tasks/{second}").json()
-    attempt = blocked.get("latest_attempt")
-    assert attempt is None or attempt["state"] in ("pending", "preparing"), attempt
-    assert "checkout_lease_denied" in event_kinds(client, second)
-    assert "checkout_lease_taken" in event_kinds(client, first)
+    first = e2e_contract("E2E-0014", "lease", worker_image)
+    response = client.post("/v1/tasks", json=first)
+    assert response.status_code == 201, response.text
+    second = e2e_contract("E2E-0015", "lease", worker_image)
+    second["repository"]["work_branch"] = "crucible/E2E-0014"
+    response = client.post("/v1/tasks", json=second)
+    assert response.status_code == 422, response.text
+    body = response.json()
+    assert body["type"] == "urn:crucible:problem:contract-invalid"
+    (problem,) = [e for e in body["errors"] if e["path"] == "repository.work_branch"]
+    assert "E2E-0014" in problem["message"] and "crucible/E2E-0014" in problem["message"]
+    assert "a branch belongs to one task" in problem["message"]
+    listed = client.get("/v1/tasks", params={"repository": "lease"}).json()
+    assert [t["external_id"] for t in listed["items"]] == ["E2E-0014"]
 
 
 async def test_live_log_tail_delivers_while_worker_is_running(

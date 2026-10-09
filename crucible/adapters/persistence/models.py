@@ -481,6 +481,53 @@ class MinionQuestionRow(Base):
     answer_contract_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+class MemoryItemRow(Base):
+    """One item of the shared memory store (hades #208, 0058_memory_and_decisions)."""
+
+    __tablename__ = "memory_items"
+    __table_args__ = (
+        Index("ix_memory_items_observed", "observed_at"),
+        Index("ix_memory_items_scope_tags", "scope_tags", postgresql_using="gin"),
+    )
+    id: Mapped[str] = mapped_column(ID, primary_key=True)
+    # Declared before `text`, whose name shadows SQLAlchemy's `text()` in this body.
+    source: Mapped[str] = mapped_column(String(128))
+    observed_at: Mapped[datetime] = mapped_column(TZ)
+    scope_tags: Mapped[list[Any]] = mapped_column(
+        ARRAY(String(64)), server_default=text("'{}'::character varying[]")
+    )
+    promoted_by: Mapped[str] = mapped_column(String(128))
+    promoted_at: Mapped[datetime] = mapped_column(TZ)
+    superseded_by: Mapped[str | None] = mapped_column(
+        ID, ForeignKey("memory_items.id"), nullable=True
+    )
+    superseded_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    text: Mapped[str] = mapped_column(Text)
+
+
+class DecisionLedgerRow(Base):
+    """One line of the append-only decision ledger (hades #208). The name `decisions`
+    was taken by Foundry's per-task decisions in 0004, so the shared ledger is
+    `decision_ledger`; `POST /v1/decisions` writes here."""
+
+    __tablename__ = "decision_ledger"
+    __table_args__ = (
+        Index("ix_decision_ledger_said", "said_at"),
+        Index("ix_decision_ledger_channel_said", "channel", "said_at"),
+    )
+    id: Mapped[str] = mapped_column(ID, primary_key=True)
+    principal: Mapped[str] = mapped_column(String(128))
+    channel: Mapped[str] = mapped_column(String(64))
+    said_at: Mapped[datetime] = mapped_column(TZ)
+    verbatim: Mapped[str] = mapped_column(Text)
+    transcript_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    applies_to: Mapped[list[Any]] = mapped_column(
+        ARRAY(String(128)), server_default=text("'{}'::character varying[]")
+    )
+    acted_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    acted_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+
+
 class ReviewDispositionRow(Base):
     __tablename__ = "review_dispositions"
     __table_args__ = (

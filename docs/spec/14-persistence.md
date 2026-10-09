@@ -37,8 +37,10 @@ the PR; a correction can be attached on the operator's word. It is not a gate.
 | `acceptance_results` | id, task_id, head_sha, principal_id, verdict, reasoning, superseded_at, created_at |
 | `decisions` | id, task_id, escalation_id, principal_id, verbatim TEXT, resolves, created_at |
 | `escalations` | id, task_id, attempt_id, state, question, opened_at, closed_at, decision_id, last_wake_at, reason (hades #393: the `blocked.md` reason, when the worker named one) |
-| `task_notes` | id, task_id, principal_id, author, text TEXT, verbatim, created_at (hades #489: the operator's notes on a task, newest first on the card and at the top of the next IDENTITY.md); delivery_state (`awaiting`, `acknowledged`, `acted_on`), acknowledged_attempt_id, acknowledged_at, acted_on_attempt_id, acted_on_at, acted_on_commit, acted_on_event_seq (hades #208 item 2, 0057: the state the supervisor set from evidence, 27) |
-| `minion_questions` | id, task_id, asked_by_attempt_id, escalation_id, question_text TEXT, asked_at, answered_by, answered_by_name, answered_at, answer_text TEXT, answer_action, answer_contract_version (hades #208 item 2, 0057: a worker's question and its answer, 27) |
+| `task_notes` | id, task_id, principal_id, author, text TEXT, verbatim, created_at (hades #489: the operator's notes on a task, newest first on the card and at the top of the next IDENTITY.md); delivery_state (`awaiting`, `acknowledged`, `acted_on`), acknowledged_attempt_id, acknowledged_at, acted_on_attempt_id, acted_on_at, acted_on_commit, acted_on_event_seq (hades #208 item 2, 0057: the state the supervisor set from evidence, 28) |
+| `minion_questions` | id, task_id, asked_by_attempt_id, escalation_id, question_text TEXT, asked_at, answered_by, answered_by_name, answered_at, answer_text TEXT, answer_action, answer_contract_version (hades #208 item 2, 0057: a worker's question and its answer, 28) |
+| `memory_items` | id, text TEXT, source, observed_at, scope_tags (varchar array, GIN), promoted_by, promoted_at, superseded_by (the replacing item), superseded_at (hades #208: the shared memory store every channel recalls; an edit supersedes, a forget retires with no replacement; see 27) |
+| `decision_ledger` | id, principal, channel, said_at, verbatim TEXT, transcript_ref, applies_to (varchar array), acted_by, acted_at; append-only (hades #208: the shared decision ledger, named apart from Foundry's per-task `decisions`; a task decision is mirrored into it; see 27) |
 | `wakes` | id, principal_id, task_id, reason, payload JSONB, created_at, delivered_at, acked_at, attempts |
 | `supervisor_status` | singleton: holder, last_tick_at, last_success_at, last_error, consecutive_failures, tick_ms, counts JSONB |
 | `idempotency_keys` | (principal_id, key) PK, request_sha256, response JSONB, created_at |
@@ -102,7 +104,8 @@ administrative kinds (10).
 
 The API role writes only `tasks` (submit, start, cancel, amend, close),
 `task_contracts`, `idempotency_keys` (in the same transaction as the
-mutation they record), `acceptance_results`, `decisions`, `artifacts`,
+mutation they record), `acceptance_results`, `decisions`, `memory_items`,
+`decision_ledger` (append-only, 27), `artifacts`,
 `wakes` (ack), `policies`, `routing_policies`, `review_reports`, and
 `github_deliveries` (the webhook endpoint holds no supervisor lease and has
 no authenticated principal, so a delivery is neither fenced nor append-only;

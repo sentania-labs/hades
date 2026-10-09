@@ -78,6 +78,9 @@ NOTE = "Keep the 409 body short.\n  Two spaces and a second line, exactly as wri
 
 
 class _ProposalTasks(_Tasks):
+    def lock_work_branch(self, repository_id: str, work_branch: str) -> None:
+        pass
+
     def get_by_external_id(self, principal_id: str, external_id: str) -> Task | None:
         return next(
             (
@@ -86,6 +89,17 @@ class _ProposalTasks(_Tasks):
                 if (t.principal_id, t.external_id) == (principal_id, external_id)
             ),
             None,
+        )
+
+    def search(self, *, repository_id: str | None, after_id: str | None, **_: Any) -> list[Task]:
+        """hades #564: submission reads a repository's tasks for branch ownership."""
+        return sorted(
+            (
+                t
+                for t in self.rows.values()
+                if repository_id in (None, t.repository_id) and (after_id or "") < t.id
+            ),
+            key=lambda t: t.id,
         )
 
 

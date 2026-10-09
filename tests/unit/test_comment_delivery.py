@@ -27,6 +27,9 @@ from crucible.adapters.api.deps import app_context, current_principal, unit_of_w
 from crucible.adapters.api.problems import install_problem_handlers
 from crucible.adapters.api.routers import tasks as tasks_router
 from crucible.adapters.persistence.migrations.versions import _0057_comment_delivery as m0057
+from crucible.adapters.persistence.migrations.versions import (
+    _0058_memory_and_decisions as m0058,
+)
 from crucible.adapters.persistence.models import MinionQuestionRow, TaskNoteRow
 from crucible.application import supervisor as supervisor_module
 from crucible.application.acceptance import record_acceptance
@@ -751,8 +754,12 @@ def test_migration_0057_owns_the_new_kinds_columns_and_table() -> None:
         "minion_question_answered",
         "handoff_recorded",
     }
-    # The latest migration owns the CHECK constraint, and it names every kind the code has.
-    assert set(m0057._event_kinds()) == {k.value for k in EventKind}
+    # 0057 adds its five kinds to the chain below it. The latest migration, 0058 (hades
+    # #208's memory store and decision ledger), chains from 0057 and owns the CHECK
+    # constraint, so the two together name every kind the code has.
+    assert m0058.down_revision == m0057.revision
+    assert set(m0057._event_kinds()) == {k.value for k in EventKind} - set(m0058.EVENT_KINDS)
+    assert set(m0058._event_kinds()) == {k.value for k in EventKind}
     note_columns = {c.name for c in TaskNoteRow.__table__.columns}
     assert set(m0057.NOTE_COLUMNS) <= note_columns
     assert TaskNoteRow.__table__.columns["delivery_state"].server_default is not None

@@ -40,6 +40,9 @@ from tests.unit.test_issue_379_merge_during_publish import (
 )
 
 BRANCH = "crucible/test"
+# hades #564: the trailer a task's commits carry; a remote tip is this task's own only
+# when it names the trusted task owner.
+TRAILER = "\n\nCrucible-Attempt: prior-attempt"
 
 
 def _commit(repo: Path, filename: str, content: str, message: str) -> str:
@@ -54,12 +57,12 @@ def _history(tmp_path: Path, *, trailer: bool = True) -> tuple[Path, Path, str, 
     origin = tmp_path / "origin.git"
     _git(tmp_path, "init", "-q", "--bare", str(origin))
     _git(repo, "push", "-q", str(origin), "main")
-    message = "checkpoint" + ("\n\nCrucible-Attempt: prior-attempt" if trailer else "")
-    checkpoint = _commit(repo, "work.txt", "retained work\n", message)
+    tag = TRAILER if trailer else ""
+    checkpoint = _commit(repo, "work.txt", "retained work\n", "checkpoint" + tag)
     _git(repo, "push", "-q", str(origin), BRANCH)
     _git(repo, "reset", "--hard", "main")
-    _commit(repo, "work.txt", "retained work\n", "corrected work")
-    head = _commit(repo, "extra.txt", "correction\n", "complete correction")
+    _commit(repo, "work.txt", "retained work\n", "corrected work" + tag)
+    head = _commit(repo, "extra.txt", "correction\n", "complete correction" + tag)
     return repo, origin, checkpoint, head
 
 
@@ -79,6 +82,7 @@ def _run(
     branch: str = BRANCH,
     owned: tuple[str, ...] = (),
     race: str = "",
+    owner: str = "prior-attempt",
 ) -> PublishOutcome:
     for name in ("tmp", "token", "out", "home", "bin"):
         (root / name).mkdir(parents=True, exist_ok=True)
@@ -91,6 +95,7 @@ def _run(
         author_email="hades@example.test",
         bundle_sha256=hashlib.sha256(bundle.read_bytes()).hexdigest(),
         owned_remote_heads=owned,
+        owner=owner,
     )
     script = script.replace("/tmp/", f"{root}/tmp/")
     for old, new in (
@@ -164,7 +169,9 @@ def test_divergent_checkpoint_is_replaced(tmp_path: Path, conflict: bool) -> Non
     """A quota checkpoint is ungated partial work; the accepted head need not contain it."""
     repo, origin, checkpoint, _ = _history(tmp_path)
     _git(repo, "reset", "--hard", "main")
-    head = _commit(repo, "work.txt" if conflict else "other.txt", "different\n", "correction")
+    head = _commit(
+        repo, "work.txt" if conflict else "other.txt", "different\n", "correction" + TRAILER
+    )
     outcome = _run(tmp_path / "run", origin, _bundle(repo, tmp_path / "bundle"), head)
     assert outcome.pushed, outcome
     assert outcome.remote_head_before == checkpoint
@@ -208,6 +215,7 @@ class _RealPublisher(_Publisher):
             request.expected_head,
             branch=request.work_branch,
             owned=request.owned_remote_heads,
+            owner=request.owner,
         )
 
 

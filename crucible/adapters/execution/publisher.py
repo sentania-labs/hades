@@ -122,6 +122,7 @@ class DockerPublisher:
             credential_host=self.config.credential_host,
             bundle_sha256=request.bundle_sha256,
             owned_remote_heads=request.owned_remote_heads,
+            owner=request.owner,
         )
         env = {
             "HOME": "/home/worker",

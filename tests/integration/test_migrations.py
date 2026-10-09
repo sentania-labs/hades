@@ -125,6 +125,116 @@ def test_unknown_event_kind_is_rejected(migrated: str) -> None:
     engine.dispose()
 
 
+def test_0058_creates_memory_and_the_ledger_on_a_populated_database(database_url: str) -> None:
+    """hades #208, AC1: the revision applies over rows that are already there, both tables
+    appear with no drift, the ledger refuses an edit and a delete, and the way down and
+    back up keeps the new event kinds the way 0007 taught."""
+    migrate.downgrade(database_url, "0056_pull_request_schema_overlap")
+    engine = make_engine(database_url)
+    marker = "hades-208-populated"
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO events (ts, kind, principal, verified, payload) "
+                "VALUES (now(), 'principal_created', :marker, true, '{}')"
+            ),
+            {"marker": marker},
+        )
+        names = set(inspect(conn).get_table_names())
+    assert "memory_items" not in names and "decision_ledger" not in names
+    migrate.upgrade(database_url)
+    with engine.begin() as conn:
+        names = set(inspect(conn).get_table_names())
+        assert {"memory_items", "decision_ledger"} <= names
+        columns = {c["name"] for c in inspect(conn).get_columns("memory_items")}
+        assert columns == {
+            "id",
+            "text",
+            "source",
+            "observed_at",
+            "scope_tags",
+            "promoted_by",
+            "promoted_at",
+            "superseded_by",
+            "superseded_at",
+        }
+        columns = {c["name"] for c in inspect(conn).get_columns("decision_ledger")}
+        assert columns == {
+            "id",
+            "principal",
+            "channel",
+            "said_at",
+            "verbatim",
+            "transcript_ref",
+            "applies_to",
+            "acted_by",
+            "acted_at",
+        }
+        assert (
+            conn.execute(
+                text("SELECT count(*) FROM events WHERE principal = :marker"), {"marker": marker}
+            ).scalar()
+            == 1
+        )
+        conn.execute(
+            text(
+                "INSERT INTO memory_items (id, text, source, observed_at, scope_tags, "
+                "promoted_by, promoted_at) VALUES ('01MEMORY0580000000000000A', 'The lab "
+                "cluster has one node.', 'operator', now(), ARRAY['hades'], 'scott', now())"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO decision_ledger (id, principal, channel, said_at, verbatim, "
+                "applies_to) VALUES ('01LEDGER0580000000000000A', 'scott', 'telegram', now(), "
+                "'Build the mvp', ARRAY['FDY-0587'])"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO events (ts, kind, principal, verified, payload) "
+                "VALUES (now(), 'memory_promoted', :marker, true, '{}')"
+            ),
+            {"marker": marker},
+        )
+    with engine.begin() as conn, pytest.raises(Exception, match="append-only"):
+        conn.execute(text("UPDATE decision_ledger SET verbatim = 'edited'"))
+    with engine.begin() as conn, pytest.raises(Exception, match="append-only"):
+        conn.execute(text("DELETE FROM decision_ledger"))
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM decision_ledger")).scalar() == 1
+        # Memory is edited by superseding, which is an update of the old row's pointer.
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE memory_items SET superseded_at = now() "
+                "WHERE id = '01MEMORY0580000000000000A'"
+            )
+        )
+    assert migrate.schema_drift(engine) is None
+    migrate.downgrade(database_url, "0056_pull_request_schema_overlap")
+    with engine.connect() as conn:
+        names = set(inspect(conn).get_table_names())
+        assert "memory_items" not in names and "decision_ledger" not in names
+        assert "events_0058_archive" in names
+        assert (
+            conn.execute(
+                text("SELECT count(*) FROM events WHERE kind = 'memory_promoted'")
+            ).scalar()
+            == 0
+        )
+    migrate.upgrade(database_url)
+    with engine.connect() as conn:
+        assert "events_0058_archive" not in set(inspect(conn).get_table_names())
+        assert (
+            conn.execute(
+                text("SELECT count(*) FROM events WHERE kind = 'memory_promoted'")
+            ).scalar()
+            == 1
+        )
+    engine.dispose()
+
+
 def test_fresh_schema_has_no_drift(migrated: str) -> None:
     engine = make_engine(migrated)
     assert migrate.schema_drift(engine) is None

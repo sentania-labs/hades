@@ -37,6 +37,8 @@ MERGED = {"0044_attempt_stall_shape", "0044_editor_leftovers_policy", "0044_merg
 # at one merge-main, past 0054 at the next and past #489's 0055 at the one after, which
 # is the provisional numbering #447 itself describes. hades #208 item 2 adds
 # 0057_comment_delivery on top: note delivery states, minion questions and handoffs.
+# hades #208 adds 0058 for the shared memory store and the decision ledger; its number
+# is the one Hades assigned and its down_revision, provisional until merge, follows 0057.
 ABOVE = "0046_blocked_reason"
 PROBE = "0047_attempt_egress_probe"
 LAUNCH = "0047_successful_launch_time"
@@ -49,7 +51,8 @@ CERT_CLASS = "0053_cert_change_class"
 DIGEST_COMMIT = "0054_digest_commit"
 TASK_NOTES = "0055_task_notes"
 SCHEMA_OVERLAP = "0056_pull_request_schema_overlap"
-HEAD = "0057_comment_delivery"
+COMMENT_DELIVERY = "0057_comment_delivery"
+HEAD = "0058_memory_and_decisions"
 
 
 def _script() -> ScriptDirectory:
@@ -94,8 +97,10 @@ def test_the_0045_merge_joins_the_three_0044_heads() -> None:
     assert task_notes is not None and task_notes.down_revision == DIGEST_COMMIT
     schema_overlap = script.get_revision(SCHEMA_OVERLAP)
     assert schema_overlap is not None and schema_overlap.down_revision == TASK_NOTES
+    comment_delivery = script.get_revision(COMMENT_DELIVERY)
+    assert comment_delivery is not None and comment_delivery.down_revision == SCHEMA_OVERLAP
     head = script.get_revision(HEAD)
-    assert head is not None and head.down_revision == SCHEMA_OVERLAP
+    assert head is not None and head.down_revision == COMMENT_DELIVERY
 
 
 def test_the_cli_config_sees_the_same_single_head() -> None:
@@ -123,7 +128,7 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
         plan = [step.revision.revision for step in script._upgrade_revs("head", head)]
         assert plan.index("0043_credential_mount_mode") < plan.index("0044_merge_423_424")
         assert plan.index("0044_merge_423_424") < plan.index(MERGE)
-        assert plan[-17:] == [
+        assert plan[-18:] == [
             "0043_credential_mount_mode",
             "0044_merge_423_424",
             ("0044_editor_leftovers_policy", "0044_attempt_stall_shape")[
@@ -142,6 +147,7 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
             DIGEST_COMMIT,
             TASK_NOTES,
             SCHEMA_OVERLAP,
+            COMMENT_DELIVERY,
             HEAD,
         ]
 

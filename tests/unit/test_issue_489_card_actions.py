@@ -62,6 +62,7 @@ from crucible.domain.entities import (
     ExecutionRole,
     ExternalReviewCycle,
     GateResultRecord,
+    LedgerDecision,
     Principal,
     PullRequest,
     PullRequestState,
@@ -131,6 +132,19 @@ class _Decisions:
         self, comment_ids: Sequence[str], body_sha256: dict[str, str] | None = None
     ) -> list[Any]:
         return []
+
+
+class _Ledger:
+    """hades #208: a task decision is mirrored into the shared decision ledger."""
+
+    def __init__(self) -> None:
+        self.rows: list[LedgerDecision] = []
+
+    def add(self, decision: LedgerDecision) -> None:
+        self.rows.append(decision)
+
+    def list_recent(self, *, limit: int, channel: str | None = None) -> list[LedgerDecision]:
+        return [d for d in self.rows if channel is None or d.channel == channel][-limit:]
 
 
 class _OpenEscalations(_Escalations):
@@ -211,6 +225,7 @@ class CardStore(_Store):
         self.events = _AuditEvents()
         self.task_notes = _Notes()
         self.decisions = _Decisions()  # type: ignore[assignment]
+        self.decision_ledger = _Ledger()
         self.escalations = _OpenEscalations()
         self.gate_results = _TaskGateResults()
         self.acceptance = _Acceptance()

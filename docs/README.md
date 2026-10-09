@@ -47,7 +47,8 @@
 | [`24-release.md`](spec/24-release.md) | 24. Release contract and release lifecycle |
 | [`25-administration.md`](spec/25-administration.md) | 25. Crucible administration: admin API, `crucible admin` CLI, credential onboarding |
 | [`26-kubernetes-provider.md`](spec/26-kubernetes-provider.md) | 26. Kubernetes execution provider |
-| [`27-comment-delivery.md`](spec/27-comment-delivery.md) | 27. Comment delivery states, minion questions as records, and bootstrap handoff events |
+| [`27-memory-and-decisions.md`](spec/27-memory-and-decisions.md) | 27. Memory and decisions: the shared store, the recall API, the decision ledger, and the Admin Memory page |
+| [`28-comment-delivery.md`](spec/28-comment-delivery.md) | 28. Comment delivery states, minion questions as records, and bootstrap handoff events |
 
 **Decisions** -- Architectural decision records.
 

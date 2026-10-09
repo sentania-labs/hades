@@ -24,7 +24,7 @@ def test_no_secret_bearing_column_names() -> None:
 
 def test_migration_event_kinds_match_enum() -> None:
     from crucible.adapters.persistence.migrations.versions import (  # noqa: PLC0415
-        _0057_comment_delivery as m,
+        _0058_memory_and_decisions as m,
     )
 
     # The latest migration owns the current CHECK constraint (10).

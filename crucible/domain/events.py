@@ -106,6 +106,13 @@ class EventKind(StrEnum):
     # merge, cancel, reroute) to Hades or Hades hands one to Foundry; the event carries
     # the principal, the local time and the words.
     HANDOFF_RECORDED = "handoff_recorded"
+    # hades #208: the shared memory store and the decision ledger. A promotion makes a
+    # finding memory; a supersede replaces an item; a forget retires one with no
+    # replacement; a ledger line is a principal's words recorded through POST /decisions.
+    MEMORY_PROMOTED = "memory_promoted"
+    MEMORY_SUPERSEDED = "memory_superseded"
+    MEMORY_FORGOTTEN = "memory_forgotten"
+    LEDGER_DECISION_RECORDED = "ledger_decision_recorded"
     DISPOSITION_RECORDED = "disposition_recorded"
     DISPOSITION_INVALIDATED = "disposition_invalidated"
     ESCALATION_OPENED = "escalation_opened"

@@ -111,6 +111,20 @@ and the note's text as `verbatim`, beside the operation's own event; both show o
 the Audit page with the words as the reason. The actions are open to operator and
 admin principals; an observer reads the card without the forms.
 
+## Memory (hades #208)
+
+`/ui/memory` is the Admin Memory page, two tabs over the shared memory store and the
+decision ledger (27): Memory items (text, source, when, scope, promoted by, with Edit
+and Forget as clicks for a principal who may write) and Decisions (the words, channel,
+local time, what they apply to, the transcript link). It opens with the rule in one
+line: transcripts stay per channel; decisions and memory are shared by every channel and
+every persona; minion findings become memory only when Hades or Scott promotes them.
+Edit supersedes an item with a corrected one and Forget supersedes it with no
+replacement; nothing is deleted, and the ledger is never edited. The page reads and
+writes through the same services as `GET /v1/memory`, `POST /v1/memory/{id}/supersede`
+and `POST /v1/memory/{id}/forget`. It has no navigation link yet; the link is a
+one-line follow-up in `render.py`.
+
 ## Shape
 
 - **Versioned admin API** under `/v1/admin`, admin role only, generated

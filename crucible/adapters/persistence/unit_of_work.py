@@ -4,6 +4,7 @@ token with SET LOCAL at the start of every transaction, never per connection (14
 from __future__ import annotations
 
 import gzip
+import hashlib
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
@@ -47,6 +48,7 @@ from crucible.adapters.persistence.records import (
     Artifacts,
     AttemptMetricsRepo,
     BootstrapImports,
+    DecisionLedger,
     Decisions,
     Dispositions,
     Escalations,
@@ -55,6 +57,7 @@ from crucible.adapters.persistence.records import (
     GitHubManifestStates,
     HarnessImages,
     HarnessStates,
+    MemoryItems,
     MinionQuestions,
     Policies,
     ProviderSettings,
@@ -97,6 +100,7 @@ from crucible.ports.repository import (
     CIDecisionRepository,
     ClaimRepository,
     ContractRepository,
+    DecisionLedgerRepository,
     DecisionRepository,
     DispositionRepository,
     EscalationRepository,
@@ -116,6 +120,7 @@ from crucible.ports.repository import (
     IdempotencyRepository,
     LeaseRepository,
     LogRepository,
+    MemoryRepository,
     MinionQuestionRepository,
     PolicyRepository,
     PoolExhaustionRepository,
@@ -365,6 +370,13 @@ class Repositories:
 
 
 class Tasks:
+    def lock_work_branch(self, repository_id: str, work_branch: str) -> None:
+        # A stable, namespaced key across processes. Hash collisions only serialize
+        # unrelated branches; ownership is still checked using the full values.
+        key = f"work-branch:{repository_id}:{work_branch}".encode()
+        lock_id = int.from_bytes(hashlib.sha256(key).digest()[:8], "big", signed=True)
+        self._s.execute(select(func.pg_advisory_xact_lock(lock_id)))
+
     def __init__(self, session: Session) -> None:
         self._s = session
 
@@ -1570,6 +1582,8 @@ class SqlUnitOfWork:
     acceptance: AcceptanceRepository
     decisions: DecisionRepository
     task_notes: TaskNoteRepository
+    memory: MemoryRepository
+    decision_ledger: DecisionLedgerRepository
     minion_questions: MinionQuestionRepository
     escalations: EscalationRepository
     dispositions: DispositionRepository
@@ -1628,6 +1642,8 @@ class SqlUnitOfWork:
         self.acceptance = Acceptances(s)
         self.decisions = Decisions(s)
         self.task_notes = TaskNotes(s)
+        self.memory = MemoryItems(s)
+        self.decision_ledger = DecisionLedger(s)
         self.minion_questions = MinionQuestions(s)
         self.escalations = Escalations(s)
         self.dispositions = Dispositions(s)

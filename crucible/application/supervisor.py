@@ -1857,7 +1857,7 @@ class Supervisor:
         checkout, and move the attempt to preparing. Each step is a short database
         transaction, and they run one attempt after another, so the per-harness cap and
         the checkout lease see every launch this tick has already begun."""
-        attempt, execution, task = item.attempt, item.execution, item.task
+        attempt, execution = item.attempt, item.execution
         review = execution.role is ExecutionRole.REVIEW
         # Read per attempt, not per pass: a login started while this pass runs holds
         # back the next launch of its harness rather than racing it (12).
@@ -1895,7 +1895,7 @@ class Supervisor:
                 await self._db(partial(self._refuse_launch, attempt.id, "registry", refusal))
             return None
         provider = self._provider(execution.provider)
-        key = self.checkout_key(item.contract, task.external_id, item.repository_url)
+        key = self.checkout_key(item.contract, item.repository_url)
         # Reviews have a fixed harness: the cap check and the pool slot it takes are one
         # transaction (hades #359). Routed launches check candidate capacity in
         # _route_pending after taking the checkout lease, so a busy first choice can
@@ -2461,12 +2461,13 @@ class Supervisor:
             )
 
     @staticmethod
-    def checkout_key(contract: dict[str, Any], external_id: str, repository_url: str = "") -> str:
-        """One checkout lease per repository url and work branch (10)."""
+    def checkout_key(contract: dict[str, Any], repository_url: str = "") -> str:
+        """One checkout lease per repository url and work branch (10). hades #564: every
+        stored contract names its branch (submission derives an omitted one), so the
+        stored contract is the one source and nothing here makes a branch up."""
         repository = contract.get("repository", {})
         url = repository_url or str(repository.get("url", "")) or str(repository.get("name", ""))
-        branch = str(repository.get("work_branch") or f"crucible/{external_id}")
-        return f"{url}#{branch}"
+        return f"{url}#{repository['work_branch']}"
 
     def _harness_gate(self, execution: Execution) -> str | None:
         """07 and 25: the registry's answer for this execution's harness, as a refusal
