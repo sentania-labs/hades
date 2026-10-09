@@ -687,10 +687,13 @@ class Rooms:
         include_closed: bool = True,
         kind: RoomKind | None = None,
         created_by: str | None = None,
+        card_task_id: str | None = None,
     ) -> Sequence[Room]:
         stmt = select(RoomRow)
         if kind is not None:
             stmt = stmt.where(RoomRow.kind == kind.value)
+        if card_task_id is not None:
+            stmt = stmt.where(RoomRow.card_task_id == card_task_id)
         if created_by is not None:
             stmt = stmt.where(RoomRow.created_by == created_by)
         if not include_closed:

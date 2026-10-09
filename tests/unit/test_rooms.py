@@ -171,6 +171,7 @@ class _Rooms:
         include_closed: bool = True,
         kind: RoomKind | None = None,
         created_by: str | None = None,
+        card_task_id: str | None = None,
     ) -> list[Room]:
         rows = [
             r
@@ -178,6 +179,7 @@ class _Rooms:
             if (include_closed or r.state is not RoomState.CLOSED)
             and (kind is None or r.kind is kind)
             and (created_by is None or r.created_by == created_by)
+            and (card_task_id is None or r.card_task_id == card_task_id)
         ]
         return [copy.deepcopy(r) for r in rows][-limit:]
 
@@ -376,6 +378,9 @@ class _Store:
         self.principals = _Principals()
         self.task_notes = _Notes()
         self.provider_settings = _Settings()
+        self.pull_requests = SimpleNamespace(get_for_task=lambda task_id: None)
+        self.ci_certifications = SimpleNamespace(list_for_task=lambda task_id: [])
+        self.attempts = SimpleNamespace(list_for_task=lambda task_id: [])
         self.commits = 0
 
     def __enter__(self) -> _Store:

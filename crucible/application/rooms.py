@@ -36,6 +36,7 @@ from crucible.application.errors import (
 from crucible.application.memory import bounded_limit
 from crucible.application.routing import image_for_harness
 from crucible.application.runtime_settings import RuntimeValue, resolve, save_scalar
+from crucible.application.task_notes import list_notes
 from crucible.application.transitions import record_event
 from crucible.contracts.rooms import (
     RoomCreateRequest,
@@ -274,6 +275,12 @@ def require_room_writer(principal: Principal) -> None:
         raise ForbiddenError("orchestrator or operator role required")
 
 
+def require_card_room_owner(principal: Principal, room: Room) -> None:
+    """Keep card-room writes aligned with the principal used by its tools."""
+    if room.kind is RoomKind.CARD and room.created_by != principal.id:
+        raise ForbiddenError("only the principal who created this room may write to it")
+
+
 def refuse_harness(harness: str) -> None:
     refusal = harness_refusal(harness)
     if refusal is not None:
@@ -393,6 +400,25 @@ def _append(uow: UnitOfWork, room: Room, role: TurnRole, text: str, at: datetime
     return turn
 
 
+def notify_card_question(uow: UnitOfWork, clock: Clock, task: Task) -> None:
+    """Point the task principal's latest open room at the card, without question text."""
+    if getattr(uow, "rooms", None) is None or getattr(uow, "room_turns", None) is None:
+        return
+    rooms = uow.rooms.list_recent(
+        limit=1, kind=RoomKind.PRINCIPAL, created_by=task.principal_id, include_closed=False
+    )
+    for candidate in rooms:
+        room = uow.rooms.get(candidate.id, for_update=True)
+        if room is not None and room.state is not RoomState.CLOSED:
+            _append(
+                uow,
+                room,
+                TurnRole.SYSTEM,
+                f"A minion on {task.external_id} asked a question. Open the card.",
+                clock.now(),
+            )
+
+
 def _open_turns(uow: UnitOfWork, room: Room) -> list[RoomTurn]:
     """The assistant turns still streaming. An assistant turn is created when its user
     turn is handed out, so it always sits after the inbox cursor."""
@@ -440,6 +466,7 @@ def inject_message(
     `starting` so this request, and only this one, launches it."""
     require_room_writer(principal)
     room = get_room(uow, room_id, for_update=True)
+    require_card_room_owner(principal, room)
     _require_open(room)
     now = clock.now()
     stale = reap_gone_runner(uow, clock, room, now=now)
@@ -457,6 +484,7 @@ def interrupt_room(uow: UnitOfWork, clock: Clock, *, principal: Principal, room_
     on its next poll and ends the turn itself; with none, the turn is ended here."""
     require_room_writer(principal)
     room = get_room(uow, room_id, for_update=True)
+    require_card_room_owner(principal, room)
     _require_open(room)
     now = clock.now()
     reap_gone_runner(uow, clock, room, now=now)
@@ -528,6 +556,7 @@ def switch_room(
     require_room_writer(principal)
     refuse_harness(harness)
     room = get_room(uow, room_id, for_update=True)
+    require_card_room_owner(principal, room)
     _require_open(room)
     before = {"harness": room.harness, "model": room.model}
     handle = _stop(uow, clock, room, why="switch", principal=principal.name)
@@ -557,6 +586,7 @@ def close_room(
 ) -> tuple[Room, str | None]:
     require_room_writer(principal)
     room = get_room(uow, room_id, for_update=True)
+    require_card_room_owner(principal, room)
     _require_open(room)
     handle = _stop(uow, clock, room, why="close", principal=principal.name)
     _move(room, RoomEvent.CLOSE)
@@ -638,6 +668,12 @@ def _card_context(uow: UnitOfWork, room: Room) -> CardContext | None:
     task = uow.tasks.get(room.card_task_id)
     if task is None:
         return None
+    contract = uow.contracts.get(task.id, task.contract_version)
+    document = contract.document if contract else {}
+    pr = uow.pull_requests.get_for_task(task.id)
+    certifications = list(uow.ci_certifications.list_for_task(task.id))
+    ci = certifications[-1] if certifications else None
+    attempts = uow.attempts.list_for_task(task.id)
     return CardContext(
         task_id=task.id,
         external_id=task.external_id,
@@ -645,6 +681,18 @@ def _card_context(uow: UnitOfWork, room: Room) -> CardContext | None:
         project=task.project,
         state=task.state.value,
         objective=task_objective(uow, task),
+        acceptance_criteria=tuple(
+            f"{criterion.get('id', '')}: {criterion.get('text', '')}"
+            for criterion in document.get("acceptance_criteria", [])
+        ),
+        pull_request=(
+            f"{pr.url} ({pr.state.value}), head {pr.head_sha}" if pr else "No pull request yet"
+        ),
+        ci=(f"{ci.state}: {ci.detail} (head {ci.head_sha})" if ci else "Not certified yet"),
+        attempt_references=tuple(
+            f"Attempt {attempt.id}: /v1/attempts/{attempt.id}/logs" for attempt in attempts
+        ),
+        notes=tuple(f"{note.author}: {note.text}" for note in list_notes(uow, task.id)),
     )
 
 

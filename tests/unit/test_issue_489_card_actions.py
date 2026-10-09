@@ -75,6 +75,7 @@ from crucible.domain.entities import (
 from crucible.domain.events import EventKind
 from crucible.domain.exit_class import ExitClass
 from crucible.domain.lifecycle import AttemptState, ExecutionState, TaskState
+from crucible.settings import ServiceSettings, Settings
 from tests.fixtures import REPOSITORY_URL, FakeClock, contract_document
 from tests.unit.test_issue_360_ready_for_merge_correction import (
     NOW,
@@ -87,8 +88,9 @@ from tests.unit.test_issue_360_ready_for_merge_correction import (
     _Store,
 )
 from tests.unit.test_issue_424_proposed_tasks import _AllWakes, _TaskGateResults
+from tests.unit.test_rooms import _Rooms, _Turns
 
-TASK_ID = "01TASK489CARDACTIONS00001"
+TASK_ID = "01M3M6B36V3WGXPDA3NHGNY6HT"
 PR_ID = "01PULL489CARDACTIONS00001"
 HEAD = "0123456789abcdef0123456789abcdef01234567"
 OPERATOR = Principal(
@@ -233,6 +235,8 @@ class CardStore(_Store):
         self.retention = _Retention()
         self.principals = _Principals()
         self.wakes = _AllWakes()
+        self.rooms = _Rooms()
+        self.room_turns = _Turns()
 
 
 def _document() -> dict[str, Any]:
@@ -932,7 +936,11 @@ def test_the_card_view_reads_a_stuck_task_in_words() -> None:
 def _ui(store: CardStore, principal: Principal, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     app = FastAPI()
     app.include_router(board_page.router)
-    ctx = SimpleNamespace(clock=FakeClock(NOW), providers=[SimpleNamespace(name="fake")])
+    ctx = SimpleNamespace(
+        clock=FakeClock(NOW),
+        providers=[SimpleNamespace(name="fake")],
+        settings=Settings(service=ServiceSettings(render_timezone="America/Chicago")),
+    )
     app.state.ctx = ctx
     app.dependency_overrides[app_context] = lambda: ctx
     app.dependency_overrides[unit_of_work] = lambda: store

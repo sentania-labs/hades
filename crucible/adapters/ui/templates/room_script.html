@@ -18,8 +18,8 @@
   };
   let lastSeq = Math.max(0, ...Array.from(transcript.querySelectorAll('[data-seq]'), n => Number(n.dataset.seq)));
 
-  const post = async (path, body = {}) => {
-    const response = await fetch(`/ui/room/${encodeURIComponent(roomId)}/${path}`, {
+  const post = async (path, body = {}, url = `/ui/room/${encodeURIComponent(roomId)}/${path}`) => {
+    const response = await fetch(url, {
       method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf}, body: JSON.stringify(body)
     });
     if (!response.ok) {
@@ -36,6 +36,7 @@
       transcript.querySelector('.room-empty')?.remove();
       node = document.createElement('article'); node.className = `room-turn room-turn--${data.role}`; node.dataset.seq = data.seq; node.dataset.role = data.role;
       const header = document.createElement('header'); const who = document.createElement('b'); who.textContent = data.role === 'assistant' ? 'Hades' : data.role === 'user' ? 'You' : 'System'; header.append(who);
+      if (data.started_at) { const time = document.createElement('time'); time.textContent = new Intl.DateTimeFormat('en-US', {timeZone: shell.dataset.timezone || 'America/Chicago', dateStyle: 'short', timeStyle: 'short'}).format(new Date(data.started_at)); header.append(time); }
       const text = document.createElement('div'); text.className = 'room-turn-text'; node.append(header, text); transcript.append(node);
     }
     node.querySelector('.room-turn-text').textContent = data.text || '';
@@ -62,6 +63,13 @@
     if (!text || posting || activeSeq !== null) return;
     posting = true; updateControls(); status.textContent = 'Sending…';
     try {
+      if (shell.dataset.answerUrl) {
+        await post('answer', {answer_text: text}, shell.dataset.answerUrl);
+        message.value = '';
+        status.textContent = 'Answer recorded.';
+        window.location.reload();
+        return;
+      }
       const data = await post('messages', {text});
       turn(data);
       if (message.value.trim() === text) message.value = '';
@@ -78,7 +86,7 @@
     }
   });
   interrupt.addEventListener('click', async () => { interrupt.disabled = true; try { await post('interrupt'); status.textContent = 'Interrupt requested.'; } catch (error) { status.textContent = error.message; } finally { interrupt.disabled = false; } });
-  document.querySelector('#room-target').addEventListener('change', async event => { const [harness, model] = event.target.value.split('|'); status.textContent = 'Switching…'; try { const data = await post('switch', {harness, model}); turn(data.turn); status.textContent = 'Switched. The next message starts this connection.'; } catch (error) { status.textContent = error.message; } });
+  document.querySelector('#room-target').addEventListener('change', async event => { const [harness, model] = event.target.value.split('|'); status.textContent = 'Switching…'; try { const data = await post('switch', {harness, model}); turn(data.turn); const label = document.querySelector('#room-target-label'); if (label) label.textContent = 'Talking to'; status.textContent = 'Switched. The next message starts this connection.'; } catch (error) { status.textContent = error.message; } });
   connect();
 })();
 </script>

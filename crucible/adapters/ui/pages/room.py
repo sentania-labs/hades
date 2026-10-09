@@ -11,10 +11,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 
 from crucible.adapters.api.deps import Ctx, UoW
 from crucible.adapters.api.routers import rooms as rooms_routes
+from crucible.adapters.api.routers import tasks as tasks_routes
 from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.adapters.ui.render import _base, templates
 from crucible.adapters.ui.session import _require
 from crucible.application.rooms import create_room, room_detail
+from crucible.contracts.api import AnswerRequest
 from crucible.contracts.rooms import RoomCreateRequest, RoomMessageRequest, RoomSwitchRequest
 from crucible.domain.entities import Principal, Role
 from crucible.domain.rooms import RoomKind, RoomState, local_time
@@ -98,6 +100,36 @@ def _timezone(ctx: Any) -> str:
     return str(ctx.settings.service.render_timezone)
 
 
+def room_panel_context(
+    ctx: Any, uow: Any, principal: Principal, room: Any | None, window: int = WINDOW
+) -> dict[str, Any]:
+    """The same transcript window and connection selector on principal and card pages."""
+    detail = room_detail(uow, room.id, window=max(1, min(window, 500))) if room else None
+    turns = [_turn_view(turn, _timezone(ctx)) for turn in detail.turns] if detail else []
+    settings = cast(Settings, ctx.settings).rooms
+    models = list(dict.fromkeys([*(settings.models or []), settings.default_model]))
+    if room and room.model not in models:
+        models.append(room.model)
+    return {
+        "room": detail.room if detail else None,
+        "turns": turns,
+        "turns_total": detail.turns_total if detail else 0,
+        "window": detail.window if detail else window,
+        "can_write": bool(
+            room
+            and room.state is not RoomState.CLOSED
+            and _can_write(principal)
+            and (room.kind is not RoomKind.CARD or room.created_by == principal.id)
+        ),
+        "connected": _connected(room, ctx.clock.now()) if room else "No principal room yet",
+        "harness": settings.default_harness,
+        "models": models,
+        "room_timezone": _timezone(ctx),
+        "friendly_harness": _friendly_harness,
+        "friendly_model": _friendly_model,
+    }
+
+
 @router.get("/room", response_class=HTMLResponse)
 def room_page(request: Request, ctx: Ctx, uow: UoW, window: int = WINDOW) -> Response:
     found = _require(request, ctx, uow)
@@ -118,27 +150,12 @@ def room_page(request: Request, ctx: Ctx, uow: UoW, window: int = WINDOW) -> Res
             ),
         )
         uow.commit()
-    detail = room_detail(uow, room.id, window=max(1, min(window, 500))) if room else None
-    turns = [_turn_view(turn, _timezone(ctx)) for turn in detail.turns] if detail else []
-    settings = cast(Settings, ctx.settings).rooms
-    models = list(dict.fromkeys([*(settings.models or []), settings.default_model]))
-    if room and room.model not in models:
-        models.append(room.model)
     response = templates.TemplateResponse(
         request=request,
         name="room.html",
         context={
             **_base(request, principal, csrf, title="Hades", active="/ui/room"),
-            "room": detail.room if detail else None,
-            "turns": turns,
-            "turns_total": detail.turns_total if detail else 0,
-            "window": detail.window if detail else window,
-            "can_write": bool(room and _can_write(principal)),
-            "connected": _connected(room, ctx.clock.now()) if room else "No principal room yet",
-            "harness": settings.default_harness,
-            "models": models,
-            "friendly_harness": _friendly_harness,
-            "friendly_model": _friendly_model,
+            **room_panel_context(ctx, uow, principal, room, window),
         },
     )
     if room:
@@ -200,3 +217,18 @@ async def stream(request: Request, room_id: str, ctx: Ctx, uow: UoW) -> Response
         return JSONResponse({"detail": "sign in required"}, status_code=401)
     after = max(0, int(request.query_params.get("after_seq", "0")))
     return await rooms_routes.stream(room_id, request, ctx, found[0], after, 300)
+
+
+@router.post("/tasks/{task_id}/questions/{question_id}/answer")
+async def answer(request: Request, task_id: str, question_id: str, ctx: Ctx, uow: UoW) -> Response:
+    auth = _authorized(request, ctx, uow)
+    if isinstance(auth, Response):
+        return auth
+    return await tasks_routes.answer(
+        task_id,
+        question_id,
+        AnswerRequest.model_validate(await request.json()),
+        request,
+        ctx,
+        auth[0],
+    )

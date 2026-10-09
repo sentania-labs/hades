@@ -14,8 +14,9 @@ class Element {
     return seq ? this.children.find(n => Number(n.dataset.seq) === Number(seq[1])) : null;
   }
 }
+const fixture = JSON.parse(fs.readFileSync(0, 'utf8'));
 const elements = Object.fromEntries(['.room-shell', '#room-transcript', '#room-composer', '#room-message', '#room-send', '#room-interrupt', '#room-status', '#room-target'].map(s => [s, new Element()]));
-elements['.room-shell'].dataset = {roomId: 'room', csrf: 'csrf'};
+elements['.room-shell'].dataset = {roomId: 'room', csrf: 'csrf', answerUrl: fixture.answerUrl};
 global.document = {querySelector: s => elements[s], createElement: tag => new Element(tag)};
 let stream;
 global.EventSource = class {
@@ -24,17 +25,37 @@ global.EventSource = class {
   close() {}
   emit(name, data) { this.handlers[name]?.({data: JSON.stringify(data)}); }
 };
-global.window = {setTimeout() {}, location: {reload() {}}};
+let reloads = 0;
+global.window = {setTimeout() {}, location: {reload() { reloads++; }}};
 let response;
 let posts = 0;
-global.fetch = async () => { posts++; return {ok: response.ok, status: response.status, json: async () => response.body}; };
-vm.runInThisContext(JSON.parse(fs.readFileSync(0, 'utf8')));
+let lastRequest;
+global.fetch = async (url, options) => { lastRequest = {url, ...options}; posts++; return {ok: response.ok, status: response.status, json: async () => response.body}; };
+vm.runInThisContext(typeof fixture === 'string' ? fixture : fixture.script);
 const message = elements['#room-message'];
 const interrupt = elements['#room-interrupt'];
 const send = elements['#room-send'];
 const status = elements['#room-status'];
 const submit = () => elements['#room-composer'].handlers.submit({preventDefault() {}});
 (async () => {
+  if (fixture.answerUrl) {
+    message.value = 'Use the card branch.';
+    response = {ok: false, status: 409, body: {detail: 'Answer rejected'}};
+    await submit();
+    assert.equal(message.value, 'Use the card branch.');
+    assert.equal(status.textContent, 'Answer rejected');
+    assert.equal(reloads, 0);
+    response = {ok: true, body: {state: 'scheduled'}};
+    await submit();
+    assert.equal(lastRequest.url, fixture.answerUrl);
+    assert.equal(lastRequest.method, 'POST');
+    assert.equal(lastRequest.headers['X-CSRF-Token'], 'csrf');
+    assert.deepEqual(JSON.parse(lastRequest.body), {answer_text: 'Use the card branch.'});
+    assert.equal(message.value, '');
+    assert.equal(reloads, 1);
+    assert.equal(elements['#room-transcript'].children.length, 0);
+    return;
+  }
   for (const state of ['warm', 'starting', 'interrupted']) {
     stream.emit('room', {state});
     assert.equal(interrupt.hidden, true, `idle ${state}`);
