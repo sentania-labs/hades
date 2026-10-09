@@ -184,7 +184,13 @@ from crucible.domain.lifecycle import (
     TaskState,
 )
 from crucible.domain.secrets import find_secrets, redact
-from crucible.domain.verification import task_specific_checks
+from crucible.domain.verification import (
+    PROOF_NEW_FILE,
+    PROOF_NONE,
+    probe_proof,
+    proves_nothing_detail,
+    task_specific_checks,
+)
 from crucible.logs import log_context
 from crucible.ports.artifacts import ArtifactStore
 from crucible.ports.clock import Clock
@@ -3126,7 +3132,16 @@ class Supervisor:
         if await self._db(partial(self._settle_if_cancelled, item.attempt.id, "gate_probe")):
             return False
         return await self._db(
-            partial(self._record_gate_probe, item.attempt.id, checks, rows, error)
+            partial(
+                self._record_gate_probe,
+                item.attempt.id,
+                checks,
+                rows,
+                error,
+                taken_ids=frozenset(
+                    str(check.get("id")) for check in item.contract.get("required_verification", [])
+                ),
+            )
         )
 
     def _record_gate_probe(
@@ -3135,6 +3150,7 @@ class Supervisor:
         checks: list[dict[str, Any]],
         rows: tuple[VerificationRun, ...] | None,
         error: str,
+        taken_ids: frozenset[str] = frozenset(),
     ) -> bool:
         with self._fenced() as uow:
             attempt = uow.attempts.get(attempt_id, for_update=True)
@@ -3154,24 +3170,42 @@ class Supervisor:
                         f"{row.id}: exit 127: {row.log_tail or 'program not found'}"
                         for row in missing
                     )
+                # hades #517, #608: a check naming a file the unchanged tree lacks fails
+                # there by definition (`new file named`), whatever exit its runner gave;
+                # a check that passes there is never proof.
                 elif all(
-                    row.exit_code == int(check.get("expect_exit", 0))
+                    probe_proof(row.exit_code, int(check.get("expect_exit", 0)), row.missing_paths)
+                    == PROOF_NONE
                     for row, check in zip(rows, checks, strict=True)
                 ):
                     reason = "gate_proves_nothing"
-                    detail = "; ".join(
-                        f"{row.id} passes on the unchanged repo (add a check that fails, "
-                        "for example a new test file)"
-                        for row in rows
+                    detail = proves_nothing_detail(
+                        [(row.id, row.command, row.exit_code) for row in rows], taken_ids
                     )
             by_id = {row.id: row for row in rows or ()}
             for check in checks:
                 row = by_id.get(check["id"])
+                proof = (
+                    probe_proof(row.exit_code, int(check.get("expect_exit", 0)), row.missing_paths)
+                    if row and not error
+                    else None
+                )
                 payload = {
                     "id": check["id"],
                     "command": check["command"],
                     "exit": row.exit_code if row else None,
-                    "detail": error or (row.log_tail if row else "probe not supported, skipped"),
+                    "detail": error
+                    or (
+                        (
+                            f"{PROOF_NEW_FILE}: {', '.join(row.missing_paths)}"
+                            if proof == PROOF_NEW_FILE
+                            else row.log_tail
+                        )
+                        if row
+                        else "probe not supported, skipped"
+                    ),
+                    "proof": proof,
+                    "missing_paths": list(row.missing_paths) if row else [],
                 }
                 uow.evidence.add(
                     EvidenceRecord(

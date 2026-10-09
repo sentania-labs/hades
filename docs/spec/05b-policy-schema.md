@@ -204,9 +204,12 @@ the same list under `execution_request.services` (05): its entry replaces the
 policy's of the same kind, and `enabled: false` drops it. A version uploaded
 before the field existed runs no service. The shipped `hades-self-hosting`
 example declares it, so a task against this repository can run the
-integration tier in the worker; the verifier re-runs `required_verification`
-without a service, so `make test-integration` stays a worker-side check and a
-CI tier, not a required verification.
+integration tier in the worker. The verifier that re-runs
+`required_verification` and the gate probe that runs a task's own checks on the
+unchanged tree before any worker (11) run beside the same declared services and
+are told the same `CRUCIBLE_TEST_DATABASE_URL` (hades #608), so a check that
+needs the database re-runs as it ran in the worker. Which checks a contract may
+require is CONTRIBUTING.md's rule, not this field's.
 
 ## Validation
 

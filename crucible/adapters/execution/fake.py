@@ -358,6 +358,8 @@ class FakeProvider:
         # Attempts whose credential copy the supervisor asked to discard (12).
         self.gate_probe_calls: list[str] = []
         self.gate_probe_exits: dict[str, int] = {}
+        # hades #517, #608: the paths a probed check names that the base lacks, by id.
+        self.gate_probe_missing: dict[str, tuple[str, ...]] = {}
         self.gate_probe_error: str | None = None
         self.discarded: list[str] = []
         # Harnesses the administrative probe was run for (25).
@@ -487,6 +489,7 @@ class FakeProvider:
                 log_tail="program: not found"
                 if self.gate_probe_exits.get(check["id"]) == 127
                 else "",
+                missing_paths=self.gate_probe_missing.get(check["id"], ()),
             )
             for check in checks
         )

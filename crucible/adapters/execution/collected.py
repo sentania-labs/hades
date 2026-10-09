@@ -42,8 +42,10 @@ from crucible.ports.execution import (
 )
 
 __all__ = [
+    "VERIFICATION_LOG_LIMIT",
     "BlobTarScan",
     "Outputs",
+    "head_and_tail",
     "lists_over_limit",
     "read_base_paths",
     "read_commit_policy",
@@ -100,6 +102,53 @@ def tail(path: Path, limit: int) -> str:
             return handle.read().decode("utf-8", "replace")
     except OSError:
         return ""
+
+
+# hades #608: what one verification log artifact keeps, at most.
+VERIFICATION_LOG_LIMIT = 64 * 1024
+
+
+def head_and_tail(path: Path, limit: int = VERIFICATION_LOG_LIMIT) -> str:
+    """A log bounded at `limit` bytes that keeps both ends (hades #608): a check's first
+    error is near the head, and the summary its runner prints last is at the tail. A
+    longer log loses its middle, and a line in its place says how many bytes went."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            if size <= limit:
+                whole = handle.read(limit).decode("utf-8", "replace")
+                half = len(whole) // 2
+                return _bounded(whole[:half], "", whole[half:], limit)
+            marker = (
+                f"\n[... {size} bytes in all: the middle is omitted, "
+                "the head and the tail are kept ...]\n"
+            )
+            half = (limit - len(marker.encode("utf-8"))) // 2
+            head = handle.read(half)
+            handle.seek(size - half)
+            last = handle.read(half)
+    except OSError:
+        return ""
+    return _bounded(head.decode("utf-8", "replace"), marker, last.decode("utf-8", "replace"), limit)
+
+
+def _bounded(head: str, marker: str, last: str, limit: int) -> str:
+    """`head`, `marker` and `last` within `limit` bytes once encoded. A byte that decoded
+    as a replacement character grows to three, so the budget is counted in encoded bytes
+    and shared between the two ends, each keeping at least half of what it may: the first
+    error and the runner's summary both survive malformed output. A cut that splits a
+    character drops that character."""
+    head_bytes = head.encode("utf-8")
+    marker_bytes = marker.encode("utf-8")
+    last_bytes = last.encode("utf-8")
+    if len(head_bytes) + len(marker_bytes) + len(last_bytes) <= limit:
+        return head + marker + last
+    budget = max(0, limit - len(marker_bytes))
+    keep_last = min(len(last_bytes), budget - min(len(head_bytes), budget // 2))
+    keep_head = min(len(head_bytes), budget - keep_last)
+    head = head_bytes[:keep_head].decode("utf-8", "ignore")
+    last = last_bytes[len(last_bytes) - keep_last :].decode("utf-8", "ignore")
+    return head + marker + last
 
 
 def read_outputs(
@@ -570,7 +619,7 @@ def read_verifications(
                     command=command,
                     expect_exit=expected.get(check_id, 0),
                     exit_code=-1,
-                    log_tail=tail(log_file, 32 * 1024),
+                    log_tail=head_and_tail(log_file),
                     ran=False,
                     detail="the verifier container recorded no exit for this command",
                 )
@@ -585,7 +634,7 @@ def read_verifications(
                 command=command,
                 expect_exit=expected.get(check_id, 0),
                 exit_code=int(raw) if raw.lstrip("-").isdigit() else -1,
-                log_tail=tail(log_file, 32 * 1024),
+                log_tail=head_and_tail(log_file),
                 # ASCII digits and a sane length only: the verifier ran worker code,
                 # which may have left anything in this file.
                 seconds=int(seconds) if re.fullmatch(r"[0-9]{1,9}", seconds) else None,

@@ -22,6 +22,7 @@ from typing import Any
 
 from crucible.domain.gates import injected_shim_text
 from crucible.domain.secrets import named_secret_pattern_expressions
+from crucible.domain.verification import named_paths
 from crucible.ports.execution import (
     OUTPUT_MOUNT,
     PACKAGE_CACHE_LEAF,
@@ -1079,7 +1080,12 @@ def encode_check_id(check_id: str) -> str:
     return "".join(out) or "%00"
 
 
-def verifier_script(checks: list[tuple[str, str]]) -> str:
+# hades #608: how long the verifier waits for a declared service's port before it runs
+# the checks anyway (each check then fails on its own, with its own first error).
+SERVICE_WAIT_SECONDS = 120
+
+
+def verifier_script(checks: list[tuple[str, str]], wait_ports: tuple[int, ...] = ()) -> str:
     """Re-run each `required_verification` command from the collected tree (11).
 
     Each command's exit, log and wall-clock seconds go to the verify directory, which is
@@ -1089,7 +1095,14 @@ def verifier_script(checks: list[tuple[str, str]]) -> str:
 
     The command is executed as the contract gave it, which is the point of the gate.
     Everything else, the id and the file names it becomes, is bound as a shell variable
-    from a literal and never concatenated into a command."""
+    from a literal and never concatenated into a command.
+
+    `wait_ports` (hades #608): the loopback ports of the declared services a Docker
+    verifier starts beside itself, which the commands must not race. Kubernetes needs
+    none: its sidecar's startup probe holds the verifier container until the server
+    answers. A TCP connection is the readiness test, because the Postgres image's
+    bootstrap server listens on its socket only; with neither bash nor python3 in the
+    image the wait is skipped."""
     lines = [
         "set -u",
         f"cd {REPO_MOUNT}",
@@ -1099,6 +1112,27 @@ def verifier_script(checks: list[tuple[str, str]]) -> str:
         f'MANIFEST="$V/{MANIFEST}"',
         ': > "$MANIFEST"',
     ]
+    if wait_ports:
+        lines.extend(
+            [
+                "service_up() {",
+                "  if command -v bash >/dev/null 2>&1; then",
+                "    bash -c ': < /dev/tcp/127.0.0.1/'\"$1\" 2>/dev/null; return",
+                "  fi",
+                "  if command -v python3 >/dev/null 2>&1; then",
+                "    python3 -c 'import socket, sys; "
+                'socket.create_connection(("127.0.0.1", int(sys.argv[1])), 2).close()\' '
+                '"$1" 2>/dev/null; return',
+                "  fi",
+                "  return 0",
+                "}",
+            ]
+        )
+        for port in wait_ports:
+            lines.append(
+                f"W=0; until service_up {int(port)} || [ $W -ge {SERVICE_WAIT_SECONDS} ]; "
+                "do sleep 1; W=$((W + 1)); done"
+            )
     for check_id, command in checks:
         encoded = encode_check_id(check_id)
         lines.append(f"ID={_quote(check_id)}")
@@ -1749,16 +1783,34 @@ def gate_probe_script(
     checks: list[dict[str, Any]],
     timeout: int,
 ) -> str:
-    """Run checks in the isolated checkout and keep forged results out of its log."""
+    """Run checks in the isolated checkout and keep forged results out of its log.
+
+    Each result line also lists, as `missing`, the paths the command names
+    (`named_paths`) that the unchanged tree does not have (hades #517, #608). Every
+    check's paths are looked up before the first command runs, so a check that deletes
+    or creates a file cannot change what any check is recorded as naming."""
     # Never depend on an interpreter that policy required_programs does not
     # guarantee: every worker image has sh, jq and Debian coreutils (timeout).
     program = f"""set -eu
 root=$(mktemp -d)
 trap 'rm -rf "$root"' 0
 cd {_quote(checkout_dir)}
+# hades #517, #608: the paths a check names that the pristine tree lacks, recorded
+# for every check before any command can delete or create one.
+probe_missing() {{
+  index=$1
+  shift
+  : > "$root/missing.$index"
+  for path in "$@"; do
+    if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+      printf '%s\n' "$path" >> "$root/missing.$index"
+    fi
+  done
+}}
 probe_check() {{
-  check_id=$1
-  command=$2
+  index=$1
+  check_id=$2
+  command=$3
   code=0
   timeout --signal=KILL {_quote(str(timeout))} sh -c '
     code=0
@@ -1775,9 +1827,14 @@ probe_check() {{
     tail -c 1000 "$root/output" > "$root/detail"
   fi
   jq -cn --arg id "$check_id" --arg command "$command" --argjson exit "$code" \
-    --rawfile detail "$root/detail" '{{id: $id, command: $command, exit: $exit, detail: $detail}}'
+    --rawfile detail "$root/detail" --rawfile missing "$root/missing.$index" \
+    '{{id: $id, command: $command, exit: $exit, detail: $detail,
+      missing: ($missing | split("\n") | map(select(. != "")))}}'
 }}
 """
-    for check in checks:
-        program += f"probe_check {_quote(check['id'])} {_quote(check['command'])}\n"
+    for index, check in enumerate(checks):
+        paths = " ".join(_quote(path) for path in named_paths(str(check["command"])))
+        program += f"probe_missing {index} {paths}\n"
+    for index, check in enumerate(checks):
+        program += f"probe_check {index} {_quote(check['id'])} {_quote(check['command'])}\n"
     return program
