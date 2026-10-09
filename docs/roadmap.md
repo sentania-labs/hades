@@ -52,7 +52,7 @@ operator's vision.
 | Capability | Current position | Owning tracking |
 |---|---|---|
 | Bootstrap authority and self-development proof | Handoff done 2026-09-29 (ADR 0029, #255); M1 exits still need #85 and a Claude Code run | [#207](https://github.com/sentania-labs/hades/issues/207), [#85](https://github.com/sentania-labs/hades/issues/85), [#184](https://github.com/sentania-labs/hades/issues/184) |
-| M2 persistent principal and harness continuity | Planned; dedicated conversation service and continuity spike not implemented | [#208](https://github.com/sentania-labs/hades/issues/208) |
+| M2 persistent principal and harness continuity | Planned; dedicated conversation service and continuity spike not implemented. FDY-0584 (hermes-room) proved Hermes room shape: per-turn CLI with --resume, no generic turn-injection API. See docs/spikes/hermes-room.md | [#208](https://github.com/sentania-labs/hades/issues/208) |
 | M3 curated identities and skills | Partial backlog coverage; applicability, permissions and agent tests need explicit acceptance | [#199](https://github.com/sentania-labs/hades/issues/199), [#197](https://github.com/sentania-labs/hades/issues/197), [#198](https://github.com/sentania-labs/hades/issues/198) |
 | M4 brainstorm intake and independent cards | Planned; captured ideas must remain distinct from authorized execution | [#209](https://github.com/sentania-labs/hades/issues/209) |
 | M4/M5 human attention and daily briefing | Planned; distinct from execution telemetry | [#210](https://github.com/sentania-labs/hades/issues/210) |
