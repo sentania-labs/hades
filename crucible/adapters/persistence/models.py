@@ -14,6 +14,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -493,6 +494,93 @@ class DecisionLedgerRow(Base):
     )
     acted_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     acted_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+
+
+class RoomRow(Base):
+    """One room (hades #208, ADR 0031, 0059_rooms): a conversation whose transcript
+    Hades owns. The runner's token is never stored; its salted digest is, and only while
+    a runner is up."""
+
+    __tablename__ = "rooms"
+    __table_args__ = (
+        Index("ix_rooms_state", "state"),
+        Index("ix_rooms_last_activity", "last_activity_at"),
+    )
+    id: Mapped[str] = mapped_column(ID, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    card_task_id: Mapped[str | None] = mapped_column(ID, ForeignKey("tasks.id"), nullable=True)
+    harness: Mapped[str] = mapped_column(String(64))
+    model: Mapped[str] = mapped_column(String(128))
+    state: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(TZ)
+    last_activity_at: Mapped[datetime] = mapped_column(TZ)
+    runner_handle: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_by: Mapped[str] = mapped_column(ID, ForeignKey("principals.id"))
+    scope_task_ids: Mapped[list[Any]] = mapped_column(
+        ARRAY(String(26)), server_default=text("'{}'::character varying[]")
+    )
+    runner_key_salt: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    runner_key_digest: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    inbox_cursor: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    pending_control: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    runner_seen_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+
+
+class RoomTurnRow(Base):
+    """One turn of a room's transcript (hades #208, 0059_rooms), unique by room and seq."""
+
+    __tablename__ = "room_turns"
+    __table_args__ = (UniqueConstraint("room_id", "seq", name="uq_room_turns_room_seq"),)
+    id: Mapped[str] = mapped_column(ID, primary_key=True)
+    room_id: Mapped[str] = mapped_column(ID, ForeignKey("rooms.id"))
+    seq: Mapped[int] = mapped_column(Integer)
+    role: Mapped[str] = mapped_column(String(16))
+    tool_calls: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    started_at: Mapped[datetime] = mapped_column(TZ)
+    ended_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    interrupted: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    decision_id: Mapped[str | None] = mapped_column(
+        ID, ForeignKey("decision_ledger.id"), nullable=True
+    )
+    # Declared last: `text` shadows SQLAlchemy's `text()` in this body.
+    text: Mapped[str] = mapped_column(Text)
+
+
+class PersonaRow(Base):
+    __tablename__ = "personas"
+    id: Mapped[str] = mapped_column(ID, primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    role_text: Mapped[str] = mapped_column(Text)
+    skills: Mapped[list[Any]] = mapped_column(JSONB)
+    tools: Mapped[list[Any]] = mapped_column(JSONB)
+    default_harness: Mapped[str] = mapped_column(String(64))
+    default_model: Mapped[str] = mapped_column(String(256))
+    default_tier: Mapped[str] = mapped_column(String(16))
+    budget_usd: Mapped[float] = mapped_column(Numeric(12, 2))
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(TZ)
+    updated_at: Mapped[datetime] = mapped_column(TZ)
+
+
+class ScheduledJobRow(Base):
+    __tablename__ = "scheduled_jobs"
+    __table_args__ = (Index("ix_scheduled_jobs_due", "enabled", "next_run_at"),)
+    id: Mapped[str] = mapped_column(ID, primary_key=True)
+    persona_id: Mapped[str] = mapped_column(ID, ForeignKey("personas.id"))
+    name: Mapped[str] = mapped_column(String(128))
+    task_kind: Mapped[str] = mapped_column(String(16))
+    task_text: Mapped[str] = mapped_column(Text)
+    cadence: Mapped[str] = mapped_column(String(128))
+    cadence_label: Mapped[str] = mapped_column(String(128))
+    timezone: Mapped[str] = mapped_column(String(64))
+    results_to: Mapped[str] = mapped_column(String(24))
+    carry_notes_forward: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    project: Mapped[str] = mapped_column(String(128))
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    last_run_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(128))
 
 
 class ReviewDispositionRow(Base):

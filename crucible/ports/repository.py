@@ -35,6 +35,7 @@ from crucible.domain.entities import (
     LedgerDecision,
     LogChunkRecord,
     MemoryItem,
+    Persona,
     Policy,
     PoolExhaustion,
     Principal,
@@ -49,6 +50,7 @@ from crucible.domain.entities import (
     ReviewDisposition,
     ReviewReportRecord,
     RoutingPolicyRecord,
+    ScheduledJob,
     SupervisorStatus,
     Task,
     TaskContract,
@@ -57,6 +59,7 @@ from crucible.domain.entities import (
     Wake,
 )
 from crucible.domain.lifecycle import AttemptState, ExecutionState, TaskState
+from crucible.domain.rooms import Room, RoomTurn
 
 
 class PrincipalRepository(Protocol):
@@ -75,6 +78,23 @@ class PrincipalRepository(Protocol):
     def disable(self, principal_id: str, at: datetime) -> bool: ...
 
     def rename(self, principal_id: str, name: str) -> bool: ...
+
+
+class PersonaRepository(Protocol):
+    def add(self, persona: Persona) -> None: ...
+    def get(self, persona_id: str) -> Persona | None: ...
+    def list_all(self) -> Sequence[Persona]: ...
+    def save(self, persona: Persona) -> None: ...
+    def delete(self, persona_id: str) -> bool: ...
+
+
+class ScheduledJobRepository(Protocol):
+    def add(self, job: ScheduledJob) -> None: ...
+    def get(self, job_id: str, *, for_update: bool = False) -> ScheduledJob | None: ...
+    def list_all(self) -> Sequence[ScheduledJob]: ...
+    def list_due(self, now: datetime) -> Sequence[ScheduledJob]: ...
+    def save(self, job: ScheduledJob) -> None: ...
+    def delete(self, job_id: str) -> bool: ...
 
 
 class UiSessionRepository(Protocol):
@@ -438,6 +458,46 @@ class DecisionLedgerRepository(Protocol):
     ) -> Sequence[LedgerDecision]: ...
 
 
+class RoomRepository(Protocol):
+    """Rooms (hades #208, ADR 0031): one row per conversation, saved whole."""
+
+    def add(self, room: Room) -> None: ...
+
+    def get(self, room_id: str, *, for_update: bool = False) -> Room | None: ...
+
+    def save(self, room: Room) -> None: ...
+
+    def list_recent(self, *, limit: int, include_closed: bool = True) -> Sequence[Room]: ...
+
+    def list_live(self) -> Sequence[Room]:
+        """The rooms whose runner is up or meant to be: starting, warm, interrupted."""
+        ...
+
+
+class RoomTurnRepository(Protocol):
+    """A room's transcript, in seq order. Hades writes a turn before any runner sees
+    it; an assistant turn is saved as its reply streams in."""
+
+    def add(self, turn: RoomTurn) -> None: ...
+
+    def get(self, room_id: str, seq: int, *, for_update: bool = False) -> RoomTurn | None: ...
+
+    def save(self, turn: RoomTurn) -> None: ...
+
+    def last_seq(self, room_id: str) -> int:
+        """The highest seq in the room, 0 when it has no turns."""
+        ...
+
+    def count(self, room_id: str) -> int: ...
+
+    def list_for_room(
+        self, room_id: str, *, after_seq: int = 0, limit: int | None = None
+    ) -> Sequence[RoomTurn]:
+        """Turns with seq above `after_seq`, oldest first; with `limit`, the newest
+        `limit` of them (still oldest first)."""
+        ...
+
+
 class EscalationRepository(Protocol):
     def add(self, escalation: Escalation) -> None: ...
 
@@ -724,6 +784,8 @@ class IdempotencyRepository(Protocol):
 
 class UnitOfWork(Protocol):
     principals: PrincipalRepository
+    personas: PersonaRepository
+    scheduled_jobs: ScheduledJobRepository
     ui_sessions: UiSessionRepository
     repositories: RepositoryRegistry
     policies: PolicyRepository
@@ -750,6 +812,8 @@ class UnitOfWork(Protocol):
     task_notes: TaskNoteRepository
     memory: MemoryRepository
     decision_ledger: DecisionLedgerRepository
+    rooms: RoomRepository
+    room_turns: RoomTurnRepository
     escalations: EscalationRepository
     dispositions: DispositionRepository
     wakes: WakeRepository

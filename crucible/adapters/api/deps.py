@@ -18,6 +18,7 @@ from crucible.application.auth import authenticate
 from crucible.application.credential_renewer import ReadOnlyCredentialStore
 from crucible.application.errors import ForbiddenError, UnauthorizedError
 from crucible.application.harnesses import HarnessRegistry
+from crucible.application.rooms import RoomContext
 from crucible.domain.entities import Principal, Role
 from crucible.ports.artifacts import ArtifactStore
 from crucible.ports.clock import Clock
@@ -103,6 +104,9 @@ class AppContext:
     # Where the migration left the first-run administrator token, removed from there
     # when that principal first signs in (ADR 0016). None where there is no such place.
     first_run: FirstRunDelivery | None = None
+    # hades #208: the room settings and the launcher of the provider that runs room
+    # runners. Without a launcher a room still takes messages; none is answered.
+    rooms: RoomContext = field(default_factory=RoomContext)
 
     @property
     def secret_providers(self) -> frozenset[str]:

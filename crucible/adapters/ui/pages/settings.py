@@ -13,7 +13,9 @@ from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.adapters.ui.actions import register
 from crucible.adapters.ui.render import _page, _redirect
 from crucible.adapters.ui.session import _require
+from crucible.application import rooms
 from crucible.application.admin import credentials, delivery, kubernetes, status_cache
+from crucible.application.admin.context import guard_mutation
 from crucible.domain.entities import Principal, Role
 
 router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
@@ -130,6 +132,33 @@ def _settings_rows(settings: Any) -> list[list[Any]]:
     return rows
 
 
+# hades #208: the idle timeout after which a warm room runner exits and its room goes idle.
+ROOM_IDLE_CHOICES = (5, 10, 15, 30, 60, 120, 240)
+
+
+def _room_idle_row(ctx: Ctx, uow: UoW, principal: Principal) -> list[Any]:
+    config = getattr(getattr(ctx, "rooms", None), "config", None)
+    value = rooms.idle_timeout_value(uow, getattr(config, "idle_timeout_minutes", None))
+    action: Any = "Administrator only"
+    if principal.role is Role.ADMIN:
+        action = {
+            "kind": "form",
+            "action": "/ui/actions/room-idle-timeout",
+            "label": "Save room idle timeout",
+            "reason": "optional",
+            "select": {
+                "name": "minutes",
+                "label": "Room idle timeout (minutes)",
+                "selected": str(value.value),
+                "options": [
+                    (str(minutes), f"{minutes} minutes")
+                    for minutes in sorted({*ROOM_IDLE_CHOICES, int(value.value)})
+                ],
+            },
+        }
+    return ["rooms.idle_timeout_minutes", value.value, value.source, value.applies, action]
+
+
 def _runtime_rows(ctx: Ctx, uow: UoW, principal: Principal) -> list[list[Any]]:
     """Runtime settings in this part, including deployment values that are only seeds."""
     rows: list[list[Any]] = []
@@ -179,6 +208,7 @@ def _runtime_rows(ctx: Ctx, uow: UoW, principal: Principal) -> list[list[Any]]:
                         "label": "Edit on Credentials",
                     }
                 rows.append([value.name, value.value, value.source, value.applies, action])
+    rows.append(_room_idle_row(ctx, uow, principal))
     if settings is not None:
         for name, seed in sorted(settings.harnesses.items()):
             state = uow.harnesses.get(name)
@@ -316,3 +346,28 @@ async def _action_status_cache(
 
 
 register("status-cache", _action_status_cache)
+
+
+async def _action_room_idle_timeout(
+    request: Request,
+    action: str,
+    ctx: Ctx,
+    uow: UoW,
+    principal: Principal,
+    csrf: str,
+    form: dict[str, str],
+    reason: str | None,
+) -> Response | None:
+    """hades #208: save `rooms.idle_timeout_minutes`; the next runner launched gets it."""
+    assert ctx.admin is not None
+    cleaned = guard_mutation(
+        ctx.admin, uow, reason, principal=principal.name, operation="rooms idle timeout set"
+    )
+    rooms.save_idle_timeout(
+        uow, ctx.clock, principal=principal, minutes=int(form["minutes"]), reason=cleaned
+    )
+    uow.commit()
+    return _redirect(form, "Room idle timeout saved.")
+
+
+register("room-idle-timeout", _action_room_idle_timeout)

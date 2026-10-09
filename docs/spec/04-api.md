@@ -4,6 +4,10 @@ Base path `/v1`. JSON only. OpenAPI generated from the Pydantic models in
 `crucible/contracts/` and published at `/v1/openapi.json`. Breaking changes
 create `/v2`; `/v1` keeps serving for at least one minor release after.
 
+Personas and scheduled jobs are documented in
+[Personas and scheduled jobs](../personas-and-scheduled-jobs.md). Their Pydantic
+request and response models are included in this API's generated OpenAPI document.
+
 ## Authentication
 
 Bearer tokens, created by `crucible admin token create --principal <name>
@@ -137,6 +141,23 @@ endpoint's existing role requirements.
 | POST | `/memory/{id}/forget` | Supersede with no replacement: the item is no longer recalled and stays as the record. Orchestrator or operator role. |
 | GET | `/decisions` | The append-only decision ledger, newest said first: `?channel=&limit=` (default 100, at most 500). Any principal. |
 | POST | `/decisions` | Append a line: `principal`, `channel`, `verbatim` required; `said_at` defaults to now; `transcript_ref`, `applies_to`, `acted_by`, `acted_at` optional. Orchestrator or operator role. There is no edit and no delete; the table refuses both. A decision recorded through `POST /tasks/{id}/decisions` is mirrored here with channel `task` and the task id in `applies_to`. |
+
+### Rooms (hades #208, ADR 0031, 28)
+
+Rooms are conversations whose transcript Hades owns. Writes take the orchestrator or operator role; any principal reads. A harness other than `claude_code` is refused with 409.
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/rooms` | Create a room: `kind` (`principal` or `card`), `harness`, `model`, and for a card room `card_task_id` (a task id or external id). 201. |
+| GET | `/rooms` | The rooms, most recently active first: `?limit=&include_closed=`. |
+| GET | `/rooms/{id}` | The room and a bounded window of its newest turns: `?window=` (default 50, at most 500). |
+| POST | `/rooms/{id}/messages` | Inject a user turn: `text`. Starts a runner when none is warm. Returns the turn (201); 503 when a runner cannot be started, with the turn kept. |
+| GET | `/rooms/{id}/stream` | Server-sent events of the room: `room`, `turn`, `delta`, `turn_end`, `closed`: `?after_seq=&max_seconds=`. |
+| POST | `/rooms/{id}/interrupt` | Stop the running turn; 409 when none runs. |
+| POST | `/rooms/{id}/switch` | `harness`, `model`: writes the switch line, stops the runner; the next message starts a new one with the transcript replayed. |
+| POST | `/rooms/{id}/close` | Stop the runner; the room takes nothing more. |
+
+The room's runner uses `/rooms/{id}/session`, `/rooms/{id}/inbox`, `/rooms/{id}/turns/{seq}/events`, `/rooms/{id}/tools/{name}` and `/rooms/{id}/runner/exit` with the room-scoped token Hades mints at each launch; no other token is accepted there, and that token is accepted nowhere else (28).
 
 ### Administration
 

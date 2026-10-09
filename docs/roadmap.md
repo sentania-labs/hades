@@ -258,6 +258,9 @@ approvals, not hidden model state, and must not replay completed actions.
   The room runner part ran on 2026-10-08 ([docs/spikes/room-runner-sdk.md](spikes/room-runner-sdk.md)):
   a room is a Claude Agent SDK client over the same stream-json process, scheduled runs
   stay on the per-turn CLI, and the two resume each other's sessions.
+  The rooms backend (FDY-0590, [docs/spec/28-rooms.md](spec/28-rooms.md), ADR 0031): Hades
+  owns each room's transcript, a message starts a runner Pod when none is warm, and
+  switch, interrupt, idle reclaim and close work from the record. The room page is next.
 
 **Exit:** close the laptop, return from another client, continue the same
 conversation, and delegate through Hades.

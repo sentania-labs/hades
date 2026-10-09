@@ -257,9 +257,10 @@ def _render(step: Any) -> str:
     return buffer.getvalue()
 
 
-def test_0058_is_the_single_head_and_follows_the_previous_one() -> None:
+def test_0058_follows_the_previous_one() -> None:
     script = ScriptDirectory.from_config(migrate.alembic_config("postgresql://unused/unused"))
-    assert script.get_heads() == ["0058_memory_and_decisions"]
+    # hades #208 (FDY-0590): 0059_rooms and FDY-0591's 0060 sit on top of it now.
+    assert "0058_memory_and_decisions" in {r.revision for r in script.walk_revisions()}
     revision = script.get_revision("0058_memory_and_decisions")
     assert revision is not None
     assert revision.down_revision == "0056_pull_request_schema_overlap"
@@ -315,7 +316,8 @@ def test_the_orm_mirrors_the_migration_and_the_event_kinds_match_the_enum() -> N
         "acted_by",
         "acted_at",
     }
-    assert set(m58._event_kinds()) == {k.value for k in EventKind}
+    # 0059_rooms owns the current CHECK constraint; 0058's kinds are all in it.
+    assert set(m58._event_kinds()) <= {k.value for k in EventKind}
     assert {
         "memory_promoted",
         "memory_superseded",

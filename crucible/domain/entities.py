@@ -48,6 +48,41 @@ class UiSession:
 
 
 @dataclass(slots=True)
+class Persona:
+    id: str
+    name: str
+    role_text: str
+    skills: list[str]
+    tools: list[str]
+    default_harness: str
+    default_model: str
+    default_tier: str
+    budget_usd: float
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(slots=True)
+class ScheduledJob:
+    id: str
+    persona_id: str
+    name: str
+    task_kind: str
+    task_text: str
+    cadence: str
+    cadence_label: str
+    timezone: str
+    results_to: str
+    carry_notes_forward: bool
+    project: str
+    enabled: bool
+    last_run_at: datetime | None
+    next_run_at: datetime | None
+    created_by: str
+
+
+@dataclass(slots=True)
 class Repository:
     id: str
     name: str
