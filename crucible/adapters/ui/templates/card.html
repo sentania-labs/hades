@@ -60,6 +60,14 @@
     </li>{% endfor %}</ol>{% else %}<p class="admin-empty">No attempt yet.</p>{% endif %}
   </section>
 
+  {% if egress %}<section class="lat-card" aria-label="Egress">
+    <h2>Egress</h2>
+    <span class="admin-hint">Each allowlisted host, tried from inside the worker before the harness started. An unreachable host is the egress path, not the worker.</span>
+    <table class="card-defaults"><thead><tr><th>Attempt</th><th>Host</th><th>Result</th></tr></thead><tbody>
+    {% for attempt_id, host, result in egress %}<tr><td><code>{{ attempt_id }}</code></td><td>{{ safe_value("host", host) }}</td><td>{{ safe_value("result", result) }}</td></tr>{% endfor %}
+    </tbody></table>
+  </section>{% endif %}
+
   <section class="lat-card" aria-label="Correction history">
     <h2>Correction history</h2>
     {% if card.corrections %}<ol class="card-timeline">{% for row in card.corrections %}<li>

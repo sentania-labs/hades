@@ -25,7 +25,9 @@ America/Chicago timestamp in the audit event. No action requires typed reason te
 
 The HTML front door is `/ui/board`. `/ui/tasks/{id}` is the matching card view, including
 the objective, acceptance criteria, pull request and CI state, attempts, actions, and the
-existing notes under the clearly named Thread section.
+existing notes under the clearly named Thread section. When an attempt recorded a worker egress probe
+(hades #425), the card also lists each allowlisted host and whether the worker reached it
+before the harness started, as the earlier task page did.
 
 The root `/` redirects to `/ui/board`, as does sign-in without an explicit return
 destination. Sign-in honors `next=/ui`: that route is the Status page and shows the
