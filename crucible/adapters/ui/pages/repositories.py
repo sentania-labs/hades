@@ -143,6 +143,7 @@ def repositories_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         principal,
         csrf,
         active="/ui/repositories",
+        data_page="repositories",
         heading="Repositories",
         intro=(
             "Delivery registrations, and the repositories each GitHub installation covers: "

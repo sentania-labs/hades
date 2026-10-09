@@ -57,6 +57,7 @@ def policies_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             principal,
             csrf,
             active=PATH,
+            data_page="policies",
             heading="Policies",
             intro="Delivery policies are edited by an administrator.",
             sections=[
@@ -97,6 +98,7 @@ def policies_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             principal,
             csrf,
             active=PATH,
+            data_page="policies",
             heading="Policies",
             intro="Delivery policies and their versions.",
             sections=sections,
@@ -179,6 +181,7 @@ def policies_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         principal,
         csrf,
         active=PATH,
+        data_page="policies",
         heading="Policies",
         intro=(
             "Delivery policies and their versions. Publishing writes the next version of the "

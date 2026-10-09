@@ -571,9 +571,17 @@ def _page(
     badge: str | None = None,
     badge_kind: str = "accent",
     refresh_seconds: int | None = None,
+    data_page: str = "",
 ) -> HTMLResponse:
     """`refresh_seconds` makes the browser reload the page (at its own path, without the
-    flash message) every so many seconds while something on it is in progress."""
+    flash message) every so many seconds while something on it is in progress.
+
+    `data_page` is a stable marker on the main element, used by the smoke test and
+    external monitors to identify pages without grepping product names.  When blank the
+    last segment of the active path is used (e.g. "/ui/tasks" → "tasks").
+    """
+    if not data_page and active:
+        data_page = active.rstrip("/").rsplit("/", 1)[-1] if "/" in active else active.lstrip("/")
     timezone = "America/Chicago"
     settings = getattr(request.app.state.ctx, "settings", None)
     if settings is not None:
@@ -590,6 +598,7 @@ def _page(
         badge=badge,
         badge_kind=badge_kind,
         refresh_seconds=refresh_seconds,
+        data_page=data_page,
     )
     return templates.TemplateResponse(request=request, name="page.html", context=context)
 

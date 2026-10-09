@@ -291,6 +291,7 @@ class LoginSession:
     # logins, which read the CLI's terminal directly.
     _pasted: list[str] = field(default_factory=list)
     _wake: threading.Event = field(default_factory=threading.Event)
+    _state_changed: threading.Event = field(default_factory=threading.Event)
     _guard: threading.Lock = field(default_factory=threading.Lock)
 
     def as_dict(self) -> dict[str, Any]:
@@ -348,6 +349,7 @@ class LoginSession:
             self.state = "waiting_for_code"
             if self.prompt is None:
                 self.prompt = "The CLI has shown the sign-in link and is waiting for input."
+            self._notify()
 
     def request_cancel(self) -> str | None:
         """Mark the login cancelled and return the state it was cancelled in, or None
@@ -367,7 +369,16 @@ class LoginSession:
         accepted before, which the outcome then honours."""
         with self._guard:
             self.state = "finishing"
+            self._state_changed.set()
             return self.cancel_requested
+
+    def wait_for_change(self, timeout: float) -> bool:
+        """Block until the session state changes or the timeout expires."""
+        return self._state_changed.wait(timeout)
+
+    def _notify(self) -> None:
+        """Signal the poll loop that the state has changed."""
+        self._state_changed.set()
 
     def wait_for_code(self, timeout: float) -> str | None:
         if self._wake.wait(timeout):
@@ -419,6 +430,7 @@ def run_login(
             session.state = "failed"
             session.exit_code = None
             session.error = f"could not start {(argv or flow.argv)[0]}: {exc.strerror or exc}"
+            session._notify()
             return session
     finally:
         os.close(slave)
@@ -428,6 +440,7 @@ def run_login(
     buffer = ""
     deadline = time.monotonic() + timeout
     session.state = "waiting_for_operator"
+    session._notify()
     try:
         while True:
             if session.cancel_requested:
@@ -460,6 +473,7 @@ def run_login(
                 if code is not None and session.error is None:
                     os.write(master, code.strip().encode("utf-8"))
                     session.state = "waiting_for_operator"
+                    session._notify()
                     time.sleep(ENTER_PAUSE_SECONDS)
                     os.write(master, ENTER.encode("utf-8"))
         process.wait(timeout=5)
@@ -471,6 +485,7 @@ def run_login(
     session.state = "finished" if process.returncode == 0 and not session.error else "failed"
     if session.state == "failed" and session.error is None:
         session.error = f"the login command exited {process.returncode}"
+    session._notify()
     return session
 
 
@@ -546,6 +561,7 @@ def _line(
                 time.time() + flow.code_wait_seconds - CODE_WAIT_MARGIN_SECONDS
             )
         session.state = "waiting_for_code"
+        session._notify()
 
 
 def _write_token(path: Path, value: str) -> None:

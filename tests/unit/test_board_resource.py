@@ -83,7 +83,7 @@ def test_first_run_sign_in_renders_the_smoke_landing_and_empty_board(
         assert landing.status_code == 200
         assert landing.url.path == "/ui"
         assert [response.headers["location"] for response in landing.history] == ["/ui"]
-        assert compose_smoke.FIRST_RUN_LANDING_MARKER in landing.content
+        assert b'data-page="status"' in landing.content
         assert "Before a task" in landing.text
         assert "Local gateway" in landing.text
         ctx.first_run.discard.assert_called_once()

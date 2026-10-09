@@ -157,6 +157,7 @@ def room_page(request: Request, ctx: Ctx, uow: UoW, window: int = WINDOW) -> Res
         context={
             **_base(request, principal, csrf, title="Hades", active="/ui/room"),
             **room_panel_context(ctx, uow, principal, room, window),
+            "data_page": "room",
         },
     )
     if room:

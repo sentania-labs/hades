@@ -260,6 +260,7 @@ def settings_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         principal,
         csrf,
         active="/ui/settings",
+        data_page="settings",
         heading="Settings",
         intro=(
             "Runtime settings are saved inside Hades. Deployment values seed them only "

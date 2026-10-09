@@ -248,9 +248,28 @@ def mint_token(principal: str) -> str:
 
 
 FIRST_RUN_FILE = "/var/lib/crucible/credentials/first-run-admin-token"
-FIRST_RUN_LANDING_MARKER = b"<h1>Status</h1>"
-BOARD_MARKER = b"<h1>Board</h1>"
 TOKEN_PATTERN = re.compile(r"\bcru_[A-Z0-9]{26}\.[A-Za-z0-9_-]+\b")
+# Stable page markers; grep the data-page attribute on <main>, never a product name.
+# The board uses a separate template (board.html) outside _page, so it carries no marker.
+_PAGE_MARKERS: dict[str, str] = {
+    "/ui": "status",
+    "/ui/harnesses": "harnesses",
+    "/ui/credentials": "credentials",
+    "/ui/images": "images",
+    "/ui/routing": "routing",
+    "/ui/repositories": "repositories",
+    "/ui/tokens": "tokens",
+    "/ui/github": "github",
+    "/ui/workers": "workers",
+    "/ui/tasks": "tasks",
+    "/ui/wakes": "wakes",
+    "/ui/retention": "retention",
+    "/ui/audit": "audit",
+    "/ui/bootstrap": "bootstrap",
+    "/ui/settings": "settings",
+}
+# The board page template (not rendered by _page) uses a product-name check.
+BOARD_MARKER = b"<h1>Board</h1>"
 
 
 def walk_first_run_ui(base_url: str) -> None:
@@ -282,41 +301,37 @@ def walk_first_run_ui(base_url: str) -> None:
         raise SmokeError("the first-run sign-in page has no pre-authentication CSRF nonce")
     if FIRST_RUN_FILE not in sign_in or "logs migrate" in sign_in:
         raise SmokeError("the sign-in page does not name the first-run token file")
-    body = urllib.parse.urlencode({"csrf": csrf.group(1), "token": token, "next": "/ui"}).encode()
-    request_object = urllib.request.Request(
-        f"{base_url}/ui/sign-in",
-        data=body,
-        method="POST",
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    # Post the sign-in form (next=/ui returns to Status).
+    sign_in_url = f"{base_url}/ui/sign-in"
+    opener.open(
+        urllib.request.Request(
+            sign_in_url,
+            data=urllib.parse.urlencode(
+                {"csrf": csrf.group(1), "token": token, "next": "/ui"}
+            ).encode(),
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        ),
+        timeout=DEFAULT_TIMEOUT,
     )
     try:
         # The explicit next=/ui returns to Status and its first-run setup steps.
         # The root and the default sign-in destination instead lead to the board.
-        with opener.open(request_object, timeout=DEFAULT_TIMEOUT) as response:
-            if response.status != 200 or FIRST_RUN_LANDING_MARKER not in response.read():
-                raise SmokeError("first-run administrator sign-in did not render the Status page")
-        with opener.open(f"{base_url}/ui/board", timeout=DEFAULT_TIMEOUT) as response:
-            if response.status != 200 or BOARD_MARKER not in response.read():
-                raise SmokeError("the first-run Board page did not render")
-        for path in (
-            "/ui/harnesses",
-            "/ui/credentials",
-            "/ui/images",
-            "/ui/routing",
-            "/ui/repositories",
-            "/ui/tokens",
-            "/ui/github",
-            "/ui/workers",
-            "/ui/tasks",
-            "/ui/wakes",
-            "/ui/retention",
-            "/ui/audit",
-            "/ui/bootstrap",
-            "/ui/settings",
-        ):
+        for path, marker in _PAGE_MARKERS.items():
             with opener.open(f"{base_url}{path}", timeout=DEFAULT_TIMEOUT) as response:
-                if response.status != 200 or b"Hades" not in response.read():
-                    raise SmokeError(f"the first-run UI page {path} did not render")
+                if response.status != 200:
+                    raise SmokeError(
+                        f"the first-run UI page {path} returned HTTP {response.status}"
+                    )
+                body = response.read()
+                if f'data-page="{marker}"'.encode() not in body:
+                    raise SmokeError(f"the first-run UI page {path} lacks data-page={marker!r}")
+        # The board uses board.html directly (not _page), so we check for its heading.
+        with opener.open(f"{base_url}/ui/board", timeout=DEFAULT_TIMEOUT) as response:
+            if response.status != 200:
+                raise SmokeError(f"the first-run Board page returned HTTP {response.status}")
+            if BOARD_MARKER not in response.read():
+                raise SmokeError("the first-run Board page did not render")
     except urllib.error.URLError as exc:
         raise SmokeError(f"the first-run UI walk failed: {exc}") from None
     left = compose(

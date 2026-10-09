@@ -28,6 +28,7 @@ def audit_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         principal,
         csrf,
         active="/ui/audit",
+        data_page="audit",
         heading="Audit",
         intro="Every administrative change and refusal: who, when, and why.",
         sections=[
