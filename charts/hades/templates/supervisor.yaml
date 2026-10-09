@@ -2,6 +2,7 @@
 # today. `Recreate` rather than a rolling update so two supervisors never overlap even
 # for the seconds a rollout would give them; the lease would refuse the second one
 # anyway, and this keeps the log free of a refusal that means nothing.
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:

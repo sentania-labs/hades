@@ -7,6 +7,7 @@
 # The Argo annotations make it a sync hook that is recreated on every sync; a plain
 # `kubectl apply -k` creates it once, and `make deploy-kind` deletes it before applying.
 # A Job's pod template is immutable, so re-creation is how a changed image reaches it.
+---
 apiVersion: batch/v1
 kind: Job
 metadata:

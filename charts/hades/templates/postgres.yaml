@@ -3,6 +3,7 @@
 # operator-managed or external server deletes this file from its overlay's resources and
 # points `url` in the `crucible-database` Secret at that server instead; nothing else in
 # the base refers to this StatefulSet except the Service name inside that DSN.
+---
 apiVersion: v1
 kind: Service
 metadata:

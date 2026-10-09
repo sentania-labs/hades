@@ -55,7 +55,10 @@ accepts or creates secret values. Create the named Kubernetes Secrets separately
 
 Run `make chart` to lint and validate the default and lab-like renders. Run
 `make chart-sync-check` to compare chart objects with the kustomize base. Both targets
-name any missing command directly.
+name any missing command directly. Component manifests live directly in
+`charts/hades/templates/`; each document starts with a standalone `---` line.
+The structure unit test guards this layout, and the CI chart job supplies the real
+Helm lint, render, schema validation, and kustomize comparison proof.
 
 Helm names the migration Job `crucible-migrate-REVISION`, creating a fresh Job on
 install and each upgrade, including image tag or digest changes. Helm removes the

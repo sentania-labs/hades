@@ -1,0 +1,222 @@
+# The first-run administrator token (ADR 0016, crucible#122). The migrate Job writes the
+# one-time token into the Secret `crucible-first-run-admin` in this namespace instead of
+# printing it, because a pod log is shipped off the cluster by whatever collects logs.
+# The api deletes that Secret when the first-run principal first signs in or is revoked.
+#
+# Two narrow grants, both in `crucible` and nowhere else:
+#
+# - `crucible-migrate` may create Secrets here and patch that one. Kubernetes cannot
+#   restrict `create` by resource name, so the create grant covers the namespace; the
+#   account is used by the migrate Job alone, whose command is fixed in the image.
+# - `crucible-supervisor` (the api's account) may delete that one Secret and nothing
+#   else. It cannot read it.
+#
+# Nobody in Crucible can read the Secret back: reading it is the operator's
+# `kubectl get secret`, under the operator's own cluster permissions.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: crucible-migrate
+  namespace: crucible
+  labels:
+    app.kubernetes.io/name: crucible
+    app.kubernetes.io/component: migrate
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: crucible-first-run-admin-writer
+  namespace: crucible
+  labels:
+    app.kubernetes.io/name: crucible
+    app.kubernetes.io/component: migrate
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ .Values.secrets.firstRunToken | quote }}]
+    verbs: ["patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: crucible-first-run-admin-writer
+  namespace: crucible
+  labels:
+    app.kubernetes.io/name: crucible
+    app.kubernetes.io/component: migrate
+subjects:
+  - kind: ServiceAccount
+    name: crucible-migrate
+    namespace: crucible
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: crucible-first-run-admin-writer
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: crucible-first-run-admin-remover
+  namespace: crucible
+  labels:
+    app.kubernetes.io/name: crucible
+    app.kubernetes.io/component: api
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ .Values.secrets.firstRunToken | quote }}]
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: crucible-first-run-admin-remover
+  namespace: crucible
+  labels:
+    app.kubernetes.io/name: crucible
+    app.kubernetes.io/component: api
+subjects:
+  - kind: ServiceAccount
+    name: crucible-supervisor
+    namespace: crucible
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: crucible-first-run-admin-remover
+
+# The control plane's grant on the GitHub App credential Secret in its own namespace (ADR
+# 0017), which the service owns; its other grant here is deleting the first-run Secret
+# (first-run-rbac.yaml, ADR 0016). Create GitHub App creates it the first time
+# it writes, labelled `app.kubernetes.io/managed-by: crucible`, and replaces its data with
+# one merge patch on each later write; the api and the supervisor read it through the API
+# server on each signature.
+#
+# `get` and `patch` name the one Secret. `create` cannot: the API server authorizes a
+# create before the object has a name, so RBAC ignores resourceNames on it. That is the
+# widening, and it is in `crucible`, where no worker ever runs. Paired with `get`, it lets
+# a process that is already compromised mint a token Secret under this name before the
+# first connect; the service refuses any Secret of this name that is not Opaque. The other
+# accounts in `crucible` are `default`, bound to nothing, and `crucible-migrate`, whose
+# create-and-patch grant for the first-run Secret (first-run-rbac.yaml, ADR 0016) adds
+# nothing this Role lacks but a patch of that one Secret (ADR 0017). `list`,
+# `watch`, `update` and `delete` are absent: nothing here enumerates, replaces or removes
+# a Secret, and the database Secret stays out of reach.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: crucible-github-app
+  namespace: crucible
+  labels:
+    app.kubernetes.io/name: crucible
+    app.kubernetes.io/component: control-plane
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ .Values.secrets.githubApp | quote }}]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: crucible-github-app
+  namespace: crucible
+  labels:
+    app.kubernetes.io/name: crucible
+    app.kubernetes.io/component: control-plane
+subjects:
+  - kind: ServiceAccount
+    name: crucible-supervisor
+    namespace: crucible
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: crucible-github-app
+
+# The supervisor's only permission on the workers' side of the cluster (26). A Role, never
+# a ClusterRole: no cluster-scoped verb of any kind. Its only other grants are two narrow
+# Secret grants in `crucible` (github-app-rbac.yaml, first-run-rbac.yaml).
+#
+# The verb set is what `crucible/adapters/execution/k8sapi.py` can actually emit, which
+# is narrower than "everything on these kinds" and slightly wider than 26's original
+# sentence. The two additions are the ones the implemented provider needs and 26 now
+# records:
+#
+#   patch on persistentvolumeclaims  the retention label cleanup writes (26, cleanup)
+#   patch on secrets                 the `rw-narrow` credential sync-back (12, 26)
+#   get and list on resourcequotas   `max_concurrency` on GET /providers (26)
+#   get and list on events           a Job whose Pod the namespace quota refused
+#                                    (`FailedCreate`) fails at once, not at its timeout
+#
+# pods/log is a GET, so `get` is its verb. pods/exec carries both: the client opens the
+# reader Pod's tar stream as a GET WebSocket upgrade, and the API server authorizes an
+# exec against `create` as well, so a Role with only `get` is refused at the upgrade.
+#
+# The admin login Job and the service-owned harness Secrets (25, ADR 0015) need nothing
+# more. The login is a Job with its own NetworkPolicy (create, list, delete), its URL is
+# read from pods/log, the pasted code and the auth files cross on pods/exec, and the
+# harness Secret is created when absent and replaced with one merge patch (create, get,
+# patch). The api Deployment runs the login and uses this same account (26). The login
+# lock that keeps two api replicas from logging one harness in at once is a ConfigMap
+# (create, get, delete, the verbs already here). `update` is deliberately absent:
+# nothing replaces an object whole.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: crucible-supervisor
+  namespace: crucible-workers
+  labels:
+    app.kubernetes.io/name: crucible
+    app.kubernetes.io/component: supervisor
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "configmaps"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets", "persistentvolumeclaims"]
+    verbs: ["create", "get", "list", "watch", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["resourcequotas", "events"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+
+# The supervisor Pod runs in the `crucible` namespace, so its ServiceAccount lives there;
+# a Pod can only use an account from its own namespace. A RoleBinding may name a subject
+# in another namespace, which is what keeps the permission itself namespaced to
+# `crucible-workers` exactly as 26 requires.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: crucible-supervisor
+  namespace: crucible-workers
+  labels:
+    app.kubernetes.io/name: crucible
+    app.kubernetes.io/component: supervisor
+subjects:
+  - kind: ServiceAccount
+    name: crucible-supervisor
+    namespace: crucible
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: crucible-supervisor

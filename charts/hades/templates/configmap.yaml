@@ -2,6 +2,7 @@
 # here is a credential value: the database DSN and the GitHub App credential are Secrets
 # (the second one the service's own, ADR 0017), and the harness credentials are Secrets in
 # `crucible-workers` that only the supervisor's account can read (12, 26).
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:

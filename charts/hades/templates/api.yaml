@@ -1,3 +1,4 @@
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -15,10 +16,10 @@ spec:
     - name: http
       port: 8080
       targetPort: http
----
 # The api Deployment (01): stateless, every request a transaction. One replica in the
 # base because the artifact claim and the first-run administrator flow are simpler to
 # reason about with one; an overlay may raise it.
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -195,11 +196,11 @@ spec:
 {{- end }}
         - name: tmp
           emptyDir: {}
----
 # 23: the webhook is the optional accelerator and the API is how the operator reaches
 # /ui. The host and the TLS reference are the overlay's; no DNS record is created here or
 # anywhere in this repository (operator rule 10, 26 item 8).
 {{- if .Values.ingress.enabled }}
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

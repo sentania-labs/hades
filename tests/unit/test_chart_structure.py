@@ -73,7 +73,7 @@ def test_chart_and_deploy_examples_contain_no_credential_values() -> None:
 
 def test_every_template_value_is_declared_in_schema() -> None:
     schema = json.loads((CHART / "values.schema.json").read_text())
-    paths = [*CHART.glob("templates/*"), *CHART.glob("base/**/*.yaml")]
+    paths = list(CHART.glob("templates/*"))
     referenced = {match for path in paths for match in VALUE_REFERENCE.findall(path.read_text())}
     assert referenced
     assert not {path for path in referenced if not _schema_has_path(schema, path)}
@@ -85,18 +85,48 @@ def test_every_kustomize_base_object_has_a_chart_template() -> None:
         for path in (ROOT / "deploy/kubernetes/base").glob("**/*.yaml")
         if path.name != "kustomization.yaml"
     ]
-    missing = []
-    for source in source_files:
-        relative = source.relative_to(ROOT / "deploy/kubernetes/base")
-        chart_source = CHART / "base" / relative
-        assert chart_source.is_file()
-        source_objects = _identities(source)
-        # Names and kinds are deliberately literal even where fields are templated.
-        chart_text = chart_source.read_text()
-        for kind, name in source_objects:
-            if f"kind: {kind}" not in chart_text or f"name: {name}" not in chart_text:
-                missing.append((kind, name, str(relative)))
-    assert not missing
+    template_objects = set()
+    for template in (CHART / "templates").glob("*.yaml"):
+        for document in template.read_text().split("---\n"):
+            kind = re.search(r"^kind: (\S+)$", document, re.M)
+            name = re.search(r"^metadata:\n  name: (.+)$", document, re.M)
+            if kind and name:
+                normalized = name[1].replace("-{{ .Release.Revision }}", "")
+                template_objects.add((kind[1], normalized))
+    source_objects = {identity for source in source_files for identity in _identities(source)}
+    assert source_objects == template_objects
+
+
+def test_component_layout_and_document_boundaries() -> None:
+    expected = {
+        "namespaces",
+        "configmap",
+        "serviceaccounts",
+        "rbac",
+        "pvcs",
+        "postgres",
+        "migrate-job",
+        "api",
+        "supervisor",
+        "workers-quota",
+        "workers-networkpolicy",
+        "buildkit",
+    }
+    templates = list((CHART / "templates").glob("*.yaml"))
+    assert {path.stem for path in templates} == expected
+    assert (CHART / "templates/_helpers.tpl").is_file()
+    assert not (CHART / "base").exists()
+    for path in templates:
+        text = path.read_text()
+        assert ".Files." not in text and "tpl " not in text
+        assert "-}}" not in text  # Right trimming can consume a separator's newline.
+        lines = text.splitlines()
+        for index, line in enumerate(lines):
+            if line.startswith("---"):
+                assert line == "---"
+                assert lines[index + 1].startswith("apiVersion:")
+            if line.startswith("apiVersion:"):
+                assert index > 0 and lines[index - 1] == "---"
 
 
 def test_chart_sync_comparison_fails_on_injected_drift(tmp_path: Path) -> None:
@@ -118,14 +148,14 @@ def test_chart_sync_comparison_fails_on_injected_drift(tmp_path: Path) -> None:
 
 
 def test_chart_secret_settings_reach_application_and_mounts() -> None:
-    config = (CHART / "base/crucible/configmap.yaml").read_text()
+    config = (CHART / "templates/configmap.yaml").read_text()
     assert "CRUCIBLE_GITHUB__APP__SECRET_NAME: {{ .Values.secrets.githubApp | quote }}" in config
     assert (
         "CRUCIBLE_KUBERNETES__FIRST_RUN_SECRET_NAME: {{ .Values.secrets.firstRunToken | quote }}"
         in config
     )
     for component in ("api", "supervisor"):
-        template = (CHART / f"base/crucible/{component}.yaml").read_text()
+        template = (CHART / f"templates/{component}.yaml").read_text()
         assert "projected:" in template
         for field, key in (
             ("githubAppPrivateKey", "app.pem"),
@@ -136,7 +166,7 @@ def test_chart_secret_settings_reach_application_and_mounts() -> None:
 
 
 def test_migration_job_name_changes_with_release_revision() -> None:
-    template = (CHART / "base/crucible/migrate-job.yaml").read_text()
+    template = (CHART / "templates/migrate-job.yaml").read_text()
     assert "  name: crucible-migrate-{{ .Release.Revision }}\n" in template
     assert "helm.sh/hook" not in template  # Dependencies are ordinary release resources.
 

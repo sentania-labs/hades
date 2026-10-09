@@ -44,6 +44,7 @@
 # break anything, it only shrinks how many attempts admit at once (a policy at fraction
 # 1 fits one attempt in the 3 CPU this quota allows, not three), so a stale quota fails
 # closed: fewer concurrent launches, never an unbounded one.
+---
 apiVersion: v1
 kind: ResourceQuota
 metadata:
