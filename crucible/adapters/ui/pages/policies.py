@@ -20,6 +20,7 @@ from crucible.adapters.ui.render import _page, _redirect
 from crucible.adapters.ui.session import _admin, _require
 from crucible.application.admin import credentials as credentials_admin
 from crucible.application.admin import policy_editor
+from crucible.application.admin import routing as routing_admin
 from crucible.domain.entities import Principal, Role
 
 router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
@@ -235,6 +236,7 @@ async def _actions(
     assert ctx.admin is not None
     _admin(principal)
     name = form.get("name", "")
+    before = routing_admin.routing_in_force(uow)
     published = policy_editor.publish_policy(
         ctx.admin,
         uow,
@@ -249,6 +251,9 @@ async def _actions(
             and adapter.credential_spec() is not None
         },
     )
+    # A changed routing name, version or pinned flag changes the routing version in
+    # force, so the worker egress is set for the version it now selects.
+    routing_admin.sync_policy_egress(ctx.admin, uow, before=before)
     uow.commit()
     form = {**form, "return_to": _here(name, published["version"])}
     return _redirect(

@@ -531,7 +531,12 @@ as retired. Pinned, the referenced version is used. The Routing page's 'In force
 names the version tasks route with now and why: pinned, or unpinned and following the
 newest version not retired, with the version the policy names. The admin panels that
 publish routing build on that same version, and an upload that becomes the version in
-force sets the worker egress as a publish does. A quota reroute and a resumed quota wait follow the same rule, with the
+force sets the worker egress as a publish does, and so does a delivery policy
+publish (the Admin policies page, the Routing page's policy upload, or `PUT
+/policies/{name}/{version}`) that changes the routing version in force by changing
+`routing.policy` name, version or pinned. `GET /routing/usage` reports the version in
+force too, unless `?policy_version=` selects a policy version, whose named version it
+reports. A quota reroute and a resumed quota wait follow the same rule, with the
 exhausted pool excluded from the reroute. The task's policy snapshot is never
 rewritten. The version used is recorded on the attempt as `routing_version`, and the
 attempt's spec, pool reservation, harness count and exit read that version, not a

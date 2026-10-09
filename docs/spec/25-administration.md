@@ -549,7 +549,11 @@ comma separated, with one reason box, the publish reason, which is required. Pub
 writes the next version of the policy, built on the version in force, through
 `put_policy`, the service behind `PUT /v1/policies/{name}/{version}`, so it validates
 the same way and its `policy_uploaded` event records the administrator and the reason.
-An edit that changes nothing is refused. Each version opens against the version before
+An edit that changes nothing is refused. When the publish changes the routing
+version in force (a changed `routing.policy` name, version or pinned flag), the
+worker egress is set for the version it now selects before the publish completes,
+as a routing publish sets it: the proxy allowlist, the Docker allowlist and a
+Kubernetes settings reload. Each version opens against the version before
 it, one row per changed setting with its old and new value. Times are local Central
 time. The page is registered without a navigation link; the navigation task adds it.
 

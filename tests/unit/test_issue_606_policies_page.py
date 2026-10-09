@@ -116,7 +116,9 @@ def _world() -> Any:
                 Policy(name="hades-self-hosting", version=1, document=first, created_at=NOW),
             ]
         ),
-        routing_policies=SimpleNamespace(get=lambda name, version: routing),
+        routing_policies=SimpleNamespace(
+            get=lambda name, version: routing, list_versions=lambda name: [routing]
+        ),
         events=events,
         principals=SimpleNamespace(get=lambda principal_id: None),
         commit=lambda: None,

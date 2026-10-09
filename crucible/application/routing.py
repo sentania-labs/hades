@@ -143,12 +143,20 @@ def resolve_routing(uow: UnitOfWork, policy_document: dict[str, Any]) -> Routing
     return RoutingResolution(name=name, named_version=named, version=newest, pinned=False, why=why)
 
 
-def load_routing(uow: UnitOfWork, policy_document: dict[str, Any]) -> RoutingPolicyV1 | None:
-    """The routing version `policy_document` names, as written (GET /routing/usage reads
-    it). An attempt routes with `load_attempt_routing` instead."""
+def load_routing(
+    uow: UnitOfWork, policy_document: dict[str, Any], *, in_force: bool = False
+) -> RoutingPolicyV1 | None:
+    """The routing version `policy_document` names, as written, or with `in_force` the
+    version it routes with now (`resolve_routing`, hades #605). GET /routing/usage reads
+    the version in force for the newest policy version and the named one for an
+    explicitly selected policy version. An attempt routes with `load_attempt_routing`."""
     ref = routing_ref(policy_document)
     if ref is None:
         return None
+    if in_force:
+        resolved = resolve_routing(uow, policy_document)
+        if resolved is not None:
+            ref = (resolved.name, resolved.version)
     record = uow.routing_policies.get(*ref)
     if record is None:
         return None

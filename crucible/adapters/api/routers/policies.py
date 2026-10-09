@@ -12,6 +12,8 @@ from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.application.admin import credentials, gateway
 from crucible.application.admin.routing import (
     gateway_url,
+    routing_in_force,
+    sync_policy_egress,
     sync_upload_egress,
     upload_overrides,
 )
@@ -57,6 +59,7 @@ def upload_policy(
     principal: Admin,
     document: Annotated[dict[str, Any], Body()],
 ) -> PolicyView:
+    before = routing_in_force(uow)
     policy = put_policy(
         uow,
         ctx.clock,
@@ -73,6 +76,9 @@ def upload_policy(
         if ctx.admin is not None
         else {},
     )
+    # A publish that changes the routing version in force sets the egress for it.
+    if ctx.admin is not None:
+        sync_policy_egress(ctx.admin, uow, before=before)
     uow.commit()
     return PolicyView(
         name=policy.name,
@@ -92,8 +98,10 @@ def routing_usage(
     policy: str = "default-software",
     policy_version: int | None = None,
 ) -> RoutingUsageView:
-    """Without `policy_version` the newest version of the policy is used, so the report
-    follows the routing policy new tasks are admitted against."""
+    """Without `policy_version` the newest version of the policy is used, read through
+    the routing version it routes new tasks with now (unpinned follows the newest one
+    not retired, hades #605). An explicit `policy_version` reports the routing version
+    that policy version names, as written."""
     if policy_version is None:
         versions = list(uow.policies.list_versions(policy))
         stored = max(versions, key=lambda p: p.version) if versions else None
@@ -101,7 +109,7 @@ def routing_usage(
         stored = uow.policies.get(policy, policy_version)
     if stored is None:
         raise NotFoundError(f"policy {policy}/{policy_version or 'latest'} does not exist")
-    routing = load_routing(uow, stored.document)
+    routing = load_routing(uow, stored.document, in_force=policy_version is None)
     if routing is None:
         raise NotFoundError("the policy names a routing policy that is not uploaded")
     return RoutingUsageView(

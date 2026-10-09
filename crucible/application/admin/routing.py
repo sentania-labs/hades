@@ -595,6 +595,33 @@ def sync_upload_egress(ctx: AdminContext, uow: UnitOfWork, *, name: str, version
     return True
 
 
+def routing_in_force(uow: UnitOfWork) -> tuple[str, int] | None:
+    """The (name, version) of the routing version the policy in force routes with now,
+    or None when there is none to route with."""
+    try:
+        _policy, routing = _active_documents(uow)
+    except NotFoundError:
+        return None
+    return routing.name, routing.version
+
+
+def sync_policy_egress(
+    ctx: AdminContext, uow: UnitOfWork, *, before: tuple[str, int] | None
+) -> bool:
+    """A delivery policy publish that changes the routing version in force (its routing
+    name, version or pinned flag) gets the egress a routing publish sets, for the
+    version it now routes with. `before` is `routing_in_force` read before the publish.
+    False, and nothing changes, when the routing version in force is the same."""
+    try:
+        _policy, routing = _active_documents(uow)
+    except NotFoundError:
+        return False
+    if (routing.name, routing.version) == before:
+        return False
+    _apply_egress(ctx, routing.document)
+    return True
+
+
 def active_documents(uow: UnitOfWork) -> tuple[Any, Any]:
     """The delivery policy in force and the routing policy it names."""
     return _active_documents(uow)

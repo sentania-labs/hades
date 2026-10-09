@@ -13,22 +13,25 @@ history.
 
 from __future__ import annotations
 
+import asyncio
 import copy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from crucible.adapters.api.routers import policies as policies_router
+from crucible.adapters.ui.pages import policies as policies_page
 from crucible.adapters.ui.pages import routing as routing_page
+from crucible.application.admin import policy_editor
 from crucible.application.admin import routing as admin_routing
 from crucible.application.routing import (
     current_routing_version,
     load_attempt_routing,
     resolve_routing,
 )
-from crucible.domain.entities import Event, Principal, Role, RoutingPolicyRecord
+from crucible.domain.entities import Event, Policy, Principal, Role, RoutingPolicyRecord
 from crucible.domain.events import EventKind
 from tests.fixtures import FakeClock
 from tests.unit.test_issue_254_routing_at_launch import (
@@ -37,6 +40,8 @@ from tests.unit.test_issue_254_routing_at_launch import (
     _store,
     _version,
 )
+from tests.unit.test_issue_606_policies_page import _document as _full_document
+from tests.unit.test_issue_606_policies_page import _Policies
 
 NOW = datetime(2026, 10, 9, 15, tzinfo=UTC)
 
@@ -395,3 +400,150 @@ def test_the_routing_page_history_names_the_overrides_with_the_reason() -> None:
     assert newest[0] == "40" and newest[2] == "operator"
     assert newest[3] == "supersedes the 2026-10-01 decision to keep coder off"
     assert "overrides codex:gpt-mid: enabled to disabled" in newest[4]
+
+
+# ----- Review: usage and egress follow the routing version in force ---------------------
+
+
+def _stored_policy(version: int, routing_version: int, *, pinned: bool) -> Any:
+    return Policy(
+        name="default-software",
+        version=version,
+        document=_policy(routing_version, pinned=pinned),
+        created_at=NOW + timedelta(minutes=version),
+    )
+
+
+def _usage_uow(policies: list[Any]) -> Any:
+    limited = _record(40)
+    limited = replace(
+        limited,
+        document={
+            **limited.document,
+            "pools": {
+                "openai-sub": {"window": "5h", "budget_units": "attempts", "soft_limit": 3},
+            },
+        },
+    )
+    return SimpleNamespace(
+        routing_policies=_Routing([_record(38), limited]),
+        policies=SimpleNamespace(
+            list_versions=lambda name: [p for p in policies if p.name == name],
+            get=lambda name, version: next(
+                (p for p in policies if (p.name, p.version) == (name, version)), None
+            ),
+        ),
+        attempt_metrics=SimpleNamespace(list_since=lambda since, model, task_ids: []),
+        pool_exhaustions=SimpleNamespace(get=lambda pool: None),
+    )
+
+
+def test_routing_usage_reports_the_version_in_force_for_an_unpinned_policy() -> None:
+    uow = _usage_uow([_stored_policy(7, 38, pinned=False)])
+    ctx = SimpleNamespace(clock=FakeClock(NOW))
+
+    view = policies_router.routing_usage(ctx, uow, None)  # type: ignore[arg-type]
+
+    assert view.routing_policy == {"name": "default-routing", "version": 40}
+    assert [(pool["pool"], pool["soft_limit"]) for pool in view.pools] == [("openai-sub", 3)]
+
+
+def test_routing_usage_keeps_the_named_version_when_pinned_or_selected() -> None:
+    ctx = SimpleNamespace(clock=FakeClock(NOW))
+    pinned = _usage_uow([_stored_policy(7, 38, pinned=True)])
+    assert policies_router.routing_usage(ctx, pinned, None).routing_policy == {  # type: ignore[arg-type]
+        "name": "default-routing",
+        "version": 38,
+    }
+    selected = _usage_uow([_stored_policy(7, 38, pinned=False)])
+    view = policies_router.routing_usage(
+        ctx,  # type: ignore[arg-type]
+        selected,
+        None,  # type: ignore[arg-type]
+        policy_version=7,
+    )
+    assert view.routing_policy == {"name": "default-routing", "version": 38}
+
+
+def _local(url: str) -> dict[str, Any]:
+    return _entry("hermes", "coder", endpoint="local", endpoint_url=url, pool="spare")
+
+
+def test_a_policy_page_publish_that_unpins_routing_sets_the_egress_it_selects() -> None:
+    @dataclass(frozen=True)
+    class _DockerConfig:
+        proxy_allowlist: tuple[str, ...] = ("api.example.test",)
+
+    document = _full_document()
+    document["routing"] = {"policy": {"name": "default-routing", "version": 39, "pinned": True}}
+    old = replace(
+        _record(39), document={**_document(39), "models": [_local("http://gw-a:8000/v1")]}
+    )
+    new = replace(
+        _record(40), document={**_document(40), "models": [_local("http://gw-b:9000/v1")]}
+    )
+    uow = SimpleNamespace(
+        policies=_Policies(
+            [Policy(name="default-software", version=4, document=document, created_at=NOW)]
+        ),
+        routing_policies=_Routing([old, new]),
+        repositories=SimpleNamespace(list_all=lambda: []),
+        principals=SimpleNamespace(get=lambda principal_id: None),
+        events=_Events(),
+        commit=lambda: None,
+    )
+    docker = SimpleNamespace(config=_DockerConfig())
+    admin = SimpleNamespace(
+        clock=FakeClock(NOW),
+        harnesses=SimpleNamespace(names=lambda: [], get=lambda name: None),
+        proxy_config_path=None,
+        proxy_subnet="10.0.0.0/24",
+        proxy_hosts=(),
+        providers={"docker": docker},
+        uow_factory=None,
+    )
+    ctx = SimpleNamespace(settings=None, admin=admin, clock=FakeClock(NOW))
+    form = {
+        policy_editor.FIELD_PREFIX + field["path"]: (
+            "true" if field["value"] is True else field["shown"]
+        )
+        for group in policy_editor.group_fields(document)
+        for field in group["fields"]
+        if field["value"] is not False and field["path"] != "routing.policy.pinned"
+    }
+    form.update(name="default-software", publish_reason="follow the newest routing again")
+
+    asyncio.run(
+        policies_page._actions(
+            None,  # type: ignore[arg-type]
+            "policy-publish",
+            ctx,  # type: ignore[arg-type]
+            uow,
+            Principal(id="p", name="operator", role=Role.ADMIN, created_at=NOW),
+            "c",
+            form,
+            None,
+        )
+    )
+
+    stored = uow.policies.get("default-software", 5)
+    assert stored is not None and stored.document["routing"]["policy"]["pinned"] is False
+    assert docker.config.proxy_allowlist == ("api.example.test", "gw-b:9000")
+
+
+def test_a_policy_publish_that_keeps_the_routing_in_force_leaves_the_egress() -> None:
+    policy = Policy(
+        name="default-software",
+        version=4,
+        document=_policy(39, pinned=False),
+        created_at=NOW,
+    )
+    uow = SimpleNamespace(
+        policies=SimpleNamespace(list_versions=lambda name: [policy]),
+        routing_policies=_Routing([_record(39), _record(40)]),
+    )
+    ctx = SimpleNamespace(providers={}, proxy_config_path=None)
+
+    assert admin_routing.routing_in_force(uow) == ("default-routing", 40)
+    assert admin_routing.sync_policy_egress(ctx, uow, before=("default-routing", 40)) is False  # type: ignore[arg-type]
+    assert admin_routing.sync_policy_egress(ctx, uow, before=("default-routing", 39)) is True  # type: ignore[arg-type]

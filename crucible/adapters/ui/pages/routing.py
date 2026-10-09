@@ -869,6 +869,7 @@ async def _actions(
             document.setdefault("routing", {}).setdefault("policy", {})["pinned"] = (
                 form.get("routing_pinned") == "true"
             )
+            before = routing.routing_in_force(uow)
             put_policy(
                 uow,
                 ctx.clock,
@@ -884,6 +885,7 @@ async def _actions(
                     and adapter.credential_spec() is not None
                 },
             )
+            routing.sync_policy_egress(ctx.admin, uow, before=before)
     return None
 
 

@@ -129,7 +129,7 @@ endpoint's existing role requirements.
 | POST | `/images/{digest}/promote` | Set promotion state (`default`, `retained`, `retired`). Admin; records the decision. |
 | GET | `/providers` | Registered execution providers and their capabilities. |
 | GET/PUT | `/routing/{name}/{version}` | Read or upload a routing policy (05b). Admin. A PUT's response adds `previous_version` (the highest stored version below it), `overrides` (each entry whose enabled flag, weight, pool or tier membership changed, or that was added or removed, hades #606) and the `reason` given. An unpinned policy routes with the newest version not retired, so an upload is in force at the next task start (hades #605). |
-| GET | `/routing/usage` | Per-pool usage in the current window, from AttemptMetrics, read through the routing policy the newest version of the named policy points at; `?policy_version=` selects another. |
+| GET | `/routing/usage` | Per-pool usage in the current window, from AttemptMetrics, read through the routing version the newest version of the named policy routes new tasks with (pinned, the version it names; unpinned, the newest routing version not retired, hades #605); `?policy_version=` selects another policy version and reports the routing version it names. |
 | GET | `/routing/history` | Per-model outcomes: `?model=&project=&since=`; wall time, cost where reported, exit class, gates passed, corrections, acceptance. Foundry reads this before selecting. |
 
 ### Memory and decisions (hades #208, 27)
