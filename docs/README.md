@@ -48,6 +48,7 @@
 | [`25-administration.md`](spec/25-administration.md) | 25. Crucible administration: admin API, `crucible admin` CLI, credential onboarding |
 | [`26-kubernetes-provider.md`](spec/26-kubernetes-provider.md) | 26. Kubernetes execution provider |
 | [`27-memory-and-decisions.md`](spec/27-memory-and-decisions.md) | 27. Memory and decisions: the shared store, the recall API, the decision ledger, and the Admin Memory page |
+| [`28-rooms.md`](spec/28-rooms.md) | 28. Rooms and the room runner: Hades-owned transcripts, the inject and stream API, the runner's launch, session start, tools and lifecycle |
 
 **Decisions** -- Architectural decision records.
 
@@ -80,6 +81,7 @@
 | [`0028-hermes-first-routing.md`](adr/0028-hermes-first-routing.md) | ADR 0028: Hermes first in routing; frontier by intent; demotion that recovers. Status: accepted. |
 | [`0029-discard-an-import-and-rename-a-principal.md`](adr/0029-discard-an-import-and-rename-a-principal.md) | ADR 0029: Discard a verified import, skip native tasks, rename a principal. Status: accepted. |
 | [`0030-ui-sessions-server-side.md`](adr/0030-ui-sessions-server-side.md) | ADR 0030: UI sessions are server-side. Status: accepted. |
+| [`0031-rooms-hades-owns-the-transcript.md`](adr/0031-rooms-hades-owns-the-transcript.md) | ADR 0031: Rooms: Hades owns the transcript. Status: accepted. |
 
 **History** -- Phase notes, the closest thing to a changelog, and spikes.
 
