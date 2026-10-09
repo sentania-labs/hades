@@ -29,9 +29,9 @@ def test_ac2_shim_references_contributing_and_rules_section() -> None:
     """AC2: the shim points at CONTRIBUTING.md and the Rules for workers section."""
     shim = injected_shim_text()
     assert "CONTRIBUTING.md" in shim, "shim must reference CONTRIBUTING.md"
-    assert (
-        "Rules-for-workers" in shim or "Rules for workers" in shim
-    ), "shim must reference the Rules for workers section"
+    assert "Rules-for-workers" in shim or "Rules for workers" in shim, (
+        "shim must reference the Rules for workers section"
+    )
 
 
 def test_ac2_contributing_has_all_key_phrases() -> None:
