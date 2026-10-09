@@ -27,6 +27,9 @@
       <div><dt>Pushed head</dt><dd>{% if card.pull_request %}{{ card.pull_request.head_sha }} on {{ safe_value("branch", card.pull_request.work_branch) }}{% else %}not pushed{% endif %}</dd></div>
       <div><dt>CI</dt><dd>{% if card.head.ci %}<span class="lat-badge lat-badge--{% if card.head.ci.status == 'green' %}ok{% elif card.head.ci.status == 'red' %}bad{% else %}accent{% endif %}">{{ card.head.ci.state }}</span> {{ safe_value("detail", card.head.ci.detail) }}{% else %}not certified yet{% endif %}</dd></div>
       <div><dt>Gates</dt><dd>{% if card.gates.results %}{% for gate, result in card.gates.results.items() %}{{ gate }}: {{ result }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}none evaluated on this head{% endif %}</dd></div>
+      {% if card.pull_request and card.pull_request.merged_by %}
+      <div><dt>Merged</dt><dd><span>sha {{ card.pull_request.merged_sha }} by {{ safe_value("merged_by", card.pull_request.merged_by) }}{% if card.pull_request.merged_at %} at {{ card.pull_request.merged_at }}{% endif %}</span></dd></div>
+      {% endif %}
     </dl>
   </section>
 
