@@ -35,7 +35,7 @@
       <label for="room-message">{% if answer_url %}Answer and resume{% else %}Message Hades{% endif %}</label>
       <textarea id="room-message" rows="2" maxlength="20000" required placeholder="What should Hades know or work through?"></textarea>
       <div><button class="lat-btn lat-btn--primary" id="room-send" type="submit">{% if answer_url %}Answer and resume{% else %}Send{% endif %}</button><button class="lat-btn lat-btn--ghost" id="room-interrupt" type="button" hidden>Interrupt</button><span id="room-status" role="status"></span></div>
-    </form>{% else %}<p class="room-readonly">{% if room.state.value == "closed" %}This room is closed and read-only.{% else %}You are signed in as an observer; the principal room is read-only.{% endif %}</p>{% endif %}
+    </form>{% else %}<p class="room-readonly">{% if room.state.value == "closed" %}This room is closed and read-only.{% else %}{{ read_only_message | default("You are signed in as an observer; the principal room is read-only.") }}{% endif %}</p>{% endif %}
   {% else %}{{ notes() }}{{ questions_thread() }}<p class="room-empty">{{ empty_room | default("You are signed in as an observer; the principal room is read-only.") }}</p>{% endif %}
 </section>
 {% if can_write %}{% include "room_script.html" %}{% endif %}
