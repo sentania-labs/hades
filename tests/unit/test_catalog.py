@@ -25,9 +25,7 @@ from crucible.domain.secrets import match_text
 
 def _make_catalog(skills_yaml: str, tools_yaml: str) -> Path:
     """Create a temporary catalog YAML and return its path."""
-    with tempfile.NamedTemporaryFile(
-        suffix=".yaml", dir="/tmp", delete=False, mode="w"
-    ) as f:
+    with tempfile.NamedTemporaryFile(suffix=".yaml", dir="/tmp", delete=False, mode="w") as f:
         f.write(skills_yaml)
         f.write("\n")
         f.write("tools:\n")
@@ -355,9 +353,7 @@ class TestAdminCatalogPage:
 """
         p = _make_catalog(skills_yaml, tools_yaml)
         principal = SimpleNamespace(name="admin", role=SimpleNamespace(value="admin"))
-        monkeypatch.setattr(
-            catalog_page_module, "_require", lambda *_: (principal, "csrf")
-        )
+        monkeypatch.setattr(catalog_page_module, "_require", lambda *_: (principal, "csrf"))
         uow_mock = SimpleNamespace()
         ctx: Any = SimpleNamespace()
 
@@ -373,9 +369,7 @@ class TestAdminCatalogPage:
         assert "read-only" in body.lower()
         p.unlink()
 
-    def test_catalog_page_shows_all_harnesses(
-        self, monkeypatch: Any, tmp_path: Path
-    ) -> None:
+    def test_catalog_page_shows_all_harnesses(self, monkeypatch: Any, tmp_path: Path) -> None:
         tools_yaml = """  - name: claude_code
     kind: cli
     command: claude
@@ -399,9 +393,7 @@ class TestAdminCatalogPage:
 """
         p = _make_catalog("skills: []", tools_yaml)
         principal = SimpleNamespace(name="admin", role=SimpleNamespace(value="admin"))
-        monkeypatch.setattr(
-            catalog_page_module, "_require", lambda *_: (principal, "csrf")
-        )
+        monkeypatch.setattr(catalog_page_module, "_require", lambda *_: (principal, "csrf"))
         uow_mock = SimpleNamespace()
         ctx: Any = SimpleNamespace()
 
