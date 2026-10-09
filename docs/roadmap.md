@@ -255,6 +255,9 @@ approvals, not hidden model state, and must not replay completed actions.
   The harness part ran on 2026-10-08 ([docs/spikes/principal-harness.md](spikes/principal-harness.md)):
   Claude Code headless per turn is the first harness; Codex app-server is the second
   path with its unsupported capabilities listed there.
+  The room runner part ran on 2026-10-08 ([docs/spikes/room-runner-sdk.md](spikes/room-runner-sdk.md)):
+  a room is a Claude Agent SDK client over the same stream-json process, scheduled runs
+  stay on the per-turn CLI, and the two resume each other's sessions.
 
 **Exit:** close the laptop, return from another client, continue the same
 conversation, and delegate through Hades.
