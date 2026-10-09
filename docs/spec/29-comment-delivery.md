@@ -1,4 +1,4 @@
-# 28. Comment delivery, minion questions and bootstrap handoffs
+# 29. Comment delivery, minion questions and bootstrap handoffs
 
 Hades #208 item 2. Three records that make the conversation between the operator, the
 worker (the minion) and Foundry legible on the task: where an operator's note is on its

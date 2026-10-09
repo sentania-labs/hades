@@ -528,6 +528,57 @@ class DecisionLedgerRow(Base):
     acted_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
 
 
+class RoomRow(Base):
+    """One room (hades #208, ADR 0031, 0059_rooms): a conversation whose transcript
+    Hades owns. The runner's token is never stored; its salted digest is, and only while
+    a runner is up."""
+
+    __tablename__ = "rooms"
+    __table_args__ = (
+        Index("ix_rooms_state", "state"),
+        Index("ix_rooms_last_activity", "last_activity_at"),
+    )
+    id: Mapped[str] = mapped_column(ID, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    card_task_id: Mapped[str | None] = mapped_column(ID, ForeignKey("tasks.id"), nullable=True)
+    harness: Mapped[str] = mapped_column(String(64))
+    model: Mapped[str] = mapped_column(String(128))
+    state: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(TZ)
+    last_activity_at: Mapped[datetime] = mapped_column(TZ)
+    runner_handle: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_by: Mapped[str] = mapped_column(ID, ForeignKey("principals.id"))
+    scope_task_ids: Mapped[list[Any]] = mapped_column(
+        ARRAY(String(26)), server_default=text("'{}'::character varying[]")
+    )
+    runner_key_salt: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    runner_key_digest: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    inbox_cursor: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    pending_control: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    runner_seen_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+
+
+class RoomTurnRow(Base):
+    """One turn of a room's transcript (hades #208, 0059_rooms), unique by room and seq."""
+
+    __tablename__ = "room_turns"
+    __table_args__ = (UniqueConstraint("room_id", "seq", name="uq_room_turns_room_seq"),)
+    id: Mapped[str] = mapped_column(ID, primary_key=True)
+    room_id: Mapped[str] = mapped_column(ID, ForeignKey("rooms.id"))
+    seq: Mapped[int] = mapped_column(Integer)
+    role: Mapped[str] = mapped_column(String(16))
+    tool_calls: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    started_at: Mapped[datetime] = mapped_column(TZ)
+    ended_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    interrupted: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    decision_id: Mapped[str | None] = mapped_column(
+        ID, ForeignKey("decision_ledger.id"), nullable=True
+    )
+    # Declared last: `text` shadows SQLAlchemy's `text()` in this body.
+    text: Mapped[str] = mapped_column(Text)
+
+
 class ReviewDispositionRow(Base):
     __tablename__ = "review_dispositions"
     __table_args__ = (

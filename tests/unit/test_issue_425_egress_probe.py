@@ -34,6 +34,7 @@ from crucible.adapters.execution import k8sspec
 from crucible.adapters.execution.docker import LAUNCH_WRAPPER, DockerProvider
 from crucible.adapters.execution.kubernetes import KubernetesConfig
 from crucible.adapters.harness.script import ScriptHarnessAdapter
+from crucible.adapters.ui.pages import board as board_mod
 from crucible.adapters.ui.pages import tasks as tasks_mod
 from crucible.application.errors import NotFoundError
 from crucible.application.queries import _attempt_summary
@@ -1077,13 +1078,13 @@ def test_the_section_is_absent_until_a_probe_was_recorded() -> None:
     view = SimpleNamespace(
         executions=[SimpleNamespace(attempts=[SimpleNamespace(id="A0", egress_probe=None)])]
     )
-    assert tasks_mod._egress_rows(view) == []
+    assert board_mod.egress_rows(view) == []
     empty = SimpleNamespace(
         executions=[
             SimpleNamespace(attempts=[SimpleNamespace(id="A1", egress_probe={"hosts": []})])
         ]
     )
-    assert tasks_mod._egress_rows(empty) == [["A1", "none", "no allowlisted host to probe"]]
+    assert board_mod.egress_rows(empty) == [["A1", "none", "no allowlisted host to probe"]]
     rejected = SimpleNamespace(
         executions=[
             SimpleNamespace(
@@ -1095,7 +1096,7 @@ def test_the_section_is_absent_until_a_probe_was_recorded() -> None:
             )
         ]
     )
-    assert tasks_mod._egress_rows(rejected) == [
+    assert board_mod.egress_rows(rejected) == [
         ["A2", "none", f"probe line rejected: {REJECTED_TOO_LONG}"]
     ]
 

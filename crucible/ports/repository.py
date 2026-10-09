@@ -58,6 +58,7 @@ from crucible.domain.entities import (
     Wake,
 )
 from crucible.domain.lifecycle import AttemptState, ExecutionState, TaskState
+from crucible.domain.rooms import Room, RoomTurn
 
 
 class PrincipalRepository(Protocol):
@@ -456,6 +457,46 @@ class MinionQuestionRepository(Protocol):
     def list_for_task(self, task_id: str) -> Sequence[MinionQuestion]: ...
 
 
+class RoomRepository(Protocol):
+    """Rooms (hades #208, ADR 0031): one row per conversation, saved whole."""
+
+    def add(self, room: Room) -> None: ...
+
+    def get(self, room_id: str, *, for_update: bool = False) -> Room | None: ...
+
+    def save(self, room: Room) -> None: ...
+
+    def list_recent(self, *, limit: int, include_closed: bool = True) -> Sequence[Room]: ...
+
+    def list_live(self) -> Sequence[Room]:
+        """The rooms whose runner is up or meant to be: starting, warm, interrupted."""
+        ...
+
+
+class RoomTurnRepository(Protocol):
+    """A room's transcript, in seq order. Hades writes a turn before any runner sees
+    it; an assistant turn is saved as its reply streams in."""
+
+    def add(self, turn: RoomTurn) -> None: ...
+
+    def get(self, room_id: str, seq: int, *, for_update: bool = False) -> RoomTurn | None: ...
+
+    def save(self, turn: RoomTurn) -> None: ...
+
+    def last_seq(self, room_id: str) -> int:
+        """The highest seq in the room, 0 when it has no turns."""
+        ...
+
+    def count(self, room_id: str) -> int: ...
+
+    def list_for_room(
+        self, room_id: str, *, after_seq: int = 0, limit: int | None = None
+    ) -> Sequence[RoomTurn]:
+        """Turns with seq above `after_seq`, oldest first; with `limit`, the newest
+        `limit` of them (still oldest first)."""
+        ...
+
+
 class EscalationRepository(Protocol):
     def add(self, escalation: Escalation) -> None: ...
 
@@ -769,6 +810,8 @@ class UnitOfWork(Protocol):
     memory: MemoryRepository
     decision_ledger: DecisionLedgerRepository
     minion_questions: MinionQuestionRepository
+    rooms: RoomRepository
+    room_turns: RoomTurnRepository
     escalations: EscalationRepository
     dispositions: DispositionRepository
     wakes: WakeRepository

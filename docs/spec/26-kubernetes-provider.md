@@ -175,6 +175,17 @@ resumes from the sealed bundle of attempt <id>, and the preparer Job could
 not build the checkout (exit 4): previous attempt bundle is gone". An
 implementing attempt names no source.
 
+### Room runners (hades #208, 28)
+
+A room's runner is not an attempt and has no workspace claim: a Secret, a ConfigMap, a
+NetworkPolicy and a Job, each `room-<room id>` and labelled `crucible.room` and
+`crucible.role=room-runner`, never `crucible.attempt`, so reconcile and the retention
+sweep leave them alone; Hades removes them when the room's runner stops. The Pod has the
+shape below with the credential projected read-only at the adapter's mount target, an
+emptyDir for CLAUDE_CONFIG_DIR, and an egress rule to the Hades API pods on the API port,
+the one destination in Crucible's own namespace any Pod of the workers namespace may
+reach. Spec 28 has the whole launch.
+
 ## Pod shape (every role)
 
 Mirrors 13's Docker flags, enforced twice: by the provider's spec and by

@@ -62,6 +62,8 @@ from crucible.adapters.persistence.records import (
     Policies,
     ProviderSettings,
     ReviewReports,
+    Rooms,
+    RoomTurns,
     RoutingPolicies,
     TaskNotes,
     Wakes,
@@ -133,6 +135,8 @@ from crucible.ports.repository import (
     RetentionRepository,
     ReviewCommentRepository,
     ReviewReportRepository,
+    RoomRepository,
+    RoomTurnRepository,
     RoutingPolicyRepository,
     SupervisorStatusRepository,
     TaskNoteRepository,
@@ -1585,6 +1589,8 @@ class SqlUnitOfWork:
     memory: MemoryRepository
     decision_ledger: DecisionLedgerRepository
     minion_questions: MinionQuestionRepository
+    rooms: RoomRepository
+    room_turns: RoomTurnRepository
     escalations: EscalationRepository
     dispositions: DispositionRepository
     wakes: WakeRepository
@@ -1645,6 +1651,8 @@ class SqlUnitOfWork:
         self.memory = MemoryItems(s)
         self.decision_ledger = DecisionLedger(s)
         self.minion_questions = MinionQuestions(s)
+        self.rooms = Rooms(s)
+        self.room_turns = RoomTurns(s)
         self.escalations = Escalations(s)
         self.dispositions = Dispositions(s)
         self.wakes = Wakes(s)

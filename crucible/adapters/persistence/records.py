@@ -30,6 +30,8 @@ from crucible.adapters.persistence.models import (
     ProviderSettingRow,
     ReviewDispositionRow,
     ReviewReportRow,
+    RoomRow,
+    RoomTurnRow,
     RoutingPolicyRow,
     TaskNoteRow,
     TaskRow,
@@ -62,6 +64,7 @@ from crucible.domain.entities import (
     TaskNote,
     Wake,
 )
+from crucible.domain.rooms import Room, RoomKind, RoomState, RoomTurn, TurnRole
 from crucible.domain.time import ensure_utc
 
 
@@ -611,6 +614,168 @@ class DecisionLedger:
             limit
         )
         return [self._to_entity(row) for row in self._s.execute(stmt).scalars()]
+
+
+class Rooms:
+    """Rooms (hades #208, ADR 0031), saved whole."""
+
+    def __init__(self, session: Session) -> None:
+        self._s = session
+
+    @staticmethod
+    def _to_entity(row: RoomRow) -> Room:
+        return Room(
+            id=row.id,
+            kind=RoomKind(row.kind),
+            harness=row.harness,
+            model=row.model,
+            state=RoomState(row.state),
+            created_at=ensure_utc(row.created_at),
+            last_activity_at=ensure_utc(row.last_activity_at),
+            created_by=row.created_by,
+            card_task_id=row.card_task_id,
+            runner_handle=row.runner_handle,
+            session_id=row.session_id,
+            scope_task_ids=[str(task) for task in (row.scope_task_ids or [])],
+            runner_key_salt=row.runner_key_salt,
+            runner_key_digest=row.runner_key_digest,
+            inbox_cursor=int(row.inbox_cursor or 0),
+            pending_control=row.pending_control,
+            runner_seen_at=ensure_utc(row.runner_seen_at) if row.runner_seen_at else None,
+        )
+
+    @staticmethod
+    def _values(room: Room) -> dict[str, object]:
+        return {
+            "kind": room.kind.value,
+            "card_task_id": room.card_task_id,
+            "harness": room.harness,
+            "model": room.model,
+            "state": room.state.value,
+            "created_at": room.created_at,
+            "last_activity_at": room.last_activity_at,
+            "runner_handle": room.runner_handle,
+            "session_id": room.session_id,
+            "created_by": room.created_by,
+            "scope_task_ids": list(room.scope_task_ids),
+            "runner_key_salt": room.runner_key_salt,
+            "runner_key_digest": room.runner_key_digest,
+            "inbox_cursor": room.inbox_cursor,
+            "pending_control": room.pending_control,
+            "runner_seen_at": room.runner_seen_at,
+        }
+
+    def add(self, room: Room) -> None:
+        self._s.add(RoomRow(id=room.id, **self._values(room)))
+        self._s.flush()
+
+    def get(self, room_id: str, *, for_update: bool = False) -> Room | None:
+        stmt = select(RoomRow).where(RoomRow.id == room_id)
+        if for_update:
+            stmt = stmt.with_for_update()
+        row = self._s.execute(stmt).scalar_one_or_none()
+        return self._to_entity(row) if row else None
+
+    def save(self, room: Room) -> None:
+        self._s.execute(update(RoomRow).where(RoomRow.id == room.id).values(**self._values(room)))
+        self._s.flush()
+
+    def list_recent(self, *, limit: int, include_closed: bool = True) -> Sequence[Room]:
+        stmt = select(RoomRow)
+        if not include_closed:
+            stmt = stmt.where(RoomRow.state != RoomState.CLOSED.value)
+        stmt = stmt.order_by(RoomRow.last_activity_at.desc(), RoomRow.id.desc()).limit(limit)
+        return [self._to_entity(row) for row in self._s.execute(stmt).scalars()]
+
+    def list_live(self) -> Sequence[Room]:
+        live = [RoomState.STARTING.value, RoomState.WARM.value, RoomState.INTERRUPTED.value]
+        stmt = select(RoomRow).where(RoomRow.state.in_(live)).order_by(RoomRow.id)
+        return [self._to_entity(row) for row in self._s.execute(stmt).scalars()]
+
+
+class RoomTurns:
+    """A room's transcript (hades #208), in seq order."""
+
+    def __init__(self, session: Session) -> None:
+        self._s = session
+
+    @staticmethod
+    def _to_entity(row: RoomTurnRow) -> RoomTurn:
+        return RoomTurn(
+            id=row.id,
+            room_id=row.room_id,
+            seq=row.seq,
+            role=TurnRole(row.role),
+            text=row.text,
+            started_at=ensure_utc(row.started_at),
+            ended_at=ensure_utc(row.ended_at) if row.ended_at else None,
+            tool_calls=[dict(call) for call in (row.tool_calls or [])],
+            interrupted=bool(row.interrupted),
+            decision_id=row.decision_id,
+        )
+
+    def add(self, turn: RoomTurn) -> None:
+        self._s.add(
+            RoomTurnRow(
+                id=turn.id,
+                room_id=turn.room_id,
+                seq=turn.seq,
+                role=turn.role.value,
+                text=turn.text,
+                tool_calls=list(turn.tool_calls),
+                started_at=turn.started_at,
+                ended_at=turn.ended_at,
+                interrupted=turn.interrupted,
+                decision_id=turn.decision_id,
+            )
+        )
+        self._s.flush()
+
+    def get(self, room_id: str, seq: int, *, for_update: bool = False) -> RoomTurn | None:
+        stmt = select(RoomTurnRow).where(RoomTurnRow.room_id == room_id, RoomTurnRow.seq == seq)
+        if for_update:
+            stmt = stmt.with_for_update()
+        row = self._s.execute(stmt).scalar_one_or_none()
+        return self._to_entity(row) if row else None
+
+    def save(self, turn: RoomTurn) -> None:
+        self._s.execute(
+            update(RoomTurnRow)
+            .where(RoomTurnRow.id == turn.id)
+            .values(
+                text=turn.text,
+                tool_calls=list(turn.tool_calls),
+                ended_at=turn.ended_at,
+                interrupted=turn.interrupted,
+                decision_id=turn.decision_id,
+            )
+        )
+        self._s.flush()
+
+    def last_seq(self, room_id: str) -> int:
+        value = self._s.execute(
+            select(func.max(RoomTurnRow.seq)).where(RoomTurnRow.room_id == room_id)
+        ).scalar_one_or_none()
+        return int(value or 0)
+
+    def count(self, room_id: str) -> int:
+        value = self._s.execute(
+            select(func.count()).select_from(RoomTurnRow).where(RoomTurnRow.room_id == room_id)
+        ).scalar_one()
+        return int(value or 0)
+
+    def list_for_room(
+        self, room_id: str, *, after_seq: int = 0, limit: int | None = None
+    ) -> Sequence[RoomTurn]:
+        stmt = select(RoomTurnRow).where(
+            RoomTurnRow.room_id == room_id, RoomTurnRow.seq > after_seq
+        )
+        if limit is None:
+            stmt = stmt.order_by(RoomTurnRow.seq)
+            return [self._to_entity(row) for row in self._s.execute(stmt).scalars()]
+        stmt = stmt.order_by(RoomTurnRow.seq.desc()).limit(limit)
+        rows = [self._to_entity(row) for row in self._s.execute(stmt).scalars()]
+        return list(reversed(rows))
 
 
 class TaskNotes:

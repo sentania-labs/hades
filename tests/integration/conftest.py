@@ -38,7 +38,7 @@ TRUNCATE = (
     "TRUNCATE github_deliveries, ci_decisions, ci_certifications, reactions, "
     "review_comments, external_reviews, external_review_cycles, pull_request_heads, "
     "pull_requests, attempt_metrics, pool_exhaustions, wakes, review_dispositions, "
-    "decisions, escalations, memory_items, decision_ledger, task_notes, "
+    "room_turns, rooms, decisions, escalations, memory_items, decision_ledger, task_notes, "
     "acceptance_results, gate_results, review_reports, evidence, artifacts, "
     "provider_settings, harness_images, github_manifest_states, "
     "bootstrap_imports, idempotency_keys, supervisor_status, completion_claims, leases, events, "

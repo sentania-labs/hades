@@ -340,6 +340,12 @@ A running attempt keeps the mode captured when it launched. Harness
 enablement and its reason are edited only on Harnesses and apply immediately. Their old
 environment entries remain seeds for upgrade compatibility, not deployment controls.
 
+`rooms.idle_timeout_minutes` (hades #208, 28) is how long a warm room runner waits for a
+message before it exits and its room goes idle: default 30, seeded by the settings
+file's `rooms.idle_timeout_minutes`, saved from Settings by an administrator (the
+`room-idle-timeout` action, 1 to 1440 minutes), recorded as `room_idle_timeout_updated`,
+and applied at the next runner launch.
+
 ## Harness enablement: a configured default, then the administrator's decision
 
 Enabling a harness is an administrator's decision the service stores (hades

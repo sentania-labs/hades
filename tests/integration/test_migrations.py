@@ -2099,3 +2099,113 @@ def test_0057_applies_to_an_empty_and_a_populated_database(database_url: str) ->
             )
     finally:
         engine.dispose()
+
+
+ROOM_PRINCIPAL = "01PR1NC1PA1208R00MS000001"
+ROOM_ID = "01R00M208R00MS00000000001"
+
+
+def test_0059_creates_rooms_and_room_turns_on_a_populated_database(database_url: str) -> None:
+    """hades #208 (FDY-0590), AC1: 0059 applies over rows that are already there, both
+    tables appear with no drift and their constraints, the SQL repositories read back
+    what they wrote, and the way down and back up keeps the room event kinds."""
+    from crucible.domain.rooms import RoomState  # noqa: PLC0415
+
+    migrate.downgrade(database_url, "0058_memory_and_decisions")
+    engine = make_engine(database_url)
+    with engine.begin() as conn:
+        names = set(inspect(conn).get_table_names())
+        assert "rooms" not in names and "room_turns" not in names
+        conn.execute(
+            text(
+                "INSERT INTO principals (id, name, role, token_salt, token_hash, created_at) "
+                "VALUES (:id, 'scott-rooms', 'operator', decode('00', 'hex'), "
+                "decode('00', 'hex'), now())"
+            ),
+            {"id": ROOM_PRINCIPAL},
+        )
+    migrate.upgrade(database_url)
+    with engine.begin() as conn:
+        assert {"rooms", "room_turns"} <= set(inspect(conn).get_table_names())
+        columns = {c["name"] for c in inspect(conn).get_columns("room_turns")}
+        assert columns == {
+            "id",
+            "room_id",
+            "seq",
+            "role",
+            "text",
+            "tool_calls",
+            "started_at",
+            "ended_at",
+            "interrupted",
+            "decision_id",
+        }
+        conn.execute(
+            text(
+                "INSERT INTO rooms (id, kind, harness, model, state, created_at, "
+                "last_activity_at, created_by) VALUES (:id, 'principal', 'claude_code', "
+                "'claude-sonnet-5', 'idle', now(), now(), :by)"
+            ),
+            {"id": ROOM_ID, "by": ROOM_PRINCIPAL},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO room_turns (id, room_id, seq, role, text, started_at, ended_at) "
+                "VALUES ('01TURN208R00MS00000000001', :room, 1, 'user', 'hello', now(), now())"
+            ),
+            {"room": ROOM_ID},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO events (ts, kind, principal, verified, payload) "
+                "VALUES (now(), 'room_created', 'tests', true, '{}')"
+            )
+        )
+    with engine.begin() as conn, pytest.raises(Exception, match="ck_rooms_card_names_a_task"):
+        conn.execute(
+            text(
+                "INSERT INTO rooms (id, kind, harness, model, state, created_at, "
+                "last_activity_at, created_by) VALUES ('01R00M208R00MS00000000002', 'card', "
+                "'claude_code', 'm', 'idle', now(), now(), :by)"
+            ),
+            {"by": ROOM_PRINCIPAL},
+        )
+    with engine.begin() as conn, pytest.raises(Exception, match="ck_rooms_state"):
+        conn.execute(text("UPDATE rooms SET state = 'sleeping'"))
+    with engine.begin() as conn, pytest.raises(Exception, match="uq_room_turns_room_seq"):
+        conn.execute(
+            text(
+                "INSERT INTO room_turns (id, room_id, seq, role, text, started_at) "
+                "VALUES ('01TURN208R00MS00000000002', :room, 1, 'user', 'again', now())"
+            ),
+            {"room": ROOM_ID},
+        )
+    assert migrate.schema_drift(engine) is None
+    with SqlUnitOfWorkFactory(engine)() as uow:
+        room = uow.rooms.get(ROOM_ID, for_update=True)
+        assert room is not None and room.state is RoomState.IDLE and room.scope_task_ids == []
+        assert room.inbox_cursor == 0 and room.runner_key_digest is None
+        room.state = RoomState.STARTING
+        room.runner_key_salt, room.runner_key_digest = b"salt", b"digest"
+        uow.rooms.save(room)
+        turns = uow.room_turns.list_for_room(ROOM_ID)
+        assert [t.text for t in turns] == ["hello"] and turns[0].tool_calls == []
+        assert uow.room_turns.last_seq(ROOM_ID) == 1 and uow.room_turns.count(ROOM_ID) == 1
+        assert [r.id for r in uow.rooms.list_live()] == [ROOM_ID]
+        uow.commit()
+    migrate.downgrade(database_url, "0058_memory_and_decisions")
+    with engine.connect() as conn:
+        names = set(inspect(conn).get_table_names())
+        assert "rooms" not in names and "events_0059_archive" in names
+        assert (
+            conn.execute(text("SELECT count(*) FROM events WHERE kind = 'room_created'")).scalar()
+            == 0
+        )
+    migrate.upgrade(database_url)
+    with engine.connect() as conn:
+        assert "events_0059_archive" not in set(inspect(conn).get_table_names())
+        assert (
+            conn.execute(text("SELECT count(*) FROM events WHERE kind = 'room_created'")).scalar()
+            == 1
+        )
+    engine.dispose()

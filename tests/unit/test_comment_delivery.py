@@ -30,6 +30,7 @@ from crucible.adapters.persistence.migrations.versions import _0057_comment_deli
 from crucible.adapters.persistence.migrations.versions import (
     _0058_memory_and_decisions as m0058,
 )
+from crucible.adapters.persistence.migrations.versions import _0059_rooms as m0059
 from crucible.adapters.persistence.models import MinionQuestionRow, TaskNoteRow
 from crucible.application import supervisor as supervisor_module
 from crucible.application.acceptance import record_acceptance
@@ -754,12 +755,14 @@ def test_migration_0057_owns_the_new_kinds_columns_and_table() -> None:
         "minion_question_answered",
         "handoff_recorded",
     }
-    # 0057 adds its five kinds to the chain below it. The latest migration, 0058 (hades
-    # #208's memory store and decision ledger), chains from 0057 and owns the CHECK
-    # constraint, so the two together name every kind the code has.
+    # 0057 adds its five kinds to the chain below it. 0058 (hades #208's memory store and
+    # decision ledger) chains from 0057 and 0059 (the rooms) from 0058; the latest owns
+    # the CHECK constraint, so together they name every kind the code has.
     assert m0058.down_revision == m0057.revision
-    assert set(m0057._event_kinds()) == {k.value for k in EventKind} - set(m0058.EVENT_KINDS)
-    assert set(m0058._event_kinds()) == {k.value for k in EventKind}
+    assert m0059.down_revision == m0058.revision
+    later = set(m0058.EVENT_KINDS) | set(m0059.EVENT_KINDS)
+    assert set(m0057._event_kinds()) == {k.value for k in EventKind} - later
+    assert set(m0059._event_kinds()) == {k.value for k in EventKind}
     note_columns = {c.name for c in TaskNoteRow.__table__.columns}
     assert set(m0057.NOTE_COLUMNS) <= note_columns
     assert TaskNoteRow.__table__.columns["delivery_state"].server_default is not None
