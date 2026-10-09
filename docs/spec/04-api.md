@@ -4,6 +4,10 @@ Base path `/v1`. JSON only. OpenAPI generated from the Pydantic models in
 `crucible/contracts/` and published at `/v1/openapi.json`. Breaking changes
 create `/v2`; `/v1` keeps serving for at least one minor release after.
 
+Personas and scheduled jobs are documented in
+[Personas and scheduled jobs](../personas-and-scheduled-jobs.md). Their Pydantic
+request and response models are included in this API's generated OpenAPI document.
+
 ## Authentication
 
 Bearer tokens, created by `crucible admin token create --principal <name>

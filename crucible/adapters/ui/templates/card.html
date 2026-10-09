@@ -27,6 +27,9 @@
       <div><dt>Pushed head</dt><dd>{% if card.pull_request %}{{ card.pull_request.head_sha }} on {{ safe_value("branch", card.pull_request.work_branch) }}{% else %}not pushed{% endif %}</dd></div>
       <div><dt>CI</dt><dd>{% if card.head.ci %}<span class="lat-badge lat-badge--{% if card.head.ci.status == 'green' %}ok{% elif card.head.ci.status == 'red' %}bad{% else %}accent{% endif %}">{{ card.head.ci.state }}</span> {{ safe_value("detail", card.head.ci.detail) }}{% else %}not certified yet{% endif %}</dd></div>
       <div><dt>Gates</dt><dd>{% if card.gates.results %}{% for gate, result in card.gates.results.items() %}{{ gate }}: {{ result }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}none evaluated on this head{% endif %}</dd></div>
+      {% if card.pull_request and card.pull_request.merged_by %}
+      <div><dt>Merged</dt><dd><span>sha {{ card.pull_request.merged_sha }} by {{ safe_value("merged_by", card.pull_request.merged_by) }}{% if card.pull_request.merged_at %} at {{ card.pull_request.merged_at }}{% endif %}</span></dd></div>
+      {% endif %}
     </dl>
   </section>
 
@@ -63,8 +66,15 @@
   {% if egress %}<section class="lat-card" aria-label="Egress">
     <h2>Egress</h2>
     <span class="admin-hint">Each allowlisted host, tried from inside the worker before the harness started. An unreachable host is the egress path, not the worker.</span>
-    <table class="card-defaults"><thead><tr><th>Attempt</th><th>Host</th><th>Result</th></tr></thead><tbody>
-    {% for attempt_id, host, result in egress %}<tr><td><code>{{ attempt_id }}</code></td><td>{{ safe_value("host", host) }}</td><td>{{ safe_value("result", result) }}</td></tr>{% endfor %}
+    <table class="card-defaults"><thead><tr><th>Attempt</th><th>Host</th><th>Result</th><th>Latency</th><th>Detail</th><th>Recorded</th></tr></thead><tbody>
+    {% for r in egress %}<tr>
+    <td><code>{{ r.attempt_id }}</code></td>
+    <td>{{ safe_value("host", r.host) }}</td>
+    <td>{{ safe_value("result", r.result) }}</td>
+    <td>{% if r.ms is not none %}{{ r.ms }} ms{% else %}{% endif %}</td>
+    <td>{{ safe_value("detail", r.detail) }}</td>
+    <td>{{ r.recorded_at or "" }}</td>
+    </tr>{% endfor %}
     </tbody></table>
   </section>{% endif %}
 

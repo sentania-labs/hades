@@ -259,7 +259,7 @@ def _render(step: Any) -> str:
 
 def test_0058_follows_the_previous_one() -> None:
     script = ScriptDirectory.from_config(migrate.alembic_config("postgresql://unused/unused"))
-    # hades #208 (FDY-0590): 0059_rooms is the head on top of it now.
+    # hades #208 (FDY-0590): 0059_rooms and FDY-0591's 0060 sit on top of it now.
     assert "0058_memory_and_decisions" in {r.revision for r in script.walk_revisions()}
     revision = script.get_revision("0058_memory_and_decisions")
     assert revision is not None

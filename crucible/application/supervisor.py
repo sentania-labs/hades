@@ -62,6 +62,7 @@ from crucible.application.harnesses import (
     record_launch_outcome,
 )
 from crucible.application.minion_questions import ask_question
+from crucible.application.personas_jobs import require_job, run_job
 from crucible.application.review import (
     author_attempt_ids,
     latest_work_attempt,
@@ -1034,6 +1035,7 @@ class Supervisor:
             await self._resume_quota_checkpoints()
             await self._db(self._resume_quota_waits)
             await self._resume_infrastructure_waits()
+            await self._db(self._scheduled_jobs_step)
             await self._db(self._materialize_scheduled)
             await self._resume_gate_probes()
             result.launched = await self._launch_pending()
@@ -1084,6 +1086,50 @@ class Supervisor:
             raise
         result.duration_ms = int((time.monotonic() - started) * 1000)
         return result
+
+    def _scheduled_jobs_step(self) -> int:
+        """File each enabled job whose next local cron instant has arrived."""
+        with self._fenced() as uow:
+            job_ids = [job.id for job in uow.scheduled_jobs.list_due(self._clock.now())]
+        filed = 0
+        for job_id in job_ids:
+            try:
+                with self._fenced() as uow:
+                    job = require_job(uow, job_id, lock=True)
+                    if (
+                        not job.enabled
+                        or job.next_run_at is None
+                        or job.next_run_at > self._clock.now()
+                    ):
+                        continue
+                    principal = uow.principals.get_by_name(job.created_by)
+                    if principal is None or principal.role not in {
+                        Role.OPERATOR,
+                        Role.ORCHESTRATOR,
+                    }:
+                        raise ValueError("scheduled job owner is missing or cannot submit tasks")
+                    run_job(
+                        uow,
+                        self._clock,
+                        principal,
+                        job_id,
+                        wired_providers=frozenset(self._providers),
+                        harnesses=self._harnesses,
+                        harness_gates=self._harness_gates,
+                        credential_sources=self._credential_sources,
+                        secret_providers=frozenset(
+                            name
+                            for name, provider in self._providers.items()
+                            if callable(getattr(provider, "read_credential_files", None))
+                        ),
+                    )
+                    uow.commit()
+                    filed += 1
+            except LeaseLostError:
+                raise
+            except Exception:
+                log.exception("scheduled job %s failed; continuing supervisor tick", job_id)
+        return filed
 
     async def _refresh_admin_status(self) -> None:
         """Refresh expensive admin reads at most once per configured TTL."""

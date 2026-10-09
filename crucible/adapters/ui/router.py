@@ -15,9 +15,11 @@ from crucible.adapters.ui.pages import (
     harnesses,
     images,
     memory,
+    personas_jobs,
     proposals,
     repositories,
     retention,
+    room,
     routing,
     routing_models,
     settings,
@@ -34,6 +36,7 @@ router = APIRouter(prefix="/ui", include_in_schema=False)
 router.routes.extend(session.router.routes)
 router.routes.extend(dashboard.router.routes)
 router.routes.extend(board.router.routes)
+router.routes.extend(room.router.routes)
 router.routes.extend(harnesses.router.routes)
 router.routes.extend(credentials.router.routes)
 router.routes.extend(gateway.router.routes)
@@ -57,3 +60,6 @@ router.routes.extend(bootstrap.router.routes)
 router.routes.extend(settings.router.routes)
 router.routes.extend(actions.router.routes)
 router.routes.extend(catalog.router.routes)
+# Personas and jobs are intentionally registered without navigation links because
+# base.html and render.py are protected by FDY-0591.
+router.routes.extend(personas_jobs.router.routes)

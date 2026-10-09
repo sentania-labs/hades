@@ -680,8 +680,19 @@ class Rooms:
         self._s.execute(update(RoomRow).where(RoomRow.id == room.id).values(**self._values(room)))
         self._s.flush()
 
-    def list_recent(self, *, limit: int, include_closed: bool = True) -> Sequence[Room]:
+    def list_recent(
+        self,
+        *,
+        limit: int,
+        include_closed: bool = True,
+        kind: RoomKind | None = None,
+        created_by: str | None = None,
+    ) -> Sequence[Room]:
         stmt = select(RoomRow)
+        if kind is not None:
+            stmt = stmt.where(RoomRow.kind == kind.value)
+        if created_by is not None:
+            stmt = stmt.where(RoomRow.created_by == created_by)
         if not include_closed:
             stmt = stmt.where(RoomRow.state != RoomState.CLOSED.value)
         stmt = stmt.order_by(RoomRow.last_activity_at.desc(), RoomRow.id.desc()).limit(limit)

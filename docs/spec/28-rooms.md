@@ -251,6 +251,8 @@ Approval detection is not part of this: a decision is recorded only when the age
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `rooms.idle_timeout_minutes` | 30 | How long a warm runner waits for a message before it exits and its room goes idle. A runtime setting: the settings page saves it (administrators), a saved value wins over the `rooms.idle_timeout_minutes` seed in the settings file, and it applies at the next launch. |
+| `rooms.default_harness`, `rooms.default_model` | `claude_code`, `claude-opus-5-5` | The harness and model used when the room page creates an operator's principal room. |
+| `rooms.models` | `claude-opus-5-5` | Models offered by the room page's Talking to selector. Only room-capable harnesses are accepted by the rooms API. |
 | `rooms.api_url` | empty | How a runner reaches Hades. |
 | `rooms.provider` | Kubernetes when enabled, else Docker | Which provider runs runners. |
 | `rooms.image` | the harness's promoted image | The runner's image. |

@@ -36,6 +36,7 @@ from crucible.domain.entities import (
     LogChunkRecord,
     MemoryItem,
     MinionQuestion,
+    Persona,
     Policy,
     PoolExhaustion,
     Principal,
@@ -50,6 +51,7 @@ from crucible.domain.entities import (
     ReviewDisposition,
     ReviewReportRecord,
     RoutingPolicyRecord,
+    ScheduledJob,
     SupervisorStatus,
     Task,
     TaskContract,
@@ -58,7 +60,7 @@ from crucible.domain.entities import (
     Wake,
 )
 from crucible.domain.lifecycle import AttemptState, ExecutionState, TaskState
-from crucible.domain.rooms import Room, RoomTurn
+from crucible.domain.rooms import Room, RoomKind, RoomTurn
 
 
 class PrincipalRepository(Protocol):
@@ -77,6 +79,23 @@ class PrincipalRepository(Protocol):
     def disable(self, principal_id: str, at: datetime) -> bool: ...
 
     def rename(self, principal_id: str, name: str) -> bool: ...
+
+
+class PersonaRepository(Protocol):
+    def add(self, persona: Persona) -> None: ...
+    def get(self, persona_id: str) -> Persona | None: ...
+    def list_all(self) -> Sequence[Persona]: ...
+    def save(self, persona: Persona) -> None: ...
+    def delete(self, persona_id: str) -> bool: ...
+
+
+class ScheduledJobRepository(Protocol):
+    def add(self, job: ScheduledJob) -> None: ...
+    def get(self, job_id: str, *, for_update: bool = False) -> ScheduledJob | None: ...
+    def list_all(self) -> Sequence[ScheduledJob]: ...
+    def list_due(self, now: datetime) -> Sequence[ScheduledJob]: ...
+    def save(self, job: ScheduledJob) -> None: ...
+    def delete(self, job_id: str) -> bool: ...
 
 
 class UiSessionRepository(Protocol):
@@ -466,7 +485,14 @@ class RoomRepository(Protocol):
 
     def save(self, room: Room) -> None: ...
 
-    def list_recent(self, *, limit: int, include_closed: bool = True) -> Sequence[Room]: ...
+    def list_recent(
+        self,
+        *,
+        limit: int,
+        include_closed: bool = True,
+        kind: RoomKind | None = None,
+        created_by: str | None = None,
+    ) -> Sequence[Room]: ...
 
     def list_live(self) -> Sequence[Room]:
         """The rooms whose runner is up or meant to be: starting, warm, interrupted."""
@@ -783,6 +809,8 @@ class IdempotencyRepository(Protocol):
 
 class UnitOfWork(Protocol):
     principals: PrincipalRepository
+    personas: PersonaRepository
+    scheduled_jobs: ScheduledJobRepository
     ui_sessions: UiSessionRepository
     repositories: RepositoryRegistry
     policies: PolicyRepository

@@ -755,12 +755,13 @@ def test_the_comment_delivery_migration_owns_the_new_kinds_columns_and_table() -
     directory = ScriptDirectory.from_config(migrate.alembic_config("postgresql://unused/unused"))
     heads = directory.get_heads()
     assert len(heads) == 1
-    # Head first. The revision sits above 0059_rooms, the head when it was written, so
-    # every database already at that head runs it; a revision placed below an applied
-    # head never runs there.
+    # Head first. The revision sits above 0060_personas_scheduled_jobs, the head when it
+    # was last numbered, so every database already at that head runs it; a revision
+    # placed below an applied head never runs there.
     chain = [r.revision for r in directory.iterate_revisions(heads[0], "base")]
     assert m.revision in chain
     assert chain.index("0059_rooms") > chain.index(m.revision)
+    assert chain.index("0060_personas_scheduled_jobs") > chain.index(m.revision)
     assert set(m.EVENT_KINDS) == {
         "task_note_acknowledged",
         "task_note_acted_on",
@@ -768,11 +769,16 @@ def test_the_comment_delivery_migration_owns_the_new_kinds_columns_and_table() -
         "minion_question_answered",
         "handoff_recorded",
     }
-    # It adds its five kinds to whatever the revision below permits, read through
-    # down_revision, and the chain's head owns the CHECK constraint with every kind.
+    # It adds its five kinds to whatever the nearest kinds-setting revision below
+    # permits, found by walking down from down_revision (0060_personas_scheduled_jobs
+    # sets none), and the chain's head owns the CHECK constraint with every kind.
     below = directory.get_revision(m.down_revision)
+    while below is not None and not hasattr(below.module, "_event_kinds"):
+        assert isinstance(below.down_revision, str)
+        below = directory.get_revision(below.down_revision)
     assert below is not None
     previous_kinds = set(below.module._event_kinds())
+    assert set(m._previous_event_kinds()) == previous_kinds
     assert previous_kinds.isdisjoint(m.EVENT_KINDS)
     assert set(m._event_kinds()) == previous_kinds | set(m.EVENT_KINDS)
     head = directory.get_revision(heads[0])

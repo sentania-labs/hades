@@ -6,6 +6,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 from collections.abc import Mapping, Sequence
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
 from typing import Any
@@ -34,10 +35,12 @@ from crucible.adapters.persistence.models import (
     IdempotencyKeyRow,
     LeaseRow,
     LogChunkRow,
+    PersonaRow,
     PoolExhaustionRow,
     PrincipalRow,
     RepositoryRow,
     RetentionActionRow,
+    ScheduledJobRow,
     SupervisorStatusRow,
     TaskContractRow,
     TaskRow,
@@ -77,11 +80,13 @@ from crucible.domain.entities import (
     Heartbeat,
     Lease,
     LogChunkRecord,
+    Persona,
     PoolExhaustion,
     Principal,
     Repository,
     RetentionAction,
     Role,
+    ScheduledJob,
     SupervisorStatus,
     Task,
     TaskContract,
@@ -124,6 +129,7 @@ from crucible.ports.repository import (
     LogRepository,
     MemoryRepository,
     MinionQuestionRepository,
+    PersonaRepository,
     PolicyRepository,
     PoolExhaustionRepository,
     PrincipalRepository,
@@ -138,6 +144,7 @@ from crucible.ports.repository import (
     RoomRepository,
     RoomTurnRepository,
     RoutingPolicyRepository,
+    ScheduledJobRepository,
     SupervisorStatusRepository,
     TaskNoteRepository,
     TaskRepository,
@@ -175,6 +182,122 @@ def make_engine(url: str) -> Engine:
 
 def _dt(value: datetime | None) -> datetime | None:
     return ensure_utc(value) if value is not None else None
+
+
+class Personas(PersonaRepository):
+    def __init__(self, session: Session) -> None:
+        self._s = session
+
+    @staticmethod
+    def _entity(row: PersonaRow) -> Persona:
+        return Persona(
+            id=row.id,
+            name=row.name,
+            role_text=row.role_text,
+            skills=list(row.skills),
+            tools=list(row.tools),
+            default_harness=row.default_harness,
+            default_model=row.default_model,
+            default_tier=row.default_tier,
+            budget_usd=float(row.budget_usd),
+            created_by=row.created_by,
+            created_at=ensure_utc(row.created_at),
+            updated_at=ensure_utc(row.updated_at),
+        )
+
+    def add(self, persona: Persona) -> None:
+        self._s.add(PersonaRow(**asdict(persona)))
+        self._s.flush()
+
+    def get(self, persona_id: str) -> Persona | None:
+        row = self._s.get(PersonaRow, persona_id)
+        return self._entity(row) if row else None
+
+    def list_all(self) -> Sequence[Persona]:
+        return [
+            self._entity(row)
+            for row in self._s.scalars(select(PersonaRow).order_by(PersonaRow.name))
+        ]
+
+    def save(self, persona: Persona) -> None:
+        row = self._s.get(PersonaRow, persona.id)
+        assert row is not None
+        for key, value in asdict(persona).items():
+            if key not in {"id", "created_by", "created_at"}:
+                setattr(row, key, value)
+        self._s.flush()
+
+    def delete(self, persona_id: str) -> bool:
+        row = self._s.get(PersonaRow, persona_id)
+        if row is None:
+            return False
+        self._s.delete(row)
+        self._s.flush()
+        return True
+
+
+class ScheduledJobs(ScheduledJobRepository):
+    def __init__(self, session: Session) -> None:
+        self._s = session
+
+    @staticmethod
+    def _entity(row: ScheduledJobRow) -> ScheduledJob:
+        return ScheduledJob(
+            id=row.id,
+            persona_id=row.persona_id,
+            name=row.name,
+            task_kind=row.task_kind,
+            task_text=row.task_text,
+            cadence=row.cadence,
+            cadence_label=row.cadence_label,
+            timezone=row.timezone,
+            results_to=row.results_to,
+            carry_notes_forward=row.carry_notes_forward,
+            project=row.project,
+            enabled=row.enabled,
+            last_run_at=_dt(row.last_run_at),
+            next_run_at=_dt(row.next_run_at),
+            created_by=row.created_by,
+        )
+
+    def add(self, job: ScheduledJob) -> None:
+        self._s.add(ScheduledJobRow(**asdict(job)))
+        self._s.flush()
+
+    def get(self, job_id: str, *, for_update: bool = False) -> ScheduledJob | None:
+        stmt = select(ScheduledJobRow).where(ScheduledJobRow.id == job_id)
+        row = self._s.scalar(stmt.with_for_update() if for_update else stmt)
+        return self._entity(row) if row else None
+
+    def list_all(self) -> Sequence[ScheduledJob]:
+        return [
+            self._entity(row)
+            for row in self._s.scalars(select(ScheduledJobRow).order_by(ScheduledJobRow.name))
+        ]
+
+    def list_due(self, now: datetime) -> Sequence[ScheduledJob]:
+        stmt = (
+            select(ScheduledJobRow)
+            .where(ScheduledJobRow.enabled.is_(True), ScheduledJobRow.next_run_at <= now)
+            .with_for_update(skip_locked=True)
+        )
+        return [self._entity(row) for row in self._s.scalars(stmt)]
+
+    def save(self, job: ScheduledJob) -> None:
+        row = self._s.get(ScheduledJobRow, job.id)
+        assert row is not None
+        for key, value in asdict(job).items():
+            if key not in {"id", "created_by"}:
+                setattr(row, key, value)
+        self._s.flush()
+
+    def delete(self, job_id: str) -> bool:
+        row = self._s.get(ScheduledJobRow, job_id)
+        if row is None:
+            return False
+        self._s.delete(row)
+        self._s.flush()
+        return True
 
 
 class Principals:
@@ -1562,6 +1685,8 @@ class SqlUnitOfWork:
     """One database transaction. Use as a context manager; commit explicitly."""
 
     principals: PrincipalRepository
+    personas: PersonaRepository
+    scheduled_jobs: ScheduledJobRepository
     ui_sessions: UiSessionRepository
     repositories: RepositoryRegistry
     policies: PolicyRepository
@@ -1624,6 +1749,8 @@ class SqlUnitOfWork:
         self._session.begin()
         s = self._session
         self.principals = Principals(s)
+        self.personas = Personas(s)
+        self.scheduled_jobs = ScheduledJobs(s)
         self.ui_sessions = UiSessions(s)
         self.repositories = Repositories(s)
         self.policies = Policies(s)

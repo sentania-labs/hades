@@ -1,7 +1,7 @@
 """Comment delivery states, minion questions and handoff events (hades #208 item 2).
 
-Revision ID: 0060_comment_delivery
-Revises: 0059_rooms
+Revision ID: 0061_comment_delivery
+Revises: 0060_personas_scheduled_jobs
 
 A note on a task now carries a delivery state the supervisor sets from evidence:
 `awaiting` (written, no attempt has been given it), `acknowledged` (the note was in an
@@ -15,16 +15,18 @@ audit: `task_note_acknowledged`, `task_note_acted_on`, `minion_question_asked`,
 (accept, merge, cancel, reroute) Foundry hands to Hades or Hades hands to Foundry during
 bootstrap, with the principal, the local time and the words.
 
-Written as 0057, the number Hades assigned to the task. 0058 (the memory store) and 0059
-(the rooms) reached main while the branch was open, so this revision is numbered after
-the highest on main and chains from 0059_rooms, as CONTRIBUTING's Migrations section
+Written as 0057, the number Hades assigned to the task. 0058 (the memory store), 0059
+(the rooms) and 0060 (personas and scheduled jobs) reached main while the branch was
+open, so this revision is numbered after the highest on main and chains from
+0060_personas_scheduled_jobs, as CONTRIBUTING's Migrations section
 says: a revision placed below a head that databases have already reached never runs on
 them, and a migration already on main is never edited. The number and `down_revision`
 stay provisional until the pull request merges; Hades renumbers the file past main's
 highest and points it at main's head at merge (hades #447, 23). The predecessor's event
-kinds are therefore read from whatever `down_revision` names, not from a module named
-here, so a renumber that lands this revision above another kinds-adding migration keeps
-every kind in the CHECK constraint.
+kinds are therefore read by walking down from whatever `down_revision` names to the
+nearest revision that sets the kinds, not from a module named here, so a renumber that
+lands this revision above another migration, kinds-adding or not, keeps every kind in
+the CHECK constraint.
 """
 
 from __future__ import annotations
@@ -34,8 +36,8 @@ import importlib
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0060_comment_delivery"
-down_revision = "0059_rooms"
+revision = "0061_comment_delivery"
+down_revision = "0060_personas_scheduled_jobs"
 branch_labels = None
 depends_on = None
 
@@ -46,7 +48,7 @@ EVENT_KINDS = (
     "minion_question_answered",
     "handoff_recorded",
 )
-EVENT_ARCHIVE = "events_0060_archive"
+EVENT_ARCHIVE = "events_0061_archive"
 NOTE_COLUMNS = (
     "acknowledged_attempt_id",
     "acknowledged_at",
@@ -64,15 +66,21 @@ VERSIONS_PACKAGE = "crucible.adapters.persistence.migrations.versions"
 
 
 def _previous_event_kinds() -> list[str]:
-    """The kinds the revision below permits, read from the module `down_revision` names.
+    """The kinds the revisions below permit, read by walking down from `down_revision`.
 
     Every kinds-adding revision has a `_event_kinds()` that lists the kinds its CHECK
-    constraint allows (0001 onward). Reading the predecessor through `down_revision`
-    rather than a module named here keeps the chain whole after hades #447 renumbers
-    this revision and points it at a different head."""
-    previous = importlib.import_module(f"{VERSIONS_PACKAGE}._{down_revision}")
-    kinds: list[str] = list(previous._event_kinds())
-    return kinds
+    constraint allows (0001 onward); a revision that adds none (0060_personas_scheduled_jobs)
+    has no such function, so the walk follows each module's `down_revision` to the nearest
+    one that does. Walking from `down_revision` rather than a module named here keeps the
+    chain whole after hades #447 renumbers this revision and points it at a different head."""
+    below: str | None = down_revision
+    while below is not None:
+        previous = importlib.import_module(f"{VERSIONS_PACKAGE}._{below}")
+        if hasattr(previous, "_event_kinds"):
+            kinds: list[str] = list(previous._event_kinds())
+            return kinds
+        below = previous.down_revision
+    raise RuntimeError("no revision below sets the event kinds")
 
 
 def _event_kinds() -> list[str]:

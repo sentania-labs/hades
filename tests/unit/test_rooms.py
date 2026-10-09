@@ -164,8 +164,21 @@ class _Rooms:
         assert room.id in self.rows
         self.rows[room.id] = copy.deepcopy(room)
 
-    def list_recent(self, *, limit: int, include_closed: bool = True) -> list[Room]:
-        rows = [r for r in self.rows.values() if include_closed or r.state is not RoomState.CLOSED]
+    def list_recent(
+        self,
+        *,
+        limit: int,
+        include_closed: bool = True,
+        kind: RoomKind | None = None,
+        created_by: str | None = None,
+    ) -> list[Room]:
+        rows = [
+            r
+            for r in self.rows.values()
+            if (include_closed or r.state is not RoomState.CLOSED)
+            and (kind is None or r.kind is kind)
+            and (created_by is None or r.created_by == created_by)
+        ]
         return [copy.deepcopy(r) for r in rows][-limit:]
 
     def list_live(self) -> list[Room]:
@@ -484,13 +497,15 @@ def _render(step: Any) -> str:
     return buffer.getvalue()
 
 
-def test_0059_sits_on_0058_in_the_single_chain_and_adr_0031_exists() -> None:
+def test_0059_is_on_top_of_0058_and_adr_0031_exists() -> None:
     script = ScriptDirectory.from_config(migrate.alembic_config("postgresql://unused/unused"))
-    # hades #208 item 2 (comment delivery) is numbered above 0059_rooms; the chain stays
-    # single and linear, with 0059 on 0058 in it.
+    # FDY-0591's 0060_personas_scheduled_jobs sits on top of it and hades #208 item 2
+    # (comment delivery) is numbered above that; the chain stays single and linear, with
+    # 0059 on 0058 in it.
     heads = script.get_heads()
     assert len(heads) == 1
-    assert "0059_rooms" in {r.revision for r in script.iterate_revisions(heads[0], "base")}
+    chain = {r.revision for r in script.iterate_revisions(heads[0], "base")}
+    assert {"0059_rooms", "0060_personas_scheduled_jobs"} <= chain
     revision = script.get_revision("0059_rooms")
     assert revision is not None and revision.down_revision == "0058_memory_and_decisions"
     adr = REPO / "docs" / "adr" / "0031-rooms-hades-owns-the-transcript.md"
@@ -568,7 +583,7 @@ def test_the_orm_mirrors_0059_and_the_event_kinds_match_the_enum() -> None:
     } <= rooms
     for column in re.findall(r'sa\.Column\(\s*"(\w+)"', (REPO / m59.__file__).read_text()):
         assert column in rooms | set(Base.metadata.tables["room_turns"].columns.keys())
-    # 0059's kinds are all in the enum; the chain's head, 0060_comment_delivery now, owns
+    # 0059's kinds are all in the enum; the chain's head, 0061_comment_delivery now, owns
     # the CHECK constraint and test_schema_hygiene holds it to the whole enum.
     assert set(m59._event_kinds()) <= {k.value for k in EventKind}
 

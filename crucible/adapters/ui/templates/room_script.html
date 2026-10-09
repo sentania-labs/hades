@@ -1,0 +1,84 @@
+<script>
+(() => {
+  const shell = document.querySelector('.room-shell');
+  const roomId = shell.dataset.roomId;
+  const csrf = shell.dataset.csrf;
+  const transcript = document.querySelector('#room-transcript');
+  const form = document.querySelector('#room-composer');
+  const message = document.querySelector('#room-message');
+  const send = document.querySelector('#room-send');
+  const interrupt = document.querySelector('#room-interrupt');
+  const status = document.querySelector('#room-status');
+  let source;
+  let activeSeq = null;
+  let posting = false;
+  const updateControls = () => {
+    interrupt.hidden = activeSeq === null;
+    send.disabled = posting || activeSeq !== null;
+  };
+  let lastSeq = Math.max(0, ...Array.from(transcript.querySelectorAll('[data-seq]'), n => Number(n.dataset.seq)));
+
+  const post = async (path, body = {}) => {
+    const response = await fetch(`/ui/room/${encodeURIComponent(roomId)}/${path}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf}, body: JSON.stringify(body)
+    });
+    if (!response.ok) {
+      const problem = await response.json();
+      const error = new Error(problem.detail || `Request failed (${response.status})`);
+      error.accepted = problem.type === 'urn:crucible:problem:room-runner-unavailable';
+      throw error;
+    }
+    return response.json();
+  };
+  const turn = data => {
+    let node = transcript.querySelector(`[data-seq="${data.seq}"]`);
+    if (!node) {
+      transcript.querySelector('.room-empty')?.remove();
+      node = document.createElement('article'); node.className = `room-turn room-turn--${data.role}`; node.dataset.seq = data.seq; node.dataset.role = data.role;
+      const header = document.createElement('header'); const who = document.createElement('b'); who.textContent = data.role === 'assistant' ? 'Hades' : data.role === 'user' ? 'You' : 'System'; header.append(who);
+      const text = document.createElement('div'); text.className = 'room-turn-text'; node.append(header, text); transcript.append(node);
+    }
+    node.querySelector('.room-turn-text').textContent = data.text || '';
+    lastSeq = Math.max(lastSeq, Number(data.seq)); transcript.scrollTop = transcript.scrollHeight; return node;
+  };
+  const connect = () => {
+    source?.close(); source = new EventSource(`/ui/room/${encodeURIComponent(roomId)}/stream?after_seq=${lastSeq}`);
+    source.addEventListener('turn', event => { const data = JSON.parse(event.data); turn(data); if (data.role === 'assistant' && !data.ended_at) { activeSeq = Number(data.seq); updateControls(); } });
+    source.addEventListener('delta', event => { const data = JSON.parse(event.data); const node = transcript.querySelector(`[data-seq="${data.seq}"]`); if (node) { node.querySelector('.room-turn-text').textContent += data.text; transcript.scrollTop = transcript.scrollHeight; } });
+    source.addEventListener('turn_end', event => {
+      const data = JSON.parse(event.data);
+      if (data.role !== 'assistant') return;
+      if (Number(data.seq) === activeSeq) {
+        activeSeq = null; updateControls();
+        status.textContent = data.interrupted ? 'Reply interrupted.' : '';
+      }
+      window.setTimeout(() => window.location.reload(), 100);
+    });
+    source.onerror = () => { source.close(); window.setTimeout(connect, 1000); };
+  };
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const text = message.value.trim();
+    if (!text || posting || activeSeq !== null) return;
+    posting = true; updateControls(); status.textContent = 'Sending…';
+    try {
+      const data = await post('messages', {text});
+      turn(data);
+      if (message.value.trim() === text) message.value = '';
+      status.textContent = 'Message saved. Waiting for Hades…';
+    } catch (error) {
+      if (error.accepted) {
+        if (message.value.trim() === text) message.value = '';
+        status.textContent = `Message saved and queued. Do not resend it. ${error.message}`;
+      } else {
+        status.textContent = error.message;
+      }
+    } finally {
+      posting = false; updateControls();
+    }
+  });
+  interrupt.addEventListener('click', async () => { interrupt.disabled = true; try { await post('interrupt'); status.textContent = 'Interrupt requested.'; } catch (error) { status.textContent = error.message; } finally { interrupt.disabled = false; } });
+  document.querySelector('#room-target').addEventListener('change', async event => { const [harness, model] = event.target.value.split('|'); status.textContent = 'Switching…'; try { const data = await post('switch', {harness, model}); turn(data.turn); status.textContent = 'Switched. The next message starts this connection.'; } catch (error) { status.textContent = error.message; } });
+  connect();
+})();
+</script>
