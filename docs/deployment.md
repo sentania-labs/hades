@@ -77,7 +77,7 @@ Hades deploys its own BuildKit (hades #475), `hades-buildkit` in the
 `hades-buildkit` namespace, as its own dependency: it is not the lab's shared CI
 builder, and nothing outside Hades is expected to use it. A worker or a verifier whose
 contract requires `make images-check` is told
-`BUILDKIT_HOST=tcp://crucible-buildkit.crucible-buildkit.svc:1234` and builds the
+`BUILDKIT_HOST=tcp://hades-buildkit.hades-buildkit.svc:1234` and builds the
 worker images through it with the `buildctl` the worker image carries, so the
 reproducibility check runs inside Hades.
 

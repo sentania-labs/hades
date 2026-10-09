@@ -55,12 +55,18 @@ metadata:
 # `baseline`, so the two unconfined profiles are the only expected finding on each
 # rollout and anything beyond them is logged. The name is `buildkit.namespace`, the
 # provider's KUBERNETES__BUILDKIT_NAMESPACE, so it does not follow nameOverride;
-# `buildkit.enabled` renders it.
+# `buildkit.enabled` renders it. It must differ from both namespaces above: one name for
+# two of them would render that Namespace twice, the second time at `privileged`, and
+# take `restricted` away from the service or the workers.
+{{- $buildkitNamespace := .Values.buildkit.namespace }}
+{{- if or (eq $buildkitNamespace (include "hades.namespace" .)) (eq $buildkitNamespace (include "hades.workersNamespace" .)) }}
+{{- fail (printf "buildkit.namespace %q is also the service's or the workers' namespace; BuildKit's privileged namespace must be its own" $buildkitNamespace) }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: {{ .Values.buildkit.namespace }}
+  name: {{ $buildkitNamespace }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: buildkit

@@ -299,6 +299,26 @@ def test_the_chart_checks_cover_the_old_names_set_explicitly() -> None:
     assert "--without-namespace hades-buildkit" in sync
 
 
+def test_the_chart_refuses_a_buildkit_namespace_it_already_creates() -> None:
+    template = (CHART / "templates" / "namespaces.yaml").read_text()
+    guard = template.split("{{- if .Values.buildkit.enabled }}", 1)[1].split("---", 1)[0]
+    assert '(eq $buildkitNamespace (include "hades.namespace" .))' in guard
+    assert '(eq $buildkitNamespace (include "hades.workersNamespace" .))' in guard
+    assert "{{- fail " in guard
+    check = (ROOT / "tools" / "chart" / "check.sh").read_text()
+    assert "for collision in hades hades-workers; do" in check
+    assert "--set namespaceOverride=demo --set buildkit.namespace=demo" in check
+
+
+def test_the_chart_hands_its_namespace_to_room_runners() -> None:
+    settings = (CHART / "templates" / "configmap.yaml").read_text()
+    assert (
+        'CRUCIBLE_ROOMS__API_NAMESPACE: {{ include "hades.namespace" . | quote }}' in settings
+    )
+    flow = (ROOT / "tools" / "chart" / "flow.py").read_text()
+    assert '"CRUCIBLE_ROOMS__API_NAMESPACE": namespace,' in flow
+
+
 # ----- AC3: the kind tier's scripts ---------------------------------------------------
 
 
@@ -348,6 +368,8 @@ def test_the_deployment_guide_says_how_to_upgrade_from_the_crucible_names() -> N
     ):
         assert needle in section, needle
     assert chr(0x2014) not in guide
+    assert "BUILDKIT_HOST=tcp://hades-buildkit.hades-buildkit.svc:1234" in guide
+    assert "crucible-buildkit.crucible-buildkit.svc" not in guide
 
 
 def test_the_execution_layer_keeps_its_names(clean_env: pytest.MonkeyPatch) -> None:

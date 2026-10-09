@@ -60,7 +60,8 @@ buildkit:
   # Its namespace, Service, Deployment, claim prefix and Pod label, and the
   # KUBERNETES__BUILDKIT_NAMESPACE setting the provider reads. Rendered into the settings
   # whether or not BuildKit is enabled here, so a BuildKit installed some other way is
-  # still found.
+  # still found. With `enabled`, it must not be the service's or the workers' namespace:
+  # the chart refuses to render a second, privileged copy of either.
   namespace: hades-buildkit
 # Facts about the cluster the provider's NetworkPolicies and Pods depend on (26).
 cluster:

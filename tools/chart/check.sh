@@ -78,6 +78,20 @@ if helm template hades charts/hades --set extraSettings.CRUCIBLE_SERVICE__LOG_LE
   echo "chart: an extraSettings value that is not a string rendered" >&2
   exit 1
 fi
+# BuildKit's privileged namespace is refused when it is the service's or the workers'
+# namespace, which would render that Namespace a second time at `privileged`.
+for collision in hades hades-workers; do
+  if helm template hades charts/hades --set buildkit.enabled=true \
+      --set buildkit.namespace="$collision" >/dev/null 2>&1; then
+    echo "chart: buildkit.namespace $collision, a namespace the chart already creates, rendered" >&2
+    exit 1
+  fi
+done
+if helm template hades charts/hades --set buildkit.enabled=true \
+    --set namespaceOverride=demo --set buildkit.namespace=demo >/dev/null 2>&1; then
+  echo "chart: buildkit.namespace equal to namespaceOverride rendered" >&2
+  exit 1
+fi
 # Overrides too long for the names they compose are refused; a dotted pull Secret is not.
 long_name=$(printf 'n%.0s' $(seq 44))
 long_namespace=$(printf 's%.0s' $(seq 56))

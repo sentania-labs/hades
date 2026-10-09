@@ -107,6 +107,7 @@ def problems(
         "CRUCIBLE_KUBERNETES__SERVICE_ACCOUNT": f"{name}-worker",
         "CRUCIBLE_KUBERNETES__CACHE_CLAIM": f"{name}-reference-cache",
         "CRUCIBLE_KUBERNETES__BUILDKIT_NAMESPACE": buildkit_namespace,
+        "CRUCIBLE_ROOMS__API_NAMESPACE": namespace,
         **settings,
     }
     for key, value in expected.items():

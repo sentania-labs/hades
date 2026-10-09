@@ -148,6 +148,8 @@ CRUCIBLE_GITHUB__WEBHOOK_ENABLED: "false"
 
 # Room runner settings. The allowlist contains hostnames only, never credentials.
 CRUCIBLE_ROOMS__API_URL: {{ .Values.roomRunner.apiUrl | quote }}
+# The namespace of the API pods a runner's NetworkPolicy opens: this chart's own.
+CRUCIBLE_ROOMS__API_NAMESPACE: {{ include "hades.namespace" . | quote }}
 CRUCIBLE_ROOMS__PROVIDER: {{ .Values.roomRunner.provider | quote }}
 CRUCIBLE_ROOMS__IMAGE: {{ .Values.roomRunner.image | quote }}
 CRUCIBLE_ROOMS__EGRESS_ALLOWLIST: {{ .Values.egress.allowlist | toJson | quote }}
