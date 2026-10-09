@@ -95,3 +95,118 @@ h1, h2, h3, .admin-brand { font-family: var(--font-display); }
 }
 
 .room-turn--question { border-left: 3px solid var(--lat-warn, #f0b35c); }
+
+/* hades #576 U5: the shell and the generic page frame on the Neon tokens. Dark only;
+   violet is the accent, cyan marks an informational tag, and a glow is kept for the
+   primary action and for what waits on the operator. State colours mean state. */
+:root, [data-theme="dark"] {
+  --ok: #4fe0a0;
+  --ok-soft: rgba(79, 224, 160, .13);
+  --ok-ink: #8ff0c4;
+  --warn: #f0b35c;
+  --warn-soft: rgba(240, 179, 92, .13);
+  --warn-ink: #f6c987;
+  --bad: #ff6b8b;
+  --bad-soft: rgba(255, 107, 139, .14);
+  --bad-ink: #ff9bb1;
+  --cyan-soft: rgba(126, 232, 250, .12);
+  --glow: 0 0 0 1px rgba(180, 107, 255, .55), 0 0 18px rgba(180, 107, 255, .45);
+  --focus: var(--accent);
+}
+body { color: var(--ink); line-height: 1.5; }
+a { color: var(--accent-ink); }
+a:hover { color: var(--ink); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* The frame: a header across the top, the navigation down the left, the page beside it. */
+.shell--nav { display: grid; grid-template-columns: 216px minmax(0, 1fr); grid-template-rows: auto 1fr; grid-template-areas: "header header" "nav main"; }
+.shell-header { grid-area: header; display: flex; align-items: center; gap: 12px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.shell-header form { margin: 0; }
+.admin-brand { font-size: 18px; letter-spacing: .02em; color: var(--ink); text-shadow: 0 0 14px rgba(180, 107, 255, .55); }
+.shell-principal { background: var(--surface-sunken); border: 1px solid var(--line-soft); color: var(--ink-muted); }
+.shell--nav > .admin-main { grid-area: main; min-width: 0; width: 100%; box-sizing: border-box; }
+.shell-drawer-toggle { position: absolute; opacity: 0; pointer-events: none; width: 1px; height: 1px; }
+.shell-drawer-button, .shell-drawer-scrim { display: none; }
+.shell-nav { grid-area: nav; display: flex; flex-direction: column; gap: 2px; padding: 14px 10px 24px; border-bottom: 0; border-right: 1px solid var(--line); background: var(--surface-sunken); min-width: 0; overflow-y: auto; }
+.shell-nav-group { display: flex; flex-direction: column; gap: 1px; margin-top: 10px; }
+.shell-nav .admin-nav-group { display: block; padding: 4px 10px; color: var(--ink-subtle); font: 600 10px/1.6 var(--font-display); text-transform: uppercase; letter-spacing: .12em; }
+.shell-nav-group--collapsed > summary { list-style: none; cursor: pointer; }
+.shell-nav-group--collapsed > summary::-webkit-details-marker { display: none; }
+.shell-nav-group--collapsed > summary::after { content: " +"; color: var(--accent-ink); }
+.shell-nav-group--collapsed[open] > summary::after { content: " -"; }
+.shell-nav a { display: block; padding: 6px 10px; border: 0; border-left: 2px solid transparent; border-radius: 0 8px 8px 0; color: var(--ink-muted); text-decoration: none; font-size: 13px; }
+.shell-nav a:hover { color: var(--ink); background: var(--accent-soft); }
+.shell-nav a[aria-current="page"] { color: var(--ink); background: var(--accent-soft); border-left-color: var(--accent); }
+.shell-nav a.shell-nav-setup { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; border: 1px solid var(--accent); border-radius: 8px; color: var(--ink); font-family: var(--font-display); box-shadow: var(--glow); }
+.shell-count { min-width: 20px; padding: 0 6px; border-radius: var(--radius-pill); background: var(--accent); color: #0b0716; font-size: 11px; font-weight: 700; text-align: center; }
+
+/* hades #214: the service strip on the Board, one pill per answer the Status page gave. */
+.shell-service-strip { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
+.shell-service-item { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--line-soft); border-radius: var(--radius-pill); background: var(--surface); color: var(--ink-muted); font-size: 12px; text-decoration: none; }
+.shell-service-item:hover { border-color: var(--line); color: var(--ink); }
+
+/* Badges: state colours mean state; cyan is an informational tag. */
+.lat-badge { border-radius: var(--radius-pill); font-weight: 600; }
+.lat-badge--info { background: var(--cyan-soft); color: var(--cyan); }
+.lat-badge--accent { background: var(--accent-soft); color: var(--accent-ink); }
+
+/* Page title and sections. */
+.neon-title h1 { font-size: clamp(22px, 4vw, 30px); letter-spacing: -.01em; }
+.neon-title p { max-width: 70ch; }
+.lat-card, .neon-section { background: var(--surface); border: 1px solid var(--line-soft); border-radius: 14px; padding: 16px 18px; min-width: 0; box-shadow: none; }
+.lat-card > h2, .neon-section > h2 { margin: 0 0 10px; font: 600 15px/1.3 var(--font-display); color: var(--ink); letter-spacing: .01em; }
+.lat-hint { color: var(--ink-muted); }
+.admin-details > summary { font-family: var(--font-display); color: var(--accent-ink); }
+
+/* Key-value tables. */
+.admin-field { border-bottom-color: var(--line-soft); }
+.admin-field dt { color: var(--ink-subtle); font-family: var(--font-display); letter-spacing: .02em; }
+
+/* Data tables. Wide screens read them as tables; under 600 px each row is a card with
+   its column names beside the values, so the page never scrolls sideways. */
+.neon-table { width: 100%; border-collapse: collapse; table-layout: auto; }
+.neon-table th { color: var(--ink-subtle); font: 600 10px/1.4 var(--font-display); letter-spacing: .1em; text-transform: uppercase; border-bottom: 1px solid var(--line); }
+.neon-table td { border-bottom: 1px solid var(--line-soft); }
+.neon-table tbody tr:hover td { background: rgba(180, 107, 255, .05); }
+.neon-table .neon-table { font-size: 11px; }
+
+/* Forms and buttons. */
+.lat-input, .lat-select, .lat-textarea { background: var(--surface-sunken); border: 1px solid var(--line); border-radius: 8px; color: var(--ink); max-width: 100%; box-sizing: border-box; }
+.lat-input:focus, .lat-select:focus, .lat-textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); outline: none; }
+.lat-label { color: var(--ink-subtle); font-family: var(--font-display); letter-spacing: .03em; }
+.lat-btn { border-radius: 8px; font-family: var(--font-display); }
+.lat-btn--primary { background: var(--accent); border-color: var(--accent); color: #0b0716; box-shadow: var(--glow); }
+.lat-btn--primary:hover { background: var(--accent-ink); }
+.lat-btn--ghost { background: transparent; border: 1px solid var(--line); color: var(--accent-ink); box-shadow: none; }
+.lat-btn--danger { background: transparent; border: 1px solid var(--bad); color: var(--bad-ink); box-shadow: none; }
+
+/* hades #169: the Set up list, one numbered step per row. */
+.neon-checklist { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.neon-checklist li { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px 14px; border: 1px solid var(--line-soft); border-radius: 12px; background: var(--surface-sunken); }
+.neon-checklist li.is-done { opacity: .78; }
+.neon-checklist li.is-next { border-color: var(--accent); }
+.neon-checklist-number { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--line); font: 700 13px/1 var(--font-display); color: var(--accent-ink); }
+.neon-checklist li.is-done .neon-checklist-number { border-color: var(--ok); color: var(--ok-ink); }
+.neon-checklist-body b { font-family: var(--font-display); }
+.neon-checklist-body p { margin: 2px 0 0; color: var(--ink-muted); font-size: 12px; }
+
+@media (max-width: 700px) {
+  .shell--nav { grid-template-columns: minmax(0, 1fr); grid-template-areas: "header" "main"; }
+  .shell-drawer-button { display: inline-flex; }
+  .shell-principal { display: none; }
+  .shell-nav { position: fixed; z-index: 30; top: 0; bottom: 0; left: 0; width: min(82vw, 300px); box-sizing: border-box; transform: translateX(-105%); transition: transform .18s ease; box-shadow: 12px 0 40px rgba(11, 7, 22, .8); }
+  .shell-drawer-toggle:checked ~ .shell-nav { transform: none; }
+  .shell-drawer-toggle:checked ~ .shell-drawer-scrim { display: block; position: fixed; z-index: 25; inset: 0; background: rgba(11, 7, 22, .66); }
+  .lat-card, .neon-section { padding: 12px; }
+  .admin-row-form, .admin-row-form .lat-select, .admin-row-form .lat-input { width: 100%; min-width: 0; }
+  .neon-checklist li { grid-template-columns: 30px minmax(0, 1fr); }
+  .neon-checklist li > .lat-btn, .neon-checklist li > .lat-badge { grid-column: 2; justify-self: start; }
+}
+@media (max-width: 600px) {
+  .neon-table, .neon-table tbody, .neon-table tr, .neon-table td { display: block; width: 100%; box-sizing: border-box; }
+  .neon-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .neon-table tr { margin: 0 0 10px; padding: 8px 12px; border: 1px solid var(--line-soft); border-radius: 12px; background: var(--surface-sunken); }
+  .neon-table td, .admin-table.neon-table td:first-child { padding: 4px 0; border-bottom: 0; white-space: normal; overflow-wrap: anywhere; }
+  .neon-table td[data-label]:not([data-label=""])::before { content: attr(data-label); display: block; color: var(--ink-subtle); font: 600 10px/1.5 var(--font-display); letter-spacing: .1em; text-transform: uppercase; }
+  .neon-table tbody tr:hover td { background: transparent; }
+}

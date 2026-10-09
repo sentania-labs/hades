@@ -24,6 +24,7 @@ from crucible.adapters.ui.pages import (
     routing,
     routing_models,
     settings,
+    setup,
     tasks,
     tokens,
     usage,
@@ -36,6 +37,8 @@ router = APIRouter(prefix="/ui", include_in_schema=False)
 # Keep the prefixed APIRoutes flat, including the dashboard at exactly /ui.
 router.routes.extend(session.router.routes)
 router.routes.extend(dashboard.router.routes)
+# hades #169: the ordered first-run steps, which replaced the Status page's setup list.
+router.routes.extend(setup.router.routes)
 router.routes.extend(board.router.routes)
 router.routes.extend(room.router.routes)
 router.routes.extend(harnesses.router.routes)
@@ -52,8 +55,6 @@ router.routes.extend(workers.router.routes)
 router.routes.extend(proposals.router.routes)
 router.routes.extend(tasks.router.routes)
 router.routes.extend(wakes.router.routes)
-# hades #208: the Admin Memory page. No navigation link yet; base.html and render.py are
-# another task's this wave, and the link is a one-line follow-up there.
 router.routes.extend(memory.router.routes)
 router.routes.extend(retention.router.routes)
 router.routes.extend(audit.router.routes)
@@ -61,9 +62,5 @@ router.routes.extend(bootstrap.router.routes)
 router.routes.extend(settings.router.routes)
 router.routes.extend(actions.router.routes)
 router.routes.extend(catalog.router.routes)
-# Personas and jobs are intentionally registered without navigation links because
-# base.html and render.py are protected by FDY-0591.
 router.routes.extend(personas_jobs.router.routes)
-# hades #606: the Admin policies page, registered without a navigation link; the
-# navigation task owns base.html and render.py and adds the link there.
 router.routes.extend(policies.router.routes)

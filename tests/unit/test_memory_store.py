@@ -822,7 +822,7 @@ def test_the_page_renders_both_tabs_with_local_times(monkeypatch: pytest.MonkeyP
     html = decisions.text
     assert "Build the mvp" in html and "telegram" in html and "FDY-0587" in html
     assert 'href="https://t.me/c/42/917"' in html
-    assert "Mirror it" in html and "<td>task</td>" in html and TASK_ID in html
+    assert "Mirror it" in html and '<td data-label="Channel">task</td>' in html and TASK_ID in html
     assert f'href="/ui/tasks/{TASK_ID}"' in html
     assert NOW_LOCAL in html and "2026-10-08T18:30" not in html
     assert "/forget" not in html

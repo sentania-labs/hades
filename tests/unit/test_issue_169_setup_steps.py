@@ -1,332 +1,131 @@
-"""crucible#169: the first-run setup path on the Status page. Five numbered steps,
-each linking to its page, shown as not done or done from the readiness state the
-Status page already computes. The path disappears once every step is done."""
+"""crucible#169: the first-run Set up steps. Five numbered steps in the order an operator
+does them (GitHub App, repository, harness login, routing, first task), each done or not
+done from live state and linking to the page where it is done. The navigation's Set up
+entry counts the undone ones and goes away once every one is done (hades #576 U5)."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
-from crucible.adapters.ui.pages.dashboard import _first_run_path
+import pytest
+
+from crucible.adapters.ui.pages.setup import checklist
+from crucible.application.admin import setup, status
+
+NOW = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
 
 
-def _readiness_with_harnesses(
-    harness_states: list[dict[str, Any]],
-    readiness_steps: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    steps = readiness_steps or []
-    return {
-        "ready": False,
-        "ready_harnesses": [h["name"] for h in harness_states if h.get("state") == "ready"],
-        "steps": steps,
-        "harnesses": [
-            {
-                "name": hs.get("name", f"harness-{i}"),
-                "state": hs.get("state", "not_ready"),
-                "note": "",
-                "steps": hs.get("steps", []),
-                "default_image": hs.get("default_image"),
-                "enabled_by_administrator": True,
-                "images": hs.get("images"),
-            }
-            for i, hs in enumerate(harness_states)
-        ],
+def _harness(name: str, **values: Any) -> SimpleNamespace:
+    fields: dict[str, Any] = {
+        "name": name,
+        "last_validated_at": None,
+        "last_successful_launch_at": None,
+        "last_auth_failure_at": None,
     }
+    fields.update(values)
+    return SimpleNamespace(**fields)
 
 
-def test_first_run_path_has_five_steps() -> None:
-    readiness = _readiness_with_harnesses([])
-    path = _first_run_path(readiness)
-    assert len(path) == 5
+def _uow(
+    *,
+    repositories: list[Any] | None = None,
+    harnesses: list[Any] | None = None,
+    tasks: list[Any] | None = None,
+) -> Any:
+    return SimpleNamespace(
+        repositories=SimpleNamespace(list_all=lambda: repositories or []),
+        harnesses=SimpleNamespace(list_all=lambda: harnesses or []),
+        tasks=SimpleNamespace(search=lambda **_filters: tasks or []),
+    )
 
 
-def test_step_order_gateway_images_credentials_github_harnesses() -> None:
-    readiness = _readiness_with_harnesses([])
-    path = _first_run_path(readiness)
-    labels = [s["label"] for s in path]
-    assert labels == [
-        "Local gateway",
-        "Images",
-        "Credentials",
-        "GitHub",
-        "Test each harness",
+def _ctx(*, github: Any = None, fixtures: frozenset[str] = frozenset()) -> Any:
+    registry = {name: SimpleNamespace(test_fixture=True) for name in fixtures}
+    return SimpleNamespace(github=github, harnesses=registry)
+
+
+@pytest.fixture
+def routing(monkeypatch: pytest.MonkeyPatch) -> set[str]:
+    enabled: set[str] = set()
+    monkeypatch.setattr(status, "_enabled_models", lambda _uow: enabled)
+    return enabled
+
+
+def _done(ctx: Any, uow: Any) -> dict[str, bool]:
+    return {step["key"]: step["done"] for step in setup.setup_steps(ctx, uow)}
+
+
+def test_five_steps_in_order_each_with_its_page(routing: set[str]) -> None:
+    steps = setup.setup_steps(_ctx(), _uow())
+    assert [(s["number"], s["label"], s["link"]) for s in steps] == [
+        (1, "GitHub App", "/ui/github"),
+        (2, "Repository", "/ui/repositories"),
+        (3, "Harness login", "/ui/credentials"),
+        (4, "Routing", "/ui/routing"),
+        (5, "First task", "/ui/room"),
     ]
+    long_dash = chr(0x2014)
+    assert all(s["detail"] and long_dash not in s["detail"] for s in steps)
 
 
-def test_step_links() -> None:
-    readiness = _readiness_with_harnesses([])
-    path = _first_run_path(readiness)
-    links = [s["link"] for s in path]
-    assert links == [
-        "/ui/gateway",
-        "/ui/images",
-        "/ui/credentials",
-        "/ui/github",
-        "/ui/harnesses",
-    ]
+def test_a_fresh_deployment_has_every_step_to_do(routing: set[str]) -> None:
+    steps = setup.setup_steps(_ctx(), _uow())
+    assert not any(s["done"] for s in steps)
+    assert setup.undone_count(steps) == 5
 
 
-def test_fresh_deployment_all_not_done() -> None:
-    """AC1: On a fresh deployment all five steps show not done, with links.
-    A fresh deployment has configured harnesses but none ready."""
-    readiness = _readiness_with_harnesses(
-        [
-            {
-                "name": "hermes",
-                "state": "not_ready",
-                "steps": [
-                    {"code": "credential_missing", "text": "missing"},
-                    {"code": "endpoint_not_configured", "text": "no endpoint"},
-                ],
-            },
-            {
-                "name": "claude_code",
-                "state": "not_ready",
-                "steps": [{"code": "credential_missing", "text": "missing"}],
-            },
-        ],
-        readiness_steps=[
-            {"code": "no_ready_harness", "text": "no ready harnesses", "fix": "/ui/harnesses"},
-            {"code": "no_repository", "text": "no repository", "fix": "/ui/github"},
-            {"code": "github_app_not_connected", "text": "app not connected", "fix": "/ui/github"},
-        ],
+def test_each_step_is_done_from_live_state(routing: set[str]) -> None:
+    routing.add("codex")
+    uow = _uow(
+        repositories=[SimpleNamespace(installation_id=7)],
+        harnesses=[_harness("codex", last_validated_at=NOW)],
+        tasks=[object()],
     )
-    path = _first_run_path(readiness)
-    for step in path:
-        assert step["done"] is False, f"Step {step['number']} {step['label']} should be not done"
+    assert _done(_ctx(), uow) == dict.fromkeys(
+        ("github_app", "repository", "harness_login", "routing", "first_task"), True
+    )
+    assert setup.undone_count(setup.setup_steps(_ctx(), uow)) == 0
 
 
-def test_local_gateway_done_when_hermes_credential_valid() -> None:
-    """AC2: Completing a step flips it to done from readiness state with no separate flag."""
-    readiness = _readiness_with_harnesses(
-        [
-            {
-                "name": "hermes",
-                "state": "ready",
-                "steps": [],
-                "default_image": {"reference": "w:1"},
-            }
+def test_the_github_app_is_done_by_a_wired_client_or_an_installation(routing: set[str]) -> None:
+    assert _done(_ctx(github=object()), _uow())["github_app"] is True
+    covered = _uow(repositories=[SimpleNamespace(installation_id=None)])
+    assert _done(_ctx(), covered)["github_app"] is False
+    assert _done(_ctx(), covered)["repository"] is True
+
+
+def test_a_harness_login_counts_until_a_later_refusal(routing: set[str]) -> None:
+    later = NOW + timedelta(minutes=5)
+    refused = _uow(harnesses=[_harness("codex", last_validated_at=NOW, last_auth_failure_at=later)])
+    assert _done(_ctx(), refused)["harness_login"] is False
+    relaunched = _uow(
+        harnesses=[
+            _harness(
+                "codex",
+                last_validated_at=NOW,
+                last_auth_failure_at=later,
+                last_successful_launch_at=later + timedelta(minutes=1),
+            )
         ]
     )
-    path = _first_run_path(readiness)
-    assert path[0]["done"] is True
+    assert _done(_ctx(), relaunched)["harness_login"] is True
 
 
-def test_images_done_when_promoted_image_exists() -> None:
-    readiness = _readiness_with_harnesses(
-        [
-            {
-                "name": "claude_code",
-                "state": "ready",
-                "steps": [],
-                "default_image": {"reference": "w:1", "digest": "sha256:abc"},
-            }
-        ]
+def test_a_test_fixture_harness_never_counts_as_a_login(routing: set[str]) -> None:
+    uow = _uow(harnesses=[_harness("script-harness", last_validated_at=NOW)])
+    assert _done(_ctx(fixtures=frozenset({"script-harness"})), uow)["harness_login"] is False
+
+
+def test_the_checklist_marks_the_first_undone_step_as_next(routing: set[str]) -> None:
+    uow = _uow(repositories=[SimpleNamespace(installation_id=7)])
+    marked = checklist(setup.setup_steps(_ctx(), uow))
+    assert [s["key"] for s in marked if s["next"]] == ["harness_login"]
+    routing.add("codex")
+    done = _uow(
+        repositories=[SimpleNamespace(installation_id=7)],
+        harnesses=[_harness("codex", last_validated_at=NOW)],
+        tasks=[object()],
     )
-    path = _first_run_path(readiness)
-    assert path[1]["done"] is True
-
-
-def test_credentials_done_when_no_missing_creds() -> None:
-    """Non-Hermes harnesses with valid credentials make this step done."""
-    readiness = _readiness_with_harnesses(
-        [
-            {
-                "name": "codex",
-                "state": "ready",
-                "steps": [],
-                "default_image": {"reference": "w:1"},
-            }
-        ]
-    )
-    path = _first_run_path(readiness)
-    assert path[2]["done"] is True
-
-
-def test_credentials_not_done_when_credential_missing() -> None:
-    readiness = _readiness_with_harnesses(
-        [
-            {
-                "name": "codex",
-                "state": "not_ready",
-                "steps": [{"code": "credential_missing", "text": "missing"}],
-                "default_image": {"reference": "w:1"},
-            }
-        ]
-    )
-    path = _first_run_path(readiness)
-    assert path[2]["done"] is False
-
-
-def test_github_done_when_no_github_steps_in_readiness() -> None:
-    """No no_repository or github_app_not_connected steps means done."""
-    readiness = _readiness_with_harnesses(
-        [
-            {
-                "name": "hermes",
-                "state": "ready",
-                "steps": [],
-                "default_image": {"reference": "w:1"},
-            }
-        ],
-        readiness_steps=[],
-    )
-    path = _first_run_path(readiness)
-    assert path[3]["done"] is True
-
-
-def test_github_not_done_when_no_repository() -> None:
-    readiness = _readiness_with_harnesses(
-        [
-            {
-                "name": "hermes",
-                "state": "ready",
-                "steps": [],
-                "default_image": {"reference": "w:1"},
-            }
-        ],
-        readiness_steps=[{"code": "no_repository", "text": "no repo", "fix": "/ui/github"}],
-    )
-    path = _first_run_path(readiness)
-    assert path[3]["done"] is False
-
-
-def test_github_not_done_when_app_not_connected() -> None:
-    readiness = _readiness_with_harnesses(
-        [
-            {
-                "name": "hermes",
-                "state": "ready",
-                "steps": [],
-                "default_image": {"reference": "w:1"},
-            }
-        ],
-        readiness_steps=[
-            {"code": "github_app_not_connected", "text": "no app", "fix": "/ui/github"}
-        ],
-    )
-    path = _first_run_path(readiness)
-    assert path[3]["done"] is False
-
-
-def test_harness_test_done_when_all_harnesses_ready() -> None:
-    """Step 5 is done when all non-off harnesses are ready."""
-    readiness = _readiness_with_harnesses(
-        [
-            {
-                "name": "hermes",
-                "state": "ready",
-                "steps": [],
-                "default_image": {"reference": "w:1"},
-            },
-            {
-                "name": "codex",
-                "state": "ready",
-                "steps": [],
-                "default_image": {"reference": "w:1"},
-            },
-        ]
-    )
-    path = _first_run_path(readiness)
-    assert path[4]["done"] is True
-
-
-def test_harness_test_not_done_when_one_harness_not_ready() -> None:
-    readiness = _readiness_with_harnesses(
-        [
-            {
-                "name": "hermes",
-                "state": "ready",
-                "steps": [],
-                "default_image": {"reference": "w:1"},
-            },
-            {
-                "name": "codex",
-                "state": "not_ready",
-                "steps": [{"code": "credential_missing", "text": "missing"}],
-                "default_image": {"reference": "w:1"},
-            },
-        ]
-    )
-    path = _first_run_path(readiness)
-    assert path[4]["done"] is False
-
-
-def test_off_harnesses_ignored_for_harness_test() -> None:
-    """Harnesses with state 'off' do not block the harness test step."""
-    readiness = _readiness_with_harnesses(
-        [
-            {
-                "name": "hermes",
-                "state": "ready",
-                "steps": [],
-                "default_image": {"reference": "w:1"},
-            },
-            {
-                "name": "script-harness",
-                "state": "off",
-                "steps": [],
-                "note": "off by default",
-            },
-        ]
-    )
-    path = _first_run_path(readiness)
-    assert path[4]["done"] is True
-
-
-def test_image_state_shows_when_missing() -> None:
-    """Image state is preserved in the readiness payload so the first-run path
-    can see when a harness has no promoted image. The test constructs a readiness
-    payload that mimics what harness_readiness() now returns (with default_image
-    and images preserved from the source), then renders the first-run path and
-    asserts that the missing image state surfaces."""
-    readiness = _readiness_with_harnesses(
-        [
-            {
-                "name": "codex",
-                "state": "not_ready",
-                "steps": [{"code": "no_promoted_image", "text": "no image", "fix": "/ui/images"}],
-                "default_image": None,
-                "images": [
-                    {
-                        "reference": "w:2",
-                        "harness_version": "0.24.0",
-                        "digest": "sha256:def",
-                        "promotion_state": "candidate",
-                    }
-                ],
-            }
-        ]
-    )
-    path = _first_run_path(readiness)
-    # Step 2 (Images) should be not done because codex has no promoted default image.
-    assert path[1]["label"] == "Images"
-    assert path[1]["done"] is False
-    # The harness entry in readiness should still carry images.
-    harness = next(h for h in readiness["harnesses"] if h["name"] == "codex")
-    assert harness["images"] is not None
-    assert len(harness["images"]) == 1
-    assert harness["images"][0]["promotion_state"] == "candidate"
-
-
-def test_images_done_via_images_list() -> None:
-    """Images step is done when an image has promotion_state == 'default'."""
-    readiness = _readiness_with_harnesses(
-        [
-            {
-                "name": "hermes",
-                "state": "ready",
-                "steps": [],
-                "default_image": {"reference": "w:1"},
-                "images": [
-                    {
-                        "reference": "w:1",
-                        "harness_version": "0.25.0",
-                        "digest": "sha256:abc",
-                        "promotion_state": "default",
-                    }
-                ],
-            }
-        ]
-    )
-    path = _first_run_path(readiness)
-    assert path[1]["done"] is True
+    assert not any(s["next"] for s in checklist(setup.setup_steps(_ctx(), done)))

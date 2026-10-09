@@ -13,6 +13,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from starlette.staticfiles import StaticFiles
 
+import crucible
+from crucible.application.admin import setup
 from crucible.application.queries import supervisor_health
 from crucible.contracts.policy import routing_model_name
 from crucible.contracts.task_contract import HarnessName
@@ -28,39 +30,61 @@ templates = Jinja2Templates(directory=str(ROOT / "templates"))
 static = StaticFiles(directory=str(ROOT / "static"))
 
 
-# Grouped so the operator's path reads in order (crucible#115, #169): what to set up, the work
-# running, then administration. An entry with no link is a group's label.
-NAV = (
-    ("/ui", "Status"),
-    ("", "Set up"),
-    ("/ui/gateway", "Local gateway"),
-    ("/ui/images", "Images"),
-    ("/ui/credentials", "Credentials"),
-    ("/ui/github", "GitHub"),
-    ("/ui/harnesses", "Harnesses"),
-    ("/ui/repositories", "Repositories"),
-    ("/ui/routing", "Routing"),
-    ("", "Work"),
-    ("/ui/room", "Hades"),
-    ("/ui/tasks", "Tasks"),
-    ("/ui/board", "Board"),
-    ("/ui/usage", "Usage"),
-    ("/ui/workers", "Workers"),
-    ("/ui/wakes", "Wakes"),
-    ("", "Admin"),
-    ("/ui/memory", "Memory"),
-    ("/ui/catalog", "Catalog"),
-    ("/ui/tokens", "Tokens"),
-    ("/ui/audit", "Audit"),
-    ("/ui/settings", "Settings"),
-    ("/ui/retention", "Retention"),
-    ("/ui/bootstrap", "Bootstrap"),
+# hades #576 U5: the navigation in three groups and a fourth kept closed. Work is what
+# the operator does every day, Admin is configuration, and Diagnostics is what is read
+# when something is wrong. Set up is one entry above them, shown only while a first-run
+# step is undone (hades #169), so it is not in this table.
+NAV_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    (
+        "Work",
+        (
+            ("/ui/board", "Board"),
+            ("/ui/room", "Hades"),
+            ("/ui/personas", "Personas"),
+            ("/ui/jobs", "Jobs"),
+            ("/ui/workers", "Workers"),
+            ("/ui/tasks", "All tasks"),
+            ("/ui/usage", "Usage"),
+        ),
+    ),
+    (
+        "Admin",
+        (
+            ("/ui/routing", "Routing"),
+            ("/ui/policies", "Policies"),
+            ("/ui/settings", "Settings"),
+            ("/ui/tokens", "Tokens"),
+            ("/ui/credentials", "Credentials"),
+            ("/ui/harnesses", "Harnesses"),
+            ("/ui/images", "Images"),
+            ("/ui/repositories", "Repositories"),
+            ("/ui/github", "GitHub"),
+            ("/ui/memory", "Memory"),
+            ("/ui/catalog", "Catalog"),
+            ("/ui/audit", "Audit"),
+        ),
+    ),
+    (
+        "Diagnostics",
+        (
+            ("/ui/wakes", "Wakes"),
+            ("/ui/retention", "Retention"),
+            ("/ui/bootstrap", "Bootstrap"),
+            ("/ui/gateway", "Gateway"),
+        ),
+    ),
 )
 
 
-# Shown only once they have something in them, or while one is open: a new deployment
-# has run no cleanup and imported no ledger (crucible#115).
-HIDDEN_WHEN_EMPTY = ("/ui/retention", "/ui/bootstrap")
+# The groups closed until the operator opens one, or until the page shown is in one.
+COLLAPSED_GROUPS = frozenset({"Diagnostics"})
+
+
+SETUP_HREF = "/ui/setup"
+
+
+# The same entries flat, each group's label as an entry with no link.
+NAV = tuple(entry for label, items in NAV_GROUPS for entry in (("", label), *items))
 
 
 LABELS = {
@@ -521,6 +545,30 @@ templates.env.globals["panel_from_cell"] = _panel
 templates.env.globals["safe_value"] = _safe_value
 
 
+def _nav_active(href: str, active: str) -> bool:
+    """A page is its entry's, and so is anything under it (a task under All tasks)."""
+    return active == href or active.startswith(f"{href}/")
+
+
+def _nav_groups(active: str) -> list[dict[str, Any]]:
+    groups = []
+    for label, entries in NAV_GROUPS:
+        items = [
+            {"href": href, "label": name, "active": _nav_active(href, active)}
+            for href, name in entries
+        ]
+        holds_active = any(item["active"] for item in items)
+        groups.append(
+            {
+                "label": label,
+                "items": items,
+                "collapsed": label in COLLAPSED_GROUPS,
+                "open": holds_active or label not in COLLAPSED_GROUPS,
+            }
+        )
+    return groups
+
+
 def _base(
     request: Request,
     principal: Principal | None,
@@ -530,33 +578,132 @@ def _base(
     active: str,
     hidden: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
+    shell = _shell_state(request, active) if principal is not None else {}
+    supervisor = shell.get("supervisor")
     return {
         "request": request,
         "title": title,
         "active": active,
         "nav": tuple(item for item in NAV if item[0] not in hidden or item[0] == active),
+        "nav_groups": _nav_groups(active),
+        "setup_remaining": shell.get("setup_remaining", 0),
+        "setup_active": _nav_active(SETUP_HREF, active),
+        "service_strip": shell.get("service_strip"),
         "principal": principal,
         "csrf": csrf,
         "message": request.query_params.get("message"),
         "message_kind": request.query_params.get("kind", "info"),
-        "supervisor_warning": _supervisor_warning(request) if principal is not None else None,
+        "supervisor_warning": (
+            supervisor["detail"] if supervisor is not None and not supervisor["healthy"] else None
+        ),
     }
 
 
-def _supervisor_warning(request: Request) -> str | None:
-    """hades #190: readiness no longer reflects the supervisor, so every signed-in page
-    says when it is not healthy. None when it is, or when there is nothing to ask."""
+def _render_timezone(ctx: Any) -> str:
+    settings = getattr(ctx, "settings", None)
+    return settings.service.render_timezone if settings is not None else "America/Chicago"
+
+
+def _shell_state(request: Request, active: str) -> dict[str, Any]:
+    """What the frame of every signed-in page reads, in one unit of work: how many Set up
+    steps are undone (hades #169), the supervisor's health for the banner (hades #190),
+    and on the Board its service strip (hades #214). Empty when there is nothing to ask,
+    as in a test that renders a template alone."""
     try:
         ctx = request.app.state.ctx
-        with ctx.uow_factory() as uow:
-            healthy, detail = supervisor_health(uow, ctx.clock.now(), ctx.lease_ttl_seconds)
+        factory = ctx.uow_factory
     except (AttributeError, KeyError):
-        return None
-    if healthy:
-        return None
-    settings = getattr(ctx, "settings", None)
-    timezone = settings.service.render_timezone if settings is not None else "America/Chicago"
-    return str(_localize(str(detail), timezone))
+        return {}
+    out: dict[str, Any] = {}
+    with factory() as uow:
+        try:
+            healthy, detail = supervisor_health(uow, ctx.clock.now(), ctx.lease_ttl_seconds)
+        except (AttributeError, KeyError):
+            pass
+        else:
+            out["supervisor"] = {
+                "healthy": healthy,
+                "detail": str(_localize(str(detail), _render_timezone(ctx))),
+            }
+        admin = getattr(ctx, "admin", None)
+        if admin is not None:
+            out["setup_remaining"] = setup.undone_count(setup.setup_steps(admin, uow))
+        if active == "/ui/board":
+            out["service_strip"] = _service_strip(
+                uow, out.get("supervisor"), out.get("setup_remaining", 0)
+            )
+    return out
+
+
+def _service_strip(
+    uow: Any, supervisor: dict[str, Any] | None, setup_remaining: int
+) -> list[dict[str, Any]]:
+    """hades #214: the Status page's one-line answers, folded into the Board. Each says
+    its state in a word and links to where it is read in full."""
+    items: list[dict[str, Any]] = []
+    if supervisor is not None:
+        items.append(
+            {
+                "label": "Supervisor",
+                "value": "healthy" if supervisor["healthy"] else "not healthy",
+                "tone": "ok" if supervisor["healthy"] else "bad",
+                "href": "/ui/settings#about",
+            }
+        )
+    try:
+        pending = uow.wakes.count_unacked()
+    except AttributeError:
+        pending = None
+    if pending is not None:
+        items.append(
+            {
+                "label": "Wakes",
+                "value": f"{pending} pending",
+                "tone": "warn" if pending else "ok",
+                "href": "/ui/wakes",
+            }
+        )
+    if setup_remaining:
+        items.append(
+            {
+                "label": "Set up",
+                "value": f"{setup_remaining} to do",
+                "tone": "warn",
+                "href": SETUP_HREF,
+            }
+        )
+    items.append(
+        {
+            "label": "Version",
+            "value": crucible.__version__,
+            "tone": "info",
+            "href": "/ui/settings#about",
+        }
+    )
+    return items
+
+
+def about_rows(settings: Any) -> list[list[Any]]:
+    """hades #214: the running service's version and image digest, for the Admin About
+    block. The digest is the one the deployment names in `service.image`; a reference
+    by tag alone has none to show."""
+    image = str(getattr(getattr(settings, "service", None), "image", "") or "")
+    _, _, digest = image.partition("@")
+    return [
+        ["Version", {"kind": "status", "value": crucible.__version__, "tone": "accent"}],
+        [
+            "Image digest",
+            {"kind": "note", "value": digest}
+            if digest
+            else {
+                "kind": "note",
+                "value": "not reported",
+                "hint": "Set service.image (CRUCIBLE_SERVICE__IMAGE) to the image "
+                "reference with its digest to show it here.",
+            },
+        ],
+        ["Image", image or "not reported"],
+    ]
 
 
 def _page(
@@ -580,9 +727,7 @@ def _page(
         timezone = settings.service.render_timezone
     sections = _reason_fields(_localize(sections, timezone))
     intro = str(_localize(intro, timezone))
-    context = _base(
-        request, principal, csrf, title=heading, active=active, hidden=_empty_sections(request)
-    )
+    context = _base(request, principal, csrf, title=heading, active=active)
     context.update(
         heading=heading,
         intro=intro,
@@ -592,21 +737,6 @@ def _page(
         refresh_seconds=refresh_seconds,
     )
     return templates.TemplateResponse(request=request, name="page.html", context=context)
-
-
-def _empty_sections(request: Request) -> frozenset[str]:
-    """The navigation entries with nothing behind them yet (HIDDEN_WHEN_EMPTY)."""
-    try:
-        factory = request.app.state.ctx.uow_factory
-    except (AttributeError, KeyError):
-        return frozenset()
-    empty: set[str] = set()
-    with factory() as uow:
-        if not list(uow.retention.list_recent(1)):
-            empty.add("/ui/retention")
-        if not list(uow.bootstrap_imports.list_all()):
-            empty.add("/ui/bootstrap")
-    return frozenset(empty)
 
 
 def _localize(value: Any, timezone: str) -> Any:

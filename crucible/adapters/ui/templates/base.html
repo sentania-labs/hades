@@ -11,20 +11,29 @@
   <link rel="stylesheet" href="/ui/static/neon.css">
 </head>
 <body>
-<div class="admin-shell">
-  <header class="lat-header">
+<div class="admin-shell{% if principal %} shell--nav{% endif %}">
+  {% if principal %}<input class="shell-drawer-toggle" type="checkbox" id="shell-drawer" aria-hidden="true" tabindex="-1">{% endif %}
+  <header class="lat-header shell-header">
+    {% if principal %}<label class="shell-drawer-button lat-btn lat-btn--ghost" for="shell-drawer" aria-controls="shell-nav">Menu</label>{% endif %}
     <a class="admin-brand" href="/ui/board">Hades</a>
-    <span class="lat-ver">administration</span>
     <span class="admin-spacer"></span>
-    {% if principal %}<span class="lat-pill"><b>{{ principal.name }}</b> {{ principal.role.value }}</span>
+    {% if principal %}<span class="lat-pill shell-principal"><b>{{ principal.name }}</b> {{ principal.role.value }}</span>
     <form method="post" action="/ui/sign-out"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="lat-btn lat-btn--ghost">Sign out</button></form>{% endif %}
   </header>
-  {% if principal %}<nav class="admin-nav" aria-label="Administration">
-    {% for href, label in nav %}{% if href %}<a href="{{ href }}" {% if active == href %}aria-current="page"{% endif %}>{{ label }}</a>{% else %}<span class="admin-nav-group">{{ label }}</span>{% endif %}{% endfor %}
+  {% if principal %}<label class="shell-drawer-scrim" for="shell-drawer" aria-hidden="true"></label>
+  <nav class="admin-nav shell-nav" id="shell-nav" aria-label="Navigation">
+    {% if setup_remaining %}<a class="shell-nav-setup" href="/ui/setup" {% if setup_active %}aria-current="page"{% endif %}>Set up <span class="shell-count" aria-label="{{ setup_remaining }} steps to do">{{ setup_remaining }}</span></a>{% endif %}
+    {% for group in nav_groups %}
+    {% if group.collapsed %}<details class="shell-nav-group shell-nav-group--collapsed" data-group="{{ group.label }}"{% if group.open %} open{% endif %}><summary class="admin-nav-group">{{ group.label }}</summary>
+    {% else %}<div class="shell-nav-group" data-group="{{ group.label }}" role="group" aria-label="{{ group.label }}"><span class="admin-nav-group">{{ group.label }}</span>{% endif %}
+      {% for item in group["items"] %}<a href="{{ item.href }}" {% if item.active %}aria-current="page"{% endif %}>{{ item.label }}</a>{% endfor %}
+    {% if group.collapsed %}</details>{% else %}</div>{% endif %}
+    {% endfor %}
   </nav>{% endif %}
   <main class="admin-main">
-    {% if supervisor_warning %}<div class="lat-banner lat-banner--bad admin-flash" role="alert"><b>The supervisor is not healthy.</b> No task is launched, observed or cancelled until it recovers; the API and this page still work. {{ supervisor_warning }}. <a href="/ui">Status</a></div>{% endif %}
+    {% if supervisor_warning %}<div class="lat-banner lat-banner--bad admin-flash" role="alert"><b>The supervisor is not healthy.</b> No task is launched, observed or cancelled until it recovers; the API and this page still work. {{ supervisor_warning }}. <a href="/ui/settings#about">About</a></div>{% endif %}
     {% if message %}<div class="lat-banner lat-banner--{{ message_kind }} admin-flash">{{ message }}</div>{% endif %}
+    {% if service_strip %}<nav class="shell-service-strip" aria-label="Service">{% for item in service_strip %}<a class="shell-service-item" href="{{ item.href }}"><span>{{ item.label }}</span> <span class="lat-badge lat-badge--{{ item.tone }}">{{ item.value }}</span></a>{% endfor %}</nav>{% endif %}
     {% block content %}{% endblock %}
   </main>
 </div>

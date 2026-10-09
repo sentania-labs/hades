@@ -583,9 +583,25 @@ any disable. Shredding is complete or it says so (12).
 
 ## Administrative interface
 
-The Status page's "Before a task can run" list is the status document's
-`readiness` part (crucible#123), so it can never disagree with the pages it
-links to. Where a field refers to something the system knows or can discover
+The Set up page (`/ui/setup`, hades #169) is one ordered list of the first-run
+steps: GitHub App, repository, harness login, routing, first task. Each reads
+done or not done from live rows and links to the page where it is done; the
+navigation shows a Set up entry with the count of steps to do only while one is
+undone, and `/ui` leads there until every step is done, then to the Board. The
+page's Service and Each harness sections read the status document's
+`readiness` part (crucible#123), so they can never disagree with the pages they
+link to. The former Status page is folded into the Board's service strip and
+the Admin About block on Settings, which shows the running version and the
+image digest the deployment names in `service.image` (hades #214).
+
+The navigation (hades #576 U5) groups the pages as Work (Board, Hades,
+Personas, Jobs, Workers, All tasks, Usage), Admin (Routing, Policies, Settings,
+Tokens, Credentials, Harnesses, Images, Repositories, GitHub, Memory, Catalog,
+Audit) and a Diagnostics group kept closed until opened or until one of its
+pages is shown (Wakes, Retention, Bootstrap, Gateway). The page shown is the
+active entry. At phone width the navigation is a drawer opened from Menu, and
+every data table becomes stacked cards under 600 px, so no page scrolls
+sideways. Where a field refers to something the system knows or can discover
 (the gateway's models, the App's installations and repositories), the page
 offers the valid values rather than a free-text field (crucible#121).
 

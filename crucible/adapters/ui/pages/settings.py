@@ -11,11 +11,12 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from crucible.adapters.api.deps import Ctx, UoW
 from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.adapters.ui.actions import register
-from crucible.adapters.ui.render import _page, _redirect
+from crucible.adapters.ui.render import _page, _redirect, about_rows
 from crucible.adapters.ui.session import _require
 from crucible.application import rooms
 from crucible.application.admin import credentials, delivery, kubernetes, status_cache
 from crucible.application.admin.context import guard_mutation
+from crucible.application.queries import supervisor_health
 from crucible.domain.entities import Principal, Role
 
 router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
@@ -234,6 +235,26 @@ def _runtime_rows(ctx: Ctx, uow: UoW, principal: Principal) -> list[list[Any]]:
     return rows
 
 
+def _supervisor_rows(ctx: Any, uow: Any) -> list[list[Any]]:
+    """The supervisor's health in the About block, with the reason. None where there is
+    no supervisor to ask, as in a page rendered without one."""
+    try:
+        healthy, detail = supervisor_health(uow, ctx.clock.now(), ctx.lease_ttl_seconds)
+    except (AttributeError, KeyError):
+        return []
+    return [
+        [
+            "Supervisor",
+            {
+                "kind": "status",
+                "value": "healthy" if healthy else "not healthy",
+                "tone": "ok" if healthy else "bad",
+                "hint": str(detail),
+            },
+        ]
+    ]
+
+
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     found = _require(request, ctx, uow)
@@ -267,6 +288,13 @@ def settings_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             "when the service starts."
         ),
         sections=[
+            {
+                # hades #214: the running service's version and image digest.
+                "title": "About",
+                "anchor": "about",
+                "columns": ["Part", "Value"],
+                "rows": [*about_rows(ctx.settings), *_supervisor_rows(ctx, uow)],
+            },
             {
                 "title": "Runtime settings",
                 "columns": ["Setting", "Effective value", "Source", "Change applies", ""],

@@ -23,12 +23,14 @@ from crucible.adapters.ui.pages import dashboard
 from crucible.adapters.ui.render import (
     _document_section,
     _localize,
+    about_rows,
 )
 from crucible.application.admin import audit as audit_service
 from crucible.application.admin import bootstrap as bootstrap_service
 from crucible.application.admin import github as github_service
 from crucible.application.admin import providers as providers_service
 from crucible.application.admin import routing as routing_service
+from crucible.application.admin import setup as setup_service
 from crucible.application.admin import status as status_service
 from crucible.domain.entities import (
     BootstrapImport,
@@ -529,58 +531,28 @@ def test_the_harnesses_word_is_the_first_readiness_step() -> None:
     )
 
 
-def test_status_page_shows_version_as_first_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    """hades #214: the Status page Service table lists a Version row first, carrying
-    ``crucible.__version__`` rendered as a status cell."""
-
-    minimal = {
-        "readiness": {
-            "ready": True,
-            "ready_harnesses": [],
-            "steps": [],
-            "harnesses": [],
-        },
-        "supervisor": {
-            "healthy": True,
-            "health_detail": "",
-            "last_tick_at": "2026-09-30T00:00:00Z",
-        },
-        "tasks": {"lists": {}},
-        "workers": [],
-        "providers": [],
-        "wakes": {"unacked": 0},
-    }
-
-    principal = SimpleNamespace(name="reader", role=SimpleNamespace(value="observer"))
-    sections_captured: list[dict[str, Any]] = []
-
-    async def _fake_status(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        return minimal
-
-    status_ns = SimpleNamespace(status=_fake_status)
-    monkeypatch.setattr(dashboard, "_require", lambda *args, **kwargs: (principal, "fixture-csrf"))
-    monkeypatch.setattr(dashboard, "status", status_ns)
-    monkeypatch.setattr(
-        dashboard,
-        "_page",
-        lambda *args, sections, **kwargs: sections_captured.extend(sections),
-    )
-
-    ctx = SimpleNamespace(admin=object())
-    asyncio.run(
-        dashboard.dashboard(
-            Request({"type": "http", "method": "GET", "path": "/ui", "headers": []}),
-            cast(Any, ctx),
-            cast(Any, SimpleNamespace()),
-        )
-    )
-
-    for section in sections_captured:
-        if section["title"] == "Service":
-            rows = section["rows"]
-            break
-    else:
-        raise AssertionError("Service section not found")
-
+def test_the_about_block_shows_the_version_first() -> None:
+    """hades #214: Status folded into the Admin About block, which leads with the running
+    version and names the image digest the deployment reports."""
+    digest = "sha256:" + "1" * 64
+    rows = about_rows(SimpleNamespace(service=SimpleNamespace(image=f"hades:1@{digest}")))
     assert rows[0][0] == "Version"
     assert rows[0][1]["value"] == crucible.__version__
+    assert rows[1][0] == "Image digest" and rows[1][1]["value"] == digest
+    unreported = about_rows(SimpleNamespace(service=SimpleNamespace(image="")))
+    assert unreported[1][1]["value"] == "not reported"
+
+
+def test_ui_sends_the_operator_to_set_up_or_the_board(monkeypatch: pytest.MonkeyPatch) -> None:
+    """hades #576 U5: /ui was Status; it now leads to Set up while a step is undone."""
+    principal = SimpleNamespace(name="reader", role=SimpleNamespace(value="observer"))
+    monkeypatch.setattr(dashboard, "_require", lambda *args, **kwargs: (principal, "csrf"))
+    steps = [{"done": False}]
+    monkeypatch.setattr(setup_service, "setup_steps", lambda _ctx, _uow: steps)
+    request = Request({"type": "http", "method": "GET", "path": "/ui", "headers": []})
+    ctx = cast(Any, SimpleNamespace(admin=object()))
+    response = dashboard.dashboard(request, ctx, cast(Any, SimpleNamespace()))
+    assert response.headers["location"] == "/ui/setup"
+    steps[0]["done"] = True
+    response = dashboard.dashboard(request, ctx, cast(Any, SimpleNamespace()))
+    assert response.headers["location"] == "/ui/board"
