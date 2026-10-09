@@ -14,6 +14,7 @@ from crucible.adapters.api.routers import (
     github,
     harnesses,
     memory,
+    personas_jobs,
     policies,
     records,
     supervision,
@@ -47,4 +48,5 @@ def create_app(ctx: AppContext) -> FastAPI:
     app.include_router(memory.router, prefix=API_PREFIX)
     app.include_router(bootstrap.router, prefix=API_PREFIX)
     app.include_router(catalog.router, prefix=API_PREFIX)
+    app.include_router(personas_jobs.router, prefix=API_PREFIX)
     return app

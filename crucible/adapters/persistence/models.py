@@ -14,6 +14,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -493,6 +494,42 @@ class DecisionLedgerRow(Base):
     )
     acted_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     acted_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+
+
+class PersonaRow(Base):
+    __tablename__ = "personas"
+    id: Mapped[str] = mapped_column(ID, primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    role_text: Mapped[str] = mapped_column(Text)
+    skills: Mapped[list[Any]] = mapped_column(JSONB)
+    tools: Mapped[list[Any]] = mapped_column(JSONB)
+    default_harness: Mapped[str] = mapped_column(String(64))
+    default_model: Mapped[str] = mapped_column(String(256))
+    default_tier: Mapped[str] = mapped_column(String(16))
+    budget_usd: Mapped[float] = mapped_column(Numeric(12, 2))
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(TZ)
+    updated_at: Mapped[datetime] = mapped_column(TZ)
+
+
+class ScheduledJobRow(Base):
+    __tablename__ = "scheduled_jobs"
+    __table_args__ = (Index("ix_scheduled_jobs_due", "enabled", "next_run_at"),)
+    id: Mapped[str] = mapped_column(ID, primary_key=True)
+    persona_id: Mapped[str] = mapped_column(ID, ForeignKey("personas.id"))
+    name: Mapped[str] = mapped_column(String(128))
+    task_kind: Mapped[str] = mapped_column(String(16))
+    task_text: Mapped[str] = mapped_column(Text)
+    cadence: Mapped[str] = mapped_column(String(128))
+    cadence_label: Mapped[str] = mapped_column(String(128))
+    timezone: Mapped[str] = mapped_column(String(64))
+    results_to: Mapped[str] = mapped_column(String(24))
+    carry_notes_forward: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    project: Mapped[str] = mapped_column(String(128))
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    last_run_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(128))
 
 
 class ReviewDispositionRow(Base):

@@ -60,6 +60,7 @@ from crucible.application.harnesses import (
     record_credential_observation,
     record_launch_outcome,
 )
+from crucible.application.personas_jobs import run_due_jobs
 from crucible.application.review import (
     author_attempt_ids,
     latest_work_attempt,
@@ -1028,6 +1029,7 @@ class Supervisor:
             await self._resume_quota_checkpoints()
             await self._db(self._resume_quota_waits)
             await self._resume_infrastructure_waits()
+            await self._db(self._scheduled_jobs_step)
             await self._db(self._materialize_scheduled)
             await self._resume_gate_probes()
             result.launched = await self._launch_pending()
@@ -1078,6 +1080,22 @@ class Supervisor:
             raise
         result.duration_ms = int((time.monotonic() - started) * 1000)
         return result
+
+    def _scheduled_jobs_step(self) -> int:
+        """File each enabled job whose next local cron instant has arrived."""
+        assert self.fenced_token is not None
+        with self._uow_factory() as uow:
+            uow.set_fenced_token(self.fenced_token)
+            now = self._clock.now()
+            principal = Principal(
+                id=PRINCIPAL_CRUCIBLE,
+                name=PRINCIPAL_CRUCIBLE,
+                role=Role.ORCHESTRATOR,
+                created_at=now,
+            )
+            filed = run_due_jobs(uow, self._clock, principal)
+            uow.commit()
+            return len(filed)
 
     async def _refresh_admin_status(self) -> None:
         """Refresh expensive admin reads at most once per configured TTL."""

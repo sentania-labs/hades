@@ -259,7 +259,7 @@ def _render(step: Any) -> str:
 
 def test_0058_is_the_single_head_and_follows_the_previous_one() -> None:
     script = ScriptDirectory.from_config(migrate.alembic_config("postgresql://unused/unused"))
-    assert script.get_heads() == ["0058_memory_and_decisions"]
+    assert script.get_heads() == ["0060_personas_scheduled_jobs"]
     revision = script.get_revision("0058_memory_and_decisions")
     assert revision is not None
     assert revision.down_revision == "0056_pull_request_schema_overlap"
