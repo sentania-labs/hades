@@ -113,7 +113,7 @@ def _sign_in_form(
     status_code: int = 200,
 ) -> Response:
     csrf = os.urandom(24).hex()
-    context = _base(request, None, title="Sign in", active="")
+    context = _base(request, None, title="Sign in", active="", data_page="sign-in")
     context.update(
         next=next_path,
         csrf=csrf,

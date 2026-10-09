@@ -529,7 +529,15 @@ def _base(
     title: str,
     active: str,
     hidden: frozenset[str] = frozenset(),
+    data_page: str = "",
 ) -> dict[str, Any]:
+    """Return the base context for templates rendered directly from _base.
+
+    `data_page` is a stable marker on the main element.  When blank the last
+    segment of the active path is used (e.g. "/ui/tasks" -> "tasks").
+    """
+    if not data_page and active:
+        data_page = active.rstrip("/").rsplit("/", 1)[-1] if "/" in active else active.lstrip("/")
     return {
         "request": request,
         "title": title,
@@ -540,6 +548,7 @@ def _base(
         "message": request.query_params.get("message"),
         "message_kind": request.query_params.get("kind", "info"),
         "supervisor_warning": _supervisor_warning(request) if principal is not None else None,
+        "data_page": data_page,
     }
 
 

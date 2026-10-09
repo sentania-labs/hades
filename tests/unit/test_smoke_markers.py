@@ -161,3 +161,32 @@ class TestSmokeMarkers:
         assert rendered == auto_marker, (
             f"page {path} auto-derived data-page={rendered!r}, expected {auto_marker!r}"
         )
+
+
+class TestBaseAutoDerive:
+    """Assert that _base() (used by direct template renders) auto-derives data_page."""
+
+    @pytest.mark.parametrize("path,marker", _MARKERS)
+    def test_base_auto_derives_last_segment(self, path: str, marker: str) -> None:
+        """When no explicit data_page is given, _base() derives from the active segment."""
+        from crucible.adapters.ui.render import _base  # noqa: PLC0415
+
+        ctx = _FakeCtx()
+        request = _FakeRequest(ctx, path)
+        expected_auto = path.rstrip("/").rsplit("/", 1)[-1] if "/" in path else path.lstrip("/")
+        result = _base(request, None, "deadbeef", title="Test", active=path)  # type: ignore[arg-type]
+        assert result["data_page"] == expected_auto, (
+            f"_base(auto) data_page={result['data_page']!r}, expected {expected_auto!r}"
+        )
+
+    @pytest.mark.parametrize("path,marker", _MARKERS)
+    def test_base_with_explicit_marker(self, path: str, marker: str) -> None:
+        """An explicit data_page overrides auto-derive in _base()."""
+        from crucible.adapters.ui.render import _base  # noqa: PLC0415
+
+        ctx = _FakeCtx()
+        request = _FakeRequest(ctx, path)
+        result = _base(request, None, "deadbeef", title="Test", active=path, data_page=marker)  # type: ignore[arg-type]
+        assert result["data_page"] == marker, (
+            f"_base(data_page={marker!r}) data_page={result['data_page']!r}, expected {marker!r}"
+        )

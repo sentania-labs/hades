@@ -250,9 +250,10 @@ def mint_token(principal: str) -> str:
 FIRST_RUN_FILE = "/var/lib/crucible/credentials/first-run-admin-token"
 TOKEN_PATTERN = re.compile(r"\bcru_[A-Z0-9]{26}\.[A-Za-z0-9_-]+\b")
 # Stable page markers; grep the data-page attribute on <main>, never a product name.
-# The board uses a separate template (board.html) outside _page, so it carries no marker.
+# The board page renders directly from _base, which derives the marker from active.
 _PAGE_MARKERS: dict[str, str] = {
     "/ui": "status",
+    "/ui/board": "board",
     "/ui/harnesses": "harnesses",
     "/ui/credentials": "credentials",
     "/ui/images": "images",
@@ -268,8 +269,6 @@ _PAGE_MARKERS: dict[str, str] = {
     "/ui/bootstrap": "bootstrap",
     "/ui/settings": "settings",
 }
-# The board page template (not rendered by _page) uses a product-name check.
-BOARD_MARKER = b"<h1>Board</h1>"
 
 
 def walk_first_run_ui(base_url: str) -> None:
@@ -315,8 +314,6 @@ def walk_first_run_ui(base_url: str) -> None:
         timeout=DEFAULT_TIMEOUT,
     )
     try:
-        # The explicit next=/ui returns to Status and its first-run setup steps.
-        # The root and the default sign-in destination instead lead to the board.
         for path, marker in _PAGE_MARKERS.items():
             with opener.open(f"{base_url}{path}", timeout=DEFAULT_TIMEOUT) as response:
                 if response.status != 200:
@@ -326,12 +323,6 @@ def walk_first_run_ui(base_url: str) -> None:
                 body = response.read()
                 if f'data-page="{marker}"'.encode() not in body:
                     raise SmokeError(f"the first-run UI page {path} lacks data-page={marker!r}")
-        # The board uses board.html directly (not _page), so we check for its heading.
-        with opener.open(f"{base_url}/ui/board", timeout=DEFAULT_TIMEOUT) as response:
-            if response.status != 200:
-                raise SmokeError(f"the first-run Board page returned HTTP {response.status}")
-            if BOARD_MARKER not in response.read():
-                raise SmokeError("the first-run Board page did not render")
     except urllib.error.URLError as exc:
         raise SmokeError(f"the first-run UI walk failed: {exc}") from None
     left = compose(

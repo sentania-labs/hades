@@ -23,7 +23,6 @@ from crucible.domain.lifecycle import TaskState
 from tests.unit.test_board import NOW, Repo, row
 from tests.unit.test_issue_489_board_lanes import fixture, task
 from tests.unit.test_ui_sessions import Sessions, context
-from tools.smoke import compose_smoke
 
 
 def principal(role: Role) -> Principal:
@@ -90,7 +89,7 @@ def test_first_run_sign_in_renders_the_smoke_landing_and_empty_board(
 
         board = client.get("/ui/board")
         assert board.status_code == 200
-        assert compose_smoke.BOARD_MARKER in board.content
+        assert b'data-page="board"' in board.content
         assert board.text.count('class="board-lane"') == 7
         assert board.text.count("No cards.") == 5
         assert 'class="board-card"' not in board.text

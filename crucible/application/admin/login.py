@@ -538,6 +538,7 @@ def _line(
     shown = redact(shown)
     session.lines.append(shown)
     session.last_output_at = time.monotonic()
+    session._notify()
     if emit is not None:
         emit(shown)
     url = URL_RE.search(shown)

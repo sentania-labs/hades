@@ -685,7 +685,7 @@ def walk_status_ui(base_url: str) -> None:
             page = response.read().decode("utf-8", "replace")
     except urllib.error.URLError as exc:
         raise SmokeError(f"the first-run administrator sign-in failed: {exc}") from None
-    if "<h1>Status</h1>" not in page:
+    if b'data-page="status"' not in page:
         raise SmokeError("the first-run administrator sign-in did not render the Status page")
     if "kubernetes" not in page:
         raise SmokeError("the rendered status page does not name the kubernetes provider")
