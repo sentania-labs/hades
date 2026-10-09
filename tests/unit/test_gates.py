@@ -618,7 +618,9 @@ def test_commit_policy_passes_commits_by_the_policy_author() -> None:
         GateName.COMMIT_POLICY, _with_commit_policy({"checked": True, "author_problems": []})
     )
     assert outcome.result is GateResult.PASS
-    assert outcome.detail == "every commit is authored as worker@example.test"
+    assert outcome.detail == (
+        "every commit is authored as crucible-worker@users.noreply.github.com"
+    )
     assert outcome.evidence_ids == (3,)
 
 
@@ -649,7 +651,8 @@ def test_commit_policy_fails_a_commit_by_another_author_for_the_reviewer() -> No
     )
     assert outcome.result is GateResult.FAIL
     assert outcome.detail == (
-        f"1 commit(s) not authored as worker@example.test ({sha[:12]} by someone@elsewhere.test)"
+        "1 commit(s) not authored as crucible-worker@users.noreply.github.com "
+        f"({sha[:12]} by someone@elsewhere.test)"
     )
 
 

@@ -21,6 +21,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from crucible.domain.gates import injected_shim_text
+from crucible.domain.git_identity import COMMIT_AUTHOR_EMAIL, COMMIT_AUTHOR_NAME
 from crucible.domain.secrets import named_secret_pattern_expressions
 from crucible.domain.verification import named_paths
 from crucible.ports.execution import (
@@ -190,7 +191,7 @@ def _commit_policy_check(git: str) -> str:
     not run is never taken for one that found nothing."""
     return f"""commit_policy_check() {{
   : > "$2/author-problems.txt"
-  shas=$({git} rev-list "$1") || return 1
+  shas=$({git} rev-list "$1" --not "$3") || return 1
   for sha in $shas; do
     who=$({git} show -s --format='%ae' "$sha") || return 1
     if [ "$who" != "$POLICY_AUTHOR_EMAIL" ]; then
@@ -210,6 +211,7 @@ GIT = (
     "-c core.bigFileThreshold=512m -c core.hooksPath=/dev/null "
     "-c log.showSignature=false -c 'safe.directory=*'"
 )
+
 CHECKPOINT_GIT = (
     "git -c advice.graftFileDeprecated=false -c core.commitGraph=false "
     "-c core.fsmonitor= -c diff.external= -c core.pager=cat "
@@ -484,8 +486,8 @@ STARTED="$ACTUAL_HEAD"
             f"BASE_REF={_quote(base_ref)}",
             f"CLONE_URL={_quote(url)}",
             f"ORIGIN_PLACEHOLDER={_quote(origin_placeholder)}",
-            f"AUTHOR_NAME={_quote(author_name)}",
-            f"AUTHOR_EMAIL={_quote(author_email)}",
+            f"AUTHOR_NAME={_quote(COMMIT_AUTHOR_NAME)}",
+            f"AUTHOR_EMAIL={_quote(COMMIT_AUTHOR_EMAIL)}",
             f"IDENTITY_MOUNT={_quote(identity_mount)}",
             f"CLAUDE_MD_WINS={_quote('1' if claude_md_wins else '0')}",
         )
@@ -599,8 +601,8 @@ printf '%s\n' "$POLICY_FROM_SHA" > "$OUT/prepared-policy-from.txt"
 
 # The policy's commit identity (05b `git`), with the defaults every shipped policy uses.
 _GIT_DEFAULTS = {
-    "author_name": "crucible-worker",
-    "author_email": "crucible-worker@users.noreply.github.com",
+    "author_name": COMMIT_AUTHOR_NAME,
+    "author_email": COMMIT_AUTHOR_EMAIL,
     "commit_trailer": "Crucible-Attempt",
 }
 
@@ -716,7 +718,7 @@ def collector_script(
     correction can resume from the state the worker left and the tree can be read.
 
     With `attempt_id`, what the worker left uncommitted is committed first, as the
-    policy's author with the trailer the worker's own commits get (`trailer_value`, the
+    fixed task author with the trailer the worker's own commits get (`trailer_value`, the
     task's external id as the commit hook writes it; the attempt id when none is given),
     so edits a model forgot to commit are collected and reviewed rather than lost
     (FDY-0140). A quota checkpoint (16) is the
@@ -727,7 +729,7 @@ def collector_script(
 
     It also checks each new commit's author (from the remote work branch when the
     checkout has one, else base_ref), so the `commit_policy` gate can show the reviewer
-    a commit authored by someone other than the policy's author (hades FDY-0135). The
+    a commit authored by someone other than the fixed task author (hades FDY-0135). The
     answer goes to `commit-policy/`, with `checked` written only once the check has
     finished."""
     return f"""set -eu
@@ -740,7 +742,7 @@ SIZE_CAP={_quote(str(size_cap_bytes))}
 DIFF_ARTIFACT_CAP={_quote(str(min(size_cap_bytes, DIFF_ARTIFACT_CAP_BYTES)))}
 COMMIT_ATTEMPT={_quote(attempt_id)}
 QUOTA={_quote("1" if quota_checkpoint else "")}
-POLICY_AUTHOR_EMAIL={_quote(author_email)}
+POLICY_AUTHOR_EMAIL={_quote(COMMIT_AUTHOR_EMAIL)}
 TRAILER={_quote(commit_trailer)}
 TRAILER_VALUE={_quote(trailer_value or attempt_id)}
 REVIEW_DIFF_ERROR=
@@ -804,8 +806,10 @@ EOF
   fi
   checkpoint_git() {{
     GIT_DIR="$REPO/.git" GIT_COMMON_DIR="$REPO/.git" \\
-      GIT_AUTHOR_NAME={_quote(author_name)} GIT_AUTHOR_EMAIL={_quote(author_email)} \\
-      GIT_COMMITTER_NAME={_quote(author_name)} GIT_COMMITTER_EMAIL={_quote(author_email)} \\
+      GIT_AUTHOR_NAME={_quote(COMMIT_AUTHOR_NAME)} \\
+      GIT_AUTHOR_EMAIL={_quote(COMMIT_AUTHOR_EMAIL)} \\
+      GIT_COMMITTER_NAME={_quote(COMMIT_AUTHOR_NAME)} \\
+      GIT_COMMITTER_EMAIL={_quote(COMMIT_AUTHOR_EMAIL)} \\
       {CHECKPOINT_GIT} -C "$REPO" "$@"
   }}
   # Build output and caches a repository forgot to ignore are never swept in: the
@@ -911,7 +915,9 @@ if [ -n "$BASE" ]; then
   mkdir -p "$OUT/commit-policy"
   if printf '%s\\n' "$POLICY_FROM" | grep -Eq '^([0-9a-f]{{40}}|[0-9a-f]{{64}})$' \
       && [ "$({GIT} -C "$REPO" cat-file -t "$POLICY_FROM" 2>/dev/null || true)" = "commit" ]; then
-    if commit_policy_check "$POLICY_FROM..HEAD" "$OUT/commit-policy"; then
+    PREPARED_BASE=$(cat "$OUT/prepared-base.txt" 2>/dev/null || true)
+    if [ "$({GIT} -C "$REPO" cat-file -t "$PREPARED_BASE" 2>/dev/null || true)" = "commit" ] \
+        && commit_policy_check "$POLICY_FROM..HEAD" "$OUT/commit-policy" "$PREPARED_BASE"; then
       echo done > "$OUT/commit-policy/checked"
     fi
   fi
@@ -1203,7 +1209,7 @@ fi
 
 
 # The publisher's git configuration: the helper above, no hooks, no pager, and the
-# policy's author. The value of `helper` has spaces, so it lives in a git config file in
+# fixed task author. The value of `helper` has spaces, so it lives in a git config file in
 # the container's own tmpfs rather than on a command line, which is the same shape the
 # preparer uses (C3).
 _CRED_HELPER = (
@@ -1442,8 +1448,8 @@ export GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
 export HOME=/home/worker LC_ALL=C
 export CRUCIBLE_TOKEN_FILE="$TOKDIR/token"
 export CRUCIBLE_CREDENTIAL_HOST={_quote(credential_host)}
-export CRUCIBLE_AUTHOR_NAME={_quote(author_name)}
-export CRUCIBLE_AUTHOR_EMAIL={_quote(author_email)}
+export CRUCIBLE_AUTHOR_NAME={_quote(COMMIT_AUTHOR_NAME)}
+export CRUCIBLE_AUTHOR_EMAIL={_quote(COMMIT_AUTHOR_EMAIL)}
 {_CRED_HELPER}
 # The token must be readable by this uid through the very helper the push will use, or
 # the push fails at the remote with an authentication error that says nothing about why.
@@ -1647,8 +1653,8 @@ export GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
 export HOME="$WORK_ROOT" LC_ALL=C
 export CRUCIBLE_TOKEN_FILE="$TOKDIR/token"
 export CRUCIBLE_CREDENTIAL_HOST={_quote(credential_host)}
-export CRUCIBLE_AUTHOR_NAME={_quote(author_name)}
-export CRUCIBLE_AUTHOR_EMAIL={_quote(author_email)}
+export CRUCIBLE_AUTHOR_NAME={_quote(COMMIT_AUTHOR_NAME)}
+export CRUCIBLE_AUTHOR_EMAIL={_quote(COMMIT_AUTHOR_EMAIL)}
 {_CRED_HELPER}
 echo credential > "$OUT/step.txt"
 # hades #443: digest commit author and message prefix for ownership check.

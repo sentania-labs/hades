@@ -113,6 +113,7 @@ class BodyInput:
     limitations: tuple[str, ...] = ()
     risks: tuple[str, ...] = ()
     artifact_verifications: tuple[str, ...] = ()
+    reviewer_notes: tuple[str, ...] = ()
     # hades #498: the `composed` section of the completion record Hades wrote from its
     # own evidence: how the run ended, the branch, each review finding against the diff,
     # and what the worker's report was. Rendered as its own section.
@@ -246,6 +247,12 @@ def render_body(body: BodyInput) -> str:
         lines += _bullets("Required artifacts", body.artifact_verifications)
     if body.record:
         lines += _record_section(body.record)
+    if body.reviewer_notes:
+        lines += _bullets(
+            "Reviewer notes",
+            body.reviewer_notes,
+            note="Advisory gate findings recorded by Hades. They did not block publication.",
+        )
     if body.review_reference:
         lines += ["## Internal review", ""]
         for key in sorted(body.review_reference):

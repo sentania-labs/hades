@@ -138,18 +138,18 @@ async def test_fail_path_scope_contained_on_a_prohibited_path(
     assert any(w["reason"] == "pre_pr_gates_failed" for w in wakes)
 
 
-async def test_advisory_failures_reach_the_review_and_are_listed_for_the_reviewer(
+async def test_advisory_failures_are_recorded_and_continue_to_acceptance(
     client: TestClient, supervisor: Supervisor, provider: FakeProvider
 ) -> None:
     """Scope and the report are both advisory (ADR 0024, hades #498): each is listed
-    for the reviewer with its detail, and the task waits for that review."""
+    for the reviewer with its detail, and the task continues without that review."""
     report = judgement_only()
     del report["risks"]
     provider.set_report("EX-0001", report)
     task_id = submit_and_start(
         client, "crucible-worker:fake-out-of-scope", deliverables=ARTIFACTS_DELIVERABLE
     )
-    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
+    assert await run_to_settled(supervisor, client, task_id) == "accepted"
     view = client.get(f"/v1/tasks/{task_id}").json()
     summary = view["gate_summary"]
     assert summary["failing"] == []
@@ -162,14 +162,11 @@ async def test_advisory_failures_reach_the_review_and_are_listed_for_the_reviewe
         "parse_errors"
     ]
     assert [".".join(e["loc"]) for e in errors] == ["risks"]
-    [wake] = [
-        w
+    assert not any(
+        w["reason"] == "internal_review_needed" and w["task_id"] == task_id
         for w in client.get("/v1/wakes").json()["items"]
-        if w["reason"] == "internal_review_needed" and w["task_id"] == task_id
-    ]
-    assert "report_present" in wake["summary"]
-    assert "scope_contained" in {i["gate"] for i in wake["payload"]["for_reviewer"]}
-    assert view["acceptance_results"] == []
+    )
+    assert len(view["acceptance_results"]) == 1
 
 
 async def test_a_report_that_is_not_yaml_goes_to_the_reviewer_with_its_parse_error(
@@ -180,7 +177,7 @@ async def test_a_report_that_is_not_yaml_goes_to_the_reviewer_with_its_parse_err
     task_id = submit_and_start(
         client, "crucible-worker:fake-malformed-report", deliverables=ARTIFACTS_DELIVERABLE
     )
-    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
+    assert await run_to_settled(supervisor, client, task_id) == "accepted"
     view = client.get(f"/v1/tasks/{task_id}").json()
     assert view["gate_summary"]["failing"] == []
     rows = client.get(f"/v1/attempts/{view['latest_attempt']['id']}/gates").json()["items"]
@@ -189,7 +186,7 @@ async def test_a_report_that_is_not_yaml_goes_to_the_reviewer_with_its_parse_err
     assert "report.yaml is not YAML: mapping values are not allowed here" in report["detail"]
     assert "at line 1, column 12" in report["detail"]
     assert "live run" not in report["detail"]
-    assert view["acceptance_results"] == []
+    assert len(view["acceptance_results"]) == 1
 
 
 @pytest.mark.xfail(strict=False, reason="hades #560: drifted from the product; cleanup pending")
