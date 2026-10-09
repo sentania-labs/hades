@@ -2,18 +2,28 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from crucible.application.catalog import load_catalog
 from crucible.application.errors import ContractValidationError, NotFoundError
+from crucible.application.harnesses import HarnessRegistry
 from crucible.application.memory import recall_memory
 from crucible.application.submit_task import submit_task
 from crucible.contracts.api import PersonaRequest, ScheduledJobRequest
-from crucible.domain.entities import Persona, Principal, ScheduledJob, Task, TaskContract
+from crucible.domain.entities import (
+    ExecutionRole,
+    Persona,
+    Principal,
+    ScheduledJob,
+    Task,
+    TaskContract,
+)
 from crucible.domain.ids import new_id
 from crucible.ports.clock import Clock
+from crucible.ports.harness import CredentialSource, HarnessGate
 from crucible.ports.repository import UnitOfWork
 
 PROTECTED_PATHS = [".github/**", "**/secrets*", "uv.lock"]
@@ -138,7 +148,7 @@ def update_job(
 
 
 def generate_contract(
-    uow: UnitOfWork, job: ScheduledJob, persona: Persona, now: datetime
+    uow: UnitOfWork, job: ScheduledJob, persona: Persona, now: datetime, *, provider: str
 ) -> dict[str, object]:
     repository = uow.repositories.get_by_name(job.project)
     if repository is None:
@@ -171,7 +181,7 @@ def generate_contract(
         ),
         "report_only": "Record the findings on this run only.",
     }[job.results_to]
-    external_id = f"JOB-{job.id}-{now.astimezone(ZoneInfo(job.timezone)):%Y%m%d-%H%M}"
+    external_id = run_external_id(job, now)
     return {
         "schema_version": "1.0",
         "external_id": external_id,
@@ -215,7 +225,7 @@ def generate_contract(
         "policy": {"name": policy.name, "version": policy.version},
         "execution_request": {
             "tier": persona.default_tier,
-            "provider": "kubernetes",
+            "provider": provider,
             "timeout_seconds": 3600,
             "rationale": (
                 f"Scheduled persona {persona.name}; preferred harness/model recorded: "
@@ -236,27 +246,108 @@ def generate_contract(
 
 
 def run_job(
-    uow: UnitOfWork, clock: Clock, principal: Principal, job_id: str
+    uow: UnitOfWork,
+    clock: Clock,
+    principal: Principal,
+    job_id: str,
+    *,
+    wired_providers: Collection[str],
+    harnesses: HarnessRegistry | None = None,
+    harness_gates: Mapping[str, HarnessGate] | None = None,
+    credential_sources: Mapping[str, CredentialSource] | None = None,
+    secret_providers: Collection[str] = (),
 ) -> tuple[ScheduledJob, Task, TaskContract, dict[str, object]]:
     job = require_job(uow, job_id, lock=True)
     persona = require_persona(uow, job.persona_id)
     now = clock.now()
-    document = generate_contract(uow, job, persona, now)
-    submission = dict(document)
-    submission.pop("scheduled_job")
-    task, stored = submit_task(uow, clock, principal=principal, body=submission)
+    provider = next(
+        (
+            name
+            for name in ("kubernetes", "docker", "hostprocess", "fake")
+            if name in wired_providers
+        ),
+        None,
+    )
+    if provider is None:
+        raise ContractValidationError("no execution provider is configured for scheduled jobs")
+    document = generate_contract(uow, job, persona, now, provider=provider)
+    task, stored = submit_task(
+        uow,
+        clock,
+        principal=principal,
+        body=document,
+        wired_providers=wired_providers,
+        harnesses=harnesses,
+        harness_gates=harness_gates,
+        credential_sources=credential_sources,
+        secret_providers=secret_providers,
+    )
     changed = replace(
         job,
         last_run_at=now,
         next_run_at=next_run(job.cadence, now, job.timezone) if job.enabled else None,
     )
     uow.scheduled_jobs.save(changed)
-    return changed, task, stored, document
+    return changed, task, stored, stored.document
 
 
-def run_due_jobs(uow: UnitOfWork, clock: Clock, principal: Principal) -> list[Task]:
-    tasks = []
-    for job in uow.scheduled_jobs.list_due(clock.now()):
-        _, task, _, _ = run_job(uow, clock, principal, job.id)
-        tasks.append(task)
-    return tasks
+def run_external_id(job: ScheduledJob, now: datetime) -> str:
+    return f"JOB-{job.id}-{now.astimezone(ZoneInfo(job.timezone)):%Y%m%d-%H%M%S-%f%z}"
+
+
+def inbox_run(document: dict[str, object]) -> bool:
+    metadata = document.get("scheduled_job")
+    return (
+        isinstance(metadata, dict)
+        and metadata.get("results_to") == "inbox_card"
+        and "inbox" in metadata.get("tags", [])
+    )
+
+
+def run_findings(uow: UnitOfWork, task_id: str) -> str | None:
+    work = {
+        execution.id
+        for execution in uow.executions.list_for_task(task_id)
+        if execution.role is not ExecutionRole.REVIEW
+    }
+    attempts = sorted(
+        (
+            attempt
+            for attempt in uow.attempts.list_for_task(task_id)
+            if attempt.execution_id in work
+        ),
+        key=lambda attempt: (attempt.created_at, attempt.id),
+        reverse=True,
+    )
+    for attempt in attempts:
+        claim = uow.claims.get(attempt.id)
+        if claim is not None and claim.parsed_ok:
+            summary = claim.document.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                return summary
+    return None
+
+
+def last_run_result(uow: UnitOfWork, job: ScheduledJob) -> dict[str, object] | None:
+    if job.last_run_at is None:
+        return None
+    tasks = uow.tasks.search(
+        state=None,
+        project=None,
+        repository_id=None,
+        external_id=run_external_id(job, job.last_run_at),
+        updated_since=None,
+        after_id=None,
+        limit=1,
+    )
+    if not tasks:
+        return None
+    task = tasks[0]
+    return {
+        "task_id": task.id,
+        "state": task.state.value,
+        "findings": run_findings(uow, task.id),
+        "delivery_note": "Rooms API is unavailable; findings are recorded on this run."
+        if job.results_to == "chat_message"
+        else None,
+    }

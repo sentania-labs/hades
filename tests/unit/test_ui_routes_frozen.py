@@ -47,6 +47,7 @@ FROZEN_ROUTES = [
     ("POST", "/ui/board/{task_id}/notes"),
     ("POST", "/ui/jobs"),
     ("POST", "/ui/jobs/{job_id}/run-now"),
+    ("POST", "/ui/jobs/{job_id}/toggle"),
     # hades #208: Edit (supersede) and Forget as clicks on the Memory page.
     ("POST", "/ui/memory/{item_id}/forget"),
     ("POST", "/ui/memory/{item_id}/supersede"),

@@ -62,6 +62,7 @@ class ScheduledJobRequest(StrictModel):
 
 
 class ScheduledJobView(Response, ScheduledJobRequest):
+    last_run: dict[str, Any] | None = None
     id: str
     last_run_at: Rfc3339 | None
     next_run_at: Rfc3339 | None

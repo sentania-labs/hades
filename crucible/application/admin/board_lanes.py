@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from crucible.application.admin.board import age_words
+from crucible.application.personas_jobs import inbox_run, run_findings
 from crucible.application.queries import board_batch_records, board_imported_attempts
 from crucible.domain.entities import PullRequestState
 from crucible.domain.events import EventKind
@@ -266,6 +267,10 @@ def board_lanes_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
             task.state,
             waiting_on_scott=bool(escalation and is_scott_question(escalation)),
         )
+        scheduled_inbox = inbox_run(contracts.get(task.id, {}))
+        findings = run_findings(uow, task.id) if scheduled_inbox else None
+        if scheduled_inbox:
+            lane_key = "inbox"
         attempt = current_attempt.get(task.id)
         pr = pull_requests.get(task.id)
         entry = _entry_event(task, events)
@@ -287,7 +292,7 @@ def board_lanes_view(uow: UnitOfWork, now: datetime) -> dict[str, Any]:
                 "harness": attempt.selected_harness if attempt else None,
                 "model": attempt.selected_model if attempt else None,
                 "tier": fields["tier"],
-                "waiting_on": _waiting_words(task, lane_key, escalation, events),
+                "waiting_on": findings or _waiting_words(task, lane_key, escalation, events),
                 "age": {
                     "entered_at": entered_at,
                     "label": age_words(max(0, int((now - entered_at).total_seconds()))),

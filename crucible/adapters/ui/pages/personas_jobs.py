@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import time
 from typing import Any
 
 from fastapi import Request
@@ -13,7 +14,13 @@ from crucible.adapters.ui.render import _page, _redirect
 from crucible.adapters.ui.session import _csrf, _form, _require
 from crucible.application.catalog import load_catalog
 from crucible.application.errors import ApplicationError
-from crucible.application.personas_jobs import create_job, create_persona, run_job
+from crucible.application.personas_jobs import (
+    create_job,
+    create_persona,
+    require_job,
+    run_job,
+    update_job,
+)
 from crucible.application.registry import REGISTERED_HARNESSES
 from crucible.contracts.api import PersonaRequest, ScheduledJobRequest
 from crucible.domain.entities import Role
@@ -177,7 +184,13 @@ def jobs_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             j.task_kind,
             j.cadence_label,
             j.results_to,
-            "On" if j.enabled else "Off",
+            {
+                "kind": "form",
+                "action": f"/ui/jobs/{j.id}/toggle",
+                "label": "Disable" if j.enabled else "Enable",
+            }
+            if _write_allowed(principal.role)
+            else ("On" if j.enabled else "Off"),
             {
                 "kind": "form",
                 "action": f"/ui/jobs/{j.id}/run-now",
@@ -310,6 +323,23 @@ def jobs_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     )
 
 
+def cadence_from_form(form: dict[str, str]) -> tuple[str, str]:
+    preset = form.get("cadence_preset", "raw")
+    if preset == "raw":
+        return form.get("cadence", ""), form.get("cadence_label", "")
+    if preset not in {"daily", "weekly"}:
+        raise ValueError("unknown cadence preset")
+    at = time.fromisoformat(form.get("daily_time", "09:00"))
+    label = at.strftime("%I:%M %p").lstrip("0") + " Central"
+    if preset == "daily":
+        return f"{at.minute} {at.hour} * * *", f"Daily at {label}"
+    day = int(form.get("weekly_day", "1"))
+    if day not in range(7):
+        raise ValueError("weekly day must be between 0 and 6")
+    days = ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
+    return f"{at.minute} {at.hour} * * {day}", f"{days[day]} at {label}"
+
+
 @router.post("/jobs")
 async def job_create(request: Request, ctx: Ctx, uow: UoW) -> Response:
     found = _require(request, ctx, uow)
@@ -321,13 +351,14 @@ async def job_create(request: Request, ctx: Ctx, uow: UoW) -> Response:
         _csrf(form, csrf)
         if not _write_allowed(principal.role):
             raise ValueError("orchestrator or operator role required")
+        cadence, cadence_label = cadence_from_form(form)
         body = ScheduledJobRequest(
             persona_id=form.get("persona_id", ""),
             name=form.get("name", ""),
             task_kind=form.get("task_kind", "prompt"),
             task_text=form.get("task_text", ""),
-            cadence=form.get("cadence", ""),
-            cadence_label=form.get("cadence_label", ""),
+            cadence=cadence,
+            cadence_label=cadence_label,
             results_to=form.get("results_to", "inbox_card"),
             carry_notes_forward=form.get("carry_notes_forward") == "true",
             project=form.get("project", ""),
@@ -351,8 +382,40 @@ async def job_run_now(request: Request, job_id: str, ctx: Ctx, uow: UoW) -> Resp
         _csrf(form, csrf)
         if not _write_allowed(principal.role):
             raise ValueError("orchestrator or operator role required")
-        run_job(uow, ctx.clock, principal, job_id)
+        run_job(
+            uow,
+            ctx.clock,
+            principal,
+            job_id,
+            wired_providers=frozenset(provider.name for provider in ctx.providers),
+            harnesses=ctx.harnesses,
+            harness_gates=ctx.harness_gates,
+            credential_sources=ctx.credential_sources,
+            secret_providers=ctx.secret_providers,
+        )
         uow.commit()
         return _redirect(form, "Run filed as a normal task.")
+    except (ApplicationError, ValueError) as exc:
+        return _redirect(form, getattr(exc, "detail", str(exc)), kind="bad")
+
+
+@router.post("/jobs/{job_id}/toggle")
+async def job_toggle(request: Request, job_id: str, ctx: Ctx, uow: UoW) -> Response:
+    found = _require(request, ctx, uow)
+    if isinstance(found, RedirectResponse):
+        return found
+    principal, csrf = found
+    form = await _form(request)
+    try:
+        _csrf(form, csrf)
+        if not _write_allowed(principal.role):
+            raise ValueError("orchestrator or operator role required")
+        job = require_job(uow, job_id, lock=True)
+        body = ScheduledJobRequest.model_validate(job, from_attributes=True)
+        update_job(uow, ctx.clock, job_id, body.model_copy(update={"enabled": not job.enabled}))
+        uow.commit()
+        return _redirect(
+            form, "Scheduled job enabled." if not job.enabled else "Scheduled job disabled."
+        )
     except (ApplicationError, ValueError) as exc:
         return _redirect(form, getattr(exc, "detail", str(exc)), kind="bad")
