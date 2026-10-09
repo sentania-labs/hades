@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 from fastapi import Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
 from crucible.adapters.threaded_router import ThreadedAPIRouter
@@ -13,8 +13,14 @@ from crucible.adapters.ui.session import _csrf, _form, _require
 from crucible.application.admin.board_card import board_card_view
 from crucible.application.admin.board_lanes import board_lanes_view
 from crucible.application.board_actions import CorrectionDeps, apply_move, next_phase
+from crucible.application.board_resource import board_resource
 from crucible.application.errors import ApplicationError, NotFoundError
+from crucible.application.proposals import reject_proposal
+from crucible.application.queries import task_view
 from crucible.application.task_notes import OPERATOR_ROLES, add_note
+from crucible.domain.entities import Principal, Role
+from crucible.domain.lifecycle import TaskState
+from crucible.domain.waivers import ACCEPT_NO_CI, WAIVABLE_STATES, WAIVE_EXTERNAL_REVIEW
 
 router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
 
@@ -291,12 +297,26 @@ def _quality_sections(document: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 @router.get("/board", response_class=HTMLResponse)
-def board_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
+def board_page(request: Request, ctx: Ctx, uow: UoW, lane: str | None = None) -> Response:
     found = _require(request, ctx, uow)
     if isinstance(found, RedirectResponse):
         return found
     principal, csrf = found
-    document = board_lanes_view(uow, ctx.clock.now())
+    if lane is not None:
+        return JSONResponse(
+            board_resource(uow, ctx.clock.now(), principal, cards_for=frozenset({lane}))
+        )
+    render_principal = cast("Principal | None", principal)
+    if render_principal is None:  # Compatibility for projection-only unit fixtures.
+        document = board_lanes_view(uow, ctx.clock.now())
+        document["needs_me"] = 0
+    else:
+        document = board_resource(
+            uow,
+            ctx.clock.now(),
+            render_principal,
+            cards_for=frozenset({"inbox", "waiting_on_me", "stuck", "in_progress", "holding_pen"}),
+        )
     return templates.TemplateResponse(
         request=request,
         name="board.html",
@@ -304,6 +324,7 @@ def board_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
             **_base(request, principal, csrf, title="Board", active="/ui/board"),
             "title": "Board",
             "lanes": document["lanes"],
+            "needs_me": document["needs_me"],
         },
     )
 
@@ -311,6 +332,100 @@ def board_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
 def _timezone(request: Request) -> str:
     settings = getattr(getattr(request.app.state, "ctx", None), "settings", None)
     return str(settings.service.render_timezone) if settings is not None else "America/Chicago"
+
+
+# The operator's waivers (ADR 0025), offered on the card page while a PR waits on them.
+WAIVER_FORMS = (
+    (
+        WAIVE_EXTERNAL_REVIEW,
+        "Waive the remaining external review rounds",
+        "The task stops waiting for the external reviewer and goes on to CI. Use it when "
+        "the reviewer will not review this pull request.",
+        "the external reviewer did not review this pull request",
+    ),
+    (
+        ACCEPT_NO_CI,
+        "Accept that this repository has no CI",
+        "With no check run or workflow run on the head, CI certification is skipped "
+        "instead of waiting. A check that does run is still certified.",
+        "this repository has no CI for this task",
+    ),
+)
+
+REMOVE_LIKE_MOVES = frozenset({"cancel", "decline"})
+
+# hades #424: the proposal answers the earlier task page offered, as (key, label, note
+# field label, confirm with a second click).
+PROPOSAL_ANSWERS = (
+    ("approve", "Approve with note", "Note added to the objective (optional)", False),
+    ("send_back", "Send back", "Note to the orchestrator (optional)", False),
+    ("reject", "Reject", None, True),
+)
+
+CARD_CLICK_REASON = "answered with one click on the card page"
+
+
+def card_page_actions(
+    task_id: str,
+    state: TaskState,
+    role: Role,
+    moves: list[dict[str, str]],
+    default_move: str | None = None,
+) -> list[dict[str, Any]]:
+    """Every action the card page offers, each one click. A note field, where there is
+    one, is optional: the handler records the operator and the time either way."""
+    if role not in OPERATOR_ROLES:
+        return []
+    quoted = quote(task_id)
+    actions: list[dict[str, Any]] = [
+        {
+            "key": move["key"],
+            "label": move["label"],
+            "hint": move.get("meaning", ""),
+            "action": f"/ui/board/{quoted}/actions",
+            "hidden": {"move": move["key"], "apply": "go"},
+            "note": "Note (optional)" if move["key"] in REMOVE_LIKE_MOVES else None,
+            "note_name": "note",
+            "primary": move["key"] == default_move,
+            "confirm": move["key"] in REMOVE_LIKE_MOVES,
+        }
+        for move in moves
+    ]
+    keys = {move["key"] for move in moves}
+    if state is TaskState.PROPOSED:
+        for key, label, note, confirm in PROPOSAL_ANSWERS:
+            # The board's own Decline already rejects.
+            if key == "reject" and "decline" in keys:
+                continue
+            actions.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "hint": "",
+                    "action": f"/ui/tasks/{quoted}/proposal",
+                    "hidden": {"proposal_action": key, "reason": CARD_CLICK_REASON},
+                    "note": note,
+                    "note_name": "note",
+                    "primary": key == "approve" and "approve" not in keys,
+                    "confirm": confirm,
+                }
+            )
+    if role is Role.ADMIN and state in WAIVABLE_STATES:
+        for kind, title, hint, resolves in WAIVER_FORMS:
+            actions.append(
+                {
+                    "key": kind,
+                    "label": title,
+                    "hint": hint,
+                    "action": f"/ui/tasks/{quoted}/decisions",
+                    "hidden": {"kind": kind, "resolves": resolves},
+                    "note": "Reason (optional; recorded on the task)",
+                    "note_name": "verbatim",
+                    "primary": False,
+                    "confirm": False,
+                }
+            )
+    return actions
 
 
 @router.get("/board/{task_id}", response_class=HTMLResponse)
@@ -327,7 +442,13 @@ def board_card_page(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Respo
         return RedirectResponse(
             f"/ui/board?kind=bad&message={quote(f'No task {task_id}.')}", status_code=303
         )
-    card = _localize(document, _timezone(request))
+    timezone = _timezone(request)
+    card = _localize(document, timezone)
+    view = task_view(uow, task_id)
+    waivers = _localize(
+        [d for d in view.decisions if d.get("kind") in (WAIVE_EXTERNAL_REVIEW, ACCEPT_NO_CI)],
+        timezone,
+    )
     return templates.TemplateResponse(
         request=request,
         name="card.html",
@@ -341,6 +462,10 @@ def board_card_page(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Respo
             ),
             "card": card,
             "can_act": principal.role in OPERATOR_ROLES,
+            "actions": card_page_actions(
+                task_id, view.state, principal.role, document["moves"], document["default_move"]
+            ),
+            "waivers": waivers,
             "return_to": f"/ui/board/{quote(task_id)}",
         },
     )
@@ -386,6 +511,18 @@ async def board_card_action(request: Request, task_id: str, ctx: Ctx, uow: UoW) 
             ),
         )
         note = form.get("note", "")
+        if not note.strip():
+            note = f"{form.get('move') or 'next phase'} by {principal.name}"
+        if form.get("move") == "decline":
+            task = reject_proposal(
+                uow,
+                ctx.clock,
+                principal=principal,
+                task_id=task_id,
+                reason=note,
+            )
+            uow.commit()
+            return _redirect(form, f"Declined {task.external_id}.")
         if form.get("apply") == "next":
             result = next_phase(
                 uow, ctx.clock, principal=principal, task_id=task_id, note_text=note, deps=deps

@@ -100,8 +100,8 @@ def _csrf(form: dict[str, str], expected: str) -> None:
 @router.get("/sign-in", response_class=HTMLResponse)
 def sign_in_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     if _session(request, ctx, uow) is not None:
-        return RedirectResponse("/ui", status_code=303)
-    return _sign_in_form(request, ctx, next_path=request.query_params.get("next", "/ui"))
+        return RedirectResponse("/ui/board", status_code=303)
+    return _sign_in_form(request, ctx, next_path=request.query_params.get("next", "/ui/board"))
 
 
 def _sign_in_form(
@@ -180,7 +180,7 @@ async def sign_in(request: Request, ctx: Ctx, uow: UoW) -> Response:
     # so a failed insert or commit leaves the token available for a retry.
     await asyncio.to_thread(discard_after_use, ctx.first_run, principal.name)
     value = _serializer(ctx).dumps(session_id)
-    target = form.get("next", "/ui")
+    target = form.get("next", "/ui/board")
     if not target.startswith("/ui") or target.startswith("//"):
         target = "/ui"
     response = RedirectResponse(target, status_code=303)

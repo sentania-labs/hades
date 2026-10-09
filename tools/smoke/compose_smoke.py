@@ -248,6 +248,8 @@ def mint_token(principal: str) -> str:
 
 
 FIRST_RUN_FILE = "/var/lib/crucible/credentials/first-run-admin-token"
+FIRST_RUN_LANDING_MARKER = b"<h1>Status</h1>"
+BOARD_MARKER = b"<h1>Board</h1>"
 TOKEN_PATTERN = re.compile(r"\bcru_[A-Z0-9]{26}\.[A-Za-z0-9_-]+\b")
 
 
@@ -288,9 +290,14 @@ def walk_first_run_ui(base_url: str) -> None:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
+        # The explicit next=/ui returns to Status and its first-run setup steps.
+        # The root and the default sign-in destination instead lead to the board.
         with opener.open(request_object, timeout=DEFAULT_TIMEOUT) as response:
-            if response.status != 200 or b"<h1>Status</h1>" not in response.read():
+            if response.status != 200 or FIRST_RUN_LANDING_MARKER not in response.read():
                 raise SmokeError("first-run administrator sign-in did not render the Status page")
+        with opener.open(f"{base_url}/ui/board", timeout=DEFAULT_TIMEOUT) as response:
+            if response.status != 200 or BOARD_MARKER not in response.read():
+                raise SmokeError("the first-run Board page did not render")
         for path in (
             "/ui/harnesses",
             "/ui/credentials",
@@ -308,7 +315,7 @@ def walk_first_run_ui(base_url: str) -> None:
             "/ui/settings",
         ):
             with opener.open(f"{base_url}{path}", timeout=DEFAULT_TIMEOUT) as response:
-                if response.status != 200 or b"Crucible" not in response.read():
+                if response.status != 200 or b"Hades" not in response.read():
                     raise SmokeError(f"the first-run UI page {path} did not render")
     except urllib.error.URLError as exc:
         raise SmokeError(f"the first-run UI walk failed: {exc}") from None

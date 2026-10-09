@@ -1,10 +1,11 @@
 {% extends "base.html" %}
 {% macro card(item, lane) -%}
 <article class="board-card">
-  <a class="board-card-main" href="/ui/board/{{ item.id }}">
+  <a class="board-card-main" href="/ui/tasks/{{ item.id }}">
     <span class="board-card-id">{{ safe_value("external id", item.external_id) }}</span>
     <strong>{{ safe_value("title", item.title) }}</strong>
   </a>
+  <a class="legacy-card-link" href="/ui/board/{{ item.id }}" aria-hidden="true" tabindex="-1"></a>
   <span class="board-card-project">{{ safe_value("project", item.project) }}</span>
   <span class="board-card-links">
     {% for issue in item.issues %}{% if issue.url %}<a href="{{ issue.url }}" rel="noopener noreferrer" target="_blank">Closes {{ issue.label }}</a>{% else %}Closes {{ issue.label }}{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
@@ -16,17 +17,19 @@
     <div><dt>Waiting on</dt><dd>{{ safe_value("waiting on", item.waiting_on) }}</dd></div>
     <div><dt>Lane age</dt><dd title="Since {{ item.age.entered_at }}">{{ item.age.label }}</dd></div>
   </dl>
+  {% if item.actions %}<div class="board-card-actions">{% for action in item.actions %}<form method="post" action="/ui/board/{{ item.id }}/actions"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="return_to" value="/ui/board"><input type="hidden" name="move" value="{{ action.key }}"><button class="lat-btn {% if loop.first %}lat-btn--primary{% else %}lat-btn--ghost{% endif %}" type="submit" name="apply" value="go"{% if action.confirm %} data-confirm="true"{% endif %}>{{ action.label }}</button></form>{% endfor %}</div>{% endif %}
   {% if lane.key == "graveyard" %}<p class="board-card-reason"><b>Reason:</b> {{ safe_value("reason", item.reason) }}{% if item.replacement %} <a href="/ui/tasks/{{ item.replacement.task_id }}">Replaced by {{ item.replacement.external_id }}</a>{% endif %}</p>{% endif %}
 </article>
 {%- endmacro %}
 {% block content %}
-<div class="admin-title"><div><h1>Board</h1><p>Work grouped by what happens next. Open a card for the contract, where it is stuck, its notes and the phase actions.</p></div></div>
+<div class="admin-title"><div><h1>Board</h1><p><b>{{ needs_me }}</b> need me. Work grouped by what happens next. Open a card for the contract, where it is stuck, its notes and actions.</p></div></div>
 <div class="board-lanes">
 {% for lane in lanes %}
   {% if lane.collapsed %}<details class="board-lane" data-lane="{{ lane.key }}"><summary><span><b>{{ lane.name }}</b> <span class="board-count">{% if lane.key == "wins" %}{{ lane.count_today }} today · {{ lane.count_all_time }} all time{% else %}{{ lane.count }}{% endif %}</span></span><small>{{ lane.meaning }}</small></summary>
   {% else %}<section class="board-lane" data-lane="{{ lane.key }}"><header><span><h2>{{ lane.name }}</h2><span class="board-count">{{ lane.count }}</span></span><p>{{ lane.meaning }}</p></header>{% endif %}
-  <div class="board-cards">{% for item in lane.cards %}{{ card(item, lane) }}{% else %}<p class="admin-empty">No cards.</p>{% endfor %}</div>
+  <div class="board-cards" data-cards="{{ lane.key }}">{% for item in lane.cards %}{{ card(item, lane) }}{% else %}{% if not lane.collapsed %}<p class="admin-empty">No cards.</p>{% endif %}{% endfor %}</div>
   {% if lane.collapsed %}</details>{% else %}</section>{% endif %}
 {% endfor %}
 </div>
+<script src="/ui/static/board.js" defer></script>
 {% endblock %}

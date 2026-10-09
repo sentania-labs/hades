@@ -69,8 +69,8 @@
     </li>{% endfor %}</ol>{% else %}<p class="admin-empty">No correction yet.</p>{% endif %}
   </section>
 
-  <section class="lat-card" aria-label="Operator notes" id="notes">
-    <h2>Operator notes</h2>
+  <section class="lat-card" aria-label="Thread" id="notes">
+    <h2>Thread</h2><span class="admin-hint">Operator notes</span>
     {% if card.notes %}<ul class="card-notes">{% for note in card.notes %}<li>
       <div class="card-note-head"><b>{{ safe_value("author", note.author) }}</b><span>{{ note.created_at }}</span>{% if note.verbatim %}<span class="admin-chip">verbatim</span>{% endif %}</div>
       <p class="card-note-text">{{ safe_value("note", note.text) }}</p>
@@ -86,29 +86,36 @@
     {% endif %}
   </section>
 
-  <section class="lat-card" aria-label="Phase actions" id="actions">
-    <h2>Phase actions</h2>
+  <aside class="lat-card card-actions-panel" aria-label="Actions" id="actions">
+    <h2>Actions</h2>
     {% if can_act %}
-    {% if card.moves %}
-    <form class="card-form" method="post" action="/ui/board/{{ card.id }}/actions">
+    {% if actions %}<ul class="card-action-list">{% for item in actions %}<li>
+      <form class="card-form" method="post" action="{{ item.action }}">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="return_to" value="{{ return_to }}">
+        {% for name, value in item.hidden.items() %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+        {% if item.note %}<label><span class="lat-label">{{ item.note }}</span>
+          <textarea class="lat-textarea" name="{{ item.note_name }}" rows="2"></textarea></label>{% endif %}
+        <div class="card-form-buttons"><button class="lat-btn {% if item.primary %}lat-btn--primary{% else %}lat-btn--ghost{% endif %}" type="submit" data-action="{{ item.key }}"{% if item.confirm %} data-confirm="true"{% endif %}>{{ item.label }}</button></div>
+        {% if item.hint %}<span class="admin-hint">{{ item.hint }}</span>{% endif %}
+      </form>
+    </li>{% endfor %}</ul>
+    {% else %}<p class="admin-empty">No action applies to a task in {{ card.state_words }}.</p>{% endif %}
+    {% if card.default_move %}<form class="card-form" method="post" action="/ui/board/{{ card.id }}/actions">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="return_to" value="{{ return_to }}">
-      <label><span class="lat-label">Move</span>
-        <select class="lat-select" name="move">{% for move in card.moves %}<option value="{{ move.key }}" {% if move.key == card.default_move %}selected{% endif %}>{{ move.label }}</option>{% endfor %}</select></label>
-      <label><span class="lat-label">Your words (required; recorded as the decision's verbatim and as a note)</span>
-        <textarea class="lat-textarea" name="note" rows="3" required></textarea></label>
-      <div class="card-form-buttons">
-        <button class="lat-btn lat-btn--primary" type="submit" name="apply" value="go">Go</button>
-        {% if card.default_move %}<button class="lat-btn lat-btn--ghost" type="submit" name="apply" value="next" title="{{ card.default_move_label }}">Next phase: {{ card.default_move_label }}</button>{% endif %}
-      </div>
-    </form>
-    {% else %}<p class="admin-empty">No move applies to a task in {{ card.state_words }}.</p>{% endif %}
+      <div class="card-form-buttons"><button class="lat-btn lat-btn--ghost" type="submit" name="apply" value="next" title="{{ card.default_move_label }}">Next phase: {{ card.default_move_label }}</button></div>
+    </form>{% endif %}
     {% else %}<p class="admin-empty">Operators act here; you are reading only.</p>{% endif %}
-    <details class="admin-details"><summary>Default move per lane</summary>
+    <div class="card-waivers" aria-label="Operator waivers"><b>Operator waivers</b>
+      {% if waivers %}<ul class="card-list">{% for d in waivers %}<li><code>{{ d.kind }}</code> {{ safe_value("reason", d.verbatim) }} <span class="admin-hint">{{ safe_value("by", d.principal) }} · {{ d.created_at }}</span></li>{% endfor %}</ul>{% else %}<p class="admin-empty">No waiver is recorded for this task.</p>{% endif %}
+    </div>
+    <div class="card-defaults-wrap" aria-label="Default move per lane"><b>Default move per lane</b>
       <table class="card-defaults"><thead><tr><th>From</th><th>To</th><th>Next phase applies</th></tr></thead><tbody>
       {% for row in card.default_table %}<tr data-current="{{ 'true' if row.from_key == card.lane.key else 'false' }}"><td>{{ row.from }}</td><td>{{ row.to }}</td><td>{{ row.label }}</td></tr>{% endfor %}
       </tbody></table>
-    </details>
-  </section>
+    </div>
+  </aside>
 </div>
+<script src="/ui/static/board.js" defer></script>
 {% endblock %}
