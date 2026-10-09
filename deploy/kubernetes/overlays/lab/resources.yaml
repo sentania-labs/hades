@@ -12,8 +12,8 @@
 apiVersion: v1
 kind: ResourceQuota
 metadata:
-  name: crucible-workers
-  namespace: crucible-workers
+  name: hades-workers
+  namespace: hades-workers
 spec:
   hard:
     # 5N + 2 where N = 6 for the lab: 5 * 6 + 2 = 32 Jobs (5 per attempt + publisher headroom)

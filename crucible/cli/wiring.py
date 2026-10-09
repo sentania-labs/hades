@@ -310,6 +310,7 @@ def kubernetes_config(
         address_overlap_window_seconds=k.address_overlap_window_seconds,
         extra_image_allowlist=tuple(k.extra_image_allowlist),
         credential_secrets=dict(k.credential_secrets),
+        buildkit_namespace=k.buildkit_namespace,
         # 25 step 7: a configured mount mode may raise the adapter's declared minimum
         # to rw-narrow and never lowers it. The Kubernetes provider reads the same
         # `[credentials.<harness>]` block the Docker provider does; only the source

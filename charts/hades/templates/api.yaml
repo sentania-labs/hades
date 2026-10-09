@@ -158,7 +158,7 @@ spec:
           volumeMounts:
             - name: artifacts
               mountPath: /var/lib/crucible/artifacts
-            # 12: the App key and the webhook secret, on the `crucible` pods only. No
+            # 12: the App key and the webhook secret, on the `hades` pods only. No
             # worker, collector, verifier or publisher ever mounts this.
             - name: github
               mountPath: /var/lib/crucible/credentials/github

@@ -199,7 +199,7 @@ def test_the_overrides_exist_typed_and_default_to_the_base_names() -> None:
         assert _errors(SCHEMA["properties"][key], "hades") == []
         assert _errors(SCHEMA["properties"][key], "Not_A_Name") != []
     helpers = (TEMPLATES / "_helpers.tpl").read_text()
-    assert '.Values.nameOverride | default "crucible"' in helpers
+    assert '.Values.nameOverride | default "hades"' in helpers
     assert '.Values.namespaceOverride | default (include "hades.name" .)' in helpers
     assert (
         '.Values.workersNamespaceOverride | default (printf "%s-workers" '
@@ -269,11 +269,7 @@ def test_no_template_hardcodes_a_crucible_namespace_or_name() -> None:
             text,
             re.M,
         )
-        if template.name in {"buildkit.yaml", "namespaces.yaml"}:
-            # The provider addresses its builder as `crucible-buildkit` (a constant).
-            assert set(names) <= {"crucible-buildkit", "crucible-buildkit-cache"}
-        else:
-            assert names == [], template.name
+        assert names == [], template.name
 
 
 @pytest.mark.parametrize("setting", sorted(TYPED_SETTINGS))
@@ -342,15 +338,18 @@ def test_every_settings_value_is_quoted_so_the_merged_map_holds_strings() -> Non
 
 
 def test_buildkit_is_off_by_default_and_gates_its_namespace_and_objects() -> None:
-    assert VALUES["buildkit"] == {"enabled": False}
+    assert VALUES["buildkit"] == {"enabled": False, "namespace": "hades-buildkit"}
     assert _schema_node("buildkit.enabled")["type"] == "boolean"
+    namespace = SCHEMA["properties"]["buildkit"]["properties"]["namespace"]
+    assert _errors(namespace, "crucible-buildkit") == []
+    assert _errors(namespace, "Not_A_Name") != []
     buildkit = (TEMPLATES / "buildkit.yaml").read_text()
     before, inside = buildkit.split("{{- if .Values.buildkit.enabled }}\n", 1)
     assert "apiVersion:" not in before
     assert inside.rstrip().endswith("{{- end }}")
     namespaces = (TEMPLATES / "namespaces.yaml").read_text()
     gated = namespaces.split("{{- if .Values.buildkit.enabled }}", 1)[1]
-    assert "  name: crucible-buildkit\n" in gated
+    assert "  name: {{ .Values.buildkit.namespace }}\n" in gated
     assert 'kubernetes.io/metadata.name: {{ include "hades.workersNamespace" . }}' in buildkit
     assert BASE_VALUES["buildkit"]["enabled"] is True
 
@@ -469,16 +468,17 @@ def test_no_em_dash_in_the_chart_tools_or_docs() -> None:
 def test_the_sync_check_renders_base_values_and_the_defaults() -> None:
     script = (ROOT / "tools/chart/sync.sh").read_text()
     assert "-f tools/chart/values-base.yaml" in script
-    assert "--without-namespace crucible-buildkit" in script
-    assert (BASE_VALUES["nameOverride"], BASE_VALUES["namespaceOverride"]) == ("crucible",) * 2
-    assert BASE_VALUES["workersNamespaceOverride"] == "crucible-workers"
+    assert "--without-namespace hades-buildkit" in script
+    assert (BASE_VALUES["nameOverride"], BASE_VALUES["namespaceOverride"]) == ("hades",) * 2
+    assert BASE_VALUES["workersNamespaceOverride"] == "hades-workers"
+    assert BASE_VALUES["buildkit"]["namespace"] == "hades-buildkit"
     found: dict[tuple[str, str, str], dict[str, Any]] = {
-        ("Namespace", "", "crucible-buildkit"): {},
-        ("Deployment", "crucible-buildkit", "crucible-buildkit"): {},
-        ("Deployment", "crucible", "crucible-api"): {},
+        ("Namespace", "", "hades-buildkit"): {},
+        ("Deployment", "hades-buildkit", "hades-buildkit"): {},
+        ("Deployment", "hades", "hades-api"): {},
     }
-    assert set(without_namespaces(found, {"crucible-buildkit"})) == {
-        ("Deployment", "crucible", "crucible-api")
+    assert set(without_namespaces(found, {"hades-buildkit"})) == {
+        ("Deployment", "hades", "hades-api")
     }
 
 
@@ -501,6 +501,8 @@ def _render(name: str, namespace: str, workers: str, *, stale: bool = False) -> 
                 "CRUCIBLE_KUBERNETES__WORKERS_NAMESPACE": workers,
                 "CRUCIBLE_KUBERNETES__SERVICE_ACCOUNT": f"{owner}-worker",
                 "CRUCIBLE_KUBERNETES__CACHE_CLAIM": f"{name}-reference-cache",
+                "CRUCIBLE_KUBERNETES__BUILDKIT_NAMESPACE": "hades-buildkit",
+                "CRUCIBLE_ROOMS__API_NAMESPACE": namespace,
                 "CRUCIBLE_KUBERNETES__CREDENTIAL_SECRETS": json.dumps(secrets),
             },
         },

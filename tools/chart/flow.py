@@ -2,7 +2,7 @@
 """Check that a chart render's names, namespaces and settings follow its values.
 
 `make chart` runs this on renders with overrides (hades #601): a nameOverride that
-renamed `metadata.name` but left the ConfigMap naming `crucible` objects would deploy
+renamed `metadata.name` but left the ConfigMap naming the default objects would deploy
 a service that looks for an account, a claim and Secrets that do not exist.
 """
 
@@ -15,8 +15,12 @@ from typing import Any
 
 import yaml
 
-# The provider addresses its builder by this constant, so it never follows the names.
-BUILDKIT_NAMESPACE = "crucible-buildkit"
+# The builder's namespace when buildkit.namespace is left alone. It never follows the
+# names; KUBERNETES__BUILDKIT_NAMESPACE hands it to the provider.
+BUILDKIT_NAMESPACE = "hades-buildkit"
+# Object name prefixes a render must not carry once its names are something else: the
+# earlier default and the current one (hades #609 step 2).
+KNOWN_PREFIXES = ("crucible", "hades")
 HARNESSES = ("claude_code", "codex", "agy", "hermes")
 
 
@@ -50,14 +54,15 @@ def problems(
     settings: dict[str, str],
     pull_secret: str = "",
     buildkit: bool | None = None,
+    buildkit_namespace: str = BUILDKIT_NAMESPACE,
 ) -> list[str]:
     """Every way the render fails to follow the given names and settings."""
     found: list[str] = []
     in_buildkit = [
         doc
         for doc in docs
-        if doc.get("metadata", {}).get("namespace") == BUILDKIT_NAMESPACE
-        or (doc.get("kind") == "Namespace" and doc["metadata"]["name"] == BUILDKIT_NAMESPACE)
+        if doc.get("metadata", {}).get("namespace") == buildkit_namespace
+        or (doc.get("kind") == "Namespace" and doc["metadata"]["name"] == buildkit_namespace)
     ]
     if buildkit is False and in_buildkit:
         found.append(f"buildkit is off but {len(in_buildkit)} objects render for it")
@@ -71,7 +76,7 @@ def problems(
                 labels = peer.get("namespaceSelector", {}).get("matchLabels", {})
                 if labels.get("kubernetes.io/metadata.name") != workers_namespace:
                     found.append(f"the builder admits {labels}, not {workers_namespace}")
-    allowed = {namespace, workers_namespace, BUILDKIT_NAMESPACE}
+    allowed = {namespace, workers_namespace, buildkit_namespace}
     for doc in docs:
         kind = doc.get("kind", "")
         metadata = doc.get("metadata", {})
@@ -83,12 +88,13 @@ def problems(
             continue
         if where not in allowed:
             found.append(f"{kind} {object_name} is in {where or 'no namespace'}")
-        if (
-            name != "crucible"
-            and where != BUILDKIT_NAMESPACE
-            and object_name.startswith("crucible-")
-        ):
-            found.append(f"{kind} {where}/{object_name} still carries the crucible name")
+        for prefix in KNOWN_PREFIXES:
+            if (
+                name != prefix
+                and where != buildkit_namespace
+                and object_name.startswith(f"{prefix}-")
+            ):
+                found.append(f"{kind} {where}/{object_name} still carries the {prefix} name")
 
     try:
         config = _find(docs, "ConfigMap", namespace, f"{name}-settings")
@@ -100,6 +106,8 @@ def problems(
         "CRUCIBLE_KUBERNETES__WORKERS_NAMESPACE": workers_namespace,
         "CRUCIBLE_KUBERNETES__SERVICE_ACCOUNT": f"{name}-worker",
         "CRUCIBLE_KUBERNETES__CACHE_CLAIM": f"{name}-reference-cache",
+        "CRUCIBLE_KUBERNETES__BUILDKIT_NAMESPACE": buildkit_namespace,
+        "CRUCIBLE_ROOMS__API_NAMESPACE": namespace,
         **settings,
     }
     for key, value in expected.items():
@@ -167,6 +175,7 @@ def main() -> int:
     parser.add_argument("--setting", type=_setting, action="append", default=[])
     parser.add_argument("--pull-secret", default="")
     parser.add_argument("--buildkit", choices=("on", "off"))
+    parser.add_argument("--buildkit-namespace", default=BUILDKIT_NAMESPACE)
     args = parser.parse_args()
     found = problems(
         _load(args.render),
@@ -176,6 +185,7 @@ def main() -> int:
         settings=dict(args.setting),
         pull_secret=args.pull_secret,
         buildkit=None if args.buildkit is None else args.buildkit == "on",
+        buildkit_namespace=args.buildkit_namespace,
     )
     for problem in found:
         print(f"chart-flow: {args.render.name}: {problem}")

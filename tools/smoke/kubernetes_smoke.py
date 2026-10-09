@@ -47,8 +47,8 @@ ORIGIN = "kind-deploy"
 ORIGIN_URL = f"file:///crucible/cache/{ORIGIN}.git"
 POLICY = "kind-deploy"
 ROUTING = "kind-routing"
-WORKERS_NAMESPACE = "crucible-workers"
-NAMESPACE = "crucible"
+WORKERS_NAMESPACE = "hades-workers"
+NAMESPACE = "hades"
 
 DEAD_END_STATES = frozenset(
     {
@@ -206,7 +206,7 @@ class PortForward:
                 "-n",
                 NAMESPACE,
                 "port-forward",
-                "service/crucible-api",
+                "service/hades-api",
                 f"{self.port}:8080",
             ],
             stdout=subprocess.DEVNULL,
@@ -244,7 +244,7 @@ def mint_token(principal: str, role: str) -> str:
             "-n",
             NAMESPACE,
             "exec",
-            "deployment/crucible-api",
+            "deployment/hades-api",
             "--",
             "crucible",
             "admin",
@@ -305,7 +305,7 @@ def seed_origin(image: str) -> None:
         "metadata": {"name": "crucible-origin-seed", "namespace": WORKERS_NAMESPACE},
         "spec": {
             "restartPolicy": "Never",
-            "serviceAccountName": "crucible-worker",
+            "serviceAccountName": "hades-worker",
             "automountServiceAccountToken": False,
             "securityContext": {
                 "runAsNonRoot": True,
@@ -342,7 +342,7 @@ def seed_origin(image: str) -> None:
             "volumes": [
                 {
                     "name": "cache",
-                    "persistentVolumeClaim": {"claimName": "crucible-reference-cache"},
+                    "persistentVolumeClaim": {"claimName": "hades-reference-cache"},
                 },
                 {"name": "tmp", "emptyDir": {}},
                 {"name": "home", "emptyDir": {}},
@@ -599,7 +599,7 @@ def assert_status_page(base_url: str, token: str) -> dict[str, Any]:
     return provider
 
 
-FIRST_RUN_SECRET = "crucible-first-run-admin"
+FIRST_RUN_SECRET = "hades-first-run-admin"
 TOKEN_PATTERN = re.compile(r"\bcru_[A-Z0-9]{26}\.[A-Za-z0-9_-]+\b")
 
 
@@ -607,7 +607,7 @@ def first_run_token() -> str:
     """The first-run administrator token, from the Secret the migrate Job wrote (ADR
     0016), after proving the Job's log does not carry it (crucible#122). The token is
     never printed by this process."""
-    logs = kubectl(["-n", NAMESPACE, "logs", "job/crucible-migrate"], redact=True, check=False)
+    logs = kubectl(["-n", NAMESPACE, "logs", "job/hades-migrate"], redact=True, check=False)
     if TOKEN_PATTERN.search(logs):
         raise SmokeError("the migrate Job's log carries a token (crucible#122)")
     if FIRST_RUN_SECRET not in logs:

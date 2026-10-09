@@ -7,15 +7,15 @@
 apiVersion: external-secrets.io/v1beta1
 kind: ExternalSecret
 metadata:
-  name: crucible-database
-  namespace: crucible
+  name: hades-database
+  namespace: hades
 spec:
   refreshInterval: 1h
   secretStoreRef:
     name: REPLACE_ME_SECRET_STORE_NAME
     kind: ClusterSecretStore
   target:
-    name: crucible-database
+    name: hades-database
     creationPolicy: Owner
   data:
     - secretKey: password

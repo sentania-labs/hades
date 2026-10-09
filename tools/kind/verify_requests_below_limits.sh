@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The kind proof for issue 93 (contract FDY-0107, requirement 8): the real
-# crucible-workers ResourceQuota (deploy/kubernetes/base/workers/resourcequota.yaml,
+# hades-workers ResourceQuota (deploy/kubernetes/base/workers/resourcequota.yaml,
 # requests.cpu 3, max_concurrency 3) refuses two concurrent pods of the old shape
 # (request equal to the 2-CPU limit, 4 CPU total) and admits three concurrent pods of
 # the new shape (request half the limit, 3 CPU total: the exact concurrency the base
@@ -43,7 +43,7 @@ busybox=$(crucible_kind_pull "$CRUCIBLE_BUSYBOX_IMAGE" 2>/dev/null) || busybox="
 kind load docker-image "$busybox" --name "$cluster"
 
 kubectl create namespace "$namespace"
-kubectl -n "$namespace" create serviceaccount crucible-worker
+kubectl -n "$namespace" create serviceaccount hades-worker
 
 echo "verify: applying the real base ResourceQuota, renamespaced to $namespace"
 "${UV:-uv}" run python - "$root/deploy/kubernetes/base/workers" "$namespace" <<'PY' > "$scratch/quota.yaml"

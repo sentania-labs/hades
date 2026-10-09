@@ -22,8 +22,8 @@ generatorOptions:
 secretGenerator:
   # Throwaway values for a cluster that is deleted at the end of the run. There is no
   # plain-Secret path for the lab: see ../../secret-shapes/README.md.
-  - name: crucible-database
-    namespace: crucible
+  - name: hades-database
+    namespace: hades
     literals:
       - password=kind-disposable-cluster
-      - url=postgresql+psycopg://crucible:kind-disposable-cluster@crucible-postgres:5432/crucible
+      - url=postgresql+psycopg://crucible:kind-disposable-cluster@hades-postgres:5432/crucible

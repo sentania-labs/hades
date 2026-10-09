@@ -52,7 +52,7 @@ async def test_worker_mounts_and_renewer_projection(mode: MountMode) -> None:
     )
     image = "crucible-worker:codex-fake-succeed-2"
     registry.register(image, harness="codex", version="0.156.0")
-    api.put_harness_secret("crucible-harness-codex", {"auth.json": json.dumps(LOGIN).encode()})
+    api.put_harness_secret("hades-harness-codex", {"auth.json": json.dumps(LOGIN).encode()})
     launch = spec(harness="codex", image=image)
     workspace = await provider.prepare(launch)
     await provider.launch(workspace, launch)
@@ -287,7 +287,7 @@ async def test_kubernetes_probe_mounts_requested_mode_instead_of_configured_mode
     api, registry, provider = build()  # Configured rw-narrow.
     image = "crucible-worker:codex-fake-succeed-2"
     registry.register(image, harness="codex", version="0.156.0")
-    api.put_harness_secret("crucible-harness-codex", {"auth.json": json.dumps(LOGIN).encode()})
+    api.put_harness_secret("hades-harness-codex", {"auth.json": json.dumps(LOGIN).encode()})
     result = await provider.probe_credential(
         ProbeRequest(
             harness="codex",

@@ -41,7 +41,7 @@ def _ro_copy(*, templates: dict[str, str]) -> _CredentialCopy:
     )
     return _CredentialCopy(
         spec=cred_spec,
-        source_secret="crucible-harness-claude-code",
+        source_secret="hades-harness-claude-code",
         mode=MountMode.RO,
     )
 
@@ -94,7 +94,7 @@ async def test_ro_with_templates_still_projects_settings_json_at_root() -> None:
     image = "crucible-worker:claude-fake-succeed-2"
     registry.register(image, harness="claude_code", version="2.1.277")
     api.put_harness_secret(
-        "crucible-harness-claude-code",
+        "hades-harness-claude-code",
         {"oauth-token": b"not-a-real-value"},
     )
     launch = spec(harness="claude_code", image=image)

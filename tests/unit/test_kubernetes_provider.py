@@ -1095,7 +1095,7 @@ async def test_retention_removes_what_is_labelled_for_an_attempt_crucible_forgot
 async def codex_attempt(**build_kwargs: Any) -> Any:
     api, registry, provider = build(harness="codex", **build_kwargs)
     registry.register(CODEX_IMAGE, harness="codex", version="0.153.4")
-    api.put_harness_secret("crucible-harness-codex", {"auth.json": _auth("2026-09-20T00:00:00Z")})
+    api.put_harness_secret("hades-harness-codex", {"auth.json": _auth("2026-09-20T00:00:00Z")})
     launch = spec(harness="codex", image=CODEX_IMAGE)
     workspace = await provider.prepare(launch)
     return api, provider, launch, workspace
@@ -1142,7 +1142,7 @@ async def test_a_failed_read_of_the_copy_at_launch_refuses_a_required_credential
         HarnessRefusedError,
         match=(
             r"the credential Secret 'cred-01attempt0000000000000000a' for harness "
-            r"'codex' is not readable in crucible-workers \(500\)"
+            r"'codex' is not readable in hades-workers \(500\)"
         ),
     ):
         await provider.launch(workspace, launch)
@@ -1151,7 +1151,7 @@ async def test_a_failed_read_of_the_copy_at_launch_refuses_a_required_credential
 async def test_a_missing_required_auth_file_refuses_the_launch() -> None:
     api, registry, provider = build(harness="codex")
     registry.register(CODEX_IMAGE, harness="codex", version="0.153.4")
-    api.put_harness_secret("crucible-harness-codex", {})
+    api.put_harness_secret("hades-harness-codex", {})
     launch = spec(harness="codex", image=CODEX_IMAGE)
     with pytest.raises(LaunchRefusedError, match="missing its auth file"):
         await provider.prepare(launch)
@@ -1195,12 +1195,12 @@ async def test_hermes_uses_no_secret_when_its_optional_credential_is_unconfigure
 async def test_kubernetes_reports_a_configured_hermes_secret_as_available() -> None:
     api, _registry, provider = build(
         harness="hermes",
-        config=KubernetesConfig(credential_secrets={"hermes": "crucible-harness-hermes"}),
+        config=KubernetesConfig(credential_secrets={"hermes": "hades-harness-hermes"}),
     )
     assert not await provider.credential_available("hermes")
-    api.put_harness_secret("crucible-harness-hermes", {})
+    api.put_harness_secret("hades-harness-hermes", {})
     assert not await provider.credential_available("hermes")
-    api.put_harness_secret("crucible-harness-hermes", {"api-key": b"secret-token"})
+    api.put_harness_secret("hades-harness-hermes", {"api-key": b"secret-token"})
     assert await provider.credential_available("hermes")
 
 
@@ -1218,10 +1218,10 @@ async def test_an_empty_optional_credential_secret_counts_as_absent() -> None:
             poll_interval_seconds=0,
             launch_timeout_seconds=5,
             local_endpoint_cidrs=("10.10.0.0/24",),
-            credential_secrets={"hermes": "crucible-harness-hermes"},
+            credential_secrets={"hermes": "hades-harness-hermes"},
         ),
     )
-    api.put_harness_secret("crucible-harness-hermes", {})
+    api.put_harness_secret("hades-harness-hermes", {})
     image = "crucible-worker:hermes-fake-succeed-1"
     registry.register(image, harness="hermes", version="0.19.0")
     launch = spec(
@@ -1274,7 +1274,7 @@ async def test_kubernetes_optional_credential_404_launches_with_placeholder() ->
             poll_interval_seconds=0,
             launch_timeout_seconds=5,
             local_endpoint_cidrs=("10.10.0.0/24",),
-            credential_secrets={"hermes": "crucible-harness-hermes"},
+            credential_secrets={"hermes": "hades-harness-hermes"},
         ),
     )
     # The Secret is mapped in config but does not exist in Kubernetes (404)
@@ -1322,21 +1322,21 @@ async def test_kubernetes_optional_credential_500_refuses_launch_naming_status()
     """A 500 on an optional credential refuses the launch naming the status."""
     api, registry, provider = build(
         harness="hermes",
-        config=KubernetesConfig(credential_secrets={"hermes": "crucible-harness-hermes"}),
+        config=KubernetesConfig(credential_secrets={"hermes": "hades-harness-hermes"}),
     )
 
     orig_get = api.get
 
     def fail_get(kind: str, name: str) -> dict[str, Any]:
-        if kind == "secrets" and name == "crucible-harness-hermes":
+        if kind == "secrets" and name == "hades-harness-hermes":
             raise KubernetesApiError(500, "Internal Server Error")
         return orig_get(kind, name)
 
     api.get = fail_get  # type: ignore[method-assign]
 
     refuses_naming_500 = (
-        r"refusing to launch: the credential Secret 'crucible-harness-hermes' "
-        r"for harness 'hermes' is not readable in crucible-workers \(500\)"
+        r"refusing to launch: the credential Secret 'hades-harness-hermes' "
+        r"for harness 'hermes' is not readable in hades-workers \(500\)"
     )
 
     with pytest.raises(HarnessRefusedError, match=refuses_naming_500):
@@ -1353,12 +1353,12 @@ async def test_a_required_credential_with_an_empty_secret_fails_naming_the_secre
     """89: a required credential whose Secret is empty fails naming the empty Secret."""
     api, registry, provider = build(harness="codex")
     registry.register(CODEX_IMAGE, harness="codex", version="0.153.4")
-    api.put_harness_secret("crucible-harness-codex", {})
+    api.put_harness_secret("hades-harness-codex", {})
     launch = spec(harness="codex", image=CODEX_IMAGE)
     with pytest.raises(
         LaunchRefusedError,
         match=(
-            r"the credential Secret 'crucible-harness-codex' is empty: "
+            r"the credential Secret 'hades-harness-codex' is empty: "
             r"missing its auth file 'auth\.json'"
         ),
     ):
@@ -1369,12 +1369,12 @@ async def test_a_required_credential_with_no_declared_auth_files_fails_naming_th
     """89: a required credential whose Secret holds no declared auth files fails."""
     api, registry, provider = build(harness="codex")
     registry.register(CODEX_IMAGE, harness="codex", version="0.153.4")
-    api.put_harness_secret("crucible-harness-codex", {"unrelated.json": b"foo"})
+    api.put_harness_secret("hades-harness-codex", {"unrelated.json": b"foo"})
     launch = spec(harness="codex", image=CODEX_IMAGE)
     with pytest.raises(
         LaunchRefusedError,
         match=(
-            r"the credential Secret 'crucible-harness-codex' is empty: "
+            r"the credential Secret 'hades-harness-codex' is empty: "
             r"missing its auth file 'auth\.json'"
         ),
     ):
@@ -1394,9 +1394,7 @@ async def test_a_rotated_auth_file_is_written_back_and_the_copy_removed() -> Non
     assert [(f.name, f.synced, f.reason) for f in sync.files] == [
         ("auth.json", True, "changed; newer issued-at, written back")
     ]
-    assert api.harness_secret("crucible-harness-codex")["auth.json"] == _auth(
-        "2026-09-21T00:00:00Z"
-    )
+    assert api.harness_secret("hades-harness-codex")["auth.json"] == _auth("2026-09-21T00:00:00Z")
     assert sync.removed and not api.secret_exists("cred-01attempt0000000000000000a")
     assert "credential/auth.json" not in claim
 
@@ -1416,9 +1414,7 @@ async def test_a_failed_attempts_newer_auth_file_is_still_written_back() -> None
     outputs = await provider.collect(handle, workspace, launch)
     assert outputs.credential_sync is not None
     assert [(f.name, f.synced) for f in outputs.credential_sync.files] == [("auth.json", True)]
-    assert api.harness_secret("crucible-harness-codex")["auth.json"] == _auth(
-        "2026-09-21T00:00:00Z"
-    )
+    assert api.harness_secret("hades-harness-codex")["auth.json"] == _auth("2026-09-21T00:00:00Z")
 
 
 async def test_an_older_auth_file_is_recorded_and_not_written_back() -> None:
@@ -1432,9 +1428,7 @@ async def test_an_older_auth_file_is_recorded_and_not_written_back() -> None:
     assert outputs.credential_sync is not None
     assert outputs.credential_sync.files[0].synced is False
     assert "not newer" in outputs.credential_sync.files[0].reason
-    assert api.harness_secret("crucible-harness-codex")["auth.json"] == _auth(
-        "2026-09-20T00:00:00Z"
-    )
+    assert api.harness_secret("hades-harness-codex")["auth.json"] == _auth("2026-09-20T00:00:00Z")
 
 
 async def test_a_file_that_is_not_the_expected_json_shape_is_not_written_back() -> None:
@@ -1445,9 +1439,7 @@ async def test_a_file_that_is_not_the_expected_json_shape_is_not_written_back() 
     outputs = await provider.collect(handle, workspace, launch)
     assert outputs.credential_sync is not None
     assert "not the expected JSON shape" in outputs.credential_sync.files[0].reason
-    assert api.harness_secret("crucible-harness-codex")["auth.json"] == _auth(
-        "2026-09-20T00:00:00Z"
-    )
+    assert api.harness_secret("hades-harness-codex")["auth.json"] == _auth("2026-09-20T00:00:00Z")
 
 
 @pytest.mark.parametrize("policy", list(Cleanup))
@@ -1635,7 +1627,7 @@ async def test_a_prepare_that_fails_after_seeding_leaves_no_secret(break_it: str
     `cleanup` or `discard` for an attempt whose `prepare` raised."""
     api, registry, provider = build(harness="codex")
     registry.register(CODEX_IMAGE, harness="codex", version="0.153.4")
-    api.put_harness_secret("crucible-harness-codex", {"auth.json": _auth("2026-09-20T00:00:00Z")})
+    api.put_harness_secret("hades-harness-codex", {"auth.json": _auth("2026-09-20T00:00:00Z")})
     launch = spec(harness="codex", image=CODEX_IMAGE)
     if break_it == "preparer-fails":
         api.script(launch.attempt_id, "prepare-fails")
@@ -1703,7 +1695,7 @@ async def test_an_absent_optional_auth_file_is_not_projected() -> None:
     api, registry, provider = build(harness="claude_code")
     image = "crucible-worker:claude-fake-succeed-2"
     registry.register(image, harness="claude_code", version="2.1.277")
-    api.put_harness_secret("crucible-harness-claude-code", {"oauth-token": b"not-a-real-value"})
+    api.put_harness_secret("hades-harness-claude-code", {"oauth-token": b"not-a-real-value"})
     launch = spec(harness="claude_code", image=image)
     workspace = await provider.prepare(launch)
     await provider.launch(workspace, launch)
@@ -1805,9 +1797,7 @@ async def test_an_exec_stream_that_ended_early_is_not_an_absent_credential() -> 
     with pytest.raises(CollectionUnavailableError, match="could not be read back"):
         await provider.collect(handle, workspace, launch)
     api.pod_exec = real
-    assert api.harness_secret("crucible-harness-codex")["auth.json"] == _auth(
-        "2026-09-20T00:00:00Z"
-    )
+    assert api.harness_secret("hades-harness-codex")["auth.json"] == _auth("2026-09-20T00:00:00Z")
     assert api.claims["ws-01attempt0000000000000000a"]["credential/auth.json"] == _auth(
         "2026-09-21T00:00:00Z"
     )

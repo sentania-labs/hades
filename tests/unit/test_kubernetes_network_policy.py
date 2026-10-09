@@ -524,7 +524,7 @@ async def test_a_selector_rule_never_opens_a_denied_address(address: str) -> Non
             assert ports and all(p["port"] in (53, 4000) for p in ports)
 
 
-@pytest.mark.parametrize("namespace", ["crucible-workers", "crucible"])
+@pytest.mark.parametrize("namespace", ["hades-workers", "hades"])
 async def test_a_selector_into_the_workers_or_crucibles_namespace_is_refused(
     namespace: str,
 ) -> None:
@@ -552,7 +552,7 @@ def test_an_empty_pod_selector_is_refused_at_render_time() -> None:
     with pytest.raises(SpecError, match="no pod labels"):
         k8sspec.egress_policy(
             name="np",
-            namespace="crucible-workers",
+            namespace="hades-workers",
             object_labels={},
             attempt_id="A",
             role=k8sspec.ROLE_WORKER,
@@ -565,7 +565,7 @@ def test_an_empty_pod_selector_is_refused_at_render_time() -> None:
 def test_an_empty_dns_namespace_leaves_the_address_rule_alone() -> None:
     body = k8sspec.egress_policy(
         name="np",
-        namespace="crucible-workers",
+        namespace="hades-workers",
         object_labels={},
         attempt_id="A",
         role=k8sspec.ROLE_WORKER,

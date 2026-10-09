@@ -2,7 +2,7 @@
 # the only place the GitHub App key and webhook secret are ever mounted (12).
 #
 # `restricted` here too. These are Crucible's own trusted pods and the untrusted half of
-# the system is `crucible-workers`, so `baseline` would have been defensible; but every
+# the system is `hades-workers`, so `baseline` would have been defensible; but every
 # pod this base creates already satisfies `restricted`, including PostgreSQL, which runs
 # as uid 999 with a read-only root and an emptyDir for its socket. Enforcing what is
 # already true costs nothing and means a later edit that adds a root container, a
@@ -45,21 +45,28 @@ metadata:
 # Hades's own image builder gets a namespace of its own (hades #475). Rootless BuildKit
 # documents a Pod whose seccomp and AppArmor profiles are both `Unconfined` (it unshares
 # user and mount namespaces and mounts overlays as uid 1000); the Baseline standard
-# permits neither profile, so the Pod cannot live under `crucible`'s `restricted`
+# permits neither profile, so the Pod cannot live under `hades`'s `restricted`
 # admission or any `baseline` relaxation of it. Pod Security admission is per namespace,
 # so the one Pod that needs the privileged level is the only thing in this namespace.
 #
 # What isolates it: the NetworkPolicy beside this file admits ingress from the
-# `crucible-workers` namespace on port 1234 and from nowhere else, the Deployment runs
+# `hades-workers` namespace on port 1234 and from nowhere else, the Deployment runs
 # as uid 1000 and is never `privileged`, and the warn and audit modes stay at
 # `baseline`, so the two unconfined profiles are the only expected finding on each
-# rollout and anything beyond them is logged. The name is the provider's constant
-# (BUILDKIT_NAMESPACE), so it does not follow nameOverride; `buildkit.enabled` renders it.
+# rollout and anything beyond them is logged. The name is `buildkit.namespace`, the
+# provider's KUBERNETES__BUILDKIT_NAMESPACE, so it does not follow nameOverride;
+# `buildkit.enabled` renders it. It must differ from both namespaces above: one name for
+# two of them would render that Namespace twice, the second time at `privileged`, and
+# take `restricted` away from the service or the workers.
+{{- $buildkitNamespace := .Values.buildkit.namespace }}
+{{- if or (eq $buildkitNamespace (include "hades.namespace" .)) (eq $buildkitNamespace (include "hades.workersNamespace" .)) }}
+{{- fail (printf "buildkit.namespace %q is also the service's or the workers' namespace; BuildKit's privileged namespace must be its own" $buildkitNamespace) }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: crucible-buildkit
+  name: {{ .Values.buildkit.namespace }}
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: buildkit

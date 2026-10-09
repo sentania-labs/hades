@@ -7,7 +7,7 @@ no broad egress). The model is a stub Pod in its own namespace, reached the way 
 lab's gateway is (an in-cluster endpoint selector); it has Hermes run one scripted
 command that first runs `make images-check` and `make registry-check` (hades #475: the
 worker builds both images through Hades's own rootless BuildKit, which
-deploy/kind/workers.yaml starts in `crucible-buildkit`, and resolves the published
+deploy/kind/workers.yaml starts in `hades-buildkit`, and resolves the published
 worker image on GHCR through its per-attempt policy), then appends a line to
 docs/roadmap.md, commits it and writes the report. The verifier then runs `make lint`,
 `make test-unit`, `make scan` and the two image checks again from the collected tree,
@@ -148,7 +148,7 @@ def database() -> Iterator[str]:
         yield url
 
 
-BUILDKIT_NAMESPACE = "crucible-buildkit"
+BUILDKIT_NAMESPACE = "hades-buildkit"
 
 
 @pytest.fixture(scope="module")
@@ -161,7 +161,7 @@ def buildkit() -> None:
         BUILDKIT_NAMESPACE,
         "rollout",
         "status",
-        "deployment/crucible-buildkit",
+        "deployment/hades-buildkit",
         "--timeout=600s",
     )
     pods = json.loads(_kubectl("-n", BUILDKIT_NAMESPACE, "get", "pods", "-o", "json"))["items"]
@@ -279,7 +279,7 @@ def _provider(client: CreateRecordingClient, image: str) -> KubernetesProvider:
         KubernetesConfig(
             storage_class="standard",
             workspace_size="4Gi",
-            cache_claim="crucible-reference-cache",
+            cache_claim="hades-reference-cache",
             poll_interval_seconds=0.5,
             launch_timeout_seconds=600,
             prepare_timeout_seconds=300,

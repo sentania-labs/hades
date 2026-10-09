@@ -953,7 +953,7 @@ def test_the_kubernetes_pod_is_the_described_launch() -> None:
         credential,
         image="crucible-worker@sha256:abc",
         egress_hosts=launch.egress_hosts,
-        service_account="crucible-worker",
+        service_account="hades-worker",
         image_pull_secret=None,
     )
     [container] = pod["containers"]
@@ -1005,8 +1005,8 @@ class _StubKubernetesProvider:
         self.created: list[tuple[str, dict[str, Any]]] = []
         self.deleted: list[tuple[str, str]] = []
         self.config = SimpleNamespace(
-            namespace="crucible-workers",
-            service_account="crucible-worker",
+            namespace="hades-workers",
+            service_account="hades-worker",
             image_pull_secret=None,
             cluster_dns_ip="10.96.0.10",
             credential_secret_name=lambda harness: f"harness-{harness}",
@@ -1036,7 +1036,7 @@ class _StubKubernetesProvider:
     ) -> dict[str, Any]:
         return k8sspec.egress_policy(
             name=name,
-            namespace="crucible-workers",
+            namespace="hades-workers",
             object_labels=labels,
             attempt_id=attempt_id,
             role=role,
@@ -1086,7 +1086,7 @@ def test_the_kubernetes_launcher_creates_the_runner_job_through_the_provider() -
     assert egress[-1] == {
         "to": [
             {
-                "namespaceSelector": {"matchLabels": {k8sspec.NAMESPACE_NAME_LABEL: "crucible"}},
+                "namespaceSelector": {"matchLabels": {k8sspec.NAMESPACE_NAME_LABEL: "hades"}},
                 "podSelector": {
                     "matchLabels": {
                         "app.kubernetes.io/component": "api",
