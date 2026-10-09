@@ -15,7 +15,6 @@ from crucible.application.acceptance import (
     deliverable_kinds,
     record_gate_acceptance,
 )
-from crucible.application.handoffs import HandoffAction, HandoffDirection, record_handoff
 from crucible.application.routing import load_attempt_routing
 from crucible.application.transitions import move_task, record_event
 from crucible.application.wakes import create_wake
@@ -167,14 +166,6 @@ def reviewer_note(items: list[dict[str, str]]) -> str:
     return " For the reviewer: " + ", ".join(sorted({i["gate"] for i in items})) + "."
 
 
-def _advisory_review_recorded(uow: UnitOfWork, task: Task) -> bool:
-    """Whether an orchestrator has reviewed the current head's advisory findings."""
-    return any(
-        report.head_sha == (task.head_sha or "")
-        for report in uow.review_reports.list_for_task(task.id)
-    )
-
-
 def _unchanged(
     uow: UnitOfWork,
     *,
@@ -219,14 +210,9 @@ def evaluate_and_advance(
     advisory = advisory_gates(gi.policy)
     outcomes = evaluate_pre_pr(gates, gi)
     summary = summarize(outcomes, advisory)
-    reviewed_advisories = (
-        task.state is TaskState.AWAITING_INTERNAL_REVIEW
-        and bool(summary["for_reviewer"])
-        and _advisory_review_recorded(uow, task)
-    )
     if (
         _unchanged(uow, task=task, attempt=attempt, outcomes=outcomes, advisory=advisory)
-        and not reviewed_advisories
+        and task.state is not TaskState.AWAITING_INTERNAL_REVIEW
     ):
         # A task waiting for its internal review is re-evaluated on every tick; writing
         # the same answer again would make reconciliation not idempotent (10).
@@ -284,55 +270,6 @@ def evaluate_and_advance(
             extra_links={"gates": f"/v1/attempts/{attempt.id}/gates"},
             for_reviewer=summary["for_reviewer"],
         )
-        return outcomes
-    if summary["for_reviewer"] and not reviewed_advisories:
-        if task.state is TaskState.REPORTED:
-            move_task(
-                uow,
-                clock,
-                task,
-                TaskState.AWAITING_INTERNAL_REVIEW,
-                EventKind.TASK_AWAITING_INTERNAL_REVIEW,
-                execution_id=execution.id,
-                attempt_id=attempt.id,
-                payload={
-                    "head_sha": task.head_sha,
-                    "executor": "orchestrator",
-                    "reason": "advisory_gate_failure",
-                },
-            )
-            advisory_words = (
-                f"the blocking gates pass on {task.head_sha}; "
-                "an orchestrator review is required for advisory gate failures."
-                + reviewer_note(summary["for_reviewer"])
-            )
-            create_wake(
-                uow,
-                clock,
-                principal_id=task.principal_id,
-                reason=WakeReason.INTERNAL_REVIEW_NEEDED,
-                summary=advisory_words,
-                task=task,
-                attempt_id=attempt.id,
-                extra_links={
-                    "review": f"/v1/tasks/{task.id}/review",
-                    "gates": f"/v1/attempts/{attempt.id}/gates",
-                },
-                for_reviewer=summary["for_reviewer"],
-            )
-            # hades #208 item 2: Hades hands the acceptance decision to Foundry.
-            record_handoff(
-                uow,
-                clock,
-                task=task,
-                action=HandoffAction.ACCEPT,
-                direction=HandoffDirection.HADES_TO_FOUNDRY,
-                principal=PRINCIPAL_CRUCIBLE,
-                words=advisory_words,
-                execution_id=execution.id,
-                attempt_id=attempt.id,
-                detail={"head_sha": task.head_sha, "for_reviewer": summary["for_reviewer"]},
-            )
         return outcomes
     move_task(
         uow,

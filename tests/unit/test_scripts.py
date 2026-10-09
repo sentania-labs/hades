@@ -419,7 +419,7 @@ def _collect(
     )
 
 
-def test_edits_left_uncommitted_are_committed_as_the_policy_author_with_the_trailer(
+def test_edits_left_uncommitted_are_committed_as_the_fixed_author_with_the_trailer(
     tmp_path: Path,
 ) -> None:
     """FDY-0140: a model that forgot to commit still has its edits collected."""
@@ -453,7 +453,7 @@ def test_edits_left_uncommitted_are_committed_as_the_policy_author_with_the_trai
         text=True,
         check=True,
     ).stdout.splitlines()
-    assert shown[0] == shown[1] == "Policy Author <policy@example.invalid>"
+    assert shown[0] == shown[1] == ("crucible-worker <crucible-worker@users.noreply.github.com>")
     assert shown[2] == "crucible: commit what attempt 01ATTEMPT left uncommitted"
     # The value the commit hook gives the worker's own commits: the task's external id.
     assert shown[3] == "EX-0001"

@@ -135,7 +135,7 @@ async def test_a_report_missing_judgement_fails_report_present_in_its_own_words(
         client, "crucible-worker:fake-succeed", deliverables=ARTIFACTS_DELIVERABLE
     )
     # hades #498: an incomplete report is for the reviewer, never a failed gate.
-    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
+    assert await run_to_settled(supervisor, client, task_id) == "accepted"
     attempt_id, rows = gate_rows(client, task_id)
     assert rows[GateName.REPORT_PRESENT]["result"] == "fail"
     assert rows[GateName.REPORT_PRESENT]["classification"] == "advisory"

@@ -661,7 +661,7 @@ def test_the_merge_main_script_pushes_a_clean_merge_with_a_lease(tmp_path: Path)
     assert _git(origin, "rev-parse", f"refs/heads/{WORK_BRANCH}") == outcome.head_sha
     parents = _git(origin, "rev-list", "--parents", "-n", "1", outcome.head_sha).split()
     assert parents[1:] == [tip, _git(origin, "rev-parse", "refs/heads/main")]
-    assert _git(origin, "log", "-1", "--format=%an", outcome.head_sha) == "Crucible"
+    assert _git(origin, "log", "-1", "--format=%an", outcome.head_sha) == "crucible-worker"
     assert not (tmp_path / "run" / "tok" / "token").exists()
 
 

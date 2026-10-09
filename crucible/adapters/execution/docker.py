@@ -202,6 +202,10 @@ WORKER_UID = 1000
 # the supervisor records on the attempt. A host it cannot reach is reported, never a
 # reason not to start; a `host:port` entry is a local endpoint and is left alone.
 LAUNCH_WRAPPER = r"""set -u
+export GIT_AUTHOR_NAME=crucible-worker
+export GIT_AUTHOR_EMAIL=crucible-worker@users.noreply.github.com
+export GIT_COMMITTER_NAME=crucible-worker
+export GIT_COMMITTER_EMAIL=crucible-worker@users.noreply.github.com
 egress_probe() {
   list=${CRUCIBLE_EGRESS_ALLOWLIST:-}
   [ -n "$list" ] || return 0

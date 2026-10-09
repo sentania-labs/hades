@@ -3203,16 +3203,15 @@ async def test_the_tasks_page_marks_each_gate_and_lists_what_is_for_the_reviewer
         client, "crucible-worker:fake-out-of-scope", deliverables=ARTIFACTS_DELIVERABLE
     )
     supervisor = make_supervisor(ctx, provider)
-    # hades #498: both failures are advisory, so the task waits for its reviewer.
-    assert await run_to_settled(supervisor, client, task_id) == "awaiting_internal_review"
-    with TestClient(create_app(ctx)) as browser:
-        ui_sign_in(browser, tokens["admin"])
-        page = html.unescape(browser.get("/ui/tasks").text)
-    assert "Gates by task" in page and "For the reviewer" in page
-    assert "scope_contained (advisory)" in page and "no_secrets (blocking)" in page
-    assert "scope_contained: outside allowed_paths" in page
-    assert "infrastructure/outside-the-contract.txt" in page
-    assert "report_present: the report did not parse" in page
+    # hades #602: both failures are advisory, so the task proceeds to acceptance.
+    assert await run_to_settled(supervisor, client, task_id) == "accepted"
+    summary = client.get(f"/v1/tasks/{task_id}").json()["gate_summary"]
+    assert summary["classification"]["scope_contained"] == "advisory"
+    assert summary["classification"]["no_secrets"] == "blocking"
+    notes = {item["gate"]: item["detail"] for item in summary["for_reviewer"]}
+    assert "outside allowed_paths" in notes["scope_contained"]
+    assert "infrastructure/outside-the-contract.txt" in notes["scope_contained"]
+    assert "the report did not parse" in notes["report_present"]
 
 
 def test_the_cli_remote_mode_sends_the_advisory_gates(monkeypatch: pytest.MonkeyPatch) -> None:

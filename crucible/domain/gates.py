@@ -23,6 +23,7 @@ from typing import Any
 from crucible.domain import injected
 from crucible.domain.acceptance_checks import criterion_checks
 from crucible.domain.exit_class import CLEAN_EXIT_CLASSES, ExitClass
+from crucible.domain.git_identity import COMMIT_AUTHOR_EMAIL
 from crucible.domain.injected import (
     injected_prefix as _injected_prefix,
 )
@@ -1106,7 +1107,7 @@ def _named_commit(sha: object) -> str:
 def commit_policy(gi: GateInput) -> GateOutcome:
     """Who authored the collected commits, for the reviewer (hades FDY-0135, FDY-0143).
 
-    The collector checks every new commit's author against the policy's `author_email`.
+    The collector checks every new commit's author against the fixed task identity.
     A commit by someone else fails this gate, which is always advisory, so the failure
     is listed for the reviewer and never stops the task. The attempt trailer is not
     checked: the operator decided on 2026-09-29 that the task record is the paper
@@ -1129,8 +1130,7 @@ def commit_policy(gi: GateInput) -> GateOutcome:
             "Crucible could not read the collected commits' authors; check them in the diff",
             ids,
         )
-    git = gi.policy.get("git", {})
-    author = str(git.get("author_email") or "crucible-worker@users.noreply.github.com")
+    author = COMMIT_AUTHOR_EMAIL
     authors = [a for a in check.get("author_problems") or [] if isinstance(a, dict)]
     if authors:
         named = ", ".join(

@@ -111,3 +111,13 @@ with commits had been scored as losses.
 3. A clean exit with commits and no report is `completed`, never
    `completed_without_report`. A stop on the time or turn budget with commits is
    `ended_by_budget`: a normal end, collected and gated like a completed run.
+
+## Amendment: advisory findings annotate publication (hades #602, 2026-10-09)
+
+The worker self-review is the internal review. A failure of `commit_policy`,
+`criteria_mapped`, `report_present`, `run_evidence_present` or advisory
+`scope_contained` is stored with its detail as a reviewer note on the task and rendered
+in the pull request body. It does not move the task to `awaiting_internal_review` and
+does not require an orchestrator review or acceptance call. Hades records acceptance
+and proceeds to publication when all blocking gates pass. A blocking gate failure keeps
+the existing stop and correction behavior.

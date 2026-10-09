@@ -2,7 +2,8 @@
 
 The pre-PR gate set runs on the collected branch before publication. Every gate is
 blocking or advisory (ADR 0024): a blocking failure stops the task; an advisory one
-is carried to the reviewer.
+is recorded as a reviewer note on the task and in the pull request body, then the task
+continues to publication without an orchestrator review.
 
 ## Pre-PR gate list
 
@@ -113,8 +114,11 @@ worker. Paths in the worker's own commits remain in the list even if a later com
 base merge hides them from the final diff.
 
 The collector's author check (`commit_policy_check`, FDY-0135) runs over a range,
-`POLICY_FROM..HEAD`, so a correction only re-checks the commits added since the branch
-was last published rather than every commit back to `base_ref`. `POLICY_FROM` is never
+`POLICY_FROM..HEAD`, excluding every commit reachable from the trusted prepared
+`origin/main` commit. A merge of main can therefore never make a main commit foreign.
+A correction only re-checks commits added since the branch was last published rather
+than every commit back to `base_ref`. A failure names each offending commit and author.
+`POLICY_FROM` is never
 resolved from `refs/remotes/origin/$WORK_BRANCH` in the checkout the worker runs in: a
 worker that moved that ref to `HEAD` could otherwise empty the range and hide every
 commit's author from the check.

@@ -271,17 +271,16 @@ def test_self_review_publishes_through_supervisor_without_orchestrator_acceptanc
 
 def test_missing_self_review_is_for_the_reviewer_and_names_section(tmp_path: Path) -> None:
     """hades #498: the report gate is advisory. A report without its self-review is
-    listed for the reviewer, named by section, and the task waits for that review
-    rather than failing its gates."""
+    listed for the reviewer, named by section, and publication continues."""
     store, supervisor, _github, publisher = _collected(tmp_path, missing_review=True)
     supervisor._evaluate_pending_gates()
-    assert _task(store).state is TaskState.AWAITING_INTERNAL_REVIEW
+    assert _task(store).state is TaskState.PUBLISHING
     outcome = next(r for r in store.gate_results.rows if r.gate == "report_present")
     assert outcome.result == GateResult.FAIL and not outcome.blocking
     assert "self_review" in outcome.detail
-    assert store.acceptance.rows == []
-    assert asyncio.run(supervisor.delivery.publish()) == 0
-    assert publisher.pushes == []
+    assert len(store.acceptance.rows) == 1
+    assert asyncio.run(supervisor.delivery.publish()) == 1
+    assert publisher.pushes == [NEW_HEAD]
 
 
 def test_self_review_cannot_bypass_a_failed_blocking_gate(tmp_path: Path) -> None:
@@ -293,36 +292,12 @@ def test_self_review_cannot_bypass_a_failed_blocking_gate(tmp_path: Path) -> Non
     assert publisher.pushes == []
 
 
-def test_advisory_failure_requires_orchestrator_review_before_publication(
+def test_advisory_failure_continues_to_publication_without_orchestrator_review(
     tmp_path: Path,
 ) -> None:
     store, supervisor, github, publisher = _collected(tmp_path, advisory_failed=True)
     task = _task(store)
     supervisor._evaluate_pending_gates()
-    assert task.state is TaskState.AWAITING_INTERNAL_REVIEW
-    assert store.acceptance.rows == []
-    assert asyncio.run(supervisor.delivery.publish()) == 0
-    assert publisher.pushes == []
-
-    request_review(
-        store.uow(),
-        FakeClock(NOW),
-        principal=_principal(),
-        task_id=TASK_ID,
-        request=ReviewRequest(
-            report={
-                "schema_version": "1.0",
-                "task_external_id": task.external_id,
-                "reviewed_head_sha": task.head_sha,
-                "reviewer": {"kind": "orchestrator", "principal": _principal().name},
-                "summary": "The scope exception is approved.",
-                "verdict": "approve",
-                "findings": [],
-            }
-        ),
-    )
-    supervisor._evaluate_pending_gates()
-    task = _task(store)
     assert task.state is TaskState.PUBLISHING
     assert len(store.acceptance.rows) == 1
     assert asyncio.run(supervisor.delivery.publish()) == 1
@@ -461,10 +436,10 @@ def test_report_gate_cannot_be_omitted_by_policy(tmp_path: Path) -> None:
     assert work is not None
     work[1].policy_snapshot["gates"]["pre_pr"] = []
     supervisor._evaluate_pending_gates()
-    assert _task(store).state is TaskState.AWAITING_INTERNAL_REVIEW
+    assert _task(store).state is TaskState.PUBLISHING
     outcome = next(r for r in store.gate_results.rows if r.gate == "report_present")
     assert outcome.result == GateResult.FAIL and not outcome.blocking
-    assert store.acceptance.rows == []
+    assert len(store.acceptance.rows) == 1
 
 
 def test_specs_and_worker_identity_use_the_same_self_review_instruction(tmp_path: Path) -> None:
@@ -495,10 +470,10 @@ def test_pre_upgrade_parsed_report_cannot_skip_self_review(
     assert report.payload["parsed_ok"]
     del report.payload["self_review_checked"]
     supervisor._evaluate_pending_gates()
-    assert _task(store).state is TaskState.AWAITING_INTERNAL_REVIEW
+    assert _task(store).state is TaskState.PUBLISHING
     outcome = next(row for row in store.gate_results.rows if row.gate == "report_present")
     assert not outcome.blocking and "self_review" in outcome.detail
-    assert store.acceptance.rows == []
+    assert len(store.acceptance.rows) == 1
 
 
 @pytest.mark.parametrize("correction", [False, True])
