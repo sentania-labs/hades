@@ -36,6 +36,7 @@ from crucible.application.errors import (
 from crucible.application.memory import bounded_limit
 from crucible.application.routing import image_for_harness
 from crucible.application.runtime_settings import RuntimeValue, resolve, save_scalar
+from crucible.application.task_notes import list_notes
 from crucible.application.transitions import record_event
 from crucible.contracts.rooms import (
     RoomCreateRequest,
@@ -638,6 +639,12 @@ def _card_context(uow: UnitOfWork, room: Room) -> CardContext | None:
     task = uow.tasks.get(room.card_task_id)
     if task is None:
         return None
+    contract = uow.contracts.get(task.id, task.contract_version)
+    document = contract.document if contract else {}
+    pr = uow.pull_requests.get_for_task(task.id)
+    certifications = list(uow.ci_certifications.list_for_task(task.id))
+    ci = certifications[-1] if certifications else None
+    attempts = uow.attempts.list_for_task(task.id)
     return CardContext(
         task_id=task.id,
         external_id=task.external_id,
@@ -645,6 +652,18 @@ def _card_context(uow: UnitOfWork, room: Room) -> CardContext | None:
         project=task.project,
         state=task.state.value,
         objective=task_objective(uow, task),
+        acceptance_criteria=tuple(
+            f"{criterion.get('id', '')}: {criterion.get('text', '')}"
+            for criterion in document.get("acceptance_criteria", [])
+        ),
+        pull_request=(
+            f"{pr.url} ({pr.state.value}), head {pr.head_sha}" if pr else "No pull request yet"
+        ),
+        ci=(f"{ci.state}: {ci.detail} (head {ci.head_sha})" if ci else "Not certified yet"),
+        attempt_references=tuple(
+            f"Attempt {attempt.id}: /v1/attempts/{attempt.id}/logs" for attempt in attempts
+        ),
+        notes=tuple(f"{note.author}: {note.text}" for note in list_notes(uow, task.id)),
     )
 
 

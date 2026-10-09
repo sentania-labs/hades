@@ -36,6 +36,7 @@
       transcript.querySelector('.room-empty')?.remove();
       node = document.createElement('article'); node.className = `room-turn room-turn--${data.role}`; node.dataset.seq = data.seq; node.dataset.role = data.role;
       const header = document.createElement('header'); const who = document.createElement('b'); who.textContent = data.role === 'assistant' ? 'Hades' : data.role === 'user' ? 'You' : 'System'; header.append(who);
+      if (data.started_at) { const time = document.createElement('time'); time.textContent = new Intl.DateTimeFormat('en-US', {timeZone: shell.dataset.timezone || 'America/Chicago', dateStyle: 'short', timeStyle: 'short'}).format(new Date(data.started_at)); header.append(time); }
       const text = document.createElement('div'); text.className = 'room-turn-text'; node.append(header, text); transcript.append(node);
     }
     node.querySelector('.room-turn-text').textContent = data.text || '';
@@ -78,7 +79,7 @@
     }
   });
   interrupt.addEventListener('click', async () => { interrupt.disabled = true; try { await post('interrupt'); status.textContent = 'Interrupt requested.'; } catch (error) { status.textContent = error.message; } finally { interrupt.disabled = false; } });
-  document.querySelector('#room-target').addEventListener('change', async event => { const [harness, model] = event.target.value.split('|'); status.textContent = 'Switching…'; try { const data = await post('switch', {harness, model}); turn(data.turn); status.textContent = 'Switched. The next message starts this connection.'; } catch (error) { status.textContent = error.message; } });
+  document.querySelector('#room-target').addEventListener('change', async event => { const [harness, model] = event.target.value.split('|'); status.textContent = 'Switching…'; try { const data = await post('switch', {harness, model}); turn(data.turn); const label = document.querySelector('#room-target-label'); if (label) label.textContent = 'Talking to'; status.textContent = 'Switched. The next message starts this connection.'; } catch (error) { status.textContent = error.message; } });
   connect();
 })();
 </script>

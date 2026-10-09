@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 
 from crucible.adapters.api.deps import Ctx, UoW
 from crucible.adapters.threaded_router import ThreadedAPIRouter
+from crucible.adapters.ui.pages.card_thread import card_thread_context
 from crucible.adapters.ui.render import _base, _localize, _redirect, _state_words, templates
 from crucible.adapters.ui.session import _csrf, _form, _require
 from crucible.application.admin.board_card import board_card_view
@@ -499,6 +500,10 @@ def board_card_page(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Respo
         return RedirectResponse(
             f"/ui/board?kind=bad&message={quote(f'No task {task_id}.')}", status_code=303
         )
+    try:
+        window = int(request.query_params.get("window", "50"))
+    except ValueError:
+        window = 50
     timezone = _timezone(request)
     card = _localize(document, timezone)
     view = task_view(uow, task_id)
@@ -516,6 +521,14 @@ def board_card_page(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Respo
                 csrf,
                 title=f"Card {document['external_id']}",
                 active="/ui/board",
+            ),
+            **card_thread_context(
+                ctx,
+                uow,
+                principal,
+                card,
+                timezone=timezone,
+                window=window,
             ),
             "card": card,
             "can_act": principal.role in OPERATOR_ROLES,

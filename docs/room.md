@@ -17,3 +17,6 @@ message remains in the composer so it can be corrected.
 
 The connection label says **Cold** while there is no warm runner. Observer accounts can
 read the room and its history, but cannot send, interrupt, or switch.
+
+Each card also has its own [Thread panel](card-threads.md), using the same room controls
+and stream. Card actions remain beside that panel in Actions.

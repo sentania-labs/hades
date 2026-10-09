@@ -87,12 +87,14 @@
     </li>{% endfor %}</ol>{% else %}<p class="admin-empty">No correction yet.</p>{% endif %}
   </section>
 
-  <section class="lat-card" aria-label="Thread" id="notes">
-    <h2>Thread</h2><span class="admin-hint">Operator notes</span>
-    {% if card.notes %}<ul class="card-notes">{% for note in card.notes %}<li>
-      <div class="card-note-head"><b>{{ safe_value("author", note.author) }}</b><span>{{ note.created_at }}</span>{% if note.verbatim %}<span class="admin-chip">verbatim</span>{% endif %}</div>
-      <p class="card-note-text">{{ safe_value("note", note.text) }}</p>
-    </li>{% endfor %}</ul>{% else %}<p class="admin-empty">No note yet.</p>{% endif %}
+  <div class="card-conversation card-wide">
+  <section class="lat-card card-thread" aria-label="Thread" id="notes">
+    {% include "room_panel.html" %}
+  </section>
+
+  <aside class="lat-card card-actions-panel" aria-label="Actions" id="actions">
+    <h2>Actions</h2>
+    <p class="admin-hint">Clicks live here, beside the thread, never in it.</p>
     {% if can_act %}
     <form class="card-form" method="post" action="/ui/board/{{ card.id }}/notes">
       <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -102,10 +104,7 @@
       <div class="card-form-buttons"><button class="lat-btn lat-btn--ghost" type="submit">Save note</button></div>
     </form>
     {% endif %}
-  </section>
 
-  <aside class="lat-card card-actions-panel" aria-label="Actions" id="actions">
-    <h2>Actions</h2>
     {% if can_act %}
     {% if actions %}<ul class="card-action-list">{% for item in actions %}<li>
       <form class="card-form" method="post" action="{{ item.action }}">
@@ -134,6 +133,11 @@
       </tbody></table>
     </div>
   </aside>
+  </div>
+  <section class="lat-card card-wide card-history" aria-label="History">
+    <h2>History</h2>
+    {% for decision in card_history %}<article><p class="card-prose">{{ decision.verbatim }}</p><span>{{ decision.channel }} · <time>{{ decision.time }}</time></span></article>{% else %}<p class="admin-empty">No decisions touch this card yet.</p>{% endfor %}
+  </section>
 </div>
 <script src="/ui/static/board.js" defer></script>
 {% endblock %}

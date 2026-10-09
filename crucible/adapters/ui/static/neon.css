@@ -69,3 +69,27 @@ h1, h2, h3, .admin-brand { font-family: var(--font-display); }
   .room-turn--system { width: 100%; }
   .room-composer { left: 8px; right: 8px; }
 }
+
+/* A card's conversation and its click actions share a row. */
+.card-conversation { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 12px; min-width: 0; }
+.card-thread .room-shell { width: 100%; min-height: 0; padding: 0; }
+.card-thread .room-header { flex-direction: column; align-items: stretch; gap: 12px; }
+.card-thread .room-header h1 { font-size: 22px; }
+.card-thread .room-controls { min-width: 0; justify-items: start; }
+.card-thread .room-controls label { flex-wrap: wrap; }
+.card-thread .room-transcript { max-height: 65dvh; overflow-y: auto; min-width: 0; }
+.card-thread .room-turn { box-sizing: border-box; min-width: 0; }
+.card-thread .room-composer { position: static; margin-top: 14px; border-bottom: 1px solid var(--line); border-radius: 12px; box-shadow: none; }
+.card-thread .room-composer > div { flex-wrap: wrap; }
+.card-history { overflow-wrap: anywhere; }
+.card-history article + article { border-top: 1px solid var(--line); margin-top: 12px; }
+@media (max-width: 700px) {
+  .card-conversation { grid-template-columns: minmax(0, 1fr); }
+  .card-thread .room-turn header { flex-wrap: wrap; }
+}
+
+@media (max-width: 700px) {
+  .card-head, .card-links, .card-grid { overflow-wrap: anywhere; }
+  .card-head > *, .card-links > * { min-width: 0; max-width: 100%; }
+  .card-defaults { table-layout: fixed; }
+}

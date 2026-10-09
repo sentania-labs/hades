@@ -474,6 +474,7 @@ class RoomRepository(Protocol):
         include_closed: bool = True,
         kind: RoomKind | None = None,
         created_by: str | None = None,
+        card_task_id: str | None = None,
     ) -> Sequence[Room]: ...
 
     def list_live(self) -> Sequence[Room]:

@@ -98,6 +98,31 @@ def _timezone(ctx: Any) -> str:
     return str(ctx.settings.service.render_timezone)
 
 
+def room_panel_context(
+    ctx: Any, uow: Any, principal: Principal, room: Any | None, window: int = WINDOW
+) -> dict[str, Any]:
+    """The same transcript window and connection selector on principal and card pages."""
+    detail = room_detail(uow, room.id, window=max(1, min(window, 500))) if room else None
+    turns = [_turn_view(turn, _timezone(ctx)) for turn in detail.turns] if detail else []
+    settings = cast(Settings, ctx.settings).rooms
+    models = list(dict.fromkeys([*(settings.models or []), settings.default_model]))
+    if room and room.model not in models:
+        models.append(room.model)
+    return {
+        "room": detail.room if detail else None,
+        "turns": turns,
+        "turns_total": detail.turns_total if detail else 0,
+        "window": detail.window if detail else window,
+        "can_write": bool(room and room.state is not RoomState.CLOSED and _can_write(principal)),
+        "connected": _connected(room, ctx.clock.now()) if room else "No principal room yet",
+        "harness": settings.default_harness,
+        "models": models,
+        "room_timezone": _timezone(ctx),
+        "friendly_harness": _friendly_harness,
+        "friendly_model": _friendly_model,
+    }
+
+
 @router.get("/room", response_class=HTMLResponse)
 def room_page(request: Request, ctx: Ctx, uow: UoW, window: int = WINDOW) -> Response:
     found = _require(request, ctx, uow)
@@ -118,27 +143,12 @@ def room_page(request: Request, ctx: Ctx, uow: UoW, window: int = WINDOW) -> Res
             ),
         )
         uow.commit()
-    detail = room_detail(uow, room.id, window=max(1, min(window, 500))) if room else None
-    turns = [_turn_view(turn, _timezone(ctx)) for turn in detail.turns] if detail else []
-    settings = cast(Settings, ctx.settings).rooms
-    models = list(dict.fromkeys([*(settings.models or []), settings.default_model]))
-    if room and room.model not in models:
-        models.append(room.model)
     response = templates.TemplateResponse(
         request=request,
         name="room.html",
         context={
             **_base(request, principal, csrf, title="Hades", active="/ui/room"),
-            "room": detail.room if detail else None,
-            "turns": turns,
-            "turns_total": detail.turns_total if detail else 0,
-            "window": detail.window if detail else window,
-            "can_write": bool(room and _can_write(principal)),
-            "connected": _connected(room, ctx.clock.now()) if room else "No principal room yet",
-            "harness": settings.default_harness,
-            "models": models,
-            "friendly_harness": _friendly_harness,
-            "friendly_model": _friendly_model,
+            **room_panel_context(ctx, uow, principal, room, window),
         },
     )
     if room:

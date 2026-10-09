@@ -45,6 +45,11 @@ class CardContext:
     project: str
     state: str
     objective: str
+    acceptance_criteria: tuple[str, ...] = ()
+    pull_request: str = "No pull request yet"
+    ci: str = "Not certified yet"
+    attempt_references: tuple[str, ...] = ()
+    notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +131,13 @@ def card_section(card: CardContext | None) -> str:
         "## The card\n"
         f"{card.external_id}: {card.title}\n"
         f"Project {card.project}, state {card.state}, task id {card.task_id}.\n"
-        f"Objective:\n{card.objective.strip()}"
+        f"Objective:\n{card.objective.strip()}\n"
+        "Acceptance criteria:\n" + ("\n".join(card.acceptance_criteria) or "None recorded") + "\n"
+        f"Pull request: {card.pull_request}\nCI: {card.ci}\n"
+        "Attempt transcript references:\n"
+        + ("\n".join(card.attempt_references) or "No attempt yet")
+        + "\nOperator notes:\n"
+        + ("\n".join(card.notes) or "None recorded")
     )
 
 

@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from crucible.adapters.api.deps import app_context, unit_of_work
 from crucible.adapters.ui.pages import board as board_page
 from crucible.adapters.ui.pages import tasks as tasks_page
+from crucible.settings import ServiceSettings, Settings
 from tests.fixtures import FakeClock
 from tests.unit.test_issue_360_ready_for_merge_correction import NOW
 from tests.unit.test_issue_489_card_actions import (
@@ -46,6 +47,7 @@ def _task_page_on_postgres(store: CardStore, monkeypatch: pytest.MonkeyPatch) ->
     app.include_router(tasks_page.router)
     ctx = SimpleNamespace(
         clock=FakeClock(NOW),
+        settings=Settings(service=ServiceSettings(render_timezone="America/Chicago")),
         providers=[SimpleNamespace(name="fake")],
         database_url="postgresql+psycopg://kind/crucible",
     )
