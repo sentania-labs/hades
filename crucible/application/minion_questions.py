@@ -21,6 +21,7 @@ from crucible.application.corrections import (
 from crucible.application.decisions import record_decision
 from crucible.application.errors import ConflictError, ForbiddenError, NotFoundError
 from crucible.application.harnesses import HarnessRegistry
+from crucible.application.rooms import notify_card_question
 from crucible.application.task_access import require_task_principal
 from crucible.application.transitions import record_event, require_contract
 from crucible.contracts.api import DecisionRequest
@@ -79,6 +80,7 @@ def ask_question(
         escalation_id=escalation.id if escalation else None,
     )
     repository.add(question)
+    notify_card_question(uow, clock, task)
     record_event(
         uow,
         clock,

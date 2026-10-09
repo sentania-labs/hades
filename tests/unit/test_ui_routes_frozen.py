@@ -63,6 +63,7 @@ FROZEN_ROUTES = [
     ("POST", "/ui/tasks/proposals/approve"),
     ("POST", "/ui/tasks/{task_id}/decisions"),
     ("POST", "/ui/tasks/{task_id}/proposal"),
+    ("POST", "/ui/tasks/{task_id}/questions/{question_id}/answer"),
 ]
 
 FROZEN_ACTIONS = [

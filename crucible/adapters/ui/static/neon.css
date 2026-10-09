@@ -93,3 +93,5 @@ h1, h2, h3, .admin-brand { font-family: var(--font-display); }
   .card-head > *, .card-links > * { min-width: 0; max-width: 100%; }
   .card-defaults { table-layout: fixed; }
 }
+
+.room-turn--question { border-left: 3px solid var(--lat-warn, #f0b35c); }

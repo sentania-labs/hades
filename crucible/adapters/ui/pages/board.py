@@ -529,6 +529,8 @@ def board_card_page(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Respo
                 card,
                 timezone=timezone,
                 window=window,
+                questions=view.questions,
+                handoffs=view.handoffs,
             ),
             "card": card,
             "can_act": principal.role in OPERATOR_ROLES,

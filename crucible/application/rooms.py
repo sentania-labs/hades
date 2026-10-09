@@ -400,6 +400,25 @@ def _append(uow: UnitOfWork, room: Room, role: TurnRole, text: str, at: datetime
     return turn
 
 
+def notify_card_question(uow: UnitOfWork, clock: Clock, task: Task) -> None:
+    """Point the task principal's latest open room at the card, without question text."""
+    if getattr(uow, "rooms", None) is None or getattr(uow, "room_turns", None) is None:
+        return
+    rooms = uow.rooms.list_recent(
+        limit=1, kind=RoomKind.PRINCIPAL, created_by=task.principal_id, include_closed=False
+    )
+    for candidate in rooms:
+        room = uow.rooms.get(candidate.id, for_update=True)
+        if room is not None and room.state is not RoomState.CLOSED:
+            _append(
+                uow,
+                room,
+                TurnRole.SYSTEM,
+                f"A minion on {task.external_id} asked a question. Open the card.",
+                clock.now(),
+            )
+
+
 def _open_turns(uow: UnitOfWork, room: Room) -> list[RoomTurn]:
     """The assistant turns still streaming. An assistant turn is created when its user
     turn is handed out, so it always sits after the inbox cursor."""

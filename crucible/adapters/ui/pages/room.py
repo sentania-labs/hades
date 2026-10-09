@@ -11,10 +11,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 
 from crucible.adapters.api.deps import Ctx, UoW
 from crucible.adapters.api.routers import rooms as rooms_routes
+from crucible.adapters.api.routers import tasks as tasks_routes
 from crucible.adapters.threaded_router import ThreadedAPIRouter
 from crucible.adapters.ui.render import _base, templates
 from crucible.adapters.ui.session import _require
 from crucible.application.rooms import create_room, room_detail
+from crucible.contracts.api import AnswerRequest
 from crucible.contracts.rooms import RoomCreateRequest, RoomMessageRequest, RoomSwitchRequest
 from crucible.domain.entities import Principal, Role
 from crucible.domain.rooms import RoomKind, RoomState, local_time
@@ -215,3 +217,18 @@ async def stream(request: Request, room_id: str, ctx: Ctx, uow: UoW) -> Response
         return JSONResponse({"detail": "sign in required"}, status_code=401)
     after = max(0, int(request.query_params.get("after_seq", "0")))
     return await rooms_routes.stream(room_id, request, ctx, found[0], after, 300)
+
+
+@router.post("/tasks/{task_id}/questions/{question_id}/answer")
+async def answer(request: Request, task_id: str, question_id: str, ctx: Ctx, uow: UoW) -> Response:
+    auth = _authorized(request, ctx, uow)
+    if isinstance(auth, Response):
+        return auth
+    return await tasks_routes.answer(
+        task_id,
+        question_id,
+        AnswerRequest.model_validate(await request.json()),
+        request,
+        ctx,
+        auth[0],
+    )

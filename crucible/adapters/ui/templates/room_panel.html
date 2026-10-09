@@ -1,6 +1,12 @@
 {% macro notes() -%}
 {% for note in system_notes | default([]) %}<article class="room-turn room-turn--system"><header><b>System · Operator notes · {{ note.author }}</b><time>{{ note.created_at }}</time>{% if note.verbatim %}<span>verbatim</span>{% endif %}</header><div class="room-turn-text">{{ note.text }}</div></article>{% endfor %}
 {%- endmacro %}
+{% macro questions_thread() -%}
+{% for question in questions | default([]) %}
+<article class="room-turn room-turn--question" data-question-id="{{ question.id }}"><header><b>Minion question</b><time>{{ question.asked_at }}</time></header><div class="room-turn-text">{{ question.question_text }}</div></article>
+{% if question.answered %}<article class="room-turn room-turn--user"><header><b>{{ question.answered_by }}</b><time>{{ question.answered_at }}</time></header><div class="room-turn-text">{{ question.answer_text }}</div></article>{% endif %}
+{% endfor %}
+{%- endmacro %}
 {% macro turn(item) -%}
 <article class="room-turn room-turn--{{ item.role }}" data-seq="{{ item.seq }}" data-role="{{ item.role }}">
   <header><b>{% if item.role == "assistant" %}Hades{% elif item.role == "user" %}You{% else %}System{% endif %}</b><time>{{ item.time }}</time></header>
@@ -10,7 +16,7 @@
   {% if item.interrupted %}<small class="room-interrupted">Interrupted</small>{% endif %}
 </article>
 {%- endmacro %}
-<section class="room-shell" data-timezone="{{ room_timezone }}"{% if room %} data-room-id="{{ room.id }}" data-csrf="{{ csrf }}"{% endif %}>
+<section class="room-shell" data-timezone="{{ room_timezone }}"{% if answer_url %} data-answer-url="{{ answer_url }}"{% endif %}{% if room %} data-room-id="{{ room.id }}" data-csrf="{{ csrf }}"{% endif %}>
   <header class="room-header">
     <div><p class="room-kicker">{{ room_kicker | default("Principal room") }}</p><h1>{{ room_title | default("Hades") }}</h1></div>
     {% if room %}<div class="room-controls">
@@ -24,12 +30,12 @@
   </header>
   {% if room %}
     {% if turns_total > turns|length and window < 500 %}<a class="room-history" href="{{ history_url | default("/ui/room") }}?window={{ [window + 50, 500]|min }}">History · load {{ [turns_total - turns|length, 50]|min }} older turns</a>{% elif turns_total > turns|length %}<span class="room-history room-history--complete">History · showing the latest 500 turns (page limit)</span>{% else %}<span class="room-history room-history--complete">History · start of room</span>{% endif %}
-    <div class="room-transcript" id="room-transcript" aria-live="polite">{{ notes() }}{% for item in turns %}{{ turn(item) }}{% else %}<p class="room-empty">This room is ready. Talk to Hades when you are.</p>{% endfor %}</div>
+    <div class="room-transcript" id="room-transcript" aria-live="polite">{{ notes() }}{{ questions_thread() }}{% for item in turns %}{{ turn(item) }}{% else %}<p class="room-empty">This room is ready. Talk to Hades when you are.</p>{% endfor %}</div>
     {% if can_write %}<form class="room-composer" id="room-composer">
-      <label for="room-message">Message Hades</label>
+      <label for="room-message">{% if answer_url %}Answer and resume{% else %}Message Hades{% endif %}</label>
       <textarea id="room-message" rows="2" maxlength="20000" required placeholder="What should Hades know or work through?"></textarea>
-      <div><button class="lat-btn lat-btn--primary" id="room-send" type="submit">Send</button><button class="lat-btn lat-btn--ghost" id="room-interrupt" type="button" hidden>Interrupt</button><span id="room-status" role="status"></span></div>
+      <div><button class="lat-btn lat-btn--primary" id="room-send" type="submit">{% if answer_url %}Answer and resume{% else %}Send{% endif %}</button><button class="lat-btn lat-btn--ghost" id="room-interrupt" type="button" hidden>Interrupt</button><span id="room-status" role="status"></span></div>
     </form>{% else %}<p class="room-readonly">{% if room.state.value == "closed" %}This room is closed and read-only.{% else %}Observer access is read-only.{% endif %}</p>{% endif %}
-  {% else %}{{ notes() }}<p class="room-empty">{{ empty_room | default("There is no principal room to observe yet.") }}</p>{% endif %}
+  {% else %}{{ notes() }}{{ questions_thread() }}<p class="room-empty">{{ empty_room | default("There is no principal room to observe yet.") }}</p>{% endif %}
 </section>
 {% if can_write %}{% include "room_script.html" %}{% endif %}

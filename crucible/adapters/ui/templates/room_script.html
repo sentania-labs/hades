@@ -18,8 +18,8 @@
   };
   let lastSeq = Math.max(0, ...Array.from(transcript.querySelectorAll('[data-seq]'), n => Number(n.dataset.seq)));
 
-  const post = async (path, body = {}) => {
-    const response = await fetch(`/ui/room/${encodeURIComponent(roomId)}/${path}`, {
+  const post = async (path, body = {}, url = `/ui/room/${encodeURIComponent(roomId)}/${path}`) => {
+    const response = await fetch(url, {
       method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf}, body: JSON.stringify(body)
     });
     if (!response.ok) {
@@ -63,6 +63,13 @@
     if (!text || posting || activeSeq !== null) return;
     posting = true; updateControls(); status.textContent = 'Sending…';
     try {
+      if (shell.dataset.answerUrl) {
+        await post('answer', {answer_text: text}, shell.dataset.answerUrl);
+        message.value = '';
+        status.textContent = 'Answer recorded.';
+        window.location.reload();
+        return;
+      }
       const data = await post('messages', {text});
       turn(data);
       if (message.value.trim() === text) message.value = '';

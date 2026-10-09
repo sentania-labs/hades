@@ -42,7 +42,18 @@ def context(**kw: Any) -> LaunchContext:
     )
 
 
-def test_local_launch_config_key_and_closed_stdin(tmp_path: Path) -> None:
+def test_local_launch_config_key_and_closed_stdin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The worker's own wrapper settings must not probe the network or overwrite its
+    # transcript when this test launches a stand-in subprocess.
+    for name in (
+        "CRUCIBLE_EGRESS_ALLOWLIST",
+        "CRUCIBLE_TRANSCRIPT",
+        "CRUCIBLE_ENV_FROM_FILES",
+        "CRUCIBLE_IN_FLIGHT_FILE",
+    ):
+        monkeypatch.delenv(name, raising=False)
     launch = CodexAdapter().build_launch(
         context(
             endpoint="local",

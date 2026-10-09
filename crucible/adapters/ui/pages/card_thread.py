@@ -20,7 +20,45 @@ def card_thread_context(
     *,
     timezone: str,
     window: int = 50,
+    questions: list[dict[str, Any]] | None = None,
+    handoffs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    history = [
+        {
+            "verbatim": decision.verbatim,
+            "channel": decision.channel,
+            "time": local_time(decision.said_at, timezone),
+        }
+        for decision in list_ledger_decisions(uow, limit=LEDGER_MAX_LIMIT)
+        if {card["id"], card["external_id"]}.intersection(decision.applies_to)
+    ]
+    history.extend(
+        {
+            "verbatim": handoff["words"],
+            "channel": f"{handoff['from']} to {handoff['to']} · {handoff['action']}",
+            "time": handoff["local_time"],
+        }
+        for handoff in handoffs or []
+    )
+    common = {
+        "room_title": "Thread",
+        "room_kicker": card["external_id"],
+        "system_notes": card["notes"],
+        "card_history": history,
+        "room_timezone": timezone,
+    }
+    defaults = getattr(getattr(ctx, "settings", None), "rooms", None)
+    if (
+        defaults is None
+        or getattr(uow, "rooms", None) is None
+        or getattr(uow, "room_turns", None) is None
+    ):
+        return {
+            **common,
+            "room": None,
+            "can_write": False,
+            "empty_room": "Threads need the rooms settings; see Settings",
+        }
     # Serialize first use on the task row so two browser tabs get the same room.
     if _can_write(principal):
         uow.tasks.get(card["id"], for_update=True)
@@ -28,7 +66,6 @@ def card_thread_context(
         iter(uow.rooms.list_recent(limit=1, kind=RoomKind.CARD, card_task_id=card["id"])),
         None,
     )
-    defaults = ctx.settings.rooms
     if room is None and _can_write(principal):
         room = create_room(
             uow,
@@ -57,22 +94,15 @@ def card_thread_context(
         if not switched
         else "Talking to"
     )
-    history = [
-        {
-            "verbatim": decision.verbatim,
-            "channel": decision.channel,
-            "time": local_time(decision.said_at, timezone),
-        }
-        for decision in list_ledger_decisions(uow, limit=LEDGER_MAX_LIMIT)
-        if {card["id"], card["external_id"]}.intersection(decision.applies_to)
-    ]
+    pending = next((q for q in reversed(questions or []) if not q["answered"]), None)
     return {
         **panel,
-        "room_title": "Thread",
-        "room_kicker": card["external_id"],
+        **common,
+        "questions": questions or [],
+        "answer_url": (
+            f"/ui/tasks/{card['id']}/questions/{pending['id']}/answer" if pending else None
+        ),
         "target_label": label,
         "history_url": f"/ui/tasks/{card['id']}",
         "empty_room": "There is no card room to observe yet.",
-        "system_notes": card["notes"],
-        "card_history": history,
     }
