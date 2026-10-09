@@ -435,7 +435,9 @@ def task_page(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Response:
         )
     # hades #425: what the launch wrapper could reach before the harness started, per
     # allowlisted host, so a failed install reads as egress rather than as the worker.
-    probe_rows = egress_rows(view)
+    _egress_dicts = egress_rows(view)
+    # The SQLite task page renders rows as tabular rows; convert dicts to lists.
+    probe_rows = [[d["attempt_id"], d["host"], d["result"]] for d in _egress_dicts]
     if probe_rows:
         sections.append(
             {

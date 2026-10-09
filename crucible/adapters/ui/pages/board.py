@@ -335,29 +335,59 @@ def _timezone(request: Request) -> str:
     return str(settings.service.render_timezone) if settings is not None else "America/Chicago"
 
 
-def egress_rows(view: Any) -> list[list[str]]:
-    """hades #425: one row per attempt per probed host, `reachable` or why not; an
-    attempt whose probe named no host, or whose probe line was rejected, says so in one
-    row."""
-    rows: list[list[str]] = []
+def egress_rows(view: Any) -> list[dict[str, Any]]:
+    """hades #425: one row per attempt per probed host; each row carries attempt id,
+    host, the result words, ms (latency), detail, and recorded_at (probe recording
+    time, localized by the template context)."""
+    rows: list[dict[str, Any]] = []
     for execution in view.executions:
         for attempt in execution.attempts:
             probe = attempt.egress_probe
             if not probe:
                 continue
             hosts = probe.get("hosts") or []
+            recorded_at = probe.get("recorded_at")
             if probe.get("rejected"):
                 # The worker's first marker line was not the wrapper's shape: nothing
                 # was read from it, and that is what the row says.
-                rows.append([attempt.id, "none", f"probe line rejected: {probe['rejected']}"])
+                rows.append(
+                    {
+                        "attempt_id": attempt.id,
+                        "host": "none",
+                        "result": f"probe line rejected: {probe['rejected']}",
+                        "ms": None,
+                        "detail": "",
+                        "recorded_at": recorded_at,
+                    }
+                )
                 continue
             if not hosts:
-                rows.append([attempt.id, "none", "no allowlisted host to probe"])
+                rows.append(
+                    {
+                        "attempt_id": attempt.id,
+                        "host": "none",
+                        "result": "no allowlisted host to probe",
+                        "ms": None,
+                        "detail": "",
+                        "recorded_at": recorded_at,
+                    }
+                )
                 continue
             for row in hosts:
-                words = host_words(row)
                 host = str(row.get("host", ""))
-                rows.append([attempt.id, host, words.removeprefix(f"{host} ")])
+                ms = row.get("ms")
+                detail = str(row.get("detail") or "")
+                words = host_words(row)
+                rows.append(
+                    {
+                        "attempt_id": attempt.id,
+                        "host": host,
+                        "result": words.removeprefix(f"{host} "),
+                        "ms": ms,
+                        "detail": detail,
+                        "recorded_at": recorded_at,
+                    }
+                )
     return rows
 
 

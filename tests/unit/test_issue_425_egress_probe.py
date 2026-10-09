@@ -1084,7 +1084,11 @@ def test_the_section_is_absent_until_a_probe_was_recorded() -> None:
             SimpleNamespace(attempts=[SimpleNamespace(id="A1", egress_probe={"hosts": []})])
         ]
     )
-    assert board_mod.egress_rows(empty) == [["A1", "none", "no allowlisted host to probe"]]
+    rows_empty = board_mod.egress_rows(empty)
+    assert len(rows_empty) == 1
+    assert rows_empty[0]["attempt_id"] == "A1"
+    assert rows_empty[0]["host"] == "none"
+    assert rows_empty[0]["result"] == "no allowlisted host to probe"
     rejected = SimpleNamespace(
         executions=[
             SimpleNamespace(
@@ -1096,9 +1100,11 @@ def test_the_section_is_absent_until_a_probe_was_recorded() -> None:
             )
         ]
     )
-    assert board_mod.egress_rows(rejected) == [
-        ["A2", "none", f"probe line rejected: {REJECTED_TOO_LONG}"]
-    ]
+    rows_rejected = board_mod.egress_rows(rejected)
+    assert len(rows_rejected) == 1
+    assert rows_rejected[0]["attempt_id"] == "A2"
+    assert rows_rejected[0]["host"] == "none"
+    assert rows_rejected[0]["result"] == f"probe line rejected: {REJECTED_TOO_LONG}"
 
 
 @pytest.mark.skipif(not os.environ.get("CRUCIBLE_EGRESS_ALLOWLIST"), reason="not inside a worker")

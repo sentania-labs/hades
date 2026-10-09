@@ -342,6 +342,9 @@ def board_card_view(uow: UnitOfWork, task_id: str, now: datetime) -> dict[str, A
                 "state": pull_request.state.value,
                 "head_sha": pull_request.head_sha,
                 "work_branch": pull_request.work_branch,
+                "merged_sha": pull_request.merge_sha,
+                "merged_by": pull_request.merged_by,
+                "merged_at": pull_request.merged_at,
             }
             if pull_request
             else None
