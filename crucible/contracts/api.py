@@ -172,7 +172,39 @@ class TaskView(Response):
     reroute_chain: list[dict[str, Any]] = Field(default_factory=list)
     gate_probes: list[dict[str, Any]] = Field(default_factory=list)
     # hades #489: the operator's notes, newest first: id, author, text, verbatim, created_at.
-    notes: list[dict[str, Any]] = Field(default_factory=list)
+    # hades #208 item 2: each also carries `delivery_state` (awaiting, acknowledged,
+    # acted_on) and the evidence `acknowledged` {attempt_id, at} and `acted_on`
+    # {attempt_id, at, commit, event_seq}; the times are local Central.
+    notes: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "The operator's notes, newest first. Each carries delivery_state: awaiting "
+            "(written, no attempt has been given it), acknowledged (in an attempt's "
+            "IDENTITY.md; `acknowledged` names the attempt and the local time) or acted_on "
+            "(that attempt's report referenced it; `acted_on` names the attempt, the local "
+            "time, the collected commit and the event). The supervisor sets the state from "
+            "that evidence; the author cannot."
+        ),
+    )
+    # hades #208 item 2: the worker's questions, oldest first, and the handoffs on the task.
+    questions: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "The worker's questions, oldest first: id, question_text, asked_by_attempt_id, "
+            "asked_at (local Central), escalation_id, answered, answered_by, answered_at, "
+            "answer_text, answer_action (corrected or recorded) and answer_contract_version. "
+            "POST /tasks/{id}/questions/{question_id}/answer answers one."
+        ),
+    )
+    handoffs: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Decisions and actions handed between Foundry and Hades during bootstrap "
+            "(accept, merge, cancel, reroute), oldest first: action, direction, principal, "
+            "local_time (Central) and the words. Each is a handoff_recorded event on "
+            "GET /tasks/{id}/events."
+        ),
+    )
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -506,11 +538,30 @@ class CloseRequest(StrictModel):
 
 
 class NoteRequest(StrictModel):
-    """hades #489: an operator's note on a task, stored as typed."""
+    """hades #489: an operator's note on a task, stored as typed. The body has no delivery
+    state: every note starts `awaiting` and the supervisor moves it from evidence
+    (hades #208 item 2); a body that names one is rejected as an unknown field."""
 
     text: str = Field(min_length=1, description="The operator's words, as typed.")
     verbatim: bool = Field(
         default=True, description="True when the text is the operator's own words."
+    )
+
+
+class AnswerRequest(StrictModel):
+    """hades #208 item 2: the answer to a worker's question. One call records the answer
+    and brings it back to the worker: a correction version with the answer as its
+    instructions, resumed from `resume_from`, which also closes the escalation."""
+
+    answer_text: str = Field(
+        min_length=2, description="The answer in the answering principal's own words."
+    )
+    resume_from: Literal["last_attempt", "remote_branch"] = Field(
+        default="last_attempt",
+        description=(
+            "Where the corrected attempt resumes: the last attempt's sealed bundle, or the "
+            "pushed work branch when a pull request exists."
+        ),
     )
 
 

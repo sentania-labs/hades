@@ -63,11 +63,20 @@ async def test_cancel_submitted_task_is_immediate(client: TestClient) -> None:
     r = client.post("/v1/tasks", json=contract_document())
     task_id = r.json()["id"]
     assert _cancel(client, task_id)["state"] == "cancelled"
+    # hades #208 item 2: the cancel is a decision handed to Hades, recorded between the
+    # request and the state change with the principal, the local time and the verbatim.
     assert event_kinds(client, task_id) == [
         "task_submitted",
         "task_cancel_requested",
+        "handoff_recorded",
         "task_cancelled",
     ]
+    events = client.get(f"/v1/tasks/{task_id}/events").json()["items"]
+    handoff = next(e for e in events if e["kind"] == "handoff_recorded")
+    assert handoff["payload"]["action"] == "cancel"
+    assert handoff["payload"]["direction"] == "foundry_to_hades"
+    assert handoff["payload"]["words"] == "stop that one please"
+    assert handoff["principal"] == "orchestrator-principal"
 
 
 async def test_cancel_before_first_tick_creates_nothing(

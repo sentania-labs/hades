@@ -17,7 +17,7 @@ from crucible.adapters.persistence.unit_of_work import SqlUnitOfWorkFactory, mak
 from crucible.application.routing import load_routing
 from crucible.contracts.policy import RoutingPolicyV1
 from crucible.ports.harness import HarnessGate, HarnessUnavailableError
-from tests.fixtures import contract_document
+from tests.fixtures import contract_document, migration_by_slug
 from tests.integration.conftest import rebuild, reset, submit_and_start
 
 pytestmark = pytest.mark.integration
@@ -1908,6 +1908,205 @@ def test_each_0044_head_upgrades_through_the_0045_merge(
                     ),
                     {"kind": merged_kind},
                 )
+    finally:
+        engine.dispose()
+
+
+def test_comment_delivery_applies_to_an_empty_and_a_populated_database(
+    database_url: str,
+) -> None:
+    """hades #208 item 2: the comment delivery revision adds columns to `task_notes`, the
+    `minion_questions` table and five event kinds. From empty it goes down and up with
+    the schema matching the ORM. On a database populated at the revision below it (a
+    task, an attempt, a note and an escalation, as a bootstrap database has) every
+    existing note comes out `awaiting`, a question can be stored against the attempt, the
+    new kinds are accepted, and a downgrade archives those events and brings them back on
+    the next upgrade. The revision is found by its slug and the revision below read from
+    it: both are provisional until merge (hades #447)."""
+    revision = migration_by_slug("comment_delivery")
+    below = revision.down_revision
+    assert isinstance(below, str)
+    archive = revision.module.EVENT_ARCHIVE
+    engine = make_engine(database_url)
+    try:
+        # Empty: down past the revision, up to head, drift-free, down and up again.
+        migrate.downgrade(database_url, below)
+        assert "minion_questions" not in inspect(engine).get_table_names()
+        note_columns = {c["name"] for c in inspect(engine).get_columns("task_notes")}
+        assert "delivery_state" not in note_columns
+        migrate.upgrade(database_url)
+        ok, detail = migrate.is_current(engine, database_url)
+        assert ok, detail
+        note_columns = {c["name"] for c in inspect(engine).get_columns("task_notes")}
+        assert {
+            "delivery_state",
+            "acknowledged_attempt_id",
+            "acknowledged_at",
+            "acted_on_attempt_id",
+            "acted_on_at",
+            "acted_on_commit",
+            "acted_on_event_seq",
+        } <= note_columns
+        assert "minion_questions" in inspect(engine).get_table_names()
+
+        # Populated: rows at the revision below, then the upgrade.
+        migrate.downgrade(database_url, below)
+        task, execution, attempt = (
+            "01MIG0570000000000000TASK1",
+            "01MIG0570000000000000EXEC1",
+            "01MIG05700000000000ATTEMPT",
+        )
+        principal, note, escalation = (
+            "01MIG057000000000PRINCIPAL",
+            "01MIG0570000000000000NOTE1",
+            "01MIG05700000000000000ESC1",
+        )
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO leases (id, kind, key, holder, fenced_token, expires_at) "
+                    "VALUES ('01MIG057000000000000LEASE1', 'supervisor', 'supervisor', "
+                    "'migration-test', 57, now() + interval '1 hour')"
+                )
+            )
+            conn.execute(text("SELECT set_config('crucible.fenced_token', '57', true)"))
+            _seed(conn, "principals", {"id": principal, "name": "mig-057", "role": "operator"})
+            _seed(
+                conn,
+                "repositories",
+                {"id": "01MIG05700000000000000REPO", "name": "mig-057", "url": "u"},
+            )
+            _seed(
+                conn,
+                "tasks",
+                {
+                    "id": task,
+                    "external_id": "MIG-057",
+                    "principal_id": principal,
+                    "repository_id": "01MIG05700000000000000REPO",
+                    "state": "blocked",
+                    "contract_version": 1,
+                    "policy_name": "default-software",
+                    "policy_version": 1,
+                },
+            )
+            _seed(
+                conn,
+                "executions",
+                {
+                    "id": execution,
+                    "task_id": task,
+                    "role": "implement",
+                    "contract_version": 1,
+                    "state": "active",
+                    "policy_snapshot": json.dumps(
+                        {"routing": {"policy": {"name": "default-routing", "version": 3}}}
+                    ),
+                    "retry_on": "[]",
+                },
+            )
+            _seed(
+                conn,
+                "attempts",
+                {
+                    "id": attempt,
+                    "execution_id": execution,
+                    "task_id": task,
+                    "number": 1,
+                    "state": "blocked",
+                    "ordered_candidates": "[]",
+                    "routing_excluded_pools": "[]",
+                },
+            )
+            _seed(
+                conn,
+                "task_notes",
+                {
+                    "id": note,
+                    "task_id": task,
+                    "principal_id": principal,
+                    "author": "mig-057",
+                    "text": "Resume and report.",
+                },
+            )
+            _seed(
+                conn,
+                "escalations",
+                {
+                    "id": escalation,
+                    "task_id": task,
+                    "attempt_id": attempt,
+                    "state": "open",
+                    "question": "Which reading?",
+                },
+            )
+        migrate.upgrade(database_url)
+        ok, detail = migrate.is_current(engine, database_url)
+        assert ok, detail
+        with engine.begin() as conn:
+            conn.execute(text("SELECT set_config('crucible.fenced_token', '57', true)"))
+            state = conn.execute(
+                text(
+                    "SELECT delivery_state, acknowledged_attempt_id FROM task_notes WHERE id = :id"
+                ),
+                {"id": note},
+            ).one()
+            assert tuple(state) == ("awaiting", None)
+            conn.execute(
+                text(
+                    "INSERT INTO minion_questions (id, task_id, asked_by_attempt_id, "
+                    "escalation_id, question_text, asked_at) VALUES "
+                    "('01MIG0570000000000QUESTION', :task, :attempt, :escalation, "
+                    "'Which reading?', now())"
+                ),
+                {"task": task, "attempt": attempt, "escalation": escalation},
+            )
+            for kind in (
+                "task_note_acknowledged",
+                "task_note_acted_on",
+                "minion_question_asked",
+                "minion_question_answered",
+                "handoff_recorded",
+            ):
+                conn.execute(
+                    text(
+                        "INSERT INTO events (ts, kind, principal, verified, payload, task_id) "
+                        "VALUES (now(), :kind, 'tests', true, '{}', :task)"
+                    ),
+                    {"kind": kind, "task": task},
+                )
+        # Down archives the five kinds and drops the table and columns; up restores them.
+        migrate.downgrade(database_url, below)
+        assert "minion_questions" not in inspect(engine).get_table_names()
+        with engine.connect() as conn:
+            assert (
+                conn.execute(
+                    text("SELECT count(*) FROM events WHERE kind = 'handoff_recorded'")
+                ).scalar()
+                == 0
+            )
+            assert conn.execute(text(f"SELECT count(*) FROM {archive}")).scalar() == 5
+        migrate.upgrade(database_url)
+        with engine.connect() as conn:
+            kinds = (
+                conn.execute(
+                    text(
+                        "SELECT kind FROM events WHERE task_id = :task AND kind IN "
+                        "('task_note_acknowledged', 'task_note_acted_on', 'minion_question_asked', "
+                        "'minion_question_answered', 'handoff_recorded') ORDER BY kind"
+                    ),
+                    {"task": task},
+                )
+                .scalars()
+                .all()
+            )
+            assert len(kinds) == 5
+            assert (
+                conn.execute(
+                    text("SELECT to_regclass(:name)"), {"name": f"public.{archive}"}
+                ).scalar()
+                is None
+            )
     finally:
         engine.dispose()
 

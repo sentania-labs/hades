@@ -445,8 +445,41 @@ class TaskNoteRow(Base):
     author: Mapped[str] = mapped_column(String(128))
     # Declared before `text`, whose name shadows SQLAlchemy's `text()` in this body.
     verbatim: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    # hades #208 item 2 (0061_comment_delivery): the delivery state and its evidence.
+    delivery_state: Mapped[str] = mapped_column(String(16), server_default=text("'awaiting'"))
     text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TZ)
+    acknowledged_attempt_id: Mapped[str | None] = mapped_column(
+        ID, ForeignKey("attempts.id"), nullable=True
+    )
+    acknowledged_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    acted_on_attempt_id: Mapped[str | None] = mapped_column(
+        ID, ForeignKey("attempts.id"), nullable=True
+    )
+    acted_on_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    acted_on_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    acted_on_event_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+
+class MinionQuestionRow(Base):
+    """A worker's question on a task and its answer (hades #208 item 2, 0061)."""
+
+    __tablename__ = "minion_questions"
+    __table_args__ = (Index("ix_minion_questions_task_asked", "task_id", "asked_at"),)
+    id: Mapped[str] = mapped_column(ID, primary_key=True)
+    task_id: Mapped[str] = mapped_column(ID, ForeignKey("tasks.id"))
+    asked_by_attempt_id: Mapped[str] = mapped_column(ID, ForeignKey("attempts.id"))
+    escalation_id: Mapped[str | None] = mapped_column(
+        ID, ForeignKey("escalations.id"), nullable=True
+    )
+    question_text: Mapped[str] = mapped_column(Text)
+    asked_at: Mapped[datetime] = mapped_column(TZ)
+    answered_by: Mapped[str | None] = mapped_column(ID, ForeignKey("principals.id"), nullable=True)
+    answered_by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    answered_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    answer_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    answer_action: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    answer_contract_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class MemoryItemRow(Base):

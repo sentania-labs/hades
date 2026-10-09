@@ -16,6 +16,7 @@ from crucible.application.errors import (
     NotFoundError,
     TransitionNotAllowedError,
 )
+from crucible.application.handoffs import HandoffAction, HandoffDirection, record_handoff
 from crucible.application.harnesses import HarnessRegistry
 from crucible.application.review import latest_work_attempt
 from crucible.application.submit_task import (
@@ -185,6 +186,29 @@ def _previous(uow: UnitOfWork, task: Task, of_version: int) -> TaskContractV1:
     return TaskContractV1.model_validate(stored.document)
 
 
+def correction_document(
+    document: dict[str, Any],
+    *,
+    of_version: int,
+    reason: str,
+    instructions: str,
+    resume_from: str,
+) -> dict[str, Any]:
+    """The current contract as a correction version: the same contract with a
+    correction section carrying the operator's words as the instructions (hades #489;
+    the answer to a minion question takes the same shape, hades #208 item 2)."""
+    body = dict(document)
+    body["correction"] = {
+        "of_version": of_version,
+        "reason": reason,
+        "addresses": [],
+        "instructions": instructions,
+        "resume_from": resume_from,
+        "request_internal_review": False,
+    }
+    return body
+
+
 def attach_correction(
     uow: UnitOfWork,
     clock: Clock,
@@ -197,7 +221,14 @@ def attach_correction(
     credential_sources: dict[str, CredentialSource] | None = None,
     secret_providers: Collection[str] = (),
     wired_providers: Collection[str] | None = None,
+    escalation_id: str | None = None,
+    resume_from_work_branch: bool = False,
 ) -> Task:
+    """`escalation_id` names the open escalation the correction answers (a worker's
+    question names its own, and only that one is closed); without it the first open
+    one is.
+    `resume_from_work_branch` puts the flag on the scheduling event that makes the next
+    execution start at the pushed branch tip rather than a sealed bundle."""
     task = uow.tasks.get(task_id, for_update=True)
     if task is None:
         raise NotFoundError(f"task {task_id} not found")
@@ -301,6 +332,23 @@ def attach_correction(
             "request_internal_review": contract.correction.request_internal_review,
         },
     )
+    if contract.execution_request.pinned_harness:
+        # hades #208 item 2: a correction that pins the harness reroutes the task by
+        # Foundry's (or the operator's) decision; the words are the instructions.
+        record_handoff(
+            uow,
+            clock,
+            task=task,
+            action=HandoffAction.REROUTE,
+            direction=HandoffDirection.FOUNDRY_TO_HADES,
+            principal=principal.name,
+            words=contract.correction.instructions,
+            detail={
+                "harness": contract.execution_request.pinned_harness.value,
+                "model": contract.execution_request.pinned_model,
+                "contract_version": stored.version,
+            },
+        )
     _from_state = task.state
     move_task(
         uow,
@@ -323,10 +371,18 @@ def attach_correction(
             ),
             "provider": contract.execution_request.provider.value,
             "policy": {"name": contract.policy.name, "version": contract.policy.version},
+            **({"resume_from_work_branch": True} if resume_from_work_branch else {}),
         },
     )
     if _from_state is TaskState.BLOCKED:
-        for escalation in uow.escalations.list_for_task(task.id):
+        open_escalations = [
+            escalation
+            for escalation in uow.escalations.list_for_task(task.id)
+            if escalation.state is EscalationState.OPEN
+        ]
+        if escalation_id is not None:
+            open_escalations = [e for e in open_escalations if e.id == escalation_id]
+        for escalation in open_escalations:
             if escalation.state is EscalationState.OPEN:
                 decision = Decision(
                     id=new_id(),

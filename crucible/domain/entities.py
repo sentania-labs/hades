@@ -425,6 +425,18 @@ class Decision:
     created_at: datetime
 
 
+class NoteDeliveryState(StrEnum):
+    """Where an operator's note is on its way to the worker (hades #208 item 2). The
+    supervisor sets the state from evidence; the note's author never does."""
+
+    # Written; no attempt has been given it yet.
+    AWAITING = "awaiting"
+    # The note was put in an attempt's IDENTITY.md (a prompt or a correction).
+    ACKNOWLEDGED = "acknowledged"
+    # That attempt's report referenced the note; the commit or event is the evidence.
+    ACTED_ON = "acted_on"
+
+
 @dataclass(slots=True)
 class MemoryItem:
     """One remembered fact in the store every Hades channel reads (hades #208).
@@ -475,7 +487,11 @@ class LedgerDecision:
 class TaskNote:
     """An operator's note on a task (hades #489): who wrote it, when, and the words as
     typed. `verbatim` says the text is the operator's own words rather than a summary
-    Hades wrote; a note an action applies is the verbatim of that decision in the audit."""
+    Hades wrote; a note an action applies is the verbatim of that decision in the audit.
+
+    hades #208 item 2: the delivery state and its evidence. `acknowledged_*` name the
+    attempt whose identity carried the note and when; `acted_on_*` name the attempt whose
+    report referenced it, the commit it collected and the event that read the report."""
 
     id: str
     task_id: str
@@ -484,6 +500,37 @@ class TaskNote:
     text: str
     created_at: datetime
     verbatim: bool = True
+    delivery_state: NoteDeliveryState = NoteDeliveryState.AWAITING
+    acknowledged_attempt_id: str | None = None
+    acknowledged_at: datetime | None = None
+    acted_on_attempt_id: str | None = None
+    acted_on_at: datetime | None = None
+    acted_on_commit: str | None = None
+    acted_on_event_seq: int | None = None
+
+
+@dataclass(slots=True)
+class MinionQuestion:
+    """A question a worker (minion) asked (hades #208 item 2): the words it stopped on,
+    the attempt that asked, and the answer once one is recorded. The answer is given
+    through one call that corrects or resumes the attempt with the answer's words, so
+    the board's Answer action and a card thread use the same record. `escalation_id`
+    links the escalation the same stop opened (09)."""
+
+    id: str
+    task_id: str
+    asked_by_attempt_id: str
+    question_text: str
+    asked_at: datetime
+    escalation_id: str | None = None
+    answered_by: str | None = None
+    answered_by_name: str | None = None
+    answered_at: datetime | None = None
+    answer_text: str | None = None
+    # How the answer reached the worker: `corrected` (a correction version with the
+    # answer as its instructions) or `recorded` (the task could not take a correction).
+    answer_action: str | None = None
+    answer_contract_version: int | None = None
 
 
 @dataclass(slots=True)

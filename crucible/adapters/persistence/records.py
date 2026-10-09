@@ -24,6 +24,7 @@ from crucible.adapters.persistence.models import (
     HarnessImageRow,
     HarnessStateRow,
     MemoryItemRow,
+    MinionQuestionRow,
     PolicyRow,
     PrincipalRow,
     ProviderSettingRow,
@@ -53,6 +54,8 @@ from crucible.domain.entities import (
     HarnessState,
     LedgerDecision,
     MemoryItem,
+    MinionQuestion,
+    NoteDeliveryState,
     Policy,
     ProviderSetting,
     ReviewDisposition,
@@ -802,20 +805,46 @@ class TaskNotes:
             text=row.text,
             verbatim=bool(row.verbatim),
             created_at=ensure_utc(row.created_at),
+            delivery_state=NoteDeliveryState(row.delivery_state or "awaiting"),
+            acknowledged_attempt_id=row.acknowledged_attempt_id,
+            acknowledged_at=_dt(row.acknowledged_at),
+            acted_on_attempt_id=row.acted_on_attempt_id,
+            acted_on_at=_dt(row.acted_on_at),
+            acted_on_commit=row.acted_on_commit,
+            acted_on_event_seq=row.acted_on_event_seq,
         )
 
+    @staticmethod
+    def _write(row: TaskNoteRow, note: TaskNote) -> None:
+        row.task_id = note.task_id
+        row.principal_id = note.principal_id
+        row.author = note.author
+        row.text = note.text
+        row.verbatim = note.verbatim
+        row.created_at = note.created_at
+        row.delivery_state = note.delivery_state.value
+        row.acknowledged_attempt_id = note.acknowledged_attempt_id
+        row.acknowledged_at = note.acknowledged_at
+        row.acted_on_attempt_id = note.acted_on_attempt_id
+        row.acted_on_at = note.acted_on_at
+        row.acted_on_commit = note.acted_on_commit
+        row.acted_on_event_seq = note.acted_on_event_seq
+
     def add(self, note: TaskNote) -> None:
-        self._s.add(
-            TaskNoteRow(
-                id=note.id,
-                task_id=note.task_id,
-                principal_id=note.principal_id,
-                author=note.author,
-                text=note.text,
-                verbatim=note.verbatim,
-                created_at=note.created_at,
-            )
-        )
+        row = TaskNoteRow(id=note.id)
+        self._write(row, note)
+        self._s.add(row)
+        self._s.flush()
+
+    def get(self, note_id: str) -> TaskNote | None:
+        row = self._s.get(TaskNoteRow, note_id)
+        return self._to_entity(row) if row else None
+
+    def save(self, note: TaskNote) -> None:
+        row = self._s.get(TaskNoteRow, note.id)
+        if row is None:
+            raise KeyError(note.id)
+        self._write(row, note)
         self._s.flush()
 
     def list_for_task(self, task_id: str) -> Sequence[TaskNote]:
@@ -823,6 +852,72 @@ class TaskNotes:
             select(TaskNoteRow)
             .where(TaskNoteRow.task_id == task_id)
             .order_by(TaskNoteRow.created_at.desc(), TaskNoteRow.id.desc())
+        ).all()
+        return [self._to_entity(row) for row in rows]
+
+
+class MinionQuestions:
+    """A worker's questions on a task (hades #208 item 2), oldest first."""
+
+    def __init__(self, session: Session) -> None:
+        self._s = session
+
+    @staticmethod
+    def _to_entity(row: MinionQuestionRow) -> MinionQuestion:
+        return MinionQuestion(
+            id=row.id,
+            task_id=row.task_id,
+            asked_by_attempt_id=row.asked_by_attempt_id,
+            question_text=row.question_text,
+            asked_at=ensure_utc(row.asked_at),
+            escalation_id=row.escalation_id,
+            answered_by=row.answered_by,
+            answered_by_name=row.answered_by_name,
+            answered_at=_dt(row.answered_at),
+            answer_text=row.answer_text,
+            answer_action=row.answer_action,
+            answer_contract_version=row.answer_contract_version,
+        )
+
+    @staticmethod
+    def _write(row: MinionQuestionRow, question: MinionQuestion) -> None:
+        row.task_id = question.task_id
+        row.asked_by_attempt_id = question.asked_by_attempt_id
+        row.escalation_id = question.escalation_id
+        row.question_text = question.question_text
+        row.asked_at = question.asked_at
+        row.answered_by = question.answered_by
+        row.answered_by_name = question.answered_by_name
+        row.answered_at = question.answered_at
+        row.answer_text = question.answer_text
+        row.answer_action = question.answer_action
+        row.answer_contract_version = question.answer_contract_version
+
+    def add(self, question: MinionQuestion) -> None:
+        row = MinionQuestionRow(id=question.id)
+        self._write(row, question)
+        self._s.add(row)
+        self._s.flush()
+
+    def get(self, question_id: str, *, for_update: bool = False) -> MinionQuestion | None:
+        statement = select(MinionQuestionRow).where(MinionQuestionRow.id == question_id)
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._s.scalars(statement).first()
+        return self._to_entity(row) if row else None
+
+    def save(self, question: MinionQuestion) -> None:
+        row = self._s.get(MinionQuestionRow, question.id)
+        if row is None:
+            raise KeyError(question.id)
+        self._write(row, question)
+        self._s.flush()
+
+    def list_for_task(self, task_id: str) -> Sequence[MinionQuestion]:
+        rows = self._s.scalars(
+            select(MinionQuestionRow)
+            .where(MinionQuestionRow.task_id == task_id)
+            .order_by(MinionQuestionRow.asked_at.asc(), MinionQuestionRow.id.asc())
         ).all()
         return [self._to_entity(row) for row in rows]
 
