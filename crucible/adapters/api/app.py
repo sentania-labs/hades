@@ -10,6 +10,7 @@ from crucible.adapters.api.problems import install_problem_handlers
 from crucible.adapters.api.routers import (
     admin,
     bootstrap,
+    catalog,
     github,
     harnesses,
     memory,
@@ -45,4 +46,5 @@ def create_app(ctx: AppContext) -> FastAPI:
     app.include_router(admin.router, prefix=API_PREFIX)
     app.include_router(memory.router, prefix=API_PREFIX)
     app.include_router(bootstrap.router, prefix=API_PREFIX)
+    app.include_router(catalog.router, prefix=API_PREFIX)
     return app

@@ -7,6 +7,7 @@ from crucible.adapters.ui.pages import (
     audit,
     board,
     bootstrap,
+    catalog,
     credentials,
     dashboard,
     gateway,
@@ -55,3 +56,4 @@ router.routes.extend(audit.router.routes)
 router.routes.extend(bootstrap.router.routes)
 router.routes.extend(settings.router.routes)
 router.routes.extend(actions.router.routes)
+router.routes.extend(catalog.router.routes)

@@ -1,0 +1,61 @@
+# Hades Catalog
+#
+# Each entry is a skill or tool that Hades knows. Personas are built
+# from this catalog and scheduled jobs reference tools by name.
+#
+# Schema:
+#   skills: list of {name, summary, owner, instructions_path}
+#   tools:  list of {name, kind, endpoint, command, credential_ref, allowed_for}
+#
+# Rules:
+#   - kind is one of: mcp_server, cli, script
+#   - mcp_server uses `endpoint`; cli and script use `command`.
+#   - credential_ref is a name only, never a value. Secrets live
+#     in Admin (the credential store) and are mounted at runtime.
+#   - allowed_for is a list of role names that may use this entry.
+#     Roles are: observer, operator, admin. Absent means all roles.
+#   - instructions_path is relative to the repository root.
+#
+# Hades assigns version and migration numbers at merge time.
+
+skills:
+  - name: example_analyzer
+    summary: Analyze a text file and report its structure.
+    owner: platform
+    instructions_path: docs/skills/example-analyzer.md
+
+  - name: example_summarizer
+    summary: Summarize a document into key points.
+    owner: platform
+    instructions_path: docs/skills/example-summarizer.md
+
+tools:
+  - name: claude_code
+    kind: cli
+    command: claude
+    credential_ref: claude_code_credential
+    allowed_for: [operator, admin]
+
+  - name: codex
+    kind: cli
+    command: codex
+    credential_ref: codex_credential
+    allowed_for: [operator, admin]
+
+  - name: agy
+    kind: cli
+    command: agy
+    credential_ref: agy_credential
+    allowed_for: [operator, admin]
+
+  - name: hermes
+    kind: cli
+    command: hermes
+    credential_ref: hermes_credential
+    allowed_for: [operator, admin]
+
+  - name: hades_http_client
+    kind: mcp_server
+    endpoint: https://hades-mcp.internal:8080
+    credential_ref: hades_mcp_credential
+    allowed_for: [operator, admin, observer]
