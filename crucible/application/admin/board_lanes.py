@@ -9,11 +9,18 @@ from datetime import datetime
 from typing import Any
 
 from crucible.application.admin.board import age_words
+from crucible.application.admin.stuck import (
+    STUCK_EVENT_KINDS,
+    ci_cause_for_event,
+    is_operator_question,
+    stuck_facts,
+)
 from crucible.application.personas_jobs import inbox_run, run_findings
 from crucible.application.queries import board_batch_records, board_imported_attempts
 from crucible.domain.entities import PullRequestState
 from crucible.domain.events import EventKind
 from crucible.domain.lifecycle import AttemptState, TaskState
+from crucible.domain.stuck_reasons import GROUP_ME, GROUPS, stuck_reason
 from crucible.ports.repository import UnitOfWork
 
 _S = TaskState
@@ -78,9 +85,9 @@ LANE_BY_STATE: dict[TaskState, str] = {
 }
 
 COLLAPSED_LANES = frozenset({"wins", "graveyard"})
-DECISION_KINDS = frozenset(
-    {"ambiguous_contract", "decision", "design", "design_question", "decision_question"}
-)
+# hades #607: the lanes whose cards carry a stuck reason, an owner and its clicks; In
+# progress only for a task waiting on Foundry's internal review.
+REASON_LANES = frozenset({"waiting_on_scott", "stuck"})
 # The events that put a task into each state. Most states have one event named for
 # them; a few are entered by more than one (a proposal rejection is
 # `task_proposal_rejected`, an approval submits, a retry or a quota resume schedules).
@@ -116,13 +123,17 @@ DETAIL_EVENT_KINDS = tuple(
             EventKind.CI_CERTIFICATION_RECORDED.value,
             *ENTRY_EVENT_KINDS,
             *DISPATCH_EVENT_KINDS,
+            *STUCK_EVENT_KINDS,
         )
     )
 )
 
 
 def lane_for_state(state: TaskState, *, waiting_on_scott: bool = False) -> str:
-    if waiting_on_scott and LANE_BY_STATE[state] not in COLLAPSED_LANES:
+    """hades #607: a stuck task stays in the Stuck lane, under Waiting on me when the
+    question is the operator's; Waiting on me holds the operator's questions on work
+    that is not stuck."""
+    if waiting_on_scott and LANE_BY_STATE[state] not in COLLAPSED_LANES | {"stuck"}:
         return "waiting_on_scott"
     return LANE_BY_STATE[state]
 
@@ -134,10 +145,9 @@ def first_sentence(value: str) -> str:
 
 
 def is_scott_question(escalation: Any) -> bool:
-    kind = str(
-        getattr(escalation, "kind", None) or getattr(escalation, "reason", None) or ""
-    ).lower()
-    return kind in DECISION_KINDS
+    """A question addressed to the operator. A worker's ambiguous_contract or
+    missing_capability is Foundry's to answer (hades #607)."""
+    return is_operator_question(escalation)
 
 
 def issue_link(issue: str, repository_url: str | None) -> dict[str, str]:
@@ -303,7 +313,27 @@ def board_lanes_view(
         if task_ids
         else {}
     )
+    ci_events = {
+        task.id: event
+        for task in built
+        if task.state is _S.CI_CERTIFICATION_FAILED
+        and (event := events.get((task.id, EventKind.CI_CERTIFICATION_RECORDED.value))) is not None
+    }
+    certification_ids = [
+        str(event.payload["certification_id"])
+        for event in ci_events.values()
+        if (event.payload or {}).get("certification_id")
+    ]
+    decisions = getattr(uow, "ci_decisions", None)
+    ci_decisions = (
+        decisions.list_for_certifications(certification_ids)
+        if certification_ids and decisions is not None
+        else ()
+    )
     tasks_by_external = {task.external_id: task for task in tasks}
+    live_external = {
+        task.external_id for task in tasks if LANE_BY_STATE[task.state] not in COLLAPSED_LANES
+    }
 
     cards: dict[str, list[dict[str, Any]]] = {key: [] for key, _name, _meaning in LANES}
     records: dict[str, dict[str, Any]] = {}
@@ -329,6 +359,26 @@ def board_lanes_view(
         )
         fields = _contract_fields(contracts.get(task.id, {}))
         reason = _recorded_reason(task, events) if lane_key == "graveyard" else None
+        stuck = (
+            stuck_reason(
+                stuck_facts(
+                    task,
+                    escalation,
+                    {
+                        kind: event
+                        for kind in STUCK_EVENT_KINDS
+                        if (event := events.get((task.id, kind))) is not None
+                    },
+                    other_tasks=live_external,
+                    ci_cause=ci_cause_for_event(ci_events.get(task.id), ci_decisions),
+                )
+            )
+            if lane_key in REASON_LANES or task.state is _S.AWAITING_INTERNAL_REVIEW
+            else None
+        )
+        waiting_on = findings or _waiting_words(task, lane_key, escalation, events)
+        if stuck is not None and lane_key == "stuck":
+            waiting_on = stuck.as_dict()["owner_words"]
         cards[lane_key].append(
             {
                 "id": task.id,
@@ -340,7 +390,8 @@ def board_lanes_view(
                 "harness": attempt.selected_harness if attempt else None,
                 "model": attempt.selected_model if attempt else None,
                 "tier": fields["tier"],
-                "waiting_on": findings or _waiting_words(task, lane_key, escalation, events),
+                "waiting_on": waiting_on,
+                "stuck": stuck.as_dict() if stuck is not None else None,
                 "age": {
                     "entered_at": entered_at,
                     "label": age_words(max(0, int((now - entered_at).total_seconds()))),
@@ -373,6 +424,23 @@ def board_lanes_view(
             "count": lane_counts[key],
             "cards": ordered,
         }
+        if key == "stuck":
+            lane_document["groups"] = _owner_groups(
+                ordered,
+                lane_counts[key],
+                mine=(
+                    sum(
+                        card["stuck"] is not None and card["stuck"]["group"] == GROUP_ME
+                        for card in ordered
+                    )
+                    if key in selected
+                    else sum(
+                        lane_by_task[task.id] == "stuck"
+                        and is_operator_question(escalation_by_task.get(task.id))
+                        for task in tasks
+                    )
+                ),
+            )
         if key == "wins":
             lane_document["count_today"] = (
                 sum(card["age"]["entered_at"].date() == today for card in ordered)
@@ -384,6 +452,27 @@ def board_lanes_view(
             )
         lanes.append(lane_document)
     return {"generated_at": now, "lanes": lanes, "records": records}
+
+
+def _owner_groups(cards: list[dict[str, Any]], count: int, *, mine: int) -> list[dict[str, Any]]:
+    """hades #607: the Stuck lane split by whose move it is, Waiting on me first. A
+    group names its cards by id; the cards themselves are the lane's."""
+    groups = []
+    for key, name in GROUPS:
+        members = [
+            card
+            for card in cards
+            if ((card["stuck"] or {}).get("group") == GROUP_ME) == (key == GROUP_ME)
+        ]
+        groups.append(
+            {
+                "key": key,
+                "name": name,
+                "count": mine if key == GROUP_ME else max(0, count - mine),
+                "card_ids": [card["id"] for card in members],
+            }
+        )
+    return groups
 
 
 def _wins_today(uow: UnitOfWork, now: datetime, wins: list[Any]) -> int:
@@ -410,6 +499,7 @@ __all__ = [
     "COLLAPSED_LANES",
     "LANES",
     "LANE_BY_STATE",
+    "REASON_LANES",
     "board_lanes_view",
     "first_sentence",
     "is_scott_question",

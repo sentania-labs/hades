@@ -753,12 +753,23 @@ def test_moves_are_offered_only_where_the_state_allows_them() -> None:
     assert offered(_S.SUBMITTED) == ["start", "cancel"]
     assert offered(_S.PROPOSED) == ["approve", "cancel"]
     assert offered(_S.RUNNING) == ["cancel"]
-    assert offered(_S.CI_CERTIFICATION_FAILED) == ["correct_remote", "correct_last", "cancel"]
-    assert offered(_S.PRE_PR_GATES_FAILED, pull_request=False) == ["correct_last", "cancel"]
+    # hades #607: a stuck task, or one with an open escalation, can be sent back to Foundry.
+    assert offered(_S.CI_CERTIFICATION_FAILED) == [
+        "correct_remote",
+        "correct_last",
+        "send_back",
+        "cancel",
+    ]
+    assert offered(_S.PRE_PR_GATES_FAILED, pull_request=False) == [
+        "correct_last",
+        "send_back",
+        "cancel",
+    ]
     assert offered(_S.BLOCKED, escalation=True) == [
         "correct_remote",
         "correct_last",
         "answer",
+        "send_back",
         "cancel",
     ]
     assert offered(_S.AWAITING_ACCEPTANCE) == ["correct_remote", "correct_last", "accept", "cancel"]
@@ -771,6 +782,7 @@ def test_moves_are_offered_only_where_the_state_allows_them() -> None:
         "correct_last",
         "accept",
         "answer",
+        "send_back",
         "cancel",
     }
 
@@ -853,11 +865,14 @@ def test_next_phase_applies_the_default_move_for_the_lane() -> None:
     assert result.lane == "holding_pen" and result.move.key == "start"
     assert result.task.state is _S.SCHEDULED
 
+    # hades #607: a blocked task with the operator's question stays in Stuck (under
+    # Waiting on me) and its next phase is still Answer.
     waiting = store_for(_S.BLOCKED)
-    _blocked_with_escalation(waiting)
-    assert lane_for_state(_S.BLOCKED, waiting_on_scott=True) == "waiting_on_scott"
+    _blocked_with_escalation(waiting).reason = "design_question"
+    assert lane_for_state(_S.BLOCKED, waiting_on_scott=True) == "stuck"
+    assert lane_for_state(_S.AWAITING_ACCEPTANCE, waiting_on_scott=True) == "waiting_on_scott"
     result = next_phase(waiting.uow(), clock, principal=OPERATOR, task_id=TASK_ID, note_text=NOTE)
-    assert result.lane == "waiting_on_scott" and result.move.key == "answer"
+    assert result.lane == "stuck" and result.move.key == "answer"
     assert result.task.state is _S.SCHEDULED
 
     running = store_for(_S.RUNNING)
@@ -927,9 +942,16 @@ def test_the_card_view_reads_a_stuck_task_in_words() -> None:
         "correct_remote",
         "correct_last",
         "answer",
+        "send_back",
         "cancel",
     ]
-    assert card["default_move"] == "correct_remote"
+    # hades #607: the worker's missing capability is Foundry's; the card says so in one
+    # sentence and offers only Send back and Cancel, so no default phase move.
+    assert card["reason"]["key"] == "missing_capability"
+    assert card["reason"]["owner"] == "foundry"
+    assert card["reason"]["quote"].startswith("The image has no gitleaks.")
+    assert card["reason"]["clicks"] == ["send_back", "cancel"]
+    assert card["default_move"] is None
     assert card["links"]["task"] == f"/ui/tasks/{TASK_ID}"
 
 
@@ -984,14 +1006,23 @@ def test_the_card_page_renders_the_stuck_task_and_is_read_only_for_an_observer(
         "Operator notes",
         "Second line, kept as typed.",
         'name="move"',
-        "Correction, resume from the PR branch",
-        'data-action="correct_remote"',
-        "Next phase: Correction, resume from the PR branch",
+        "The worker stopped because it lacks a program or access it needs.",
+        "Whose move: Foundry",
+        "Waiting on Foundry. Nothing for you to do.",
+        'data-action="send_back"',
+        "Send back to Foundry",
+        'data-action="cancel"',
+        "<summary>Details</summary>",
         "Save note",
         "Default move per lane",
         "<td>Waiting on Scott</td><td>In progress</td><td>Answer the open escalation</td>",
     ):
         assert words in html, words
+    # hades #607: only the reason's clicks; no correction or Answer for Foundry's card.
+    assert 'data-action="correct_remote"' not in html
+    assert 'data-action="answer"' not in html
+    assert "Next phase:" not in html
+    assert html.count("<summary>Details</summary>") == 1
     # Newest note first on the page.
     assert html.index("Second line, kept as typed.") < html.index("Older note.")
     assert html.index("Where it is and what it is stuck on") < html.index("Contract</h2>")

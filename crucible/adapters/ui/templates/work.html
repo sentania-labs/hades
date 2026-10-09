@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% import "page.html" as page with context %}
+{% macro work_table(section) -%}
+  <table class="work-table"><thead><tr>{% for column in section.columns %}<th>{{ column }}</th>{% endfor %}</tr></thead><tbody>
+  {% for row in section.rows %}<tr>{% for cell in row %}<td data-label="{{ section.columns[loop.index0] }}">{{ page.render_cell(cell, section.columns[loop.index0]) }}</td>{% endfor %}</tr>{% endfor %}
+  </tbody></table>
+{%- endmacro %}
+{% macro work_body(section) -%}
+  {% if section.note %}<p class="lat-hint work-note">{{ section.note }}</p>{% endif %}
+  {% if section.cards is defined %}
+    {% if section.cards %}<div class="work-cards">{% for item in section.cards %}
+    <article class="board-card work-card" data-state="{{ item.state }}">
+      <a class="board-card-main" href="{{ item.href }}"><span class="board-card-id">{{ safe_value("external id", item.external_id) }}</span>{% if item.title %}<strong>{{ safe_value("title", item.title) }}</strong>{% endif %}</a>
+      <span><span class="lat-badge lat-badge--{{ item.tone }}">{{ item.state_words }}</span></span>
+      <dl class="board-card-facts">{% for label, value in item.facts %}<div><dt>{{ label }}</dt><dd>{{ safe_value(label, value) }}</dd></div>{% endfor %}</dl>
+      {% if item.links %}<div class="board-card-actions">{% for link in item.links %}<a class="lat-btn lat-btn--ghost" href="{{ link.href }}">{{ link.label }}</a>{% endfor %}</div>{% endif %}
+      {% if item.details %}<details class="work-card-details"><summary>Details</summary><dl class="board-card-facts">{% for label, value in item.details %}<div><dt>{{ label }}</dt><dd><code>{{ safe_value(label, value) }}</code></dd></div>{% endfor %}</dl></details>{% endif %}
+    </article>{% endfor %}</div>
+    {% else %}<p class="admin-empty">{{ section.empty or "Nothing to show." }}</p>{% endif %}
+  {% endif %}
+  {% if section.rows is defined %}
+    {% if section.rows %}{{ work_table(section) }}{% else %}<p class="admin-empty">{{ section.empty or "Nothing to show." }}</p>{% endif %}
+  {% endif %}
+  {% if section.panel is defined %}{{ page.render_panel(section.panel) }}{% endif %}
+  {% if section.text is defined %}<pre class="lat-code admin-output">{{ section.text }}</pre>{% endif %}
+{%- endmacro %}
+{% block content %}
+<style>
+  .work-page { display: grid; gap: 12px; min-width: 0; max-width: 100%; }
+  .work-page .lat-card { min-width: 0; }
+  .work-page .lat-card > h2 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-subtle); }
+  .work-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); gap: 8px; }
+  .work-card { min-width: 0; }
+  .work-card-details summary { cursor: pointer; color: var(--ink-subtle); }
+  .work-card code { overflow-wrap: anywhere; white-space: normal; }
+  .work-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .work-table th, .work-table td { text-align: left; vertical-align: top; padding: 6px 8px; border-bottom: 1px solid var(--line-soft); overflow-wrap: anywhere; }
+  .work-table th { color: var(--ink-subtle); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+  .work-table tbody tr:hover td { background: var(--surface-sunken); }
+  .work-page .admin-details summary { cursor: pointer; color: var(--ink-subtle); }
+  @media (max-width: 700px) {
+    .work-page, .work-page * { max-width: 100%; }
+    .work-page .lat-card { padding-left: 10px; padding-right: 10px; }
+    .work-table, .work-table tbody, .work-table tr, .work-table td,
+    .work-page .admin-table, .work-page .admin-table tbody, .work-page .admin-table tr, .work-page .admin-table td { display: block; width: 100%; box-sizing: border-box; }
+    .work-table thead, .work-page .admin-table thead { display: none; }
+    .work-table tr, .work-page .admin-table tr { margin: 0 0 8px; padding: 6px 8px; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--surface); }
+    .work-table td { display: grid; grid-template-columns: minmax(0, 6.5rem) minmax(0, 1fr); gap: 6px; padding: 3px 0; border: 0; }
+    .work-table td::before { content: attr(data-label); color: var(--ink-subtle); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+    .work-page .admin-table td { padding: 3px 0; border: 0; white-space: normal; }
+    .work-page .admin-table-wrap, .work-page .lat-table-scroll { overflow-x: visible; }
+    .work-page pre, .work-page code { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .work-page .admin-form-grid { grid-template-columns: minmax(0, 1fr); }
+    .work-page input, .work-page select, .work-page textarea { max-width: 100%; box-sizing: border-box; }
+  }
+</style>
+<div class="admin-title"><div><h1>{{ heading }}</h1><p>{{ intro }}</p></div></div>
+<div class="work-page">
+  {% for section in sections %}
+  <section class="lat-card"{% if section.anchor %} id="{{ section.anchor }}"{% endif %}>
+    <h2>{{ section.title }}{% if section.count is defined %} <span class="board-count">{{ section.count }}</span>{% endif %}</h2>
+    {{ work_body(section) }}
+    {% if section.details %}<details class="admin-details"><summary>{{ section.details_label or "Details" }}</summary>
+      {% for detail in section.details %}<div class="admin-detail"><h3>{{ detail.title }}</h3>{{ work_body(detail) }}</div>{% endfor %}
+    </details>{% endif %}
+    {% if section.form %}
+    <form class="admin-form" method="post" action="{{ section.form.action }}">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="return_to" value="{{ section.form.return_to or active }}">
+      <div class="admin-form-grid">{% for field in section.form.fields %}{% if field.kind == "grid" %}<div class="admin-form-wide">{% if field.label %}<span class="lat-label">{{ field.label }}</span>{% endif %}
+        <table class="work-table"><thead><tr>{% for column in field.columns %}<th>{{ column }}</th>{% endfor %}</tr></thead><tbody>
+        {% for row in field.rows %}<tr>{% for cell in row %}<td data-label="{{ field.columns[loop.index0] }}">{% if cell.kind == "select" %}<select class="lat-select" name="{{ cell.name }}" aria-label="{{ cell.label or cell.name }}">{% for value, label in cell.options %}<option value="{{ value }}" {% if value == cell.value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+          {% elif cell.kind == "checkbox" %}<input type="checkbox" name="{{ cell.name }}" value="true" aria-label="{{ cell.label or cell.name }}" {% if cell.value %}checked{% endif %}>
+          {% elif cell.kind == "hidden" %}<input type="hidden" name="{{ cell.name }}" value="{{ cell.value }}">{{ cell.label or cell.value }}
+          {% else %}{{ cell.value }}{% endif %}</td>{% endfor %}</tr>{% endfor %}
+        </tbody></table></div>{% elif field.kind == "hidden" %}<input type="hidden" name="{{ field.name }}" value="{{ field.value }}">{% else %}<label><span class="lat-label">{{ field.label }}</span>
+        {% if field.kind == "textarea" %}<textarea class="lat-textarea" rows="{{ field.rows or 5 }}" name="{{ field.name }}" {% if field.required %}required{% endif %}>{{ field.value or "" }}</textarea>
+        {% elif field.kind == "select" %}<select class="lat-select" name="{{ field.name }}">{% for value, label in field.options %}<option value="{{ value }}" {% if field.value is defined and value == field.value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+        {% else %}<input class="lat-input" type="{{ field.kind or 'text' }}" name="{{ field.name }}" value="{{ field.value or '' }}" {% if field.required %}required{% endif %}{% if field.placeholder %} placeholder="{{ field.placeholder }}"{% endif %}>{% endif %}
+      </label>{% endif %}{% endfor %}</div>
+      <button class="lat-btn {% if section.form.danger %}lat-btn--danger{% else %}lat-btn--primary{% endif %}" type="submit">{{ section.form.label }}</button>
+    </form>{% endif %}
+  </section>
+  {% endfor %}
+</div>
+{% endblock %}

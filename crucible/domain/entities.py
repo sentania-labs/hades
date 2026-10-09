@@ -545,7 +545,8 @@ class Escalation:
     decision_id: str | None = None
     last_wake_at: datetime | None = None
     # hades #393: the reason the worker's `blocked.md` named (missing_capability or
-    # ambiguous_contract), None when it named none or the escalation is not a worker's.
+    # ambiguous_contract), or an explicit operator question kind (decision/design).
+    # None means an unclassified escalation, owned by Foundry.
     reason: str | None = None
 
 

@@ -10,6 +10,7 @@ from crucible.application.admin.board_lanes import board_lanes_view
 from crucible.application.board_actions import moves_for_card
 from crucible.domain.entities import Principal, Role
 from crucible.domain.lifecycle import TaskState
+from crucible.domain.stuck_reasons import GROUP_ME
 from crucible.ports.repository import UnitOfWork
 
 CENTRAL = ZoneInfo("America/Chicago")
@@ -18,6 +19,8 @@ ACTION_LABELS = {
     "approve": "Approve scope",
     "accept": "Accept result",
     "cancel": "Cancel",
+    "answer": "Answer",
+    "send_back": "Send back to Foundry",
 }
 # The board's lane key for the projection's Waiting on Scott lane.
 PROJECTION_KEYS = {"waiting_on_me": "waiting_on_scott"}
@@ -35,13 +38,20 @@ def _local(moment: datetime) -> str:
     return moment.astimezone(CENTRAL).isoformat(timespec="seconds")
 
 
-def _card_moves(lane: str, record: dict[str, Any]) -> list[dict[str, str]]:
+def _card_moves(
+    lane: str, record: dict[str, Any], stuck: dict[str, Any] | None = None
+) -> list[dict[str, str]]:
     """At most two moves, chosen by what the lane asks of the operator rather than by
-    the generic move order, so a Waiting on me card always offers Answer."""
+    the generic move order, so a Waiting on me card always offers Answer. A card with a
+    stuck reason offers only that reason's clicks, the first two in its order; the card
+    page offers them all (hades #607)."""
     task = record["task"]
     moves = moves_for_card(
         task, escalation=record["escalation"], pull_request=record["pull_request"]
     )
+    if stuck is not None:
+        by_key = {move["key"]: move for move in moves}
+        return [by_key[key] for key in stuck["clicks"] if key in by_key][:2]
     if task.state is TaskState.PROPOSED:
         moves = [
             next(move for move in moves if move["key"] == "approve"),
@@ -94,7 +104,7 @@ def board_resource(
                         "confirm": move["key"] in REMOVE_LIKE,
                         "note_optional": move["key"] == "decline",
                     }
-                    for move in _card_moves(lane["key"], record)
+                    for move in _card_moves(lane["key"], record, card.get("stuck"))
                 ]
                 if can_act
                 else []
@@ -104,10 +114,22 @@ def board_resource(
     order = {key: index for index, key in enumerate(keys)}
     document["lanes"].sort(key=lambda lane: order[lane["key"]])
     counts = {lane["key"]: lane["count"] for lane in document["lanes"]}
+    # hades #607: what needs the operator is the Waiting on me lane and the Stuck lane's
+    # Waiting on me group, never a card that waits on Foundry.
+    stuck_mine = next(
+        (
+            group["count"]
+            for lane in document["lanes"]
+            if lane["key"] == "stuck"
+            for group in lane.get("groups", [])
+            if group["key"] == GROUP_ME
+        ),
+        0,
+    )
     return {
         "schema_version": "1.0",
         "generated_at": _local(now),
-        "needs_me": counts["waiting_on_me"],
+        "needs_me": counts["waiting_on_me"] + stuck_mine,
         "counts": counts,
         "lanes": document["lanes"],
     }

@@ -12,12 +12,14 @@ from typing import Any
 from crucible.application.admin.board import age_words, ci_summary
 from crucible.application.admin.board_lanes import (
     LANES,
+    REASON_LANES,
     first_sentence,
     issue_link,
 )
+from crucible.application.admin.stuck import task_stuck_reason
 from crucible.application.board_actions import (
     card_lane,
-    default_move,
+    default_move_for,
     default_move_table,
     moves_for_card,
     open_escalation,
@@ -323,7 +325,14 @@ def board_card_view(uow: UnitOfWork, task_id: str, now: datetime) -> dict[str, A
         text["objective"] = run_findings(uow, task.id) or text["objective"]
     notes = list_notes(uow, task.id)
     moves = moves_for_card(task, escalation=escalation, pull_request=pull_request)
-    default = default_move(lane)
+    # hades #607: why it waits, in one sentence, whose move it is and the clicks that
+    # apply; the raw gate and escalation text stays in `stuck` for the Details line.
+    reason = (
+        task_stuck_reason(uow, task, escalation)
+        if lane in REASON_LANES or task.state is TaskState.AWAITING_INTERNAL_REVIEW
+        else None
+    )
+    default = None if reason is not None else default_move_for(lane, escalation)
     return {
         "id": task.id,
         "external_id": task.external_id,
@@ -353,6 +362,7 @@ def board_card_view(uow: UnitOfWork, task_id: str, now: datetime) -> dict[str, A
         "stuck": _stuck_block(
             task, lane, latest, latest_execution, gates, escalation, ci, uow, now
         ),
+        "reason": reason.as_dict() if reason is not None else None,
         "gates": gates,
         "escalation": (
             {
