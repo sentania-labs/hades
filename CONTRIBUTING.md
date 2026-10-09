@@ -59,6 +59,26 @@ cannot. A worker-authored change to the manifests relies on `make manifests`
 and the `e2e-kind` job in CI, and says so in the PR body; a person with
 Docker and kind runs `make deploy-kind` when the change warrants it.
 
+## Rules for workers
+
+1. Never write, type or print a string shaped like a credential (not even
+   in a comment, example, or test fixture): the secret scan reads the diff
+   and transcript; token-shaped placeholders cost three rounds. Use angle-bracket
+   placeholders such as `<github-token>`. Build fake values at runtime.
+2. Run every required verification command after the final commit and edit
+   nothing afterwards: Hades re-runs them in a verifier container and a
+   tree that fails to import there fails the attempt.
+3. The integration tier runs in the worker when the contract declares the
+   Postgres test service (`CRUCIBLE_TEST_DATABASE_URL` is set). Run `make
+   test-integration` whenever it is set because most 0.12 CI failures
+   were integration tests the worker never ran.
+4. What only CI can run: the compose smoke, the kind e2e tier, helm lint
+   until #598. Say so in the report rather than guessing.
+5. Never hard-code the worker checkout path (`/crucible/repo`) in code or
+   tests.
+6. No em-dashes anywhere. Local America/Chicago times in anything the
+   operator reads.
+
 ## Kubernetes manifests
 
 A change under `deploy/` runs `make manifests`. When it touches the workers
