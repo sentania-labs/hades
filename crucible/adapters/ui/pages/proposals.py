@@ -263,7 +263,16 @@ async def answer_proposal(request: Request, task_id: str, ctx: Ctx, uow: UoW) ->
         reason = form.get("reason", "")
         note = form.get("note", "")
         if action == "approve":
-            task = approve_task(uow, ctx.clock, principal=principal, task_id=task_id, reason=reason)
+            # The card page's Approve carries an optional note (hades #576): typed, it
+            # is added to the objective as Approve with note adds it.
+            task = approve_task(
+                uow,
+                ctx.clock,
+                principal=principal,
+                task_id=task_id,
+                reason=reason,
+                note=note if note.strip() else None,
+            )
             message = f"Approved {task.external_id}; it is queued."
         elif action == "approve_with_note":
             if not note.strip():
@@ -273,6 +282,8 @@ async def answer_proposal(request: Request, task_id: str, ctx: Ctx, uow: UoW) ->
             )
             message = f"Approved {task.external_id} with your note; it is queued."
         elif action == "send_back":
+            # The card page's Send back is one click (hades #576); the note is optional there.
+            note = note.strip() or f"Sent back by {principal.name}: {reason}"
             task = send_back_task(
                 uow, ctx.clock, principal=principal, task_id=task_id, reason=reason, note=note
             )

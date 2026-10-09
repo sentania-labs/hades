@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
+from zoneinfo import ZoneInfo
 
 from crucible.application.acceptance import record_acceptance
 from crucible.application.admin.board_lanes import LANES, is_scott_question, lane_for_state
@@ -257,6 +258,9 @@ def apply_move(
             "note_id": note.id,
             "verbatim": note.text,
             "reason": note.text,
+            "acted_at_local": clock.now()
+            .astimezone(ZoneInfo("America/Chicago"))
+            .isoformat(timespec="seconds"),
         },
     )
     deps = deps or CorrectionDeps()

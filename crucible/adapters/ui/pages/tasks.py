@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
 from crucible.adapters.threaded_router import ThreadedAPIRouter
+from crucible.adapters.ui.pages.board import WAIVER_FORMS, board_card_page
 from crucible.adapters.ui.pages.proposals import (
     action_forms,
     batch_section,
@@ -348,26 +349,11 @@ DELIVERY_STATES = (
 )
 
 
-WAIVER_FORMS = (
-    (
-        WAIVE_EXTERNAL_REVIEW,
-        "Waive the remaining external review rounds",
-        "The task stops waiting for the external reviewer and goes on to CI. Use it when "
-        "the reviewer will not review this pull request.",
-        "the external reviewer did not review this pull request",
-    ),
-    (
-        ACCEPT_NO_CI,
-        "Accept that this repository has no CI",
-        "With no check run or workflow run on the head, CI certification is skipped "
-        "instead of waiting. A check that does run is still certified.",
-        "this repository has no CI for this task",
-    ),
-)
-
-
 @router.get("/tasks/{task_id}", response_class=HTMLResponse)
 def task_page(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Response:
+    database_url = str(getattr(ctx, "database_url", ""))
+    if database_url.startswith("postgres"):
+        return board_card_page(request, task_id, ctx, uow)
     found = _require(request, ctx, uow)
     if isinstance(found, RedirectResponse):
         return found
@@ -660,9 +646,11 @@ async def task_decision(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> R
         kind = form.get("kind", "")
         if kind not in (WAIVE_EXTERNAL_REVIEW, ACCEPT_NO_CI):
             raise ConflictError(f"the task page records only waivers, not {kind!r}")
-        reason = (form.get("verbatim") or "").strip()
-        if not reason:
-            raise ConflictError("a waiver needs a reason")
+        # One click is enough (hades #576): with no typed reason the decision records
+        # what it resolves; the principal and the time are recorded either way.
+        reason = (form.get("verbatim") or "").strip() or (
+            f"{principal.name} clicked: {form.get('resolves') or kind}"
+        )
         record_decision(
             uow,
             ctx.clock,

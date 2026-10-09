@@ -977,7 +977,7 @@ def test_the_card_page_renders_the_stuck_task_and_is_read_only_for_an_observer(
         "Second line, kept as typed.",
         'name="move"',
         "Correction, resume from the PR branch",
-        ">Go<",
+        'data-action="correct_remote"',
         "Next phase: Correction, resume from the PR branch",
         "Save note",
         "Default move per lane",
