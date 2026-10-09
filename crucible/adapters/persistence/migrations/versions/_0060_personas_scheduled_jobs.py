@@ -1,7 +1,7 @@
 """Personas and scheduled jobs (hades #208).
 
 Revision ID: 0060_personas_scheduled_jobs
-Revises: 0058_memory_and_decisions
+Revises: 0059_rooms
 
 The number is assigned for FDY-0591 and must not be renumbered in this branch. The
 down revision remains provisional under hades #447.
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision = "0060_personas_scheduled_jobs"
-down_revision = "0058_memory_and_decisions"
+down_revision = "0059_rooms"
 branch_labels = None
 depends_on = None
 

@@ -142,6 +142,23 @@ endpoint's existing role requirements.
 | GET | `/decisions` | The append-only decision ledger, newest said first: `?channel=&limit=` (default 100, at most 500). Any principal. |
 | POST | `/decisions` | Append a line: `principal`, `channel`, `verbatim` required; `said_at` defaults to now; `transcript_ref`, `applies_to`, `acted_by`, `acted_at` optional. Orchestrator or operator role. There is no edit and no delete; the table refuses both. A decision recorded through `POST /tasks/{id}/decisions` is mirrored here with channel `task` and the task id in `applies_to`. |
 
+### Rooms (hades #208, ADR 0031, 28)
+
+Rooms are conversations whose transcript Hades owns. Writes take the orchestrator or operator role; any principal reads. A harness other than `claude_code` is refused with 409.
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/rooms` | Create a room: `kind` (`principal` or `card`), `harness`, `model`, and for a card room `card_task_id` (a task id or external id). 201. |
+| GET | `/rooms` | The rooms, most recently active first: `?limit=&include_closed=`. |
+| GET | `/rooms/{id}` | The room and a bounded window of its newest turns: `?window=` (default 50, at most 500). |
+| POST | `/rooms/{id}/messages` | Inject a user turn: `text`. Starts a runner when none is warm. Returns the turn (201); 503 when a runner cannot be started, with the turn kept. |
+| GET | `/rooms/{id}/stream` | Server-sent events of the room: `room`, `turn`, `delta`, `turn_end`, `closed`: `?after_seq=&max_seconds=`. |
+| POST | `/rooms/{id}/interrupt` | Stop the running turn; 409 when none runs. |
+| POST | `/rooms/{id}/switch` | `harness`, `model`: writes the switch line, stops the runner; the next message starts a new one with the transcript replayed. |
+| POST | `/rooms/{id}/close` | Stop the runner; the room takes nothing more. |
+
+The room's runner uses `/rooms/{id}/session`, `/rooms/{id}/inbox`, `/rooms/{id}/turns/{seq}/events`, `/rooms/{id}/tools/{name}` and `/rooms/{id}/runner/exit` with the room-scoped token Hades mints at each launch; no other token is accepted there, and that token is accepted nowhere else (28).
+
 ### Administration
 
 `/v1/admin/*`, admin role, versioned with the rest: status, harnesses, credentials (validate, probe, login, rotate, remove), images, providers, github, repositories, audit. Every mutation there takes an optional reason, recorded as an audit note, and the few that hand the supervisor work (committing a bootstrap import, rotating or removing a credential) need a live supervisor lease (the operator's direction of 2026-09-29); revoking a token, removing a repository or a credential, and committing a bootstrap import require one (the operator's decision of 2026-09-25, crucible#117). Repository registration through `PUT /v1/admin/repositories/{name}` is one of those mutations; the `PUT /repositories/{name}` above is the older non-administrative form and is unchanged. Detail in 25. `GET /v1/capabilities` gives orchestrator principals the sanitized read-only subset Foundry needs to report an unavailable capability, with its workers, tasks and wakes filtered to the caller's own (an operator sees all).

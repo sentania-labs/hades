@@ -70,6 +70,11 @@ RUN groupadd --gid 1000 crucible && useradd --uid 1000 --gid 1000 --create-home 
 COPY --from=crane /usr/local/bin/crane /usr/local/bin/crane
 WORKDIR /app
 COPY --from=build --chown=crucible:crucible /app /app
+# hades #208: what a room runner is launched with. The service reads both from its
+# working directory: the runner script it mounts into the runner's Pod or container, and
+# the principal identity it puts at the top of every room's session start.
+COPY --chown=crucible:crucible tools/room_runner.py /app/tools/room_runner.py
+COPY --chown=crucible:crucible config/principal/IDENTITY.md /app/config/principal/IDENTITY.md
 USER crucible
 EXPOSE 8080
 CMD ["crucible", "serve", "--all"]

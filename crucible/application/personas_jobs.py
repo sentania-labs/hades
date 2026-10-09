@@ -347,7 +347,8 @@ def last_run_result(uow: UnitOfWork, job: ScheduledJob) -> dict[str, object] | N
         "task_id": task.id,
         "state": task.state.value,
         "findings": run_findings(uow, task.id),
-        "delivery_note": "Rooms API is unavailable; findings are recorded on this run."
+        "delivery_note": "Findings are recorded on this run; the scheduler does not yet "
+        "post them to the principal room."
         if job.results_to == "chat_message"
         else None,
     }

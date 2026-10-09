@@ -19,6 +19,7 @@ from crucible.adapters.api.routers import (
     personas_jobs,
     policies,
     records,
+    rooms,
     supervision,
     tasks,
 )
@@ -54,6 +55,7 @@ def create_app(ctx: AppContext) -> FastAPI:
     app.include_router(harnesses.router, prefix=API_PREFIX)
     app.include_router(admin.router, prefix=API_PREFIX)
     app.include_router(memory.router, prefix=API_PREFIX)
+    app.include_router(rooms.router, prefix=API_PREFIX)
     app.include_router(bootstrap.router, prefix=API_PREFIX)
     app.include_router(catalog.router, prefix=API_PREFIX)
     app.include_router(personas_jobs.router, prefix=API_PREFIX)

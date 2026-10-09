@@ -448,6 +448,12 @@ workers' list. `network:
 none` gives `--network none` and no proxy. Crucible never programs host
 firewall rules.
 
+A room runner (hades #208, 28) is a container on the same workers network behind the
+same egress proxy, hardened as a worker is, with its script, its token file and the room
+token mounted read-only from `rooms/room-<room id>/` under the artifact root and a tmpfs
+for CLAUDE_CONFIG_DIR. It reaches Hades at `rooms.api_url` through the proxy, so under
+`make up` the proxy's allowlist must permit the API's host and port.
+
 ## What the cluster deployment provides instead
 
 Everything above is local operation. On Kubernetes the same service is the api

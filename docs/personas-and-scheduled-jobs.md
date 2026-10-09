@@ -39,16 +39,17 @@ Results destinations behave as follows:
   the opened card shows the objective. The tag changes the display lane only; the
   task still follows the normal execution lifecycle.
 - `chat_message` records the findings on the run and asks the runner to post a
-  system turn in the principal room. The rooms API does not exist yet, so the run
-  records the findings and explicitly says that it could not post the turn.
+  system turn in the principal room. The rooms API (`/v1/rooms`, hades #208) now
+  exists, but the scheduler does not yet write that system turn itself, so the run
+  records the findings and its delivery note says the turn was not posted.
 - `report_only` records the findings on the run without an Inbox or chat delivery.
 
 The contract stores `scheduled_job` metadata, including the job ID, destination,
 tags, and persona tool names. `GET /v1/scheduled_jobs` and the individual job
 response expose `last_run` with the task ID, state, saved findings, and a delivery
 note. Findings come from the latest valid work-attempt completion claim; review
-reports do not replace them. Chat delivery explicitly reports that the rooms API
-is unavailable in this deployment.
+reports do not replace them. Chat delivery explicitly reports that the principal
+room turn was not posted by the scheduler; wiring that post is a follow-up.
 
 Daily and weekly presets generate cron expressions from the selected Central time
 and weekday, including a matching human label. Select Raw cron to use the cron and

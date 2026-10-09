@@ -81,6 +81,15 @@ class IdempotencyKeyReuseError(ApplicationError):
     title = "Idempotency-Key reused with a different body"
 
 
+class RoomRunnerUnavailableError(ApplicationError):
+    """hades #208: a room's runner could not be started. The message that asked for it
+    is already in the room's transcript; the next message tries again."""
+
+    slug = "room-runner-unavailable"
+    status = 503
+    title = "The room runner could not be started"
+
+
 class SupervisorNotLiveError(ApplicationError):
     """25: an administrative mutation is refused when no live supervisor holds the lease,
     so a stale instance cannot administer."""

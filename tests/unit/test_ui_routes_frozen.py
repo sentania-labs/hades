@@ -95,6 +95,8 @@ FROZEN_ACTIONS = [
     "routing-preference",
     "routing-tier",
     "routing-upload",
+    # hades #208: the room idle timeout, `rooms.idle_timeout_minutes`, on the Settings page.
+    "room-idle-timeout",
     "token-create",
     "token-rename",
     "token-revoke",
