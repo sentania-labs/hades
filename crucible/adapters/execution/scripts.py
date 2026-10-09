@@ -1786,16 +1786,31 @@ def gate_probe_script(
     """Run checks in the isolated checkout and keep forged results out of its log.
 
     Each result line also lists, as `missing`, the paths the command names
-    (`named_paths`) that the unchanged tree does not have (hades #517, #608)."""
+    (`named_paths`) that the unchanged tree does not have (hades #517, #608). Every
+    check's paths are looked up before the first command runs, so a check that deletes
+    or creates a file cannot change what any check is recorded as naming."""
     # Never depend on an interpreter that policy required_programs does not
     # guarantee: every worker image has sh, jq and Debian coreutils (timeout).
     program = f"""set -eu
 root=$(mktemp -d)
 trap 'rm -rf "$root"' 0
 cd {_quote(checkout_dir)}
+# hades #517, #608: the paths a check names that the pristine tree lacks, recorded
+# for every check before any command can delete or create one.
+probe_missing() {{
+  index=$1
+  shift
+  : > "$root/missing.$index"
+  for path in "$@"; do
+    if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+      printf '%s\n' "$path" >> "$root/missing.$index"
+    fi
+  done
+}}
 probe_check() {{
-  check_id=$1
-  command=$2
+  index=$1
+  check_id=$2
+  command=$3
   code=0
   timeout --signal=KILL {_quote(str(timeout))} sh -c '
     code=0
@@ -1811,21 +1826,15 @@ probe_check() {{
   if [ "$code" -eq 127 ]; then
     tail -c 1000 "$root/output" > "$root/detail"
   fi
-  # hades #517, #608: the paths the command names that this unchanged tree lacks.
-  : > "$root/missing"
-  shift 2
-  for path in "$@"; do
-    if [ ! -e "$path" ] && [ ! -L "$path" ]; then
-      printf '%s\n' "$path" >> "$root/missing"
-    fi
-  done
   jq -cn --arg id "$check_id" --arg command "$command" --argjson exit "$code" \
-    --rawfile detail "$root/detail" --rawfile missing "$root/missing" \
+    --rawfile detail "$root/detail" --rawfile missing "$root/missing.$index" \
     '{{id: $id, command: $command, exit: $exit, detail: $detail,
       missing: ($missing | split("\n") | map(select(. != "")))}}'
 }}
 """
-    for check in checks:
+    for index, check in enumerate(checks):
         paths = " ".join(_quote(path) for path in named_paths(str(check["command"])))
-        program += f"probe_check {_quote(check['id'])} {_quote(check['command'])} {paths}\n"
+        program += f"probe_missing {index} {paths}\n"
+    for index, check in enumerate(checks):
+        program += f"probe_check {index} {_quote(check['id'])} {_quote(check['command'])}\n"
     return program

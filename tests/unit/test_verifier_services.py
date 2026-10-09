@@ -378,6 +378,46 @@ def test_probe_script_reports_the_named_paths_the_unchanged_tree_lacks(tmp_path:
     ]
 
 
+def test_probe_script_looks_up_named_paths_before_any_command_runs(tmp_path: Path) -> None:
+    """A check that deletes a file the unchanged tree has is not `new file named`, and a
+    check that creates its absent file before failing keeps that proof."""
+    if shutil.which("jq") is None:
+        pytest.skip("jq is not on this machine")
+    origin = tmp_path / "origin"
+    (origin / "tests" / "unit").mkdir(parents=True)
+    (origin / "tests" / "unit" / "test_old.py").write_text("")
+    _git(origin, "init", "-b", "main")
+    _git(origin, "add", ".")
+    _git(origin, "commit", "-m", "base")
+    checkout = tmp_path / "checkout"
+    subprocess.run(
+        ["sh", "-c", scripts.gate_probe_checkout_script(str(origin), "main", str(checkout))],
+        check=True,
+        capture_output=True,
+    )
+    checks = [
+        {"id": "V1", "command": "rm tests/unit/test_old.py"},
+        {"id": "V2", "command": f"touch {NEW_TEST} && exit 1"},
+        {"id": "V3", "command": f"test -f {NEW_TEST}"},
+    ]
+    result = subprocess.run(
+        ["sh", "-c", scripts.gate_probe_script(str(checkout), checks, 5)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    rows = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [(row["id"], row["exit"], row["missing"]) for row in rows] == [
+        ("V1", 0, []),
+        ("V2", 1, [NEW_TEST]),
+        ("V3", 0, [NEW_TEST]),
+    ]
+    assert probe_proof(rows[0]["exit"], 0, tuple(rows[0]["missing"])) != "new file named"
+    assert probe_proof(rows[1]["exit"], 0, tuple(rows[1]["missing"])) == "new file named"
+
+
 # ----- the verification log keeps its head and its tail (hades #608) -----------
 
 
@@ -409,6 +449,21 @@ def test_a_log_of_invalid_bytes_stays_within_the_cap(tmp_path: Path) -> None:
     assert len(head_and_tail(log).encode("utf-8")) <= VERIFICATION_LOG_LIMIT
     log.write_bytes(b"\xff" * (VERIFICATION_LOG_LIMIT - 10))
     assert len(head_and_tail(log).encode("utf-8")) <= VERIFICATION_LOG_LIMIT
+
+
+def test_invalid_bytes_near_the_cap_keep_the_head_and_the_tail(tmp_path: Path) -> None:
+    """Each invalid byte grows to three once decoded; the trim counts bytes, not
+    characters, so the first error is not cut away with the excess."""
+    log = tmp_path / "V1.log"
+    first = b"E   first error\n"
+    summary = b"1 failed in 0.10s\n"
+    for size in (VERIFICATION_LOG_LIMIT - 100, VERIFICATION_LOG_LIMIT * 2):
+        log.write_bytes(first + b"\xff" * (size - len(first) - len(summary)) + summary)
+        kept = head_and_tail(log)
+        assert kept.startswith(first.decode())
+        assert kept.endswith(summary.decode())
+        assert len(kept.encode("utf-8")) <= VERIFICATION_LOG_LIMIT
+        assert len(kept.encode("utf-8")) > VERIFICATION_LOG_LIMIT // 2
 
 
 def test_the_verification_run_carries_the_head_and_the_tail(tmp_path: Path) -> None:

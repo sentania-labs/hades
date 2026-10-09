@@ -134,14 +134,20 @@ def head_and_tail(path: Path, limit: int = VERIFICATION_LOG_LIMIT) -> str:
 
 def _bounded(head: str, marker: str, last: str, limit: int) -> str:
     """`head`, `marker` and `last` within `limit` bytes once encoded. A byte that decoded
-    as a replacement character grows to three, so what is over comes off the head's end
-    first, and off the tail's start only when the head is gone."""
-    excess = len((head + marker + last).encode("utf-8")) - limit
-    if excess > 0:
-        head = head[: max(0, len(head) - excess)]
-        excess = len((head + marker + last).encode("utf-8")) - limit
-        if excess > 0:
-            last = last[excess:]
+    as a replacement character grows to three, so the budget is counted in encoded bytes
+    and shared between the two ends, each keeping at least half of what it may: the first
+    error and the runner's summary both survive malformed output. A cut that splits a
+    character drops that character."""
+    head_bytes = head.encode("utf-8")
+    marker_bytes = marker.encode("utf-8")
+    last_bytes = last.encode("utf-8")
+    if len(head_bytes) + len(marker_bytes) + len(last_bytes) <= limit:
+        return head + marker + last
+    budget = max(0, limit - len(marker_bytes))
+    keep_last = min(len(last_bytes), budget - min(len(head_bytes), budget // 2))
+    keep_head = min(len(head_bytes), budget - keep_last)
+    head = head_bytes[:keep_head].decode("utf-8", "ignore")
+    last = last_bytes[len(last_bytes) - keep_last :].decode("utf-8", "ignore")
     return head + marker + last
 
 

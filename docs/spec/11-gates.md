@@ -55,7 +55,8 @@ policy's gate groups. It launches no review attempt: the judgement is mechanical
 The verifier runs beside the attempt's declared test services, told the same
 `CRUCIBLE_TEST_DATABASE_URL` as the worker (05b, 08, 26). Each command's log is kept
 as a `verify/<id>.log` artifact of at most 64 KB. A longer log keeps its head and its
-tail, half each, with one line in place of the middle saying how many bytes the log
+tail, half each counted in encoded bytes (so undecodable output cannot crowd out
+either end), with one line in place of the middle saying how many bytes the log
 had: the first error is near the head, and the summary the runner prints last is at
 the tail.
 
@@ -70,7 +71,9 @@ attempt. A check proves something only when it fails on the unchanged tree:
   a `/` or ending in `.py`, a pytest node id's `::name` cut off) fails there by
   definition, whatever its runner exits (pytest exits 4, or 2, for a path it cannot
   find). The probe's evidence records it as `new file named` with the paths. This is
-  how a new test file the attempt adds is proof; it is never a reason to block.
+  how a new test file the attempt adds is proof; it is never a reason to block. Every
+  check's paths are looked up on the fresh checkout before the first command runs, so
+  a check that deletes or creates a file changes nothing about what any check names.
 - A check that exits other than its `expect_exit` fails on its own.
 - A check that passes on the unchanged tree is not proof.
 - Exit 127 (the program is missing) blocks the task as `check_cannot_run`.
