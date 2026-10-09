@@ -66,7 +66,13 @@ Docker and kind runs `make deploy-kind` when the change warrants it.
 1. Never write, type or print a string shaped like a credential (not even
    in a comment, example, or test fixture): the secret scan reads the diff
    and transcript; token-shaped placeholders cost three rounds. Use angle-bracket
-   placeholders such as `<github-token>`. Build fake values at runtime.
+   placeholders such as `<github-token>`. Build fake values at runtime. Search
+   with `grep -l` or `grep -c`, never a command that prints a matching line into
+   the transcript. A failure names the input, line, rule and a redacted excerpt,
+   and for a transcript match the command and a redacted window artifact
+   (docs/spec/11). A fixture the repository declares in `.gitleaksignore` or the
+   `.gitleaks.toml` allowlist on main is allowed by both the gate and `make scan`;
+   an entry added on the branch does not allow the branch's own match.
 2. Run every required verification command after the final commit and edit
    nothing afterwards: Hades re-runs them in a verifier container and a
    tree that fails to import there fails the attempt.

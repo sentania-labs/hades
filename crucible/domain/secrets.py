@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 
 _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -40,19 +40,179 @@ class SecretMatch:
     path: str
     pattern: str
     excerpt: str = ""
+    # FDY-0618: the 1-based line of the input the match is on (the new file's line for a
+    # diff), the redacted text around it on that line, and whether the value is one the
+    # repository itself declares as a fixture, which makes the match advisory.
+    line: int | None = None
+    context: str = ""
+    advisory: bool = False
 
 
 def redact_excerpt(value: str) -> str:
-    """Show enough of a matched value to identify it without disclosing it."""
-    return f"{value[:3]}...{value[-3:]}"
+    """Show enough of a matched value to identify it without disclosing it: its first
+    four and last three characters and its length (FDY-0618)."""
+    return f"{value[:4]}...{value[-3:]} ({len(value)} chars)"
 
 
-def match_text(text: str, *, path: str = "") -> SecretMatch | None:
-    """Return the first match with its rule and safely abbreviated value."""
+def _redacted_marker(value: str) -> str:
+    return f"[{redact_excerpt(value)}]"
+
+
+@dataclass(frozen=True, slots=True)
+class _Hit:
+    pattern: str
+    start: int
+    end: int
+    value: str
+
+
+def _hits(text: str) -> list[_Hit]:
+    """Every match in `text`, in order, none overlapping another: where two patterns
+    match at overlapping places the earlier one wins, and at the same place the one
+    listed first."""
+    found = sorted(
+        (
+            (match.start(), index, name, match)
+            for index, (name, pattern) in enumerate(_PATTERNS)
+            for match in pattern.finditer(text)
+        ),
+        key=lambda item: (item[0], item[1]),
+    )
+    hits: list[_Hit] = []
+    end = -1
+    for start, _index, name, match in found:
+        if start < end:
+            continue
+        hits.append(_Hit(name, start, match.end(), match.group(0)))
+        end = match.end()
+    return hits
+
+
+def _redacted(text: str, hits: list[_Hit]) -> tuple[str, list[tuple[int, int]]]:
+    """`text` with each hit replaced by its marker, and where each marker landed."""
+    parts: list[str] = []
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    length = 0
+    for hit in hits:
+        parts.append(text[cursor : hit.start])
+        length += hit.start - cursor
+        marker = _redacted_marker(hit.value)
+        spans.append((length, length + len(marker)))
+        parts.append(marker)
+        length += len(marker)
+        cursor = hit.end
+    parts.append(text[cursor:])
+    return "".join(parts), spans
+
+
+def redact_line(text: str, limit: int = 400) -> str:
+    """One line with every secret-shaped run replaced by its first four and last three
+    characters and its length, cut to `limit` characters (FDY-0618)."""
+    shown, _ = _redacted(text.rstrip("\r\n"), _hits(text))
+    return shown if len(shown) <= limit else shown[:limit] + "[...]"
+
+
+# How much of the line on each side of a match its context keeps.
+CONTEXT_WIDTH = 60
+
+
+def _context(shown: str, span: tuple[int, int], width: int = CONTEXT_WIDTH) -> str:
+    start = max(span[0] - width, 0)
+    end = min(span[1] + width, len(shown))
+    return (
+        ("[...]" if start > 0 else "")
+        + shown[start:end].strip()
+        + ("[...]" if end < len(shown) else "")
+    )
+
+
+def match_line(
+    text: str,
+    *,
+    path: str = "",
+    line: int | None = None,
+    fixture: Callable[[str], bool] | None = None,
+    skip: Callable[[str, str, str], bool] | None = None,
+) -> list[SecretMatch]:
+    """Every match on one line, each with its rule, abbreviated value and the redacted
+    text around it (FDY-0618). `skip(rule, value, line_text)` drops a match the
+    repository allows; `fixture(value)` marks one whose value the repository declares
+    as a fixture advisory. Neither value is kept."""
+    text = text.rstrip("\r\n")
+    hits = _hits(text)
+    if not hits:
+        return []
+    shown, spans = _redacted(text, hits)
+    found: list[SecretMatch] = []
+    for hit, span in zip(hits, spans, strict=True):
+        if skip is not None and skip(hit.pattern, hit.value, text):
+            continue
+        found.append(
+            SecretMatch(
+                path=path,
+                pattern=hit.pattern,
+                excerpt=redact_excerpt(hit.value),
+                line=line,
+                context=_context(shown, span),
+                advisory=fixture is not None and fixture(hit.value),
+            )
+        )
+    return found
+
+
+def match_lines(
+    text: str,
+    *,
+    path: str = "",
+    fixture: Callable[[str], bool] | None = None,
+    limit: int = 50,
+) -> list[SecretMatch]:
+    """Every match in a text, line by line, at most `limit` of them. A match no single
+    line holds (a pattern that may span a line break) is still reported, from the whole
+    text, so the line view never reads less than `match_text` does."""
+    found: list[SecretMatch] = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        found.extend(match_line(line, path=path, line=number, fixture=fixture))
+        if len(found) >= limit:
+            return found[:limit]
+    if not found:
+        whole = match_text(text, path=path, fixture=fixture)
+        if whole is not None:
+            found.append(whole)
+    return found
+
+
+def match_text(
+    text: str, *, path: str = "", fixture: Callable[[str], bool] | None = None
+) -> SecretMatch | None:
+    """Return the first match with its rule, safely abbreviated value, line and the
+    redacted text around it; `fixture(value)` marks a declared fixture value advisory."""
     for name, pattern in _PATTERNS:
         match = pattern.search(text)
         if match is not None:
-            return SecretMatch(path=path, pattern=name, excerpt=redact_excerpt(match.group(0)))
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line_end = text.find("\n", match.start())
+            line_text = text[line_start : len(text) if line_end < 0 else line_end]
+            hits = _hits(line_text)
+            shown, spans = _redacted(line_text, hits)
+            where = match.start() - line_start
+            context = next(
+                (
+                    _context(shown, span)
+                    for hit, span in zip(hits, spans, strict=True)
+                    if hit.start <= where < hit.end
+                ),
+                _redacted_marker(match.group(0)),
+            )
+            return SecretMatch(
+                path=path,
+                pattern=name,
+                excerpt=redact_excerpt(match.group(0)),
+                line=text.count("\n", 0, match.start()) + 1,
+                context=context,
+                advisory=fixture is not None and fixture(match.group(0)),
+            )
     return None
 
 
@@ -140,22 +300,24 @@ def named_secret_pattern_expressions() -> tuple[tuple[str, str], ...]:
     )
 
 
-def _walk(value: object, path: str) -> Iterator[SecretMatch]:
+def _walk(value: object, path: str, fixture: Callable[[str], bool] | None) -> Iterator[SecretMatch]:
     if isinstance(value, str):
-        hit = match_text(value, path=path)
+        hit = match_text(value, path=path, fixture=fixture)
         if hit is not None:
             yield hit
     elif isinstance(value, dict):
         for key, item in value.items():
-            yield from _walk(item, f"{path}.{key}" if path else str(key))
+            yield from _walk(item, f"{path}.{key}" if path else str(key), fixture)
     elif isinstance(value, list | tuple):
         for index, item in enumerate(value):
-            yield from _walk(item, f"{path}[{index}]")
+            yield from _walk(item, f"{path}[{index}]", fixture)
 
 
-def find_secrets(document: object, root: str = "") -> list[SecretMatch]:
+def find_secrets(
+    document: object, root: str = "", *, fixture: Callable[[str], bool] | None = None
+) -> list[SecretMatch]:
     """Walk a nested document and report every string that matches a secret pattern."""
-    return list(_walk(document, root))
+    return list(_walk(document, root, fixture))
 
 
 # What a redaction writes in place of a match. The pattern name is kept so a reader of a

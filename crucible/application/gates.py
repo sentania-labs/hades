@@ -45,6 +45,7 @@ from crucible.domain.gates import (
 )
 from crucible.domain.ids import new_id
 from crucible.domain.lifecycle import TaskState
+from crucible.domain.secret_findings import no_secrets_correction
 from crucible.ports.clock import Clock
 from crucible.ports.repository import UnitOfWork
 
@@ -257,7 +258,7 @@ def evaluate_and_advance(
                 + (
                     f"{outcomes['no_secrets'].detail}. The next pre_pr_gates correction "
                     f"defaults to last_attempt at {task.head_sha}, where the match can be "
-                    "removed; remote_branch is an explicit alternative."
+                    "removed; remote_branch is an explicit alternative." + _secret_guidance(gi)
                     if outcomes.get("no_secrets") is not None
                     and outcomes["no_secrets"].result is GateResult.FAIL
                     else f"The next pre_pr_gates correction defaults to last_attempt at "
@@ -330,6 +331,22 @@ def evaluate_and_advance(
             extra_links={"artifacts": f"/v1/attempts/{attempt.id}/artifacts"},
         )
     return outcomes
+
+
+def _scanner_findings(gi: GateInput) -> list[dict[str, Any]]:
+    """The scanner_result findings the no_secrets gate judged (FDY-0618)."""
+    item = gi.one("scanner_result")
+    findings = item.payload.get("findings") if item is not None else None
+    return [f for f in findings if isinstance(f, dict)] if isinstance(findings, list) else []
+
+
+def _secret_guidance(gi: GateInput) -> str:
+    """What Hades adds to the next correction's instructions for a no_secrets failure,
+    shown in the wake so Foundry reads the same words (FDY-0618)."""
+    composed = no_secrets_correction(_scanner_findings(gi))
+    if not composed:
+        return ""
+    return f" Hades adds this to that correction's instructions:\n{composed}\n"
 
 
 def counts_for_metrics(outcomes: dict[str, GateOutcome]) -> tuple[int, int]:

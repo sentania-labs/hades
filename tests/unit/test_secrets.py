@@ -75,7 +75,7 @@ def test_find_secrets_reports_path_not_value() -> None:
     doc = {"a": {"b": ["fine", _join("ghp_", _repeat("c", 36))]}, "c": "ok"}
     matches = find_secrets(doc)
     assert [(m.path, m.pattern) for m in matches] == [("a.b[1]", "github_token")]
-    assert matches[0].excerpt == "ghp...ccc"
+    assert matches[0].excerpt == "ghp_...ccc (40 chars)"
     assert _repeat("c", 4) not in repr(matches)
 
 
