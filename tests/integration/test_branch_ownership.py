@@ -1,63 +1,74 @@
-"""Branch ownership enforcement: integration tests for submit.
-
-hades #564: verify that submit_task refuses a duplicate work_branch
-and derives crucible/<external_id> when omitted, through the API.
-"""
+"""hades #564: a work branch belongs to one task, through the API and the database."""
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from fastapi.testclient import TestClient
+from httpx import Response
 
+from crucible.adapters.api.deps import AppContext
+from crucible.domain.lifecycle import TaskState
 from tests.fixtures import contract_document
 
 pytestmark = pytest.mark.integration
 
+BRANCH = "crucible/FDY-0524"
 
-def test_submit_refuses_duplicate_work_branch(client: TestClient) -> None:
-    """AC1, AC4: submit returns 422 naming the owning task when the branch is already
-    owned by another task on the same repository."""
-    # First task submits successfully with an explicit branch
-    r1 = client.post(
-        "/v1/tasks",
-        json=contract_document(external_id="EX-OLD", work_branch="crucible/dup-branch"),
-    )
-    assert r1.status_code == 201
 
-    # Second task tries the same branch - should be refused
-    r2 = client.post(
-        "/v1/tasks",
-        json=contract_document(external_id="EX-NEW", work_branch="crucible/dup-branch"),
-    )
-    assert r2.status_code == 422
-    body = r2.json()
+def _document(external_id: str, branch: str | None = BRANCH) -> dict[str, object]:
+    document = contract_document(external_id=external_id)
+    if branch is None:
+        del document["repository"]["work_branch"]
+    else:
+        document["repository"]["work_branch"] = branch
+    return document
+
+
+def _refused_naming(response: Response, owner: str) -> None:
+    assert response.status_code == 422, response.text
+    body = response.json()
     assert body["type"] == "urn:crucible:problem:contract-invalid"
-    assert any("EX-OLD" in e.get("message", "") for e in body["errors"])
+    (problem,) = [e for e in body["errors"] if e["path"] == "repository.work_branch"]
+    assert owner in problem["message"] and BRANCH in problem["message"]
 
 
-def test_submit_accepts_omitted_work_branch(client: TestClient) -> None:
-    """AC2: a contract with no work_branch is accepted and derives crucible/<external_id>.
+def test_submit_refuses_another_tasks_branch_in_every_state(
+    client: TestClient, ctx: AppContext
+) -> None:
+    """AC1: the copied-contract incident of 2026-10-08; submitted, cancelled and merged
+    owners all keep their branch, and the 422 names the owner."""
+    owner = client.post("/v1/tasks", json=_document("FDY-0524"))
+    assert owner.status_code == 201, owner.text
+    owner_id = owner.json()["id"]
 
-    The derived branch must not conflict with the first task's branch,
-    confirming the derivation happened at submit time.
-    """
-    base = contract_document(external_id="EX-NOBRANCH")
-    del base["repository"]["work_branch"]
+    _refused_naming(client.post("/v1/tasks", json=_document("FDY-0525")), "FDY-0524")
 
-    r = client.post("/v1/tasks", json=base)
-    assert r.status_code == 201, r.text
-    task_id = r.json()["id"]
-
-    # Verify the stored contract has the derived branch
-    r2 = client.get(f"/v1/tasks/{task_id}")
-    assert r2.status_code == 200
-    body = r2.json()
-    repo_section = body.get("repository", {})
-    assert repo_section.get("work_branch") == "crucible/EX-NOBRANCH"
-
-    # A third task with an explicit different branch should still work
-    r3 = client.post(
-        "/v1/tasks",
-        json=contract_document(external_id="EX-OTHER", work_branch="crucible/other-branch"),
+    cancelled = client.post(
+        f"/v1/tasks/{owner_id}/cancel",
+        json={"reason": "test", "verbatim": "cancel", "decided_by": "test"},
     )
-    assert r3.status_code == 201
+    assert cancelled.status_code == 200, cancelled.text
+    _refused_naming(client.post("/v1/tasks", json=_document("FDY-0526")), "FDY-0524")
+
+    with ctx.uow_factory() as uow:
+        task = uow.tasks.get(owner_id)
+        assert task is not None
+        uow.tasks.save(replace(task, state=TaskState.MERGED))
+        uow.commit()
+    _refused_naming(client.post("/v1/tasks", json=_document("FDY-0527")), "FDY-0524")
+
+    # Nothing was stored for the refused submissions.
+    listed = client.get("/v1/tasks", params={"repository": "example-service"}).json()
+    assert [t["external_id"] for t in listed["items"]] == ["FDY-0524"]
+
+
+def test_an_omitted_branch_is_derived_and_owned(client: TestClient) -> None:
+    """AC2: no repository.work_branch is accepted and stored as crucible/<external_id>;
+    the derived branch is then the submitter's like any other."""
+    response = client.post("/v1/tasks", json=_document("FDY-0524", branch=None))
+    assert response.status_code == 201, response.text
+    view = client.get(f"/v1/tasks/{response.json()['id']}").json()
+    assert view["contract"]["repository"]["work_branch"] == BRANCH
+    _refused_naming(client.post("/v1/tasks", json=_document("FDY-0600")), "FDY-0524")

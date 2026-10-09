@@ -1336,10 +1336,6 @@ def publisher_script(
     token_source: str = "stdin",
     bundle_sha256: str = "",
     owned_remote_heads: tuple[str, ...] = (),
-    repo_owner: str = "",
-    repo_name: str = "",
-    own_pr_number: int | None = None,
-    attempt_id: str = "",
 ) -> str:
     """Fetch the base from the remote and the branch from the bundle, then push (23).
 
@@ -1380,20 +1376,19 @@ EXPECTED={_quote(expected_head)}
 CLONE_URL={_quote(clone_url)}
 SEAL={_quote(bundle_sha256)}
 OWNED_HEADS={_quote(" ".join(owned_remote_heads))}
-# hades #564: open pull request on the work branch from another task.
-REPO_OWNER={_quote(repo_owner)}
-REPO_NAME={_quote(repo_name)}
-OWN_PR_NUMBER={own_pr_number if own_pr_number is not None else 0}
-# Derive owner/name from CLONE_URL if not provided explicitly by the adapter.
-if [ -z "$REPO_OWNER" ] && [ -n "$CLONE_URL" ]; then
-  REPO_SLUG=$(echo "$CLONE_URL" | sed -e 's|.*github.com[/:]||' -e 's|.git$||' -e 's|.git$||')
-  REPO_OWNER=$(echo "$REPO_SLUG" | cut -d'/' -f1)
-  REPO_NAME=$(echo "$REPO_SLUG" | cut -d'/' -f2)
-fi
 # hades #443: digest-commit author and message prefix for remote-branch checks.
 DIGEST_AUTHOR={_quote(DIGEST_AUTHOR_LOGIN)}
 DIGEST_MSG_PREFIX={_quote(DIGEST_MESSAGE_PREFIX)}
 drop_token() {{ {drop}; }}
+# hades #564: the non-empty Crucible-Attempt values on stdin, one per line, trimmed.
+attempt_values() {{ sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d'; }}
+# hades #564: the number of a pull request whose head is commit $1 on the remote, from
+# its refs/pull/<n>/head refs; git only, as the API calls stay on Crucible's side.
+pull_request_at() {{
+  git ls-remote origin 'refs/pull/*/head' 2>> "$OUT/publisher.log" \
+    | awk -v sha="$1" '$1 == sha {{ print $2; exit }}' \
+    | sed -e 's|^refs/pull/||' -e 's|/head$||' || true
+}}
 mkdir -p "$OUT"
 # A retried publication of the same attempt writes into the same directory; nothing a
 # previous run left may be read back as this run's outcome.
@@ -1409,7 +1404,6 @@ stat -L -c '%a' "$TOKDIR/token" > "$OUT/token-mode.txt"
 unset GIT_TRACE GIT_TRACE_CURL GIT_CURL_VERBOSE GIT_TRACE_PACKET GIT_TRACE2 || true
 export GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
 export HOME=/home/worker LC_ALL=C
-export CRUCIBLE_ATTEMPT_ID={_quote(attempt_id)}
 export CRUCIBLE_TOKEN_FILE="$TOKDIR/token"
 export CRUCIBLE_CREDENTIAL_HOST={_quote(credential_host)}
 export CRUCIBLE_AUTHOR_NAME={_quote(author_name)}
@@ -1464,69 +1458,31 @@ if [ -s "$OUT/ls-remote-before.txt" ]; then
   REMOTE=$(git rev-parse FETCH_HEAD)
 fi
 printf '%s\n' "$REMOTE" > "$OUT/remote-head-before.txt"
-# hades #564: determine own_pr_number from the PR list if OWNED_HEADS already
-# includes EXPECTED_HEAD (the expected head is our own branch tip).
-OWN_PR_NUMBER=0
-if [ -n "$EXPECTED_HEAD" ] && echo "$OWNED_HEADS" | grep -q "^$EXPECTED_HEAD$"; then
-  OWN_PR_URL="https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/pulls"
-  OWN_PR_URL="$OWN_PR_URL?state=open&head=$REPO_OWNER:$WORK_BRANCH"
-  OWN_PR_NUMBER=$(curl -s -f --max-time 10 \
-    -H "Authorization: token ***" \
-    "$OWN_PR_URL" 2>/dev/null | python3 -c "
-import json,sys
-prs=json.loads(sys.stdin.read())
-for p in prs:
-    head_sha=p.get('head',{{}}).get('sha')
-    if head_sha=='${{EXPECTED_HEAD}}':
-        print(p['number'])
-        sys.exit(0)
-sys.exit(1)
-" 2>/dev/null) || OWN_PR_NUMBER=0
-fi
 if [ -n "$REMOTE" ]; then
   echo remote-ownership > "$OUT/step.txt"
   OWNED=no
   case " $OWNED_HEADS " in *" $REMOTE "*) OWNED=yes ;; esac
-  # hades #564: the Crucible-Attempt trailer must match our own attempt; a trailer
-  # from another task's attempt no longer counts as ownership.
+  # hades #564: a trailer proves ownership only when it names this task, as the sealed
+  # bundle's own commits name it. A tip Hades pushed for another task is foreign, and
+  # one that is the head of a pull request is named with that pull request.
+  OWN_ATTEMPTS=$(git log --format='%(trailers:key=Crucible-Attempt,valueonly)' \
+      "refs/remotes/origin/$BASE_REF..refs/heads/crucible-publish" | attempt_values)
   REMOTE_ATTEMPT=$(git show -s --format='%(trailers:key=Crucible-Attempt,valueonly)' "$REMOTE" \
-      2>/dev/null | head -1 | tr -d '[:space:]') || REMOTE_ATTEMPT=""
-  if [ -n "$CRUCIBLE_ATTEMPT_ID" ] && [ "$REMOTE_ATTEMPT" = "$CRUCIBLE_ATTEMPT_ID" ]; then
-    OWNED=yes
-  fi
-  # hades #564: refuse when the remote branch is the head of an open pull request
-  # from another task; a Hades-pushed tip from another task is foreign for this
-  # purpose, so the trailer alone no longer proves ownership.
-  if [ -n "$REPO_OWNER" ] && [ -n "$REPO_NAME" ]; then
-    _AUTH_TOKEN=$(cat "$CRUCIBLE_TOKEN_FILE")
-    PR_URL="https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/pulls?state=open&head=$REPO_OWNER:$WORK_BRANCH"
-    PR_RESP=$(curl -s -f --max-time 10 \
-      -H "Authorization: token ***" \
-      "$PR_URL" 2>> "$OUT/publisher.log") || {{
-      # hades #564: the PR lookup failed (network error, rate-limit, auth failure);
-      # we cannot prove branch ownership, so refuse publication (fail closed).
-      printf 'remote ownership PR lookup failed for %s on branch %s\\n' \
-        "$REPO_OWNER/$REPO_NAME" "$WORK_BRANCH" > "$OUT/error.txt"
-      drop_token; exit 5
-    }}
-    if [ -n "$PR_RESP" ] && [ "$PR_RESP" != "[]" ]; then
-      # Check if any open PR on this branch is NOT our own.
-      FELLOW=$(echo "$PR_RESP" | python3 -c "
-import json,sys
-prs=json.loads(sys.stdin.read())
-own=$OWN_PR_NUMBER
-for p in prs:
-    num=p.get('number')
-    if num!=own:
-        print(str(num))
-        sys.exit(0)
-sys.exit(1)
-" 2>/dev/null) || FELLOW=""
-      if [ -n "$FELLOW" ]; then
-        printf 'foreign pull request %s on branch %s from another task\n' \
-          "$FELLOW" "$WORK_BRANCH" > "$OUT/error.txt"
-        drop_token; exit 5
+      | attempt_values | head -n 1)
+  if [ "$OWNED" != yes ] && [ -n "$REMOTE_ATTEMPT" ]; then
+    if printf '%s\n' "$OWN_ATTEMPTS" | grep -Fxq -- "$REMOTE_ATTEMPT"; then
+      OWNED=yes
+    else
+      PULL=$(pull_request_at "$REMOTE")
+      if [ -n "$PULL" ]; then
+        printf '%s %s; a branch belongs to one task\n' \
+          "branch $WORK_BRANCH is the head of pull request #$PULL" \
+          "of task $REMOTE_ATTEMPT (tip $REMOTE)" > "$OUT/error.txt"
+      else
+        printf 'foreign remote commit %s pushed for task %s; a branch belongs to one task\n' \
+          "$REMOTE" "$REMOTE_ATTEMPT" > "$OUT/error.txt"
       fi
+      drop_token; exit 5
     fi
   fi
   # hades #443: if the remote is ahead only by digest commits, treat it as owned.
@@ -1555,8 +1511,9 @@ sys.exit(1)
   fi
   if [ "$OWNED" != yes ]; then
     AUTHOR=$(git show -s --format='%an <%ae>' "$REMOTE")
-    printf 'foreign remote commit %s by %s; no Hades push record or attempt trailer\n' \
-      "$REMOTE" "$AUTHOR" > "$OUT/error.txt"
+    PULL=$(pull_request_at "$REMOTE")
+    printf 'foreign remote commit %s by %s; no Hades push record or attempt trailer%s\n' \
+      "$REMOTE" "$AUTHOR" "${{PULL:+; it is the head of pull request #$PULL}}" > "$OUT/error.txt"
     drop_token; exit 5
   fi
 fi

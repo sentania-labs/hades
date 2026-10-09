@@ -144,17 +144,6 @@ class PullRequests:
         row = self._s.scalars(stmt).one_or_none()
         return self._to_entity(row) if row else None
 
-    def get_by_number(
-        self, repository_id: str, pr_number: int, *, for_update: bool = False
-    ) -> PullRequest | None:
-        stmt = select(PullRequestRow).where(
-            (PullRequestRow.repository_id == repository_id) & (PullRequestRow.number == pr_number)
-        )
-        if for_update:
-            stmt = stmt.with_for_update()
-        row = self._s.scalar(stmt)
-        return self._to_entity(row) if row else None
-
     def save(self, pull_request: PullRequest) -> None:
         row = self._s.get(PullRequestRow, pull_request.id)
         if row is None:

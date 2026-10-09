@@ -258,11 +258,6 @@ class PublishPlan:
     title: str = DEFAULT_TITLE
     body: str = ""
     existing_pr_number: int | None = None
-    # hades #564: repository owner and name for the remote-ownership PR check in the
-    # publisher script; the task's own pull request number if one exists.
-    repo_owner: str = ""
-    repo_name: str = ""
-    own_pr_number: int | None = None
     timeout_seconds: int = 600
     problem: str = ""
     resume_step: str = ""
@@ -289,16 +284,6 @@ def repository_slug(repository: Repository) -> str:
         if len(parts) >= 2:
             return f"{parts[-2]}/{parts[-1]}"
     return repository.name.strip("/")
-
-
-def _repository_owner(repository: Repository) -> str:
-    """The owner segment of a GitHub repository for API calls."""
-    url = repository.url.rstrip("/").removesuffix(".git")
-    if "github.com" in url:
-        parts = [p for p in url.replace(":", "/").split("/") if p]
-        if len(parts) >= 2:
-            return parts[-2]
-    return ""
 
 
 def push_url_for(repository: Repository, *, host: str = "github.com") -> str:
@@ -433,9 +418,8 @@ def build_plan(uow: UnitOfWork, task: Task, work: tuple[Attempt, Execution]) -> 
     composed = record.get("composed") if record else None
     repo_section = contract.get("repository", {})
     base_ref = str(repo_section.get("base_ref") or repository.default_branch or "main")
-    # hades #564: submit_task always sets work_branch at submit time (crucible/<external_id>
-    # when omitted by the contract), so the stored contract is always complete here and the
-    # key is always present. The publish plan no longer carries a dead fallback.
+    # hades #564: submission stores the branch (derived when the contract omitted it),
+    # so the stored contract is the one source; nothing here makes a branch up.
     work_branch = str(repo_section["work_branch"])
     deliverables = [
         d for d in contract.get("deliverables", []) if d.get("kind") in ("pull_request", "branch")
@@ -523,9 +507,6 @@ def build_plan(uow: UnitOfWork, task: Task, work: tuple[Attempt, Execution]) -> 
         retry_number=int(publishing_payload.get("retry_number", 0)),
         publish_retry_max=int(retry_limit),
         external_review_needs_person=external_review_requires_person(policy, repository),
-        repo_owner=_repository_owner(repository),
-        repo_name=repository.name,
-        own_pr_number=existing.number if existing else None,
     )
 
 

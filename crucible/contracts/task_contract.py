@@ -448,12 +448,19 @@ class TaskContractV1(StrictModel):
             )
         return self
 
-    def external_identity_fields(self) -> tuple[str, str, str | None, str, int]:
+    @property
+    def resolved_work_branch(self) -> str:
+        """hades #564: the task's branch, `crucible/<external_id>` when the contract omits
+        `repository.work_branch`. The one place that shape is written: submission fills
+        it in (`parse_contract`), so every stored contract names its branch."""
+        return self.repository.work_branch or f"crucible/{self.external_id}"
+
+    def external_identity_fields(self) -> tuple[str, str, str, str, int]:
         """What a correction version must keep identical to the version it corrects."""
         return (
             self.external_id,
             self.repository.name,
-            self.repository.work_branch,
+            self.resolved_work_branch,
             self.policy.name,
             self.policy.version,
         )

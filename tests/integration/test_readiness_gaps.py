@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import copy
+
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import Engine, select
+from sqlalchemy.orm import Session
 
 from crucible.adapters.api.deps import AppContext
 from crucible.adapters.execution.fake import FakeProvider
+from crucible.adapters.persistence.models import TaskContractRow
 from crucible.application.supervisor import Supervisor
+from crucible.contracts.task_contract import contract_sha256
 from crucible.ports.execution import LogChunk
 from tests.fixtures import FakeClock, contract_document
 from tests.integration.conftest import event_kinds, submit_and_start
@@ -75,14 +81,27 @@ async def test_second_checkout_waits_once_and_launches_after_release(
     client: TestClient,
     supervisor: Supervisor,
     clock: FakeClock,
+    engine: Engine,
 ) -> None:
     first = submit_and_start(client, "crucible-worker:fake-hang", external_id="LEASE-A")
     document = contract_document(external_id="LEASE-B")
-    document["repository"]["work_branch"] = "crucible/LEASE-A"
     document["execution_request"]["image"] = "crucible-worker:fake-succeed"
+    # hades #564: submission refuses another task's branch now, so the second task is
+    # submitted on its own branch and its stored contract then given the first one's, as
+    # a task submitted before the refusal existed could still have.
+    document["repository"]["work_branch"] = "crucible/LEASE-B"
     response = client.post("/v1/tasks", json=document)
     assert response.status_code == 201, response.text
     second = response.json()["id"]
+    with Session(engine) as session:
+        row = session.scalars(
+            select(TaskContractRow).where(TaskContractRow.task_id == second)
+        ).one()
+        shared = copy.deepcopy(row.document)
+        shared["repository"]["work_branch"] = "crucible/LEASE-A"
+        row.document = shared
+        row.sha256 = contract_sha256(shared)
+        session.commit()
     response = client.post(
         f"/v1/tasks/{second}/start",
         json={"provider": "fake", "image": "crucible-worker:fake-succeed", "policy_version": 2},
