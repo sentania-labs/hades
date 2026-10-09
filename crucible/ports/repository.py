@@ -35,6 +35,7 @@ from crucible.domain.entities import (
     LedgerDecision,
     LogChunkRecord,
     MemoryItem,
+    Persona,
     Policy,
     PoolExhaustion,
     Principal,
@@ -49,6 +50,7 @@ from crucible.domain.entities import (
     ReviewDisposition,
     ReviewReportRecord,
     RoutingPolicyRecord,
+    ScheduledJob,
     SupervisorStatus,
     Task,
     TaskContract,
@@ -76,6 +78,23 @@ class PrincipalRepository(Protocol):
     def disable(self, principal_id: str, at: datetime) -> bool: ...
 
     def rename(self, principal_id: str, name: str) -> bool: ...
+
+
+class PersonaRepository(Protocol):
+    def add(self, persona: Persona) -> None: ...
+    def get(self, persona_id: str) -> Persona | None: ...
+    def list_all(self) -> Sequence[Persona]: ...
+    def save(self, persona: Persona) -> None: ...
+    def delete(self, persona_id: str) -> bool: ...
+
+
+class ScheduledJobRepository(Protocol):
+    def add(self, job: ScheduledJob) -> None: ...
+    def get(self, job_id: str, *, for_update: bool = False) -> ScheduledJob | None: ...
+    def list_all(self) -> Sequence[ScheduledJob]: ...
+    def list_due(self, now: datetime) -> Sequence[ScheduledJob]: ...
+    def save(self, job: ScheduledJob) -> None: ...
+    def delete(self, job_id: str) -> bool: ...
 
 
 class UiSessionRepository(Protocol):
@@ -772,6 +791,8 @@ class IdempotencyRepository(Protocol):
 
 class UnitOfWork(Protocol):
     principals: PrincipalRepository
+    personas: PersonaRepository
+    scheduled_jobs: ScheduledJobRepository
     ui_sessions: UiSessionRepository
     repositories: RepositoryRegistry
     policies: PolicyRepository

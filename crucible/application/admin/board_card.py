@@ -23,6 +23,7 @@ from crucible.application.board_actions import (
     open_escalation,
 )
 from crucible.application.errors import NotFoundError
+from crucible.application.personas_jobs import inbox_run, run_findings
 from crucible.application.queries import gate_summary
 from crucible.application.task_notes import list_notes, note_view
 from crucible.domain.entities import Attempt, Execution, ExecutionRole, Task
@@ -316,7 +317,10 @@ def board_card_view(uow: UnitOfWork, task_id: str, now: datetime) -> dict[str, A
     )
     gates = gate_summary(uow, task.id)
     escalation = open_escalation(uow, task.id)
-    lane = card_lane(task, escalation)
+    lane = "inbox" if inbox_run(document) else card_lane(task, escalation)
+    text = contract_text(document)
+    if inbox_run(document):
+        text["objective"] = run_findings(uow, task.id) or text["objective"]
     notes = list_notes(uow, task.id)
     moves = moves_for_card(task, escalation=escalation, pull_request=pull_request)
     default = default_move(lane)
@@ -329,7 +333,7 @@ def board_card_view(uow: UnitOfWork, task_id: str, now: datetime) -> dict[str, A
         "state_words": state_words(task.state),
         "lane": {"key": lane, "name": LANE_NAMES[lane]},
         "updated_at": task.updated_at,
-        "contract": contract_text(document),
+        "contract": text,
         "contract_version": task.contract_version,
         "pull_request": (
             {

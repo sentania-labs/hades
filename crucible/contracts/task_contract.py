@@ -398,6 +398,13 @@ class Correction(StrictModel):
         return value
 
 
+class ScheduledJobMetadata(StrictModel):
+    id: str = Field(min_length=1)
+    results_to: Literal["inbox_card", "chat_message", "report_only"]
+    tags: list[str]
+    persona_tools: list[str]
+
+
 class TaskContractV1(StrictModel):
     schema_version: str
     external_id: str = Field(min_length=1, max_length=128)
@@ -419,6 +426,7 @@ class TaskContractV1(StrictModel):
     execution_request: ExecutionRequest
     lifecycle: Lifecycle
     correction: Correction | None
+    scheduled_job: ScheduledJobMetadata | None = None
 
     @field_validator("schema_version")
     @classmethod

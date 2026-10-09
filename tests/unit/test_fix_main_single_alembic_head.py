@@ -38,7 +38,8 @@ MERGED = {"0044_attempt_stall_shape", "0044_editor_leftovers_policy", "0044_merg
 # is the provisional numbering #447 itself describes. hades #208 adds 0058 for the shared
 # memory store and the decision ledger; its number is the one Hades assigned and its
 # down_revision is provisional until merge. hades #208 then adds 0059_rooms on top for the
-# rooms and their transcripts, numbered and provisional the same way.
+# rooms and their transcripts, numbered and provisional the same way. FDY-0591 adds
+# assigned revision 0060 for personas and scheduled jobs on top of 0059_rooms.
 ABOVE = "0046_blocked_reason"
 PROBE = "0047_attempt_egress_probe"
 LAUNCH = "0047_successful_launch_time"
@@ -52,7 +53,8 @@ DIGEST_COMMIT = "0054_digest_commit"
 TASK_NOTES = "0055_task_notes"
 SCHEMA_OVERLAP = "0056_pull_request_schema_overlap"
 MEMORY = "0058_memory_and_decisions"
-HEAD = "0059_rooms"
+ROOMS = "0059_rooms"
+HEAD = "0060_personas_scheduled_jobs"
 
 
 def _script() -> ScriptDirectory:
@@ -99,8 +101,10 @@ def test_the_0045_merge_joins_the_three_0044_heads() -> None:
     assert schema_overlap is not None and schema_overlap.down_revision == TASK_NOTES
     memory = script.get_revision(MEMORY)
     assert memory is not None and memory.down_revision == SCHEMA_OVERLAP
+    rooms = script.get_revision(ROOMS)
+    assert rooms is not None and rooms.down_revision == MEMORY
     head = script.get_revision(HEAD)
-    assert head is not None and head.down_revision == MEMORY
+    assert head is not None and head.down_revision == ROOMS
 
 
 def test_the_cli_config_sees_the_same_single_head() -> None:
@@ -128,7 +132,7 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
         plan = [step.revision.revision for step in script._upgrade_revs("head", head)]
         assert plan.index("0043_credential_mount_mode") < plan.index("0044_merge_423_424")
         assert plan.index("0044_merge_423_424") < plan.index(MERGE)
-        assert plan[-18:] == [
+        assert plan[-19:] == [
             "0043_credential_mount_mode",
             "0044_merge_423_424",
             ("0044_editor_leftovers_policy", "0044_attempt_stall_shape")[
@@ -148,6 +152,7 @@ def test_the_path_from_each_proposal_head_runs_0043_credential_mount_mode() -> N
             TASK_NOTES,
             SCHEMA_OVERLAP,
             MEMORY,
+            ROOMS,
             HEAD,
         ]
 
