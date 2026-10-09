@@ -18,6 +18,7 @@ from crucible.application.errors import ApplicationError, NotFoundError
 from crucible.application.proposals import reject_proposal
 from crucible.application.queries import task_view
 from crucible.application.task_notes import OPERATOR_ROLES, add_note
+from crucible.domain.egress_probe import host_words
 from crucible.domain.entities import Principal, Role
 from crucible.domain.lifecycle import TaskState
 from crucible.domain.waivers import ACCEPT_NO_CI, WAIVABLE_STATES, WAIVE_EXTERNAL_REVIEW
@@ -334,6 +335,32 @@ def _timezone(request: Request) -> str:
     return str(settings.service.render_timezone) if settings is not None else "America/Chicago"
 
 
+def egress_rows(view: Any) -> list[list[str]]:
+    """hades #425: one row per attempt per probed host, `reachable` or why not; an
+    attempt whose probe named no host, or whose probe line was rejected, says so in one
+    row."""
+    rows: list[list[str]] = []
+    for execution in view.executions:
+        for attempt in execution.attempts:
+            probe = attempt.egress_probe
+            if not probe:
+                continue
+            hosts = probe.get("hosts") or []
+            if probe.get("rejected"):
+                # The worker's first marker line was not the wrapper's shape: nothing
+                # was read from it, and that is what the row says.
+                rows.append([attempt.id, "none", f"probe line rejected: {probe['rejected']}"])
+                continue
+            if not hosts:
+                rows.append([attempt.id, "none", "no allowlisted host to probe"])
+                continue
+            for row in hosts:
+                words = host_words(row)
+                host = str(row.get("host", ""))
+                rows.append([attempt.id, host, words.removeprefix(f"{host} ")])
+    return rows
+
+
 # The operator's waivers (ADR 0025), offered on the card page while a PR waits on them.
 WAIVER_FORMS = (
     (
@@ -466,6 +493,7 @@ def board_card_page(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Respo
                 task_id, view.state, principal.role, document["moves"], document["default_move"]
             ),
             "waivers": waivers,
+            "egress": egress_rows(view),
             "return_to": f"/ui/board/{quote(task_id)}",
         },
     )
