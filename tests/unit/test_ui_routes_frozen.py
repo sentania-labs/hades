@@ -22,6 +22,8 @@ FROZEN_ROUTES = [
     ("GET", "/ui/github/installed"),
     ("GET", "/ui/harnesses"),
     ("GET", "/ui/images"),
+    # hades #208: the Admin Memory page, two tabs over the shared store and the ledger.
+    ("GET", "/ui/memory"),
     ("GET", "/ui/repositories"),
     ("GET", "/ui/retention"),
     ("GET", "/ui/routing"),
@@ -40,6 +42,9 @@ FROZEN_ROUTES = [
     # hades #489: the card's note and phase actions.
     ("POST", "/ui/board/{task_id}/actions"),
     ("POST", "/ui/board/{task_id}/notes"),
+    # hades #208: Edit (supersede) and Forget as clicks on the Memory page.
+    ("POST", "/ui/memory/{item_id}/forget"),
+    ("POST", "/ui/memory/{item_id}/supersede"),
     ("POST", "/ui/sign-in"),
     ("POST", "/ui/sign-out"),
     # hades #424: the operator's answers to proposed tasks, one at a time and as a batch.

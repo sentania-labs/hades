@@ -32,7 +32,9 @@ from crucible.domain.entities import (
     HarnessState,
     Heartbeat,
     Lease,
+    LedgerDecision,
     LogChunkRecord,
+    MemoryItem,
     Policy,
     PoolExhaustion,
     Principal,
@@ -402,6 +404,36 @@ class TaskNoteRepository(Protocol):
     def list_for_task(self, task_id: str) -> Sequence[TaskNote]: ...
 
 
+class MemoryRepository(Protocol):
+    """The shared memory store (hades #208). Items are added and retired, never edited:
+    `retire` sets `superseded_at`, and `superseded_by` when there is a replacement."""
+
+    def add(self, item: MemoryItem) -> None: ...
+
+    def get(self, item_id: str, *, for_update: bool = False) -> MemoryItem | None: ...
+
+    def retire(self, item_id: str, *, superseded_by: str | None, at: datetime) -> None: ...
+
+    def recall(
+        self, *, tags: Sequence[str], keywords: Sequence[str], limit: int
+    ) -> Sequence[MemoryItem]: ...
+
+    def list_recent(
+        self, *, limit: int, include_superseded: bool = False
+    ) -> Sequence[MemoryItem]: ...
+
+
+class DecisionLedgerRepository(Protocol):
+    """The append-only decision ledger (hades #208): lines are added and listed. There
+    is no save and no delete, and the table refuses both."""
+
+    def add(self, decision: LedgerDecision) -> None: ...
+
+    def list_recent(
+        self, *, limit: int, channel: str | None = None
+    ) -> Sequence[LedgerDecision]: ...
+
+
 class EscalationRepository(Protocol):
     def add(self, escalation: Escalation) -> None: ...
 
@@ -712,6 +744,8 @@ class UnitOfWork(Protocol):
     acceptance: AcceptanceRepository
     decisions: DecisionRepository
     task_notes: TaskNoteRepository
+    memory: MemoryRepository
+    decision_ledger: DecisionLedgerRepository
     escalations: EscalationRepository
     dispositions: DispositionRepository
     wakes: WakeRepository

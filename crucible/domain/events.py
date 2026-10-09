@@ -95,6 +95,13 @@ class EventKind(StrEnum):
     # board card with that note as the decision's verbatim.
     TASK_NOTE_RECORDED = "task_note_recorded"
     TASK_PHASE_ACTION_APPLIED = "task_phase_action_applied"
+    # hades #208: the shared memory store and the decision ledger. A promotion makes a
+    # finding memory; a supersede replaces an item; a forget retires one with no
+    # replacement; a ledger line is a principal's words recorded through POST /decisions.
+    MEMORY_PROMOTED = "memory_promoted"
+    MEMORY_SUPERSEDED = "memory_superseded"
+    MEMORY_FORGOTTEN = "memory_forgotten"
+    LEDGER_DECISION_RECORDED = "ledger_decision_recorded"
     DISPOSITION_RECORDED = "disposition_recorded"
     DISPOSITION_INVALIDATED = "disposition_invalidated"
     ESCALATION_OPENED = "escalation_opened"

@@ -47,6 +47,7 @@ from crucible.adapters.persistence.records import (
     Artifacts,
     AttemptMetricsRepo,
     BootstrapImports,
+    DecisionLedger,
     Decisions,
     Dispositions,
     Escalations,
@@ -55,6 +56,7 @@ from crucible.adapters.persistence.records import (
     GitHubManifestStates,
     HarnessImages,
     HarnessStates,
+    MemoryItems,
     Policies,
     ProviderSettings,
     ReviewReports,
@@ -96,6 +98,7 @@ from crucible.ports.repository import (
     CIDecisionRepository,
     ClaimRepository,
     ContractRepository,
+    DecisionLedgerRepository,
     DecisionRepository,
     DispositionRepository,
     EscalationRepository,
@@ -115,6 +118,7 @@ from crucible.ports.repository import (
     IdempotencyRepository,
     LeaseRepository,
     LogRepository,
+    MemoryRepository,
     PolicyRepository,
     PoolExhaustionRepository,
     PrincipalRepository,
@@ -1568,6 +1572,8 @@ class SqlUnitOfWork:
     acceptance: AcceptanceRepository
     decisions: DecisionRepository
     task_notes: TaskNoteRepository
+    memory: MemoryRepository
+    decision_ledger: DecisionLedgerRepository
     escalations: EscalationRepository
     dispositions: DispositionRepository
     wakes: WakeRepository
@@ -1625,6 +1631,8 @@ class SqlUnitOfWork:
         self.acceptance = Acceptances(s)
         self.decisions = Decisions(s)
         self.task_notes = TaskNotes(s)
+        self.memory = MemoryItems(s)
+        self.decision_ledger = DecisionLedger(s)
         self.escalations = Escalations(s)
         self.dispositions = Dispositions(s)
         self.wakes = Wakes(s)

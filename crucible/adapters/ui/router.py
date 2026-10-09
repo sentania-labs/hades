@@ -13,6 +13,7 @@ from crucible.adapters.ui.pages import (
     github,
     harnesses,
     images,
+    memory,
     proposals,
     repositories,
     retention,
@@ -46,6 +47,9 @@ router.routes.extend(workers.router.routes)
 router.routes.extend(proposals.router.routes)
 router.routes.extend(tasks.router.routes)
 router.routes.extend(wakes.router.routes)
+# hades #208: the Admin Memory page. No navigation link yet; base.html and render.py are
+# another task's this wave, and the link is a one-line follow-up there.
+router.routes.extend(memory.router.routes)
 router.routes.extend(retention.router.routes)
 router.routes.extend(audit.router.routes)
 router.routes.extend(bootstrap.router.routes)

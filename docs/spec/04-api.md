@@ -127,6 +127,17 @@ endpoint's existing role requirements.
 | GET | `/routing/usage` | Per-pool usage in the current window, from AttemptMetrics, read through the routing policy the newest version of the named policy points at; `?policy_version=` selects another. |
 | GET | `/routing/history` | Per-model outcomes: `?model=&project=&since=`; wall time, cost where reported, exit class, gates passed, corrections, acceptance. Foundry reads this before selecting. |
 
+### Memory and decisions (hades #208, 27)
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/memory` | Recall from the shared memory store: `?subject=&tags=&limit=`. Current items whose scope tags overlap `tags` or whose text carries one of the subject's words, newest observed first, at most `limit` (default 20, at most 100). Nothing superseded or forgotten is returned. Any principal. |
+| POST | `/memory` | Promote a finding into memory: `text`, `source`, optional `observed_at` (default now), `scope_tags`. Orchestrator or operator role. Returns the item (201). |
+| POST | `/memory/{id}/supersede` | Edit by superseding: a new item with the given `text` (and optionally `source`, `observed_at`, `scope_tags`) replaces the item, which stays as history pointing at it. 409 when the item is already superseded or forgotten. Orchestrator or operator role. |
+| POST | `/memory/{id}/forget` | Supersede with no replacement: the item is no longer recalled and stays as the record. Orchestrator or operator role. |
+| GET | `/decisions` | The append-only decision ledger, newest said first: `?channel=&limit=` (default 100, at most 500). Any principal. |
+| POST | `/decisions` | Append a line: `principal`, `channel`, `verbatim` required; `said_at` defaults to now; `transcript_ref`, `applies_to`, `acted_by`, `acted_at` optional. Orchestrator or operator role. There is no edit and no delete; the table refuses both. A decision recorded through `POST /tasks/{id}/decisions` is mirrored here with channel `task` and the task id in `applies_to`. |
+
 ### Administration
 
 `/v1/admin/*`, admin role, versioned with the rest: status, harnesses, credentials (validate, probe, login, rotate, remove), images, providers, github, repositories, audit. Every mutation there takes an optional reason, recorded as an audit note, and the few that hand the supervisor work (committing a bootstrap import, rotating or removing a credential) need a live supervisor lease (the operator's direction of 2026-09-29); revoking a token, removing a repository or a credential, and committing a bootstrap import require one (the operator's decision of 2026-09-25, crucible#117). Repository registration through `PUT /v1/admin/repositories/{name}` is one of those mutations; the `PUT /repositories/{name}` above is the older non-administrative form and is unchanged. Detail in 25. `GET /v1/capabilities` gives orchestrator principals the sanitized read-only subset Foundry needs to report an unavailable capability, with its workers, tasks and wakes filtered to the caller's own (an operator sees all).
