@@ -51,17 +51,25 @@ class _FakeCtx:
     """Minimal context so the renderer path does not raise AttributeError."""
 
     def __init__(self) -> None:
-        uow_obj = type("Uow", (), {
-            "retention": type("R", (), {"list_recent": lambda s, n: []})(),
-            "bootstrap_imports": type("B", (), {"list_all": lambda s: []})(),
-            "__enter__": lambda s: s,
-            "__exit__": lambda s, *a: None,
-        })()
-        uow_factory_obj = type("UowFactory", (), {
-            "__call__": lambda s: uow_obj,
-            "__enter__": lambda s: uow_obj,
-            "__exit__": lambda s, *a: None,
-        })()
+        uow_obj = type(
+            "Uow",
+            (),
+            {
+                "retention": type("R", (), {"list_recent": lambda s, n: []})(),
+                "bootstrap_imports": type("B", (), {"list_all": lambda s: []})(),
+                "__enter__": lambda s: s,
+                "__exit__": lambda s, *a: None,
+            },
+        )()
+        uow_factory_obj = type(
+            "UowFactory",
+            (),
+            {
+                "__call__": lambda s: uow_obj,
+                "__enter__": lambda s: uow_obj,
+                "__exit__": lambda s, *a: None,
+            },
+        )()
         self._data = {
             "uow_factory": uow_factory_obj,
             "settings": None,
@@ -81,6 +89,7 @@ class _FakeApp:
         class _State:
             def __init__(self, c: _FakeCtx) -> None:
                 self.ctx = c
+
         self.state = _State(ctx)
 
 
@@ -98,12 +107,14 @@ class _FakeRequest:
 
 
 class _FakePrincipal:
+    """A stub Principal for template rendering."""
+
     def __init__(self) -> None:
         self.name = "admin"
         self.role = type("Role", (), {"value": "admin"})()
 
 
-def _render_page(active: str, *, data_page: str | None = None) -> str:
+def _render_page(active: str, *, data_page: str = "") -> str:
     """Render the page template and extract the data-page value from main."""
     from crucible.adapters.ui.render import _page  # noqa: PLC0415
 
@@ -112,8 +123,8 @@ def _render_page(active: str, *, data_page: str | None = None) -> str:
     principal = _FakePrincipal()
     csrf = "deadbeef"
     response = _page(
-        request=request,
-        principal=principal,
+        request=request,  # type: ignore[arg-type]
+        principal=principal,  # type: ignore[arg-type]
         csrf=csrf,
         active=active,
         heading="Test",
@@ -121,7 +132,7 @@ def _render_page(active: str, *, data_page: str | None = None) -> str:
         sections=[],
         data_page=data_page,
     )
-    body = response.body.decode("utf-8", "replace")
+    body = response.body.decode("utf-8", "replace")  # type: ignore[union-attr]
     match = _MARKER_RE.search(body)
     if match is None:
         return ""
@@ -134,17 +145,13 @@ class TestSmokeMarkers:
     @pytest.mark.parametrize("path,marker", _MARKERS)
     def test_smoke_pages_have_data_page(self, path: str, marker: str) -> None:
         rendered = _render_page(active=path, data_page=marker)
-        assert rendered == marker, (
-            f"page {path} has data-page={rendered!r}, expected {marker!r}"
-        )
+        assert rendered == marker, f"page {path} has data-page={rendered!r}, expected {marker!r}"
 
     @pytest.mark.parametrize("path,marker", _EXTRA_MARKERS)
     def test_extra_pages_have_data_page(self, path: str, marker: str) -> None:
         """Extra pages not walked by the compose smoke still carry markers."""
         rendered = _render_page(active=path, data_page=marker)
-        assert rendered == marker, (
-            f"page {path} has data-page={rendered!r}, expected {marker!r}"
-        )
+        assert rendered == marker, f"page {path} has data-page={rendered!r}, expected {marker!r}"
 
     @pytest.mark.parametrize("path,marker", _MARKERS)
     def test_auto_derive_from_active(self, path: str, marker: str) -> None:

@@ -301,12 +301,18 @@ def walk_first_run_ui(base_url: str) -> None:
         raise SmokeError("the first-run sign-in page has no pre-authentication CSRF nonce")
     if FIRST_RUN_FILE not in sign_in or "logs migrate" in sign_in:
         raise SmokeError("the sign-in page does not name the first-run token file")
-    body = urllib.parse.urlencode({"csrf": csrf.group(1), "token": token, "next": "/ui"}).encode()
-    request_object = urllib.request.Request(
-        f"{base_url}/ui/sign-in",
-        data=body,
-        method="POST",
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    # Post the sign-in form (next=/ui returns to Status).
+    sign_in_url = f"{base_url}/ui/sign-in"
+    opener.open(
+        urllib.request.Request(
+            sign_in_url,
+            data=urllib.parse.urlencode(
+                {"csrf": csrf.group(1), "token": token, "next": "/ui"}
+            ).encode(),
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        ),
+        timeout=DEFAULT_TIMEOUT,
     )
     try:
         # The explicit next=/ui returns to Status and its first-run setup steps.
@@ -314,16 +320,16 @@ def walk_first_run_ui(base_url: str) -> None:
         for path, marker in _PAGE_MARKERS.items():
             with opener.open(f"{base_url}{path}", timeout=DEFAULT_TIMEOUT) as response:
                 if response.status != 200:
-                    raise SmokeError(f"the first-run UI page {path} returned HTTP {response.status}")
+                    raise SmokeError(
+                        f"the first-run UI page {path} returned HTTP {response.status}"
+                    )
                 body = response.read()
                 if f'data-page="{marker}"'.encode() not in body:
-                    raise SmokeError(
-                        f"the first-run UI page {path} lacks data-page={marker!r}"
-                    )
+                    raise SmokeError(f"the first-run UI page {path} lacks data-page={marker!r}")
         # The board uses board.html directly (not _page), so we check for its heading.
         with opener.open(f"{base_url}/ui/board", timeout=DEFAULT_TIMEOUT) as response:
             if response.status != 200:
-                raise SmokeError("the first-run Board page returned HTTP {}".format(response.status))
+                raise SmokeError(f"the first-run Board page returned HTTP {response.status}")
             if BOARD_MARKER not in response.read():
                 raise SmokeError("the first-run Board page did not render")
     except urllib.error.URLError as exc:
