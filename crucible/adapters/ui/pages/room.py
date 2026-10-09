@@ -28,7 +28,7 @@ ROOM_COOKIE = "crucible_ui_room"
 
 
 def _can_write(principal: Principal) -> bool:
-    return principal.role in {Role.OPERATOR, Role.ORCHESTRATOR}
+    return principal.role in {Role.OPERATOR, Role.ORCHESTRATOR, Role.ADMIN}
 
 
 def _principal_room(uow: Any, principal: Principal, remembered: str | None = None) -> Any | None:
@@ -121,6 +121,7 @@ def room_panel_context(
             and _can_write(principal)
             and (room.kind is not RoomKind.CARD or room.created_by == principal.id)
         ),
+        "read_only_message": "You are signed in as an observer; the principal room is read-only.",
         "connected": _connected(room, ctx.clock.now()) if room else "No principal room yet",
         "harness": settings.default_harness,
         "models": models,

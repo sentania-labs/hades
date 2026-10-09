@@ -171,7 +171,7 @@ def test_room_page_serves_stream_script_and_observer_is_read_only(
     assert "room-interrupt" in operator and "room-composer" in operator
 
     observer = _html(monkeypatch, OBSERVER)
-    assert "Observer access is read-only" in observer
+    assert "You are signed in as an observer; the principal room is read-only" in observer
     assert "room-composer" not in observer and "new EventSource" not in observer
 
 

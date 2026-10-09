@@ -94,15 +94,17 @@ def card_thread_context(
         if not switched
         else "Talking to"
     )
+    read_only_msg = "You are signed in as an observer; the card thread is read-only."
     pending = next((q for q in reversed(questions or []) if not q["answered"]), None)
     return {
         **panel,
         **common,
+        "read_only_message": read_only_msg,
+        "empty_room": "You are signed in as an observer; the card thread is read-only.",
         "questions": questions or [],
         "answer_url": (
             f"/ui/tasks/{card['id']}/questions/{pending['id']}/answer" if pending else None
         ),
         "target_label": label,
         "history_url": f"/ui/tasks/{card['id']}",
-        "empty_room": "There is no card room to observe yet.",
     }
