@@ -22,7 +22,7 @@
     </div>{% endif %}
   </header>
   {% if room %}
-    {% if turns_total > turns|length %}<a class="room-history" href="/ui/room?window={{ [window + 50, 500]|min }}">History · load {{ [turns_total - turns|length, 50]|min }} older turns</a>{% else %}<span class="room-history room-history--complete">History · start of room</span>{% endif %}
+    {% if turns_total > turns|length and window < 500 %}<a class="room-history" href="/ui/room?window={{ [window + 50, 500]|min }}">History · load {{ [turns_total - turns|length, 50]|min }} older turns</a>{% elif turns_total > turns|length %}<span class="room-history room-history--complete">History · showing the latest 500 turns (page limit)</span>{% else %}<span class="room-history room-history--complete">History · start of room</span>{% endif %}
     <div class="room-transcript" id="room-transcript" aria-live="polite">{% for item in turns %}{{ turn(item) }}{% else %}<p class="room-empty">This room is ready. Talk to Hades when you are.</p>{% endfor %}</div>
     {% if can_write %}<form class="room-composer" id="room-composer">
       <label for="room-message">Message Hades</label>

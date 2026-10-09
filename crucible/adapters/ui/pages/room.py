@@ -30,18 +30,22 @@ def _can_write(principal: Principal) -> bool:
 
 
 def _principal_room(uow: Any, principal: Principal, remembered: str | None = None) -> Any | None:
-    rooms = [
-        room
-        for room in uow.rooms.list_recent(limit=500, include_closed=False)
-        if room.kind is RoomKind.PRINCIPAL
-    ]
-    mine = [room for room in rooms if room.created_by == principal.id]
-    candidates = mine if _can_write(principal) else rooms
-    open_rooms = [room for room in candidates if room.state is not RoomState.CLOSED]
-    selected = next((room for room in open_rooms if room.id == remembered), None)
-    if selected is not None:
-        return selected
-    return max(open_rooms, key=lambda room: room.last_activity_at, default=None)
+    if remembered:
+        room = uow.rooms.get(remembered)
+        if (
+            room is not None
+            and room.kind is RoomKind.PRINCIPAL
+            and room.state is not RoomState.CLOSED
+            and (not _can_write(principal) or room.created_by == principal.id)
+        ):
+            return room
+    rooms = uow.rooms.list_recent(
+        limit=1,
+        include_closed=False,
+        kind=RoomKind.PRINCIPAL,
+        created_by=principal.id if _can_write(principal) else None,
+    )
+    return next(iter(rooms), None)
 
 
 def _friendly_harness(value: str) -> str:

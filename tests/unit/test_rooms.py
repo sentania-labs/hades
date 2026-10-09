@@ -164,8 +164,21 @@ class _Rooms:
         assert room.id in self.rows
         self.rows[room.id] = copy.deepcopy(room)
 
-    def list_recent(self, *, limit: int, include_closed: bool = True) -> list[Room]:
-        rows = [r for r in self.rows.values() if include_closed or r.state is not RoomState.CLOSED]
+    def list_recent(
+        self,
+        *,
+        limit: int,
+        include_closed: bool = True,
+        kind: RoomKind | None = None,
+        created_by: str | None = None,
+    ) -> list[Room]:
+        rows = [
+            r
+            for r in self.rows.values()
+            if (include_closed or r.state is not RoomState.CLOSED)
+            and (kind is None or r.kind is kind)
+            and (created_by is None or r.created_by == created_by)
+        ]
         return [copy.deepcopy(r) for r in rows][-limit:]
 
     def list_live(self) -> list[Room]:
