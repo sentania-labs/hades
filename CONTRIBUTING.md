@@ -121,7 +121,8 @@ published until it finishes.
 
 ## Style
 
-`make lint` keeps mypy's cache in `/tmp/hades-mypy-<uid>` by default. Its SQLite
+The Makefile keeps mypy's cache in `/tmp/hades-mypy-<uid>` by default, including
+the unit suite's mypy subprocess. Its SQLite
 cache can stall on NFS-backed worker checkouts. Set `MYPY_CACHE_DIR` to override
 that location; the type checks are unchanged.
 

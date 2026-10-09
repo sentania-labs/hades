@@ -24,6 +24,9 @@ COMPOSE ?= $(DOCKER) compose
 # `--pull never` here after it has built and classified the candidate image.
 COMPOSE_UP_FLAGS ?= --build
 UV ?= uv
+# SQLite cache commits can stall on an NFS checkout. Export this for the mypy
+# subprocess in the unit suite too, so every check uses local temporary storage.
+export MYPY_CACHE_DIR ?= /tmp/hades-mypy-$(shell id -u)
 
 # The cluster budget `make manifests` checks the rendered requests against (issue 93).
 # Left blank by default: tools/manifests/validate.sh falls back to the lab's own stated
@@ -129,7 +132,7 @@ lint: check-image-manifest
 	$(UV) sync --frozen --quiet
 	$(UV) run ruff format --check crucible tests tools/release tools/smoke tools/registry tools/images tools/ci tools/chart
 	$(UV) run ruff check crucible tests tools/release tools/smoke tools/registry tools/images tools/ci tools/chart
-	$(UV) run mypy --cache-dir "$${MYPY_CACHE_DIR:-/tmp/hades-mypy-$$(id -u)}" crucible tests tools/release tools/smoke tools/registry tools/images tools/ci tools/chart
+	$(UV) run mypy crucible tests tools/release tools/smoke tools/registry tools/images tools/ci tools/chart
 	$(UV) run lint-imports
 
 check-image-manifest: ## fail when a declared worker-image tag is stale
