@@ -1,0 +1,20 @@
+# The supervisor Pod runs in the `crucible` namespace, so its ServiceAccount lives there;
+# a Pod can only use an account from its own namespace. A RoleBinding may name a subject
+# in another namespace, which is what keeps the permission itself namespaced to
+# `crucible-workers` exactly as 26 requires.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: crucible-supervisor
+  namespace: crucible-workers
+  labels:
+    app.kubernetes.io/name: crucible
+    app.kubernetes.io/component: supervisor
+subjects:
+  - kind: ServiceAccount
+    name: crucible-supervisor
+    namespace: crucible
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: crucible-supervisor

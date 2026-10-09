@@ -1,0 +1,8 @@
+Hades was installed into the crucible, crucible-workers, and crucible-buildkit namespaces.
+The chart never creates credential values. Provision the Secrets named in values.yaml.
+{{- if .Values.ingress.enabled }}
+Open https://{{ .Values.ingress.host }}/ui
+{{- else }}
+Run: kubectl -n crucible port-forward service/crucible-api 8080:8080
+{{- end }}
+

@@ -462,6 +462,36 @@ jobs:
       - name: render and validate every manifest
         run: make manifests
 
+  chart:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c # v7.0.0
+        with:
+          enable-cache: true
+      - name: install kubeconform
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 4 -o "$RUNNER_TEMP/kubeconform.tgz" \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          echo '95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73  '"$RUNNER_TEMP/kubeconform.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/kubeconform.tgz" -C "$RUNNER_TEMP" kubeconform
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: install kubectl
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 4 -o "$RUNNER_TEMP/kubectl" \
+            https://dl.k8s.io/release/v1.31.6/bin/linux/amd64/kubectl
+          echo 'c46b2f5b0027e919299d1eca073ebf13a4c5c0528dd854fc71a5b93396c9fa9d  '"$RUNNER_TEMP/kubectl" | sha256sum -c -
+          chmod 0755 "$RUNNER_TEMP/kubectl"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: lint, render, validate, and compare the chart
+        run: |
+          make chart
+          make chart-sync-check
+
   compose-smoke:
     runs-on: ubuntu-24.04
     steps:

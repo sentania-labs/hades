@@ -1,0 +1,138 @@
+# The supervisor Deployment (01, 26): one replica, the lease in PostgreSQL exactly as
+# today. `Recreate` rather than a rolling update so two supervisors never overlap even
+# for the seconds a rollout would give them; the lease would refuse the second one
+# anyway, and this keeps the log free of a refusal that means nothing.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crucible-supervisor
+  namespace: crucible
+  labels:
+    app.kubernetes.io/name: crucible
+    app.kubernetes.io/component: supervisor
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: crucible
+      app.kubernetes.io/component: supervisor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: crucible
+        app.kubernetes.io/component: supervisor
+    spec:
+      serviceAccountName: crucible-supervisor
+      # 26: `drain` sends SIGTERM and waits the policy's grace period before the kubelet
+      # kills the worker. The supervisor needs at least that long to finish its own
+      # shutdown without leaving an attempt half-terminated.
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # First boot brings PostgreSQL up beside these pods, so without this the first
+        # few starts fail on a refused connection and the restart backoff grows past any
+        # reasonable rollout timeout. The wait reads the DSN it is about to use and
+        # nothing else; the password in it is never printed, parsed or logged.
+        - name: wait-for-database
+          image: {{ include "hades.serviceImage" . }}
+          # The base tracks `latest`, and Kubernetes defaults an unpinned `latest` tag to
+          # `imagePullPolicy: Always`; explicit here so a local proof never reaches a
+          # registry and a real deployment's exact-pinned tag still resolves once, at
+          # whichever digest the deployer set (24).
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -c
+            - |
+              import os, socket, sys, time
+              from urllib.parse import urlsplit
+              url = urlsplit(os.environ["CRUCIBLE_DATABASE__URL"])
+              host, port = url.hostname or "", url.port or 5432
+              deadline = time.monotonic() + 300
+              while time.monotonic() < deadline:
+                  try:
+                      with socket.create_connection((host, port), timeout=5):
+                          print(f"{host}:{port} is accepting connections", flush=True)
+                          sys.exit(0)
+                  except OSError as exc:
+                      print(f"waiting for {host}:{port}: {type(exc).__name__}", flush=True)
+                      time.sleep(3)
+              sys.exit("the database never accepted a connection")
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: CRUCIBLE_DATABASE__URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.databaseSecretName }}
+                  key: url
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+      containers:
+        - name: supervisor
+          image: {{ include "hades.serviceImage" . }}
+          imagePullPolicy: IfNotPresent
+          command: ["crucible", "serve", "--supervisor"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          envFrom:
+            - configMapRef:
+                name: crucible-settings
+          env:
+            - name: CRUCIBLE_DATABASE__URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.databaseSecretName }}
+                  key: url
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: artifacts
+              mountPath: /var/lib/crucible/artifacts
+            - name: github
+              mountPath: /var/lib/crucible/credentials/github
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: crucible-artifacts
+        # The GitHub App Secret the service owns (ADR 0017). Optional by design, not by
+        # accident (crucible#79): the service creates it when the operator connects the
+        # App, so a fresh deployment has none and must still start. The key is read
+        # through the API server, not from this mount; the mount carries the webhook
+        # secret to the webhook route, and a missing key is named on the GitHub page and
+        # at startup when `github.enabled` says one should be there.
+        - name: github
+          secret:
+            secretName: {{ .Values.secrets.githubApp }}
+            optional: true
+            defaultMode: 0400
+        - name: tmp
+          emptyDir: {}

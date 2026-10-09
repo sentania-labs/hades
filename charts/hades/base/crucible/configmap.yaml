@@ -1,0 +1,127 @@
+# Every non-secret setting the cluster deployment carries (crucible/settings.py). Nothing
+# here is a credential value: the database DSN and the GitHub App credential are Secrets
+# (the second one the service's own, ADR 0017), and the harness credentials are Secrets in
+# `crucible-workers` that only the supervisor's account can read (12, 26).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: crucible-settings
+  namespace: crucible
+  labels:
+    app.kubernetes.io/name: crucible
+data:
+  CRUCIBLE_SERVICE__BIND: "0.0.0.0:8080"
+  CRUCIBLE_SERVICE__ARTIFACT_ROOT: /var/lib/crucible/artifacts
+  CRUCIBLE_SERVICE__LOG_LEVEL: INFO
+  # 01: stored UTC, rendered in the operator's zone. The repository carries UTC and the
+  # overlay sets the deployment's own zone; a zone name is a lab-specific value.
+  CRUCIBLE_SERVICE__RENDER_TIMEZONE: UTC
+
+  # 01: exactly one active supervisor, enforced by the database lease. The holder names
+  # the deployment, not the Pod, so a restarted Pod re-takes its own lease.
+  CRUCIBLE_SUPERVISOR__HOLDER: crucible-kubernetes
+
+  # 13: the Docker provider is the development provider and there is no Docker socket
+  # anywhere on the cluster (26).
+  CRUCIBLE_DOCKER__ENABLED: "false"
+
+  # The Kubernetes execution provider (26).
+  CRUCIBLE_KUBERNETES__ENABLED: "true"
+  CRUCIBLE_KUBERNETES__NAMESPACE: crucible
+  CRUCIBLE_KUBERNETES__WORKERS_NAMESPACE: crucible-workers
+  CRUCIBLE_KUBERNETES__SERVICE_ACCOUNT: crucible-worker
+  CRUCIBLE_KUBERNETES__CACHE_CLAIM: crucible-reference-cache
+  CRUCIBLE_KUBERNETES__USE_REFERENCE_CACHE: "true"
+  CRUCIBLE_KUBERNETES__WORKSPACE_SIZE: {{ .Values.roomRunner.workspaceSize | quote }}
+  CRUCIBLE_KUBERNETES__MAX_CONCURRENCY: {{ .Values.roomRunner.maxConcurrency | quote }}
+  CRUCIBLE_KUBERNETES__LAUNCH_TIMEOUT_SECONDS: {{ .Values.roomRunner.launchTimeoutSeconds | quote }}
+  CRUCIBLE_KUBERNETES__PREPARE_TIMEOUT_SECONDS: {{ .Values.roomRunner.prepareTimeoutSeconds | quote }}
+  CRUCIBLE_KUBERNETES__COLLECTOR_TIMEOUT_SECONDS: {{ .Values.roomRunner.collectorTimeoutSeconds | quote }}
+  CRUCIBLE_KUBERNETES__VERIFIER_TIMEOUT_SECONDS: {{ .Values.roomRunner.verifierTimeoutSeconds | quote }}
+  # The cluster's DNS service address. 26 allows port 53 there and denies everything else
+  # inside the cluster, so a wrong value here is a worker with no name resolution, not a
+  # worker with more reach. The overlay sets the cluster's own value.
+  CRUCIBLE_KUBERNETES__CLUSTER_DNS_IP: 10.96.0.10
+  # The same resolver as its pods, allowed on port 53 beside the address above. A CNI
+  # that translates a service address before it applies policy (Cilium with kube-proxy
+  # replacement) matches only this (crucible#91). CoreDNS carries these labels on kind,
+  # k3s and kubeadm. These seed the `kubernetes.egress` admin setting; a value saved from
+  # the admin UI, API or CLI wins over them.
+  CRUCIBLE_KUBERNETES__DNS_NAMESPACE: kube-system
+  CRUCIBLE_KUBERNETES__DNS_POD_LABELS: '{"k8s-app":"kube-dns"}'
+  # The worker image repositories `GET /v1/admin/images` reports the promoted tags of
+  # (13, 25). A JSON array: pydantic-settings decodes a complex field from the
+  # environment as JSON.
+  CRUCIBLE_KUBERNETES__IMAGE_REPOSITORIES: {{ list .Values.workerImage.repository | toJson | quote }}
+  # One exact worker image for 26's readiness canary, set by the overlay. The canary runs
+  # the first image the provider knows of, and a bare repository means `:latest` to a
+  # kubelet, so a registry with no `latest` leaves the canary in ImagePullBackOff and the
+  # status page reporting the namespace as not ready for a reason that is not about the
+  # namespace.
+  #
+  # Empty here on purpose, and not a `:latest` default: a deployment pins, and the one
+  # thing this setting exists to prevent is a `:latest` a kubelet resolves. Empty means
+  # the setting contributes nothing at all, so a deployment that leaves it empty behaves
+  # exactly as it did before the setting existed.
+  CRUCIBLE_KUBERNETES__PROBE_IMAGE: {{ include "hades.workerImage" . | quote }}
+  # The namespace readiness canary is a shell script with curl, not a role pod, so it
+  # requests a fixed small size rather than the policy's limits (26, issue 93).
+  CRUCIBLE_KUBERNETES__CANARY_CPU_MILLICORES: "100"
+  CRUCIBLE_KUBERNETES__CANARY_MEMORY: 64Mi
+  # The harness credential Secret in `crucible-workers`, per harness (12, 26). The
+  # default for a harness that is absent here is `crucible-harness-<harness>`; it is
+  # written out so the runbook and the cluster name the same objects.
+  # Mapping a harness here does not force a credential mount if the Secret contains
+  # none of the adapter's declared auth files: an optional credential whose Secret is
+  # empty counts as absent (matching Docker), while a required credential in the same
+  # state fails the launch with a clear message naming the empty Secret.
+  CRUCIBLE_KUBERNETES__CREDENTIAL_SECRETS: >-
+    {"claude_code":"crucible-harness-claude-code","codex":"crucible-harness-codex","agy":"crucible-harness-agy","hermes":"crucible-harness-hermes"}
+  # A named endpoint may enter only this private range. Service and Pod ranges remain
+  # denied even when DNS returns one of their addresses. Empty here on purpose: the
+  # local endpoint host's address is a cluster fact, and the overlay sets it.
+  CRUCIBLE_KUBERNETES__LOCAL_ENDPOINT_CIDRS: "[]"
+  # 26: each allowlisted name is resolved and the worker's NetworkPolicy carries its
+  # addresses, re-resolved after this many seconds. `true` below swaps that for the
+  # broad rule (the internet on 443 minus every denied range), for a CNI that enforces
+  # names some other way; it lets a worker reach GitHub, which 26 forbids, so it stays
+  # off unless a deployment deliberately turns it on (issue 61).
+  CRUCIBLE_KUBERNETES__BROAD_EGRESS: "false"
+  CRUCIBLE_KUBERNETES__RESOLVE_TTL_SECONDS: "300"
+  # hades #205: a running worker's names are looked up again on that interval; a new
+  # address joins its NetworkPolicy and the old one stays beside it for this many
+  # seconds before it is dropped. The addresses the Pod's hostAliases pin are kept.
+  CRUCIBLE_KUBERNETES__ADDRESS_OVERLAP_WINDOW_SECONDS: "120"
+  # An in-cluster local endpoint as the pods that take its connections, their namespace
+  # and their port (0: the endpoint URL's port). Empty namespace: the endpoint is outside
+  # the cluster and keeps its resolved-address rule above. Seeds of `kubernetes.egress`.
+  CRUCIBLE_KUBERNETES__LOCAL_ENDPOINT_NAMESPACE: ""
+  CRUCIBLE_KUBERNETES__LOCAL_ENDPOINT_POD_LABELS: "{}"
+  CRUCIBLE_KUBERNETES__LOCAL_ENDPOINT_PORT: "0"
+
+  # GitHub delivery (12, 23, ADR 0017). The App credential is the Secret
+  # `crucible-github-app` in this namespace, which the service owns: the operator connects
+  # the App from the GitHub page (its id and private key), and the service creates the
+  # Secret and reads it through the API server. Nothing here needs to change for that;
+  # `enabled` and `app_id` only matter for a Secret a deployment placed there itself. The
+  # two paths are where the mounted Secret's files appear: the webhook route reads
+  # `webhook.secret` there. The webhook is the optional accelerator and needs the Ingress
+  # route below plus the operator's own public DNS record (operator rule 10), so it stays
+  # off in the base.
+  CRUCIBLE_GITHUB__ENABLED: "false"
+  CRUCIBLE_GITHUB__APP__APP_ID: "0"
+  CRUCIBLE_GITHUB__APP__SECRET_NAME: crucible-github-app
+  CRUCIBLE_GITHUB__APP__PRIVATE_KEY_PATH: /var/lib/crucible/credentials/github/app.pem
+  CRUCIBLE_GITHUB__APP__WEBHOOK_SECRET_PATH: /var/lib/crucible/credentials/github/webhook.secret
+  CRUCIBLE_GITHUB__WEBHOOK_ENABLED: "false"
+
+  # Room runner settings. The allowlist contains hostnames only, never credentials.
+  CRUCIBLE_ROOMS__API_URL: {{ .Values.roomRunner.apiUrl | quote }}
+  CRUCIBLE_ROOMS__PROVIDER: {{ .Values.roomRunner.provider | quote }}
+  CRUCIBLE_ROOMS__IMAGE: {{ .Values.roomRunner.image | quote }}
+  CRUCIBLE_ROOMS__EGRESS_ALLOWLIST: {{ .Values.egress.allowlist | toJson | quote }}
+  CRUCIBLE_ROOMS__IDLE_TIMEOUT_MINUTES: {{ .Values.roomRunner.idleTimeoutMinutes | quote }}
+  CRUCIBLE_ROOMS__MAX_RUNNER_SECONDS: {{ .Values.roomRunner.maxRunnerSeconds | quote }}
+  CRUCIBLE_ROOMS__DEFAULT_HARNESS: {{ .Values.roomRunner.defaultHarness | quote }}
+  CRUCIBLE_ROOMS__DEFAULT_MODEL: {{ .Values.roomRunner.defaultModel | quote }}
+  CRUCIBLE_ROOMS__MODELS: {{ .Values.roomRunner.models | toJson | quote }}

@@ -1,0 +1,20 @@
+# The artifact root (14, 26). The api serves stored artifacts and the supervisor writes
+# them, and they are separate Deployments on this topology, so the claim is
+# ReadWriteMany. That is a prerequisite on the cluster's storage, listed in the runbook
+# and in 26's checklist; object storage for artifacts is a later phase (26).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: crucible-artifacts
+  namespace: crucible
+  labels:
+    app.kubernetes.io/name: crucible
+    app.kubernetes.io/component: artifacts
+spec:
+  {{- if .Values.storage.storageClass }}
+  storageClassName: {{ .Values.storage.storageClass | quote }}
+  {{- end }}
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: {{ .Values.storage.artifactsSize }}

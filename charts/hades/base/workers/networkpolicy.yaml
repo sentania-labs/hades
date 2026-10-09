@@ -1,0 +1,14 @@
+# 26: the namespace default deny for ingress and egress. The provider adds one policy
+# per attempt per role that needs egress; a role with no egress gets no object, because
+# this is already its answer. The readiness probe refuses to launch anything when a CNI
+# does not enforce this.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: crucible-workers
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []

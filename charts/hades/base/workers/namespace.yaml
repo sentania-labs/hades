@@ -1,0 +1,16 @@
+# The workers namespace (26). Pod Security admission at `restricted` is what enforces
+# the pod shape independently of Crucible's own code: it is the surviving half of 13's
+# create-request policy, so it is a property of the namespace and not of the provider.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: crucible-workers
+  labels:
+    app.kubernetes.io/name: crucible
+    app.kubernetes.io/component: workers
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest

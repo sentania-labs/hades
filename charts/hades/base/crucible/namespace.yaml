@@ -1,0 +1,22 @@
+# Crucible's own namespace (01, 26): the api and supervisor Deployments, PostgreSQL, and
+# the only place the GitHub App key and webhook secret are ever mounted (12).
+#
+# `restricted` here too. These are Crucible's own trusted pods and the untrusted half of
+# the system is `crucible-workers`, so `baseline` would have been defensible; but every
+# pod this base creates already satisfies `restricted`, including PostgreSQL, which runs
+# as uid 999 with a read-only root and an emptyDir for its socket. Enforcing what is
+# already true costs nothing and means a later edit that adds a root container, a
+# hostPath or a hostPort is refused rather than merely warned about.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: crucible
+  labels:
+    app.kubernetes.io/name: crucible
+    app.kubernetes.io/component: control-plane
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
