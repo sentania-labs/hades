@@ -47,6 +47,8 @@ NAV = (
     ("/ui/workers", "Workers"),
     ("/ui/wakes", "Wakes"),
     ("", "Admin"),
+    ("/ui/memory", "Memory"),
+    ("/ui/catalog", "Catalog"),
     ("/ui/tokens", "Tokens"),
     ("/ui/audit", "Audit"),
     ("/ui/settings", "Settings"),
