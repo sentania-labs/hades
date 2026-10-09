@@ -61,6 +61,24 @@ if helm template hades charts/hades --set extraSettings.CRUCIBLE_SERVICE__LOG_LE
   echo "chart: an extraSettings value that is not a string rendered" >&2
   exit 1
 fi
+# Overrides too long for the names they compose are refused; a dotted pull Secret is not.
+long_name=$(printf 'n%.0s' $(seq 44))
+long_namespace=$(printf 's%.0s' $(seq 56))
+if helm template hades charts/hades --set nameOverride="$long_name" >/dev/null 2>&1; then
+  echo "chart: a nameOverride longer than 43 characters rendered" >&2
+  exit 1
+fi
+if helm template hades charts/hades --set namespaceOverride="$long_namespace" >/dev/null 2>&1; then
+  echo "chart: a namespaceOverride too long for <namespace>-workers rendered" >&2
+  exit 1
+fi
+helm template hades charts/hades --set namespaceOverride="$long_namespace" \
+  --set workersNamespaceOverride=demo-workers >/dev/null
+helm template hades charts/hades --set cluster.imagePullSecret=ghcr.io-pull > "$tmp/pull.yaml"
+kubeconform -strict -summary "$tmp/pull.yaml"
+flow "$tmp/pull.yaml" --name crucible --namespace crucible \
+  --workers-namespace crucible-workers --buildkit off --pull-secret ghcr.io-pull \
+  --setting CRUCIBLE_KUBERNETES__IMAGE_PULL_SECRET=ghcr.io-pull
 
 # Exercise independent credential mounts and external database configuration as well.
 helm template hades charts/hades --is-upgrade \

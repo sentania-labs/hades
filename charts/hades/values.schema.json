@@ -3,6 +3,8 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["nameOverride", "namespaceOverride", "workersNamespaceOverride", "serviceImage", "workerImage", "postgres", "ingress", "storage", "buildkit", "cluster", "egress", "workerQuota", "secrets", "provider", "roomRunner", "extraSettings"],
+  "if": {"properties": {"workersNamespaceOverride": {"const": ""}}},
+  "then": {"properties": {"namespaceOverride": {"maxLength": 55}}},
   "$defs": {
     "image": {
       "type": "object", "additionalProperties": false,
@@ -15,14 +17,17 @@
       "if": {"properties": {"tag": {"not": {"const": "latest"}}}},
       "then": {"properties": {"digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}}}
     },
-    "name": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+    "name": {"type": "string", "maxLength": 63, "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
     "optionalName": {"anyOf": [{"const": ""}, {"$ref": "#/$defs/name"}]},
+    "namePrefix": {"type": "string", "maxLength": 43, "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+    "secretName": {"type": "string", "maxLength": 253, "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"},
+    "optionalSecretName": {"anyOf": [{"const": ""}, {"$ref": "#/$defs/secretName"}]},
     "storageClass": {"type": "string"},
     "labels": {"type": "object", "additionalProperties": {"type": "string"}},
     "quantity": {"type": "string", "minLength": 1}
   },
   "properties": {
-    "nameOverride": {"$ref": "#/$defs/optionalName"},
+    "nameOverride": {"$ref": "#/$defs/namePrefix"},
     "namespaceOverride": {"$ref": "#/$defs/optionalName"},
     "workersNamespaceOverride": {"$ref": "#/$defs/optionalName"},
     "serviceImage": {"$ref": "#/$defs/image"},
@@ -32,7 +37,7 @@
       "required": ["bundled", "image", "databaseSecretName", "user", "database", "storageClass", "size"],
       "properties": {
         "bundled": {"type": "boolean"}, "image": {"type": "string", "minLength": 1},
-        "databaseSecretName": {"$ref": "#/$defs/name"},
+        "databaseSecretName": {"$ref": "#/$defs/secretName"},
         "user": {"type": "string", "pattern": "^[a-z_][a-z0-9_]*$"}, "database": {"type": "string", "pattern": "^[a-z_][a-z0-9_]*$"},
         "storageClass": {"$ref": "#/$defs/storageClass"}, "size": {"$ref": "#/$defs/quantity"}
       }
@@ -72,7 +77,7 @@
           }
         },
         "podPidLimitOverride": {"type": "integer", "minimum": 0},
-        "imagePullSecret": {"$ref": "#/$defs/optionalName"}
+        "imagePullSecret": {"$ref": "#/$defs/optionalSecretName"}
       }
     },
     "egress": {"type": "object", "additionalProperties": false, "required": ["allowlist"], "properties": {"allowlist": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}}},
@@ -84,7 +89,7 @@
     "secrets": {
       "type": "object", "additionalProperties": false,
       "required": ["githubApp", "githubAppPrivateKey", "githubAppWebhook", "firstRunToken"],
-      "properties": {"githubApp": {"$ref": "#/$defs/name"}, "githubAppPrivateKey": {"$ref": "#/$defs/optionalName"}, "githubAppWebhook": {"$ref": "#/$defs/optionalName"}, "firstRunToken": {"$ref": "#/$defs/name"}}
+      "properties": {"githubApp": {"$ref": "#/$defs/secretName"}, "githubAppPrivateKey": {"$ref": "#/$defs/optionalSecretName"}, "githubAppWebhook": {"$ref": "#/$defs/optionalSecretName"}, "firstRunToken": {"$ref": "#/$defs/secretName"}}
     },
     "provider": {
       "type": "object", "additionalProperties": false,

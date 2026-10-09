@@ -5,10 +5,13 @@
 # its metadata. `helm --namespace` holds only Helm's release record: the chart creates
 # its own namespaces, so set namespaceOverride instead. Hades's BuildKit keeps
 # `crucible-buildkit` whatever these say, because the provider names it as a constant.
+# At most 43 characters: `<name>-postgres` must leave room for its StatefulSet's
+# revision hash inside a 63-character label.
 nameOverride: ""
-# Empty: the name above. The control plane's namespace.
+# Empty: the name above. The control plane's namespace. At most 55 characters while
+# workersNamespaceOverride is empty, so `<namespace>-workers` stays within 63.
 namespaceOverride: ""
-# Empty: the control plane's namespace with `-workers` after it.
+# Empty: the control plane's namespace with `-workers` after it. At most 63 characters.
 workersNamespaceOverride: ""
 serviceImage:
   repository: ghcr.io/sentania-labs/crucible
@@ -76,7 +79,7 @@ cluster:
   podPidLimitOverride: 0
   # A pull Secret for the service and worker images, in both namespaces. Empty: the
   # packages are public. It is set on the control-plane Pods and handed to the provider
-  # for every attempt Pod.
+  # for every attempt Pod. Any Secret name, periods included (`ghcr.io-pull`).
   imagePullSecret: ""
 egress:
   allowlist: []

@@ -70,6 +70,8 @@ def _errors(node: dict[str, Any], value: Any, where: str = "") -> list[str]:
             found.append(f"{where}: {value!r} does not match {node['pattern']}")
         if len(value) < node.get("minLength", 0):
             found.append(f"{where}: {value!r} is too short")
+        if len(value) > node.get("maxLength", len(value)):
+            found.append(f"{where}: {value!r} is longer than {node['maxLength']}")
     if isinstance(value, int) and not isinstance(value, bool):
         if value < node.get("minimum", value):
             found.append(f"{where}: {value} is below {node['minimum']}")
@@ -203,6 +205,49 @@ def test_the_overrides_exist_typed_and_default_to_the_base_names() -> None:
         '.Values.workersNamespaceOverride | default (printf "%s-workers" '
         '(include "hades.namespace" .))'
     ) in helpers
+
+
+@pytest.mark.parametrize(
+    ("overrides", "accepted"),
+    [
+        # The longest suffix that must stay a 63-character DNS label: the bundled
+        # `<name>-postgres` StatefulSet, whose controller-revision-hash label value is
+        # the name plus an 11-character hash (52 + 11), so 43 for the name.
+        ({"nameOverride": "n" * 43}, True),
+        ({"nameOverride": "n" * 44}, False),
+        # The default workers namespace is `<namespace>-workers`: 55 + 8.
+        ({"namespaceOverride": "s" * 55}, True),
+        ({"namespaceOverride": "s" * 56}, False),
+        # A workers namespace of its own frees the control plane's to 63.
+        ({"namespaceOverride": "s" * 63, "workersNamespaceOverride": "w" * 63}, True),
+        ({"namespaceOverride": "s" * 64, "workersNamespaceOverride": "w" * 63}, False),
+        ({"workersNamespaceOverride": "w" * 64}, False),
+    ],
+)
+def test_the_overrides_are_bounded_by_the_names_they_compose(
+    overrides: dict[str, str], accepted: bool
+) -> None:
+    values = json.loads(json.dumps(VALUES))
+    values.update(overrides)
+    assert (_errors(SCHEMA, values) == []) is accepted
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "cluster.imagePullSecret",
+        "postgres.databaseSecretName",
+        "secrets.githubApp",
+        "secrets.githubAppPrivateKey",
+        "secrets.githubAppWebhook",
+        "secrets.firstRunToken",
+    ],
+)
+def test_secret_references_take_dns_subdomain_names(path: str) -> None:
+    assert _errors(SCHEMA, _with(VALUES, path, "ghcr.io-pull")) == []
+    assert _errors(SCHEMA, _with(VALUES, path, "x" * 253)) == []
+    for wrong in ("x" * 254, "Ghcr.io", "ghcr..io", ".ghcr", "ghcr.io."):
+        assert _errors(SCHEMA, _with(VALUES, path, wrong)) != [], wrong
 
 
 def test_the_names_flow_into_the_settings_the_service_reads() -> None:
