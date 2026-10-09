@@ -164,7 +164,7 @@ async def sign_in(request: Request, ctx: Ctx, uow: UoW) -> Response:
             message="Token not recognized.",
             status_code=401,
         )
-    if is_device(principal):
+    if is_device(uow, principal):
         # hades #576 (U9): a device token opens a session once, whichever door it uses.
         refused = _exchange(request, ctx, uow, principal, next_path=form.get("next", "/ui"))
         if refused is not None:
@@ -239,7 +239,7 @@ async def device_sign_in(request: Request, ctx: Ctx, uow: UoW) -> Response:
     if not token and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
     principal = authenticate(uow, token)
-    if principal is None or not is_device(principal):
+    if principal is None or not is_device(uow, principal):
         return _sign_in_form(
             request,
             ctx,

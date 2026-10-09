@@ -15,7 +15,7 @@ from crucible.adapters.github.client import RestGitHubClient
 from crucible.application.admin import devices
 from crucible.application.admin.context import AdminContext
 from crucible.application.admin.login import LoginRegistry
-from crucible.application.auth import authenticate, is_device
+from crucible.application.auth import authenticate, has_device_name
 from crucible.application.credential_renewer import ReadOnlyCredentialStore
 from crucible.application.errors import ForbiddenError, UnauthorizedError
 from crucible.application.harnesses import HarnessRegistry
@@ -136,7 +136,7 @@ def note_device_use(
     """hades #576 (U9): a device token's last use and user agent, committed before the
     handler runs so its own transaction carries nothing of it. Recording is never a
     reason to refuse the request."""
-    if not is_device(principal):
+    if not has_device_name(principal):
         return
     try:
         if devices.record_use(uow, clock, principal, user_agent=user_agent):

@@ -36,7 +36,11 @@ authenticates `/v1` like any bearer token, as the principal `device:<name>` with
 the role it was minted with, and a browser on the device exchanges it once at
 `POST /ui/device-sign-in` (form field `token`, or `Authorization: Bearer`) for the
 same server-side UI session the sign-in form opens (ADR 0030). A second exchange,
-through either door, is refused with 409.
+through either door, is refused with 409. The role defaults to `operator` only when
+none is given; an empty role is refused. What makes a principal a device is its
+device row, not its name: a principal named `device:...` from before devices existed
+signs in, rotates and may be renamed as before, and only a new principal may not take
+the prefix.
 
 ## Conventions
 

@@ -19,7 +19,7 @@ from crucible.adapters.api.deps import AppContext, Reader
 from crucible.adapters.ui import session as ui
 from crucible.application.admin import devices, tokens
 from crucible.application.admin.audit import ADMIN_KINDS
-from crucible.application.auth import DEVICE_PREFIX, authenticate, mint_token
+from crucible.application.auth import DEVICE_PREFIX, _mint, authenticate, is_device, mint_token
 from crucible.application.errors import ConflictError
 from crucible.domain.entities import Device, Event, Principal, Role, UiSession
 from crucible.domain.events import EventKind
@@ -60,6 +60,14 @@ class Principals:
         if row is None or row[0].disabled_at is not None:
             return None
         return row[1], row[2]
+
+    def rotate(self, principal_id: str, token_salt: bytes, token_hash: bytes) -> None:
+        principal = self._store.principals[principal_id][0]
+        self._store.principals[principal_id] = (principal, token_salt, token_hash)
+
+    def rename(self, principal_id: str, name: str) -> bool:
+        self._store.principals[principal_id][0].name = name
+        return True
 
     def list_all(self) -> list[Principal]:
         return sorted((replace(p) for p, _, _ in self._store.principals.values()), key=_name)
@@ -251,6 +259,8 @@ def test_mint_names_a_role_and_refuses_what_it_cannot_mint(
     for body, status in (
         ({"name": "wall display"}, 409),
         ({"name": "tablet", "role": "superuser"}, 409),
+        # An empty role is refused, not read as the operator default.
+        ({"name": "tablet", "role": ""}, 409),
         ({"name": " padded"}, 409),
         ({"name": "x" * (devices.NAME_MAX + 1)}, 409),
         ({"role": "operator"}, 422),
@@ -457,3 +467,46 @@ def test_a_secret_shaped_user_agent_is_withheld() -> None:
     assert devices._agent("x" * 600) == "x" * devices.AGENT_MAX
     shaped = "ghp_" + "A1b2C3d4" * 5
     assert devices._agent(f"agent {shaped}") == devices.WITHHELD
+
+
+def test_a_principal_named_like_a_device_before_devices_stays_an_ordinary_one(
+    client: TestClient, admin_token: str, store: Store, clock: FakeClock
+) -> None:
+    """A principal named `device:...` before devices existed has no device row: it signs
+    in as before, keeps its token rotation, and may be renamed out of the prefix."""
+    uow: Any = Uow(store)
+    legacy = _mint(uow, clock, name=f"{DEVICE_PREFIX}old kiosk", role=Role.OPERATOR, rotate=False)
+    assert not is_device(uow, legacy.principal)
+
+    preauth = ui._preauth_serializer(client.app.state.ctx).dumps({"csrf": "fixture-csrf"})  # type: ignore[attr-defined]
+    for _ in range(2):
+        client.cookies.set(ui.PREAUTH_COOKIE, preauth, path="/ui/sign-in")
+        signed_in = client.post(
+            "/ui/sign-in",
+            data={"token": legacy.token, "csrf": "fixture-csrf"},
+            follow_redirects=False,
+        )
+        assert signed_in.status_code == 303, signed_in.text
+    assert kinds(store, EventKind.DEVICE_TOKEN_USED) == []
+    # It is not a device, so the device door stays shut to it.
+    not_a_device = client.post(
+        "/ui/device-sign-in", data={"token": legacy.token}, follow_redirects=False
+    )
+    assert not_a_device.status_code == 401
+
+    rotated = mint_token(
+        uow, clock, name=f"{DEVICE_PREFIX}old kiosk", role=Role.OPERATOR, rotate=True
+    )
+    assert rotated.principal.id == legacy.principal.id
+    with pytest.raises(ValueError, match="reserved"):
+        mint_token(uow, clock, name=f"{DEVICE_PREFIX}new kiosk", role=Role.OPERATOR, rotate=True)
+
+    renamed = tokens.rename(
+        SimpleNamespace(clock=clock, uow_factory=lambda: Uow(store)),  # type: ignore[arg-type]
+        uow,
+        principal="admin",
+        principal_id=legacy.principal.id,
+        name="old kiosk",
+        reason="out of the device namespace",
+    )
+    assert renamed["name"] == "old kiosk"

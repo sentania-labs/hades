@@ -17,7 +17,8 @@ from crucible.ports.clock import Clock
 from crucible.ports.repository import UnitOfWork
 
 TOKEN_PREFIX = "cru_"
-# hades #576 (U9): a device's principal is named for it; only devices.mint creates one.
+# hades #576 (U9): a device's principal is named for it; only devices.mint creates one
+# now, but a principal of that name from before devices existed is an ordinary one.
 DEVICE_PREFIX = "device:"
 SALT_BYTES = 16
 SECRET_BYTES = 32
@@ -42,17 +43,33 @@ def is_reserved_name(name: str) -> bool:
     )
 
 
-def is_device(principal: Principal) -> bool:
+def has_device_name(principal: Principal) -> bool:
+    """Whether the principal may be a device: the cheap test before the row lookup."""
     return principal.name.startswith(DEVICE_PREFIX)
+
+
+def is_device(uow: UnitOfWork, principal: Principal) -> bool:
+    """A device is a principal with a device row. The name alone does not make one: a
+    principal named `device:...` before devices existed stays an ordinary principal."""
+    return has_device_name(principal) and uow.devices.get(principal.id) is not None
 
 
 def mint_token(
     uow: UnitOfWork, clock: Clock, *, name: str, role: Role, rotate: bool = False
 ) -> MintedToken:
     """Create a principal with a fresh token, or rotate an existing principal's token."""
-    if is_reserved_name(name):
+    if is_reserved_name(name) and not _legacy_rotation(uow, name, rotate=rotate):
         raise ValueError(f"principal name {name!r} is reserved")
     return _mint(uow, clock, name=name, role=role, rotate=rotate)
+
+
+def _legacy_rotation(uow: UnitOfWork, name: str, *, rotate: bool) -> bool:
+    """A principal named `device:...` from before devices existed keeps its token
+    rotation; a new one may not take the name, and a device rotates by a new mint."""
+    if not rotate or not name.startswith(DEVICE_PREFIX):
+        return False
+    existing = uow.principals.get_by_name(name)
+    return existing is not None and not is_device(uow, existing)
 
 
 def mint_device_token(uow: UnitOfWork, clock: Clock, *, device: str, role: Role) -> MintedToken:

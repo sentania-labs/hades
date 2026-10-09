@@ -19,7 +19,12 @@ from crucible.application.admin.context import (
     guard_mutation,
     refuse_secret_shaped,
 )
-from crucible.application.auth import DEVICE_PREFIX, MintedToken, is_device, mint_device_token
+from crucible.application.auth import (
+    DEVICE_PREFIX,
+    MintedToken,
+    has_device_name,
+    mint_device_token,
+)
 from crucible.application.errors import (
     ConflictError,
     ContractValidationError,
@@ -124,7 +129,8 @@ def mint(
     reason = guard_mutation(ctx, uow, reason, principal=principal, operation="devices mint")
     name = _name(name)
     try:
-        selected = Role(role) if role else DEFAULT_ROLE
+        # Only an absent role takes the default; an empty one is refused like any other.
+        selected = DEFAULT_ROLE if role is None else Role(role)
     except ValueError as exc:
         roles = ", ".join(item.value for item in Role)
         raise ConflictError(f"role {role!r} is not one of {roles}") from exc
@@ -224,7 +230,7 @@ def record_use(
     """A device token authenticated a /v1 request: move its last-used time and user
     agent, and audit the use when it is the first, from a new user agent, or after an
     hour without one. True when something was written and the caller should commit."""
-    if not is_device(principal):
+    if not has_device_name(principal):
         return False
     device = uow.devices.get(principal.id)
     if device is None or device.revoked_at is not None:
@@ -246,7 +252,7 @@ def exchange(
 ) -> Device:
     """Take the device token's one exchange for a UI session, or refuse. The caller
     creates the session in the same transaction and commits both."""
-    device = uow.devices.get(principal.id) if is_device(principal) else None
+    device = uow.devices.get(principal.id) if has_device_name(principal) else None
     if device is None or device.revoked_at is not None:
         raise UnauthorizedError("not a device token")
     now = clock.now()
