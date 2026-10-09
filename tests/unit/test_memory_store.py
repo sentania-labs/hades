@@ -263,8 +263,7 @@ def test_0058_follows_the_previous_one() -> None:
     assert "0058_memory_and_decisions" in {r.revision for r in script.walk_revisions()}
     revision = script.get_revision("0058_memory_and_decisions")
     assert revision is not None
-    # hades #208 item 2 took 0057 (comment delivery); 0058 chains from it (hades #447).
-    assert revision.down_revision == "0057_comment_delivery"
+    assert revision.down_revision == "0056_pull_request_schema_overlap"
     assert m58.revision == "0058_memory_and_decisions"
 
 

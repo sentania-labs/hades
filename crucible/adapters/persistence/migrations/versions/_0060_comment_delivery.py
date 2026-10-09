@@ -1,7 +1,7 @@
 """Comment delivery states, minion questions and handoff events (hades #208 item 2).
 
-Revision ID: 0057_comment_delivery
-Revises: 0056_pull_request_schema_overlap
+Revision ID: 0060_comment_delivery
+Revises: 0059_rooms
 
 A note on a task now carries a delivery state the supervisor sets from evidence:
 `awaiting` (written, no attempt has been given it), `acknowledged` (the note was in an
@@ -15,20 +15,27 @@ audit: `task_note_acknowledged`, `task_note_acted_on`, `minion_question_asked`,
 (accept, merge, cancel, reroute) Foundry hands to Hades or Hades hands to Foundry during
 bootstrap, with the principal, the local time and the words.
 
-The number and `down_revision` are provisional until the pull request merges (hades #447).
+Written as 0057, the number Hades assigned to the task. 0058 (the memory store) and 0059
+(the rooms) reached main while the branch was open, so this revision is numbered after
+the highest on main and chains from 0059_rooms, as CONTRIBUTING's Migrations section
+says: a revision placed below a head that databases have already reached never runs on
+them, and a migration already on main is never edited. The number and `down_revision`
+stay provisional until the pull request merges; Hades renumbers the file past main's
+highest and points it at main's head at merge (hades #447, 23). The predecessor's event
+kinds are therefore read from whatever `down_revision` names, not from a module named
+here, so a renumber that lands this revision above another kinds-adding migration keeps
+every kind in the CHECK constraint.
 """
 
 from __future__ import annotations
 
+import importlib
+
 import sqlalchemy as sa
 from alembic import op
 
-from crucible.adapters.persistence.migrations.versions._0055_task_notes import (
-    _event_kinds as _previous_event_kinds,
-)
-
-revision = "0057_comment_delivery"
-down_revision = "0056_pull_request_schema_overlap"
+revision = "0060_comment_delivery"
+down_revision = "0059_rooms"
 branch_labels = None
 depends_on = None
 
@@ -39,7 +46,7 @@ EVENT_KINDS = (
     "minion_question_answered",
     "handoff_recorded",
 )
-EVENT_ARCHIVE = "events_0057_archive"
+EVENT_ARCHIVE = "events_0060_archive"
 NOTE_COLUMNS = (
     "acknowledged_attempt_id",
     "acknowledged_at",
@@ -49,6 +56,23 @@ NOTE_COLUMNS = (
     "acted_on_event_seq",
     "delivery_state",
 )
+
+
+# The revisions live in this package; alembic loads this file under its own module name,
+# so the package is named in full rather than read from __name__.
+VERSIONS_PACKAGE = "crucible.adapters.persistence.migrations.versions"
+
+
+def _previous_event_kinds() -> list[str]:
+    """The kinds the revision below permits, read from the module `down_revision` names.
+
+    Every kinds-adding revision has a `_event_kinds()` that lists the kinds its CHECK
+    constraint allows (0001 onward). Reading the predecessor through `down_revision`
+    rather than a module named here keeps the chain whole after hades #447 renumbers
+    this revision and points it at a different head."""
+    previous = importlib.import_module(f"{VERSIONS_PACKAGE}._{down_revision}")
+    kinds: list[str] = list(previous._event_kinds())
+    return kinds
 
 
 def _event_kinds() -> list[str]:

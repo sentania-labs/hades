@@ -7,7 +7,8 @@ repository. AC1: a note's delivery state moves only on the supervisor's evidence
 author cannot set it. AC2: a worker's question is a record on the task, listed by the task
 read and answered by one POST that corrects the attempt with the answer. AC3: accept,
 merge, cancel and reroute handoffs carry the principal, the local time and the words and
-are on the task's events. AC4: migration 0057 owns the new columns, table and kinds.
+are on the task's events. AC4: the comment delivery migration owns the new columns,
+table and kinds.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from alembic.script import ScriptDirectory
 from fastapi import FastAPI
 from pydantic import ValidationError
 from starlette.testclient import TestClient
@@ -26,11 +28,7 @@ from starlette.testclient import TestClient
 from crucible.adapters.api.deps import app_context, current_principal, unit_of_work
 from crucible.adapters.api.problems import install_problem_handlers
 from crucible.adapters.api.routers import tasks as tasks_router
-from crucible.adapters.persistence.migrations.versions import _0057_comment_delivery as m0057
-from crucible.adapters.persistence.migrations.versions import (
-    _0058_memory_and_decisions as m0058,
-)
-from crucible.adapters.persistence.migrations.versions import _0059_rooms as m0059
+from crucible.adapters.persistence import migrate
 from crucible.adapters.persistence.models import MinionQuestionRow, TaskNoteRow
 from crucible.application import supervisor as supervisor_module
 from crucible.application.acceptance import record_acceptance
@@ -67,7 +65,7 @@ from crucible.domain.events import EventKind
 from crucible.domain.lifecycle import TaskState
 from crucible.domain.time import local_text
 from crucible.ports.execution import CollectedOutputs
-from tests.fixtures import FakeClock
+from tests.fixtures import FakeClock, migration_by_slug
 from tests.unit.test_gates import HEAD as HEAD_498
 from tests.unit.test_issue_360_ready_for_merge_correction import NOW
 from tests.unit.test_issue_489_card_actions import (
@@ -742,29 +740,46 @@ def test_merge_and_reroute_handoffs_record_both_directions() -> None:
     assert [e.principal for e in events] == ["crucible", "scott", "crucible", "foundry"]
 
 
-# ----- AC4: migration 0057 ------------------------------------------------------------
+# ----- AC4: the comment delivery migration ---------------------------------------------
 
 
-def test_migration_0057_owns_the_new_kinds_columns_and_table() -> None:
-    assert m0057.revision == "0057_comment_delivery"
-    assert m0057.down_revision == "0056_pull_request_schema_overlap"
-    assert set(m0057.EVENT_KINDS) == {
+def test_the_comment_delivery_migration_owns_the_new_kinds_columns_and_table() -> None:
+    # The revision is found by its slug, never imported by number: Hades renumbers a
+    # branch's new migration past main's highest and points it at main's head when it
+    # merges main into the branch (hades #447, CONTRIBUTING), so a pinned module name
+    # fails at collection the moment that happens.
+    script = migration_by_slug("comment_delivery")
+    m = script.module
+    assert Path(script.path).name == f"_{m.revision}.py"
+    assert m.revision == script.revision
+    directory = ScriptDirectory.from_config(migrate.alembic_config("postgresql://unused/unused"))
+    heads = directory.get_heads()
+    assert len(heads) == 1
+    # Head first. The revision sits above 0059_rooms, the head when it was written, so
+    # every database already at that head runs it; a revision placed below an applied
+    # head never runs there.
+    chain = [r.revision for r in directory.iterate_revisions(heads[0], "base")]
+    assert m.revision in chain
+    assert chain.index("0059_rooms") > chain.index(m.revision)
+    assert set(m.EVENT_KINDS) == {
         "task_note_acknowledged",
         "task_note_acted_on",
         "minion_question_asked",
         "minion_question_answered",
         "handoff_recorded",
     }
-    # 0057 adds its five kinds to the chain below it. 0058 (hades #208's memory store and
-    # decision ledger) chains from 0057 and 0059 (the rooms) from 0058; the latest owns
-    # the CHECK constraint, so together they name every kind the code has.
-    assert m0058.down_revision == m0057.revision
-    assert m0059.down_revision == m0058.revision
-    later = set(m0058.EVENT_KINDS) | set(m0059.EVENT_KINDS)
-    assert set(m0057._event_kinds()) == {k.value for k in EventKind} - later
-    assert set(m0059._event_kinds()) == {k.value for k in EventKind}
+    # It adds its five kinds to whatever the revision below permits, read through
+    # down_revision, and the chain's head owns the CHECK constraint with every kind.
+    below = directory.get_revision(m.down_revision)
+    assert below is not None
+    previous_kinds = set(below.module._event_kinds())
+    assert previous_kinds.isdisjoint(m.EVENT_KINDS)
+    assert set(m._event_kinds()) == previous_kinds | set(m.EVENT_KINDS)
+    head = directory.get_revision(heads[0])
+    assert head is not None
+    assert set(head.module._event_kinds()) == {k.value for k in EventKind}
     note_columns = {c.name for c in TaskNoteRow.__table__.columns}
-    assert set(m0057.NOTE_COLUMNS) <= note_columns
+    assert set(m.NOTE_COLUMNS) <= note_columns
     assert TaskNoteRow.__table__.columns["delivery_state"].server_default is not None
     question_columns = {c.name for c in MinionQuestionRow.__table__.columns}
     assert question_columns == {

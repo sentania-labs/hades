@@ -444,7 +444,7 @@ class TaskNoteRow(Base):
     author: Mapped[str] = mapped_column(String(128))
     # Declared before `text`, whose name shadows SQLAlchemy's `text()` in this body.
     verbatim: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
-    # hades #208 item 2 (0057): the delivery state and the supervisor's evidence for it.
+    # hades #208 item 2 (0060_comment_delivery): the delivery state and its evidence.
     delivery_state: Mapped[str] = mapped_column(String(16), server_default=text("'awaiting'"))
     text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TZ)
@@ -461,7 +461,7 @@ class TaskNoteRow(Base):
 
 
 class MinionQuestionRow(Base):
-    """A worker's question on a task and its answer (hades #208 item 2, 0057)."""
+    """A worker's question on a task and its answer (hades #208 item 2, 0060)."""
 
     __tablename__ = "minion_questions"
     __table_args__ = (Index("ix_minion_questions_task_asked", "task_id", "asked_at"),)

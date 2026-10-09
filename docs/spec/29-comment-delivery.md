@@ -104,9 +104,13 @@ differently from its neighbours and never edited.
 
 ## Persistence
 
-Revision `0057_comment_delivery` (14): seven columns on `task_notes`
+Revision `0060_comment_delivery` (14): seven columns on `task_notes`
 (`delivery_state` with default `awaiting`, `acknowledged_attempt_id`, `acknowledged_at`,
 `acted_on_attempt_id`, `acted_on_at`, `acted_on_commit`, `acted_on_event_seq`), the
 `minion_questions` table, and the five event kinds in the `events` CHECK constraint. The
-downgrade archives the five kinds' events in `events_0057_archive` and the next upgrade
-restores them, the pattern 0055 set.
+downgrade archives the five kinds' events in `events_0060_archive` and the next upgrade
+restores them, the pattern 0055 set. The revision was assigned 0057 and is numbered past
+`0059_rooms` because the memory store (0058) and the rooms (0059) reached main first; a
+revision placed below a head that databases have already reached never runs on them. The
+number stays provisional until merge (hades #447, 23), so the tests find the revision by
+its slug and the revision reads its predecessor's event kinds through `down_revision`.

@@ -1,7 +1,7 @@
 """The shared memory store and the decision ledger (hades #208).
 
 Revision ID: 0058_memory_and_decisions
-Revises: 0057_comment_delivery
+Revises: 0056_pull_request_schema_overlap
 
 Transcripts stay per channel. Decisions and memory are shared by every channel and every
 persona. `memory_items` holds the facts every Hades channel recalls: the text, where it
@@ -17,8 +17,8 @@ ledger gets the append-only trigger 0001 gives events. Four event kinds join the
 `memory_promoted`, `memory_superseded`, `memory_forgotten` and
 `ledger_decision_recorded`.
 
-The number is the one Hades assigned (0058); the down_revision is provisional until merge
-(hades #447) and now follows 0057_comment_delivery, hades #208 item 2's revision.
+The number is the one Hades assigned (0058); the down_revision is provisional and Hades
+points it at main's head at merge (hades #447).
 """
 
 from __future__ import annotations
@@ -27,12 +27,12 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-from crucible.adapters.persistence.migrations.versions._0057_comment_delivery import (
+from crucible.adapters.persistence.migrations.versions._0055_task_notes import (
     _event_kinds as _previous_event_kinds,
 )
 
 revision = "0058_memory_and_decisions"
-down_revision = "0057_comment_delivery"
+down_revision = "0056_pull_request_schema_overlap"
 branch_labels = None
 depends_on = None
 

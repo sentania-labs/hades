@@ -17,7 +17,7 @@ from crucible.adapters.persistence.unit_of_work import SqlUnitOfWorkFactory, mak
 from crucible.application.routing import load_routing
 from crucible.contracts.policy import RoutingPolicyV1
 from crucible.ports.harness import HarnessGate, HarnessUnavailableError
-from tests.fixtures import contract_document
+from tests.fixtures import contract_document, migration_by_slug
 from tests.integration.conftest import rebuild, reset, submit_and_start
 
 pytestmark = pytest.mark.integration
@@ -1912,17 +1912,25 @@ def test_each_0044_head_upgrades_through_the_0045_merge(
         engine.dispose()
 
 
-def test_0057_applies_to_an_empty_and_a_populated_database(database_url: str) -> None:
+def test_comment_delivery_applies_to_an_empty_and_a_populated_database(
+    database_url: str,
+) -> None:
     """hades #208 item 2: the comment delivery revision adds columns to `task_notes`, the
     `minion_questions` table and five event kinds. From empty it goes down and up with
-    the schema matching the ORM. On a database populated at 0056 (a task, an attempt, a
-    note and an escalation, as a bootstrap database has) every existing note comes out
-    `awaiting`, a question can be stored against the attempt, the new kinds are accepted,
-    and a downgrade archives those events and brings them back on the next upgrade."""
+    the schema matching the ORM. On a database populated at the revision below it (a
+    task, an attempt, a note and an escalation, as a bootstrap database has) every
+    existing note comes out `awaiting`, a question can be stored against the attempt, the
+    new kinds are accepted, and a downgrade archives those events and brings them back on
+    the next upgrade. The revision is found by its slug and the revision below read from
+    it: both are provisional until merge (hades #447)."""
+    revision = migration_by_slug("comment_delivery")
+    below = revision.down_revision
+    assert isinstance(below, str)
+    archive = revision.module.EVENT_ARCHIVE
     engine = make_engine(database_url)
     try:
         # Empty: down past the revision, up to head, drift-free, down and up again.
-        migrate.downgrade(database_url, "0056_pull_request_schema_overlap")
+        migrate.downgrade(database_url, below)
         assert "minion_questions" not in inspect(engine).get_table_names()
         note_columns = {c["name"] for c in inspect(engine).get_columns("task_notes")}
         assert "delivery_state" not in note_columns
@@ -1941,8 +1949,8 @@ def test_0057_applies_to_an_empty_and_a_populated_database(database_url: str) ->
         } <= note_columns
         assert "minion_questions" in inspect(engine).get_table_names()
 
-        # Populated: rows at 0056, then the upgrade.
-        migrate.downgrade(database_url, "0056_pull_request_schema_overlap")
+        # Populated: rows at the revision below, then the upgrade.
+        migrate.downgrade(database_url, below)
         task, execution, attempt = (
             "01MIG0570000000000000TASK1",
             "01MIG0570000000000000EXEC1",
@@ -2068,7 +2076,7 @@ def test_0057_applies_to_an_empty_and_a_populated_database(database_url: str) ->
                     {"kind": kind, "task": task},
                 )
         # Down archives the five kinds and drops the table and columns; up restores them.
-        migrate.downgrade(database_url, "0056_pull_request_schema_overlap")
+        migrate.downgrade(database_url, below)
         assert "minion_questions" not in inspect(engine).get_table_names()
         with engine.connect() as conn:
             assert (
@@ -2077,7 +2085,7 @@ def test_0057_applies_to_an_empty_and_a_populated_database(database_url: str) ->
                 ).scalar()
                 == 0
             )
-            assert conn.execute(text("SELECT count(*) FROM events_0057_archive")).scalar() == 5
+            assert conn.execute(text(f"SELECT count(*) FROM {archive}")).scalar() == 5
         migrate.upgrade(database_url)
         with engine.connect() as conn:
             kinds = (
@@ -2094,7 +2102,9 @@ def test_0057_applies_to_an_empty_and_a_populated_database(database_url: str) ->
             )
             assert len(kinds) == 5
             assert (
-                conn.execute(text("SELECT to_regclass('public.events_0057_archive')")).scalar()
+                conn.execute(
+                    text("SELECT to_regclass(:name)"), {"name": f"public.{archive}"}
+                ).scalar()
                 is None
             )
     finally:
