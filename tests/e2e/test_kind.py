@@ -83,6 +83,7 @@ from tests.e2e.conftest import (
 )
 from tests.e2e.policy import e2e_policy_document, e2e_routing_document
 from tests.e2e.repo import make_origin
+from tests.e2e.reroute import first_reroute_pair
 from tests.e2e.test_class_routing import _install_class_policy
 from tests.e2e.test_isolation import MUST_BE_REFUSED
 from tests.fixtures import contract_document, promote_for_test
@@ -1315,13 +1316,15 @@ async def test_scripted_quota_reroutes_on_kubernetes(
     case goes on to prove its checkpoint reaches the local file origin."""
     clock = SystemClock()
     harnesses = application_harnesses(test_fixtures=True)
+    store = DiskArtifactStore(artifact_root / "kind-routing-store")
+    provider.artifact_store = store
     ctx = AppContext(
         uow_factory=SqlUnitOfWorkFactory(engine),
         clock=clock,
         providers=[provider],
         database_url=migrated,
         engine=engine,
-        artifact_store=DiskArtifactStore(artifact_root / "kind-routing-store"),
+        artifact_store=store,
         harnesses=harnesses,
     )
     tokens: dict[str, str] = {}
@@ -1396,10 +1399,9 @@ async def test_scripted_quota_reroutes_on_kubernetes(
             await asyncio.sleep(0.5)
         else:
             raise AssertionError("the scripted quota attempt never rerouted")
-        # The reroute schedules the successor; since collection runs beside the tick
-        # (lab findings of 2026-09-29) the tick after it may already have launched it.
-        assert midway["state"] in ("scheduled", "running"), midway
-        first, second = attempts
+        # Collection and rerouting run beside the tick. The poll can observe a later
+        # attempt too, but the first pair is still the quota attempt and its successor.
+        first, second = first_reroute_pair(attempts)
         assert first["exit_class"] == "quota_exhausted"
         assert first["image"] == resolved.reference
         assert second["resume_from_remote"] is False
