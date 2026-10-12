@@ -214,6 +214,7 @@ async def gateway_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         principal,
         csrf,
         active="/ui/gateway",
+        data_page="gateway",
         heading="Local gateway",
         intro="The gateway Hermes uses: its URL, its key, a test of both, and its models.",
         sections=sections,
@@ -465,6 +466,7 @@ def _confirm_page(
         principal,
         csrf,
         active="/ui/gateway",
+        data_page="gateway",
         heading="Local gateway",
         intro="Confirm the routing version these model choices publish.",
         sections=[

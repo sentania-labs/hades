@@ -248,9 +248,39 @@ def mint_token(principal: str) -> str:
 
 
 FIRST_RUN_FILE = "/var/lib/crucible/credentials/first-run-admin-token"
-FIRST_RUN_LANDING_MARKER = b"<h1>Set up</h1>"
-BOARD_MARKER = b"<h1>Board</h1>"
 TOKEN_PATTERN = re.compile(r"\bcru_[A-Z0-9]{26}\.[A-Za-z0-9_-]+\b")
+# Stable page markers: the data-page attribute on <main>, never a product name or a
+# heading. Pages that render straight from _base (the board) derive theirs from the
+# active path. /ui itself is a redirect whose destination depends on the deployment's
+# first-run state, so it is not walked; the board is fetched explicitly instead.
+BOARD_PATH = "/ui/board"
+BOARD_MARKER = "board"
+PAGE_MARKERS: dict[str, str] = {
+    "/ui/setup": "setup",
+    "/ui/harnesses": "harnesses",
+    "/ui/credentials": "credentials",
+    "/ui/images": "images",
+    "/ui/routing": "routing",
+    "/ui/repositories": "repositories",
+    "/ui/tokens": "tokens",
+    "/ui/github": "github",
+    "/ui/workers": "workers",
+    "/ui/tasks": "tasks",
+    "/ui/wakes": "wakes",
+    "/ui/retention": "retention",
+    "/ui/audit": "audit",
+    "/ui/bootstrap": "bootstrap",
+    "/ui/settings": "settings",
+}
+
+
+def expect_page(opener: urllib.request.OpenerDirector, url: str, path: str, marker: str) -> None:
+    """A 200 whose main element carries the page's marker, whatever its headings say."""
+    with opener.open(url, timeout=DEFAULT_TIMEOUT) as response:
+        if response.status != 200:
+            raise SmokeError(f"the first-run UI page {path} returned HTTP {response.status}")
+        if f'data-page="{marker}"'.encode() not in response.read():
+            raise SmokeError(f"the first-run UI page {path} lacks data-page={marker!r}")
 
 
 def walk_first_run_ui(base_url: str) -> None:
@@ -290,33 +320,15 @@ def walk_first_run_ui(base_url: str) -> None:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
-        # The explicit next=/ui lands on Set up while a first-run step is undone (hades
-        # #169). The root and the default sign-in destination instead lead to the board.
+        # Where a fresh sign-in lands is the product's choice (Set up while a first-run
+        # step is undone, the board otherwise; hades #169, #603). The smoke asks only
+        # that the sign-in succeed, then fetches the board and each page by name.
         with opener.open(request_object, timeout=DEFAULT_TIMEOUT) as response:
-            if response.status != 200 or FIRST_RUN_LANDING_MARKER not in response.read():
-                raise SmokeError("first-run administrator sign-in did not render the Set up page")
-        with opener.open(f"{base_url}/ui/board", timeout=DEFAULT_TIMEOUT) as response:
-            if response.status != 200 or BOARD_MARKER not in response.read():
-                raise SmokeError("the first-run Board page did not render")
-        for path in (
-            "/ui/harnesses",
-            "/ui/credentials",
-            "/ui/images",
-            "/ui/routing",
-            "/ui/repositories",
-            "/ui/tokens",
-            "/ui/github",
-            "/ui/workers",
-            "/ui/tasks",
-            "/ui/wakes",
-            "/ui/retention",
-            "/ui/audit",
-            "/ui/bootstrap",
-            "/ui/settings",
-        ):
-            with opener.open(f"{base_url}{path}", timeout=DEFAULT_TIMEOUT) as response:
-                if response.status != 200 or b"Hades" not in response.read():
-                    raise SmokeError(f"the first-run UI page {path} did not render")
+            if response.status != 200:
+                raise SmokeError(f"first-run administrator sign-in returned HTTP {response.status}")
+        expect_page(opener, f"{base_url}{BOARD_PATH}", BOARD_PATH, BOARD_MARKER)
+        for path, marker in PAGE_MARKERS.items():
+            expect_page(opener, f"{base_url}{path}", path, marker)
     except urllib.error.URLError as exc:
         raise SmokeError(f"the first-run UI walk failed: {exc}") from None
     left = compose(

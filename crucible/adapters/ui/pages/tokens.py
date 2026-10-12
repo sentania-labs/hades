@@ -113,6 +113,7 @@ def tokens_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         principal,
         csrf,
         active="/ui/tokens",
+        data_page="tokens",
         heading="Tokens",
         intro="Who can sign in or call the API, and with which role.",
         sections=sections,
@@ -139,7 +140,14 @@ async def _action_token_create(
         reason=reason,
     )
     uow.commit()
-    context = _base(request, principal, csrf, title="Token created", active="/ui/tokens")
+    context = _base(
+        request,
+        principal,
+        csrf,
+        title="Token created",
+        active="/ui/tokens",
+        data_page="token-created",
+    )
     context.update(
         token=minted.token,
         token_name=minted.principal.name,
