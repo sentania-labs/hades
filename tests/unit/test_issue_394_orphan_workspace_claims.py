@@ -121,7 +121,7 @@ def _spec_returning(spec_: LaunchSpec) -> Callable[[Attempt], Awaitable[LaunchSp
 
 async def prepared(api: FakeKubernetesApi, provider: KubernetesProvider, attempt_id: str) -> None:
     await provider.prepare(spec(attempt_id=attempt_id))
-    assert claim(attempt_id) in api.object_names("persistentvolumeclaims")
+    assert not api.object_names("persistentvolumeclaims")
 
 
 def cleaned_payloads(uow: Any) -> dict[str, str]:
@@ -136,15 +136,14 @@ def cleaned_payloads(uow: Any) -> dict[str, str]:
 # ----- AC1: the supervisor's cleanup path for an attempt with started_at null ----------
 
 
-async def test_an_attempt_that_ends_environment_at_prepare_has_its_claim_deleted(
+async def test_an_attempt_that_ends_environment_at_prepare_has_no_claim_to_delete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     api, _registry, provider = build()
     api.script(PRE_LAUNCH, "prepare-fails")
     with pytest.raises(ProviderError):
         await provider.prepare(spec(attempt_id=PRE_LAUNCH))
-    # The preparer failed after the claim was made: the leak of the issue.
-    assert claim(PRE_LAUNCH) in api.object_names("persistentvolumeclaims")
+    assert not api.object_names("persistentvolumeclaims")
 
     row = attempt(PRE_LAUNCH, AttemptState.PREPARING)
     supervisor, uow = supervisor_over(monkeypatch, provider, [row])
@@ -161,10 +160,9 @@ async def test_an_attempt_that_ends_environment_at_prepare_has_its_claim_deleted
     assert supervisor._list_cleanup_due() == []
     assert await supervisor._pre_launch_cleanup_step() == 1
 
-    assert claim(PRE_LAUNCH) not in api.object_names("persistentvolumeclaims")
-    assert ("persistentvolumeclaims", claim(PRE_LAUNCH)) in api.deleted
+    assert not api.object_names("persistentvolumeclaims")
     assert row.cleaned_up_at == NOW
-    assert cleaned_payloads(uow) == {PRE_LAUNCH: "delete"}
+    assert cleaned_payloads(uow) == {}
     # Recorded cleaned, it is not visited again.
     assert await supervisor._pre_launch_cleanup_step() == 0
 
@@ -191,7 +189,7 @@ async def test_every_pre_launch_ending_has_its_claim_deleted(
 
     assert api.object_names("persistentvolumeclaims") == []
     assert not [name for kind, name in api.objects if kind == "configmaps"]
-    assert cleaned_payloads(uow) == {PRE_LAUNCH: "delete"}
+    assert cleaned_payloads(uow) == {}
 
 
 async def test_an_interrupted_start_waits_the_attempt_lease_as_cleanup_does(
@@ -205,48 +203,30 @@ async def test_an_interrupted_start_waits_the_attempt_lease_as_cleanup_does(
 
     assert await supervisor._pre_launch_cleanup_step() == 0
     assert PRE_LAUNCH in supervisor._live_attempt_ids()
-    assert claim(PRE_LAUNCH) in api.object_names("persistentvolumeclaims")
+    assert not api.object_names("persistentvolumeclaims")
 
     row.ended_at = NOW - timedelta(seconds=supervisor.attempt_lease_ttl_seconds)
     assert await supervisor._pre_launch_cleanup_step() == 1
     assert api.object_names("persistentvolumeclaims") == []
 
 
-# ----- AC2: the retention sweep drains a leaked claim and honours the label -------------
+# ----- ADR 0033: no workspace claims enter retention -----------------------------------
 
 
-async def test_the_sweep_deletes_a_leaked_unlabelled_claim_and_leaves_a_labelled_one(
+async def test_the_sweep_does_not_manage_workspace_claims(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     api, _registry, provider = build()
+    del monkeypatch
     await prepared(api, provider, LEAKED)
-    await prepared(api, provider, KEPT)
-    # Both attempts never launched and were never cleaned (they ended before this fix).
-    # One claim carries the retention label, as an operator or an old cleanup left it.
-    labels = api.objects[("persistentvolumeclaims", claim(KEPT))].body["metadata"]["labels"]
-    labels[k8sspec.LABEL_RETAIN] = "keep"
-    supervisor, _uow = supervisor_over(
-        monkeypatch,
-        provider,
-        [
-            attempt(LEAKED, AttemptState.FAILED, ExitClass.ENVIRONMENT),
-            attempt(KEPT, AttemptState.FAILED, ExitClass.ENVIRONMENT),
-        ],
-    )
-
-    keep = supervisor._live_attempt_ids()
-    assert LEAKED not in keep and KEPT not in keep
-    removed = await provider.retention(keep)
-
-    assert removed >= 1
-    assert ("persistentvolumeclaims", claim(LEAKED)) in api.deleted
-    assert api.object_names("persistentvolumeclaims") == [claim(KEPT)]
+    await provider.retention([])
+    assert not api.object_names("persistentvolumeclaims")
 
 
 async def test_a_finished_launched_attempt_not_yet_cleaned_is_still_held_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Hades #237 is unchanged: a launched attempt's bundle is read until its cleanup."""
+    """A finished attempt has no retained claim before ordinary object cleanup."""
     api, _registry, provider = build()
     await prepared(api, provider, LEAKED)
     row = attempt(LEAKED, AttemptState.FAILED, ExitClass.COMPLETED, started_at=NOW)
@@ -256,24 +236,19 @@ async def test_a_finished_launched_attempt_not_yet_cleaned_is_still_held_back(
     assert LEAKED in keep
     await provider.retention(keep)
     assert await supervisor._pre_launch_cleanup_step() == 0
-    assert api.object_names("persistentvolumeclaims") == [claim(LEAKED)]
+    assert not api.object_names("persistentvolumeclaims")
 
 
-# ----- AC3: a running attempt's claim and a kept claim survive both paths ---------------
+# ----- Cleanup policies cannot retain Pod scratch --------------------------------------
 
 
-async def test_running_and_kept_claims_survive_the_cleanup_and_the_sweep(
+async def test_running_and_keep_policy_attempts_create_no_workspace_claims(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     api, _registry, provider = build()
     for attempt_id in (RUNNING, KEPT, RESUME):
         await prepared(api, provider, attempt_id)
-    # A kept claim: a launched attempt that cleanup kept under `keep`.
     await provider.cleanup(workspace(KEPT), CleanupPolicy.KEEP, spec(attempt_id=KEPT))
-    assert (
-        k8sspec.LABEL_RETAIN
-        in (api.objects[("persistentvolumeclaims", claim(KEPT))].body["metadata"]["labels"])
-    )
     rows = [
         attempt(RUNNING, AttemptState.RUNNING, started_at=NOW),
         attempt(
@@ -294,7 +269,7 @@ async def test_running_and_kept_claims_survive_the_cleanup_and_the_sweep(
     monkeypatch.setattr(supervisor, "_spec_for", _spec_returning(spec(attempt_id=RESUME)))
 
     assert await supervisor._pre_launch_cleanup_step() == 1
-    assert cleaned_payloads(uow) == {RESUME: "keep"}
+    assert cleaned_payloads(uow) == {}
     keep = supervisor._live_attempt_ids()
     assert RUNNING in keep
     await provider.retention(keep)
@@ -302,13 +277,7 @@ async def test_running_and_kept_claims_survive_the_cleanup_and_the_sweep(
     assert await supervisor._pre_launch_cleanup_step() == 0
     await provider.retention(supervisor._live_attempt_ids())
 
-    assert sorted(api.object_names("persistentvolumeclaims")) == sorted(
-        claim(attempt_id) for attempt_id in (RUNNING, KEPT, RESUME)
-    )
-    resume_labels = api.objects[("persistentvolumeclaims", claim(RESUME))].body["metadata"][
-        "labels"
-    ]
-    assert resume_labels[k8sspec.LABEL_RETAIN] == CleanupPolicy.KEEP.value
+    assert not api.object_names("persistentvolumeclaims")
     assert not [name for kind, name in api.deleted if kind == "persistentvolumeclaims"]
 
 

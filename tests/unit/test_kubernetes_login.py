@@ -607,7 +607,7 @@ async def test_the_supervisor_neither_sweeps_nor_adopts_a_probe_in_flight() -> N
     )
     assert await other.retention([]) == 0
     assert await other.reconcile() == []
-    assert [n for n in api.object_names("persistentvolumeclaims") if "probe" in n]
+    assert not api.object_names("persistentvolumeclaims")
     await asyncio.wait_for(task, 20)
     assert result["probe"].timed_out
 

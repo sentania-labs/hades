@@ -15,6 +15,47 @@ every provider implements; this document is the Kubernetes provider's
 mechanics, in the same order as 08's Docker section, plus what the cluster
 must guarantee before a worker runs there.
 
+ADR 0033 changes the workspace mechanics. Every role Pod has a `ws` volume that is
+removed with that Pod. It is a size-limited `emptyDir` by default, or a generic
+ephemeral volume when `kubernetes.workspace_ephemeral_class` is set. Both use
+`kubernetes.workspace_ephemeral_size`. The artifact and reference-cache claims remain
+persistent. No attempt PVC is created and no Pod mounts or inherits another Pod's
+files.
+
+The worker Pod contains `workspace-prepare` as an init container, the agent as
+`crucible`, and the collector as `collector`. The init container clones into that Pod's
+scratch with the same preparer script the `prepare-<attempt>` Job ran, which proved the
+checkout can be built; harness credential init containers, when the harness has them,
+come after it. A correction's sealed bundle is delivered from the artifact store into
+that init container over exec, as it is into the preparer (ADR 0032). The clone reaches
+the remote even with a reference cache, which is only an object source, so the worker
+Pod gets a second NetworkPolicy, `np-checkout-<attempt>`, with the preparer's git
+destinations, and a private repository's `checkout-<attempt>` Secret is mounted into
+that init container and no other container. Whether the Secret is mounted is read from
+the cluster at launch, so a supervisor restarted between prepare and launch still mounts
+it. The provider deletes both once the Pod has left `Pending`, which a Pod does only
+after its init containers have run; `cleanup` deletes them on every other path. The
+Supervisor holds a private checkout token until launch returns, and launch waits for
+the checkout init to complete before returning. Failed and cancelled launches revoke
+it too; Docker's revocation after prepare is unchanged (ADR 0019 amended by 0033). The
+worker's own policy stays exactly its allowlist. The agent's container is ended by
+signalling its processes (TERM for drain, KILL after the supervisor's grace window),
+preserving the running Pod for collection. The collector waits
+for the provider: once `collect` has seen the agent's exit and classified it, it writes
+`quota` or `normal` to `.collect-mode` in the scratch, so a quota checkpoint (16) is
+packaged or refused as one. The collector finishes while the checkout still exists and
+stays available for bounded read-back. The worker Job's `activeDeadlineSeconds` is the
+contract's timeout plus the drain grace plus the collector timeout. The verifier and publisher are
+separate Jobs; they clone from the reference cache or receive the sealed bundle from
+the artifact store. The verifier receives a self-contained bundle from the collector's
+independent clone, bounded to 256 MiB: the incremental publication bundle alone cannot
+populate an empty repository. The sealed publication and correction artifact is
+unchanged. A verifier init creates its repo, results and cache subPaths as the worker
+uid. The verifier stays alive after checks until the provider reads its results over
+exec; both exchange directions share the role deadline. The worker init likewise
+creates its report directory, and credential probes create empty directories without
+cloning a repository.
+
 Local-origin quota checkpoints are Docker-only. A Kubernetes worker cannot
 reach an origin that is a path on the supervisor host, so the supervisor
 records that the checkpoint was skipped and reroutes from the base instead.
@@ -46,7 +87,8 @@ and deleting the first-run administrator Secret (ADR 0016). Everything a worker 
 per attempt by the supervisor through the Kubernetes API.
 
 The supervisor's ServiceAccount is bound to a Role in `crucible-workers`
-that permits create, get, list, watch, and delete on Jobs, Pods,
+that permits create, get, list, watch, patch, and delete on Jobs, and create, get,
+list, watch, and delete on Pods and
 ConfigMaps, Secrets, and PersistentVolumeClaims, plus `pods/log` and
 `pods/exec` for log tail and the login flow, and nothing in any other
 namespace. It has no cluster-scoped permissions.
@@ -61,7 +103,7 @@ carries and what a unit test holds it to (C9):
 | `pods/log` | get |
 | `pods/exec` | create, get |
 | `resourcequotas`, `events` | get, list |
-| `batch/jobs` | create, get, list, watch, delete |
+| `batch/jobs` | create, get, list, watch, **patch**, delete |
 | `networking.k8s.io/networkpolicies` | create, get, list, watch, **patch**, delete |
 
 The admin login Job and the service-owned harness Secrets (ADR 0015) need no
@@ -69,8 +111,8 @@ verb beyond this table: the Job and its NetworkPolicy are `create`, `list` and
 `delete`, the URL is `pods/log`, the pasted code and the auth files cross on
 `pods/exec`, and the Secret is `create` when absent and one merge `patch` after
 that. There is no `update` on anything. The three additions to the sentence
-above are the ones the implemented provider needs: `patch` on PersistentVolumeClaims writes the retention label
-`cleanup` leaves behind, `patch` on Secrets is the `rw-narrow` credential
+above are the ones the implemented provider needs: `patch` on Jobs records the worker
+Pod UID used during reconciliation, `patch` on Secrets is the `rw-narrow` credential
 sync-back (12), and reading the ResourceQuota is where `max_concurrency` on
 `GET /providers` comes from. Reading events is how a Job whose Pod the namespace
 quota refused (`FailedCreate`, "exceeded quota") is seen at once rather than at the
@@ -78,7 +120,7 @@ end of its timeout. `patch` on NetworkPolicies is how a running worker's policy 
 its allowlisted names to a new address (hades #205); without it every follow is refused
 with a 403 (hades #575). `pods/exec` needs `create` as well as `get`
 because the API server authorizes an exec against `create` even when the
-client opens it as a GET WebSocket upgrade, which is how the reader Pod's tar
+client opens it as a GET WebSocket upgrade, which is how the collector's tar
 stream is opened; a Role with only `get` is refused at the upgrade with a 403
 (found on a real cluster in C9).
 
@@ -102,32 +144,28 @@ Per attempt the provider creates, in `crucible-workers`, all labelled
 
 | Object | Role | Lifetime |
 |---|---|---|
-| PersistentVolumeClaim `ws-<attempt>` | the workspace: `repo/`, `report/`, `output/`, `resume/` (a correction's sealed bundle, delivered from the artifact store, ADR 0032), and `publish/` (a merge-main run's outcome). The collector's bundle in `output/` is copied out at collection and stored as the `work_bundle` artifact; no later Pod reads it from here, and no Pod mounts another attempt's claim | attempt, then per cleanup policy; a kept claim is deleted by the retention step once nothing needs it (16); the claim of an attempt that never launched is deleted, unless it is a resume source (hades #394, below) |
 | ConfigMap `identity-<attempt>` (or a projected volume from an object store above the ConfigMap size cap, 08) | the identity bundle, read-only | attempt |
 | Secret `cred-<attempt>` | the per-attempt copy of one harness credential directory, seeded from the harness's dedicated Secret in `crucible-workers`, `rw-narrow` where the adapter declares it (12) | attempt, deleted under every cleanup policy |
-| Secret `checkout-<attempt>` | a private repository's read-only installation token (ADR 0019), key `token`, mounted mode 0400 at `/run/crucible-token` into the refresher and the preparer Jobs and nothing else | created just before the refresher, deleted once the preparer's Pod is gone, on every path; a deletion that fails fails the prepare, and `discard`, `cleanup` and the retention sweep retry it |
+| Secret `checkout-<attempt>` | a private repository's read-only installation token (ADR 0019), key `token`, mounted mode 0400 at `/run/crucible-token` into the refresher and the preparer Jobs and the worker Pod's `workspace-prepare` init container (ADR 0033), and nothing else | created just before the refresher; deleted when the prepare fails, and otherwise once the worker Pod has left `Pending`, retried on each later look; `discard` and `cleanup` retry it |
 | Job `refresh-cache-<attempt>` | the reference cache's only writer: fetches the repository's bare mirror on the cache PVC (or clones it when absent), with git egress only and no workspace or identity bundle; for a private repository it also mounts `checkout-<attempt>` and fetches with it. It gives the remote 20 seconds to answer a ref listing and otherwise leaves the mirror as it is, so a refresh that cannot connect costs seconds, not the kernel's two-minute connect timeout (hades #191) | until complete, then deleted, before the preparer starts |
-| Job `prepare-<attempt>` | the preparer: clone into the PVC from the reference cache, mounted read-only, then branch, shims, author identity, `origin` placeholder (08). Its stdout and stderr are read before it is deleted; when it failed they are kept as the attempt's `crucible/preparer.log` artifact (hades #370) | until complete, then deleted |
-| Job `worker-<attempt>` | the worker, one Pod, `backoffLimit: 0`, `restartPolicy: Never` | until terminal, then deleted after `logs_drained` (or, for an attempt that never launched, by its pre-launch cleanup, hades #394) |
-| Job `collect-<attempt>` | the collector, no network, repo and report read-only, output read-write (08) | until complete |
+| Job `prepare-<attempt>` | the preparer proves the checkout can be built in its own ephemeral scratch. Its stdout and stderr are read before it is deleted; when it failed they are kept as the attempt's `crucible/preparer.log` artifact (hades #370). Its files are not inherited by another Pod | until complete, then deleted |
+| Job `worker-<attempt>` | one Pod with its own ephemeral `ws`: `workspace-prepare` recreates the checkout, the agent runs on it, and the collector sidecar packages it after the agent exits. The Job carries the first observed Pod UID as an annotation | until collection and log drain complete, then deleted with its scratch |
 | Job `verify-bundle-<attempt>` | `git bundle verify`, no network | until complete |
 | Job `verifier-<attempt>` | re-runs `required_verification` on an independent clone from the bundle (10, 11) | until complete |
-| Job `prepare-<attempt>` (before a merge-main run) | runs `publish_leaf_script` as the worker uid with the whole claim mounted and no network: refuses (exit 7) unless `output/work_branch.bundle` is a regular file, creates `publish/` with `output/`'s owner and mode, and refuses (exit 8) if it cannot. The merge-main run's `publish/` subPath therefore always exists before its Pod starts, and is never made by the kubelet. A push runs no such Job (ADR 0032) | until complete, then deleted with its Pod |
-| Job `publish-<attempt>` | the publisher (23, ADR 0022, ADR 0032): mounts no workspace claim. The supervisor reads the attempt's `work_bundle` artifact from the artifact store, checks it against its seal, and writes it over exec into the Pod's own memory-backed `bundle` volume once the Pod runs; the script checks it against the seal again, builds from it and pushes with an exact-tip lease after the remote ownership check (23), and its outcome files, in a second memory-backed volume, are read back over exec before the Pod ends. A merge-main run (hades #411) is the same Job with the claim's `publish/` leaf for its outcome and no bundle. Its egress is its own NetworkPolicy `np-publisher-<attempt>` | until complete, then deleted with its Pod and policy |
+| Job `publish-<attempt>` | the publisher (23, ADR 0022, ADR 0032): the supervisor reads the attempt's `work_bundle` artifact from the artifact store, checks it against its seal, and writes it over exec into the Pod's own bundle volume. Outcome files use that Pod's own scratch and are read back over exec before it ends. Its egress is its own NetworkPolicy `np-publisher-<attempt>` | until complete, then deleted with its Pod and policy |
 | Secret `publish-token-<attempt>` | the installation token for one push, key `token`, mounted mode 0400 at `/run/crucible-token` into the publisher Job and nothing else | created just before the Job, deleted once its Pod is gone, on every path; one a crashed supervisor left is replaced by the next push of that attempt and removed by the retention sweep |
 | Job `login-<harness>-<id>` (admin flow, 25) | the harness's own login in that harness's default worker image (ADR 0018), no workspace, no credential mounted, a memory-backed home; the service reads the auth files back over exec and writes the harness Secret (ADR 0015). Labelled `crucible.role=login`, `crucible.harness`, `crucible.login` and never `crucible.attempt` | until the service has read it back, cancelled, or timed out; its own deadline and a TTL remove it if the api died |
 | NetworkPolicy `np-login-<id>` | the login Job's egress: the adapter's `login_endpoints` only | with its Job; the retention sweep removes one whose Job is gone |
 | ConfigMap `login-lock-<harness>` (admin flow, 25) | the harness's login lock across every api replica: created before the login Job, so exactly one replica gets it and the others are refused naming its holder. Carries the holder and an expiry (the login deadline, the read-back window and five minutes). Labelled `crucible.role=login-lock` and `crucible.harness`, never `crucible.attempt` | deleted by the api that took it, by uid, however the login ends; a lock past its expiry (its api died) is deleted by uid and replaced by the next login |
-| the probe's claim, ConfigMap, per-run Secret and Jobs (admin flow, 25) | the bounded credential probe: an attempt's objects for one prompt, labelled `crucible.admin=probe` | removed by the probe; neither swept nor adopted by the supervisor for two hours |
+| the probe's ConfigMap, per-run Secret and Jobs (admin flow, 25) | the bounded credential probe: an attempt's objects for one prompt, labelled `crucible.admin=probe`; each Pod has its own ephemeral scratch | removed by the probe; neither swept nor adopted by the supervisor for two hours |
 
-A Job per role keeps the same separation the Docker provider has (worker,
-collector, verifier, publisher are distinct processes with distinct
-mounts), and lets Kubernetes own restarts, deadlines, and garbage
-collection. `activeDeadlineSeconds` on each Job is the policy's timeout for
+A container per role keeps process separation. The collector is the worker Pod's
+second container so it can read that Pod's scratch; verifier and publisher remain
+separate Jobs. Kubernetes owns deadlines and garbage collection.
+`activeDeadlineSeconds` on each Job is the policy's timeout for
 that role; Crucible still drains before the deadline and classifies the
-exit itself (16). A single-purpose role's own time (the collector, the
-verifier, the bundle verifier, the cleaner, the Job that readies a claim for
-the publisher) is counted from when its Pod is Running: pulling the image and
+exit itself (16). A single-purpose role's own time (the verifier, bundle
+verifier, and publication preparation) is counted from when its Pod is Running: pulling the image and
 waiting for a node are bounded by the launch timeout instead, and the Job's
 `activeDeadlineSeconds` is the role's time plus the launch timeout, since
 Kubernetes counts it from the Job's start. The short roles' time is the
@@ -713,11 +751,13 @@ the namespace. A deployment therefore names one exact, pullable reference in
   | exists | none yet, past the launch timeout | launch failure ("the Job controller never created a Pod") |
   | exists | had one, now gone | `lost` (the Pod existed and disappeared, unlike the row above) |
 
-  Distinguishing the last two rows needs the observer's own memory of whether
-  it ever saw this attempt's Pod (103): a Job it has watched since launch
-  keeps that memory in the process; one adopted by `reconcile` after a
-  restart never had the chance, so it starts in the "none yet" row with the
-  Job's own creation time standing in for the launch time.
+  Distinguishing the last two rows does not depend on process memory. On the
+  first observation, launch records the worker Pod UID in the Job annotation
+  `crucible.io/worker-pod-uid`. Reconciliation restores that marker and only
+  reads the marked Pod. If the Job controller creates a replacement after an
+  out-of-band deletion, its different UID cannot inherit the attempt or its
+  vanished scratch. A Job that has no marker yet uses its creation time for
+  the launch timeout while it waits for its first Pod.
 - `logs`: `pods/log` with timestamps, `sinceTime` from the stored offset,
   resumed strict-after by the (timestamp, line hash) pair (10). A restarted
   supervisor re-attaches by Job name. Each poll also sends `limitBytes`
@@ -728,12 +768,11 @@ the namespace. A deployment therefore names one exact, pullable reference in
   second is retried larger up to 64 MiB; past that, the rest of the second is
   skipped with a `[crucible] log lines skipped` line in the log rather than
   read unbounded. (Made concrete 2026-09-25, issue 63.)
-- `collect`: the collector Job with the workspace mounted read-only and an
-  output subpath read-write; then the bundle verifier Job; outputs are read
-  by the supervisor from the PVC through a short-lived reader Pod, never by
-  mounting the PVC into the Crucible pods. The bundle among them is stored
+- `collect`: release the collector container in the worker Pod after the agent exits,
+  then run the bundle verifier Job. Outputs are read over exec from that collector
+  while it keeps the Pod alive. The bundle among them is stored
   as the attempt's `work_bundle` artifact, which the publisher and a
-  correction read from then on (ADR 0032). The reader's tar is streamed to a
+  correction read from then on (ADR 0032). The collector's tar is streamed to a
   scratch file and extracted from there, so the supervisor never holds the
   collected archive (up to 256 MiB) in memory. The blobs the worker added or
   changed, which the collector exports for the secret scanner (hades #398), are
@@ -743,48 +782,34 @@ the namespace. A deployment therefore names one exact, pullable reference in
   same way, into a sink that scans each blob as it arrives and keeps only the
   verdict per object id, never the bytes (11). A step the cluster could not
   take or answer (an API server that refused, reset or timed out a
-  connection or answered 429 or 5xx, a quota-refused role Pod, a reader Pod
-  that did not start, an exec stream that ended before its status) raises
+  connection or answered 429 or 5xx, a quota-refused role Pod, or an exec stream
+  that ended before its status) raises
   `ProviderUnavailableError`, and the supervisor collects again later from the
-  claim, which still holds the work, rather than failing the attempt (10); a
+  live worker Pod, whose scratch still holds the work, rather than failing the attempt
+  (10); a
   credential copy already synced is not synced twice. A failed status look
   while a Pod starts is asked again until the deadline, never taken as the
   answer. The bounded retry counts and unavailable-provider retry window are
   supervisor memory, not attempt state: after a supervisor restart collection
-  begins a fresh window and receives its full retry count. The workspace stays
-  in place, so this can extend, but cannot discard, a pending collection.
-- `terminate`: `drain` deletes the Pod with the policy grace period, read
-  off the Pod itself (SIGTERM, then SIGKILL by the kubelet); `kill` deletes
-  with grace zero.
-- `cleanup`: only after `logs_drained`; delete Jobs and NetworkPolicy;
-  delete the per-attempt Secret under every policy; keep or delete the PVC
-  per policy (retained PVCs carry a retention label the orphan sweep
-  honours); release the lease. `release_workspace` deletes a kept claim and
-  anything else still labelled for its attempt once the retention step
-  decided nothing needs it (16), and reports a claim still there so the step
-  tries again.
-- An attempt that ended before its worker launched (`started_at` null: an
-  environment failure at prepare or launch, a cancel during launch, a
-  `quota_exhausted` refusal at reserve, a worker that never started) never
-  records `logs_drained`, so the cleanup above never visited it and its
-  `ws-<attempt>` claim stayed in the namespace, counted against the claim
-  quota, forever (hades #394). The supervisor now calls `cleanup` for it under
-  `delete`, since no gate consumed the claim and no worker wrote on it, and
-  records it cleaned; an `infrastructure` exit waits the attempt lease first,
-  as the cleanup above does. The one exception is a claim the correction
-  resume of 08 could pick, an attempt with a verified bundle head: it is
-  cleaned under `keep`, so it carries the retention label and is released by
-  the retention step of 16. No attempt that never launched has one today
-  (only collection records a bundle head), so in practice every such claim
-  is deleted. The retention sweep likewise no longer holds back the objects
-  of a finished attempt that never launched, so an unlabelled claim leaked
-  before this fix is removed on its own; a claim with the retention label is
-  still honoured, and a running attempt's claim is never touched.
+  begins a fresh window and receives its full retry count. This can extend a
+  pending collection only while that Pod survives. If it is lost, the attempt
+  follows the lost-attempt path instead of waiting for a collector that cannot run.
+- `terminate`: `drain` sends TERM to every process in the agent container. After the
+  policy grace period, `kill` sends KILL to the remaining agent processes. Neither
+  operation deletes the Pod because its collector still needs the Pod's scratch.
+- `cleanup`: only after `logs_drained`; delete Jobs, Pods, NetworkPolicies, ConfigMaps
+  and per-attempt Secrets under every cleanup policy, then release the lease. Deleting
+  the Pod deletes its scratch. `release_workspace` is a compatibility cleanup with no
+  retained Kubernetes workspace to release.
+- An attempt that ended before its worker launched has no workspace claim to leak.
+  Cleanup removes any labelled objects and Secrets left by preparation or launch.
 - `reconcile`: list Jobs by label; a Job with no live attempt row is
   orphaned and deleted; a live attempt with no Job is `lost`. A Job still
   waiting on its Pod is adopted like a running one (103), its launch time
   taken from the Job's own creation timestamp; one whose Pod already
-  finished and was reaped is left alone for cleanup, not adopted.
+  finished and was reaped is left alone for cleanup, not adopted. The
+  persisted worker Pod UID is restored before Pod lookup, so a replacement
+  Pod is not adopted after a restart.
 
 Heartbeats and stall detection (10, C6c): log progress comes from the Pod log,
 and `container_running` is the Pod phase. The filesystem fingerprint comes from
@@ -821,17 +846,17 @@ writes and nothing stores. A harness whose adapter declares `rw-narrow` cannot:
 a Kubernetes Secret volume is read-only however it is mounted, and the three
 subscription harnesses refresh their own token in place (S1). So an init
 container copies the named files off the Secret's read-only projection into the
-`credential` leaf of the attempt's own claim, mode 0700 on the directory and
+`credential` leaf of the worker Pod's scratch, mode 0700 on the directory and
 0600 on each file, which is the same shape, the same properties and the same
 place the Docker provider puts it (12). The provider reads the rotated file
-back from there through the reader Pod and writes it into the harness Secret
+back from there through the worker Pod's collector container and writes it into the harness Secret
 whenever the attempt reaches collection, whether the worker exited successfully
 or not. This matches the Docker provider: a valid newer refresh is durable state
 even when the task itself fails.
-That credential read-back deliberately uses the collection reader wait, rather
-than the preparer's short wait: a reader Pod that is still terminating can hold
-the only newly rotated credential, and the supervisor must retry collection
-instead of treating that state as a launch failure.
+That credential read-back deliberately uses the collection retry path rather
+than the preparer's short wait. The live worker Pod can hold the only newly
+rotated credential, so the supervisor retries collection instead of treating
+an unavailable read as a launch failure.
 (Made concrete 2026-09-21 during C8a.)
 The per-attempt Secret is deleted under every cleanup policy. The admin
 login flow (25) runs the harness's login in a login Job and captures the device
@@ -951,10 +976,9 @@ the Job itself, deletes the Job and raises `LaunchWaitError`, and the
 supervisor puts the attempt back to pending (the task back to scheduled) with
 the quota's words as the reason, the attempt unconsumed and without an exit
 class. The gate probe and the preparer raise the same when the quota refuses
-their Pod, and a `persistentvolumeclaims` quota refusing the workspace claim
-does too; a refused gate probe is therefore retried on a later tick rather
+their Pod; a refused gate probe is therefore retried on a later tick rather
 than recorded as `check_cannot_run`. Since hades #370 this holds for every
-quota resource the preparation touches, not only the claim and the Jobs: a
+quota resource the preparation touches, not only the Jobs: a
 403 naming the quota on the identity ConfigMap, the credential or checkout
 Secret, or the preparer's NetworkPolicy (a `count/configmaps`,
 `count/secrets` or `count/networkpolicies` limit) is the same
@@ -992,9 +1016,8 @@ the status page.
    cluster name and reach the enabled local endpoint. On a CNI that translates
    service addresses first, the `kubernetes.egress` selectors are what make the
    second half true.
-3. A storage class for the workspace PVCs with `ReadWriteOnce` and a size
-   the policy's workspace cap fits, and one with `ReadWriteMany` for the
-   artifact root: the api serves what the supervisor wrote and they are
+3. Per-Pod attempt scratch configured by `workspaceEphemeral`, and a storage
+   class with `ReadWriteMany` for the artifact root: the api serves what the supervisor wrote and they are
    separate Deployments on this topology. Object storage for artifacts would
    remove the second requirement and is a later phase.
    (Added 2026-09-22 during C9.)
@@ -1088,5 +1111,5 @@ their kind run before the gate counts for real-project use.
 ## Out of scope for this version
 
 Runtime class (microVM or gVisor), multi-cluster, object storage for
-artifacts (the PVC and the reader Pod are enough for the lab), a Kubernetes
+artifacts, a Kubernetes
 operator, and autoscaling. Each is a later phase in 20.

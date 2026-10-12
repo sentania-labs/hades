@@ -1,5 +1,5 @@
 # The namespace's resource ceiling, and the bound on what one runaway attempt can leave
-# behind: an attempt is one claim and a Job per role, so a namespace that is full refuses
+# behind: an attempt is a Job per role with Pod-local scratch, so a namespace that is full refuses
 # a launch rather than wedging. The lab overlay sets the sizes; these fit three
 # concurrent Pods of the default shape. The provider keeps one of them for Hades's own
 # short-role Pods (the gate probe, the preparer, the collector, a login; hades #423,
@@ -18,8 +18,13 @@
 #
 # Sizing rule for any worker count N with the default policy:
 #   count/jobs.batch   = 5N + 2     (5 Jobs per attempt + 2 for the publisher)
-#   persistentvolumeclaims = 4N     (each attempt claims four PVCs: workspace,
-#                                   reference cache, bundle output, and artifact root)
+#   persistentvolumeclaims = 4N     (ADR 0033: an attempt creates no claim of its own.
+#                                   A named workspaceEphemeral class makes one claim
+#                                   per running role Pod, owned by that Pod and gone
+#                                   with it; an empty class makes none. 4N leaves room
+#                                   for every role Pod an attempt may have alive at
+#                                   once plus the publisher's, beside the reference
+#                                   cache claim the manifests own)
 #   requests.cpu       = N          (2 CPU limit x 0.5 fraction = 1 CPU per attempt)
 #   limits.cpu         = 2N         (2 CPU limit per attempt)
 #   requests.memory    = 4N GiB     (4 GiB per attempt)
@@ -28,8 +33,8 @@
 # 20 CPU limit, 40 GiB memory. The quota is the deployer's overlay to set; the provider
 # advertises capacity from it, so a stale quota shows up as a smaller max_concurrency on
 # the Providers page, never as an unbounded launch.
-# The claim count is the structural cap, one claim per attempt. No Pod count is used,
-# because a Pod count also cannot distinguish attempts from their supporting Pods.
+# The Job count is the structural cap. No Pod count is used, because a Pod count
+# cannot distinguish attempts from their supporting Pods.
 #
 # `requests.cpu` is three attempts at the default policy's request, not its limit
 # (issue 93): the default `cpu_request_fraction` is 0.5 of the 2-CPU default limit, so

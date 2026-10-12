@@ -183,7 +183,7 @@ async def test_the_canary_requests_a_small_fixed_size_not_the_role_pods_size() -
         config=KubernetesConfig(
             poll_interval_seconds=0,
             launch_timeout_seconds=5,
-            storage_class="lab-ssd",
+            workspace_ephemeral_class="lab-ssd",
             image_pull_secret="ghcr-pull",
             canary_cpu_millicores=50,
             canary_memory="32Mi",
@@ -271,7 +271,7 @@ async def test_an_operator_declared_limit_covers_a_private_cgroup_namespace() ->
     config = KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        storage_class="lab-ssd",
+        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         pod_pid_limit_override=512,
     )
@@ -292,7 +292,7 @@ async def test_an_operator_declared_limit_never_overrides_a_confirmed_absence() 
     config = KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        storage_class="lab-ssd",
+        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         pod_pid_limit_override=512,
     )
@@ -319,7 +319,7 @@ async def test_a_non_positive_override_never_passes_the_gate() -> None:
     config = KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        storage_class="lab-ssd",
+        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         pod_pid_limit_override=-1,
     )
@@ -484,20 +484,18 @@ async def test_a_pod_crucible_drained_is_an_exit_and_never_a_loss() -> None:
     await provider.terminate(handle, "drain")
     observation = await provider.observe(handle)
     assert observation.state is ObservationState.EXITED and observation.exit_code == 143
-    deleted = [name for kind, name in api.deleted if kind == "pods"]
-    assert deleted
+    assert api.object_names("pods")
 
 
-async def test_a_worker_that_ignores_sigterm_is_killed_at_the_grace_period() -> None:
+async def test_drain_stops_the_agent_but_leaves_the_collector_alive() -> None:
     api, _registry, provider, launch, workspace = await prepared()
     api.script(launch.attempt_id, "hang", after=1)
     handle = await provider.launch(workspace, launch)
     await provider.terminate(handle, "drain")
-    # The kubelet waited the grace period and the Pod is still there.
-    assert (await provider.observe(handle)).state is ObservationState.RUNNING
-    await provider.terminate(handle, "kill")
     observation = await provider.observe(handle)
-    assert observation.state is ObservationState.EXITED and observation.exit_code == 137
+    assert observation.state is ObservationState.EXITED and observation.exit_code == 143
+    outputs = await provider.collect(handle, workspace, launch)
+    assert outputs.bundle is not None
 
 
 async def test_a_pod_pending_past_the_launch_timeout_is_a_launch_failure() -> None:
@@ -508,7 +506,7 @@ async def test_a_pod_pending_past_the_launch_timeout_is_a_launch_failure() -> No
     assert (await provider.ensure_ready()).passed
     api.pending_forever.add(launch.attempt_id)
     provider.config = KubernetesConfig(
-        poll_interval_seconds=0, launch_timeout_seconds=0, storage_class="lab-ssd"
+        poll_interval_seconds=0, launch_timeout_seconds=0, workspace_ephemeral_class="lab-ssd"
     )
     handle = await provider.launch(workspace, launch)
     observation = await provider.observe(handle)
@@ -759,6 +757,37 @@ async def test_reconcile_recovers_the_image_after_provider_restart() -> None:
     assert provider._launched[launch.attempt_id].image_digest == handle.image_digest
 
 
+async def test_reconcile_uses_the_job_marker_and_refuses_a_replacement_worker_pod() -> None:
+    """A restarted provider keeps an out-of-band Pod deletion on the lost path."""
+    api, _registry, provider, launch, workspace = await prepared()
+    api.script(launch.attempt_id, "hang")
+    handle = await provider.launch(workspace, launch)
+    assert (await provider.observe(handle)).state is ObservationState.RUNNING
+    original = api.get("pods", f"{handle.ref}-abc12")
+    marker = api.get("jobs", handle.ref)["metadata"]["annotations"][
+        kubernetes_module.ANNOTATION_WORKER_POD_UID
+    ]
+    assert marker == original["metadata"]["uid"]
+
+    api.delete("pods", str(original["metadata"]["name"]), grace_period_seconds=0)
+    api.create(
+        "pods",
+        {
+            "metadata": {
+                "name": f"{handle.ref}-replacement",
+                "labels": dict(original["metadata"]["labels"]),
+            },
+            "spec": dict(original["spec"]),
+        },
+    )
+    provider._launched.clear()
+
+    [adopted] = await provider.reconcile()
+    observation = await provider.observe(adopted)
+    assert observation.state is ObservationState.LOST
+    assert provider._launched[launch.attempt_id].pod_uid == marker
+
+
 async def test_collection_waits_for_the_reader_pod_to_finish_deleting() -> None:
     api, _registry, provider, launch, workspace = await prepared()
     handle = await provider.launch(workspace, launch)
@@ -856,11 +885,11 @@ async def test_role_policy_is_removed_when_the_pod_deletion_wait_fails(
     assert ("networkpolicies", policy_name) in api.deleted
 
 
-async def test_reconcile_does_not_adopt_a_job_whose_pod_is_finished() -> None:
+async def test_reconcile_adopts_a_worker_pod_while_its_collector_is_readable() -> None:
     _api, _registry, provider, launch, workspace = await prepared()
     handle = await provider.launch(workspace, launch)
     await run_to_exit(provider, handle)
-    assert await provider.reconcile() == []
+    assert [row.attempt_id for row in await provider.reconcile()] == [launch.attempt_id]
 
 
 async def test_reconcile_adopts_a_job_with_no_pod_yet_after_a_restart() -> None:
@@ -1008,25 +1037,23 @@ async def test_an_adopted_attempt_drains_with_the_task_policys_grace_period() ->
         "resources": {"cpus": 2, "memory": "4GiB"},
         "limits": {"grace_seconds": 45},
     }
-    api, _registry, provider, launch, workspace = await prepared(policy=policy)
+    _api, _registry, provider, launch, workspace = await prepared(policy=policy)
     handle = await provider.launch(workspace, launch)
     provider._launched.clear()
     [adopted] = await provider.reconcile()
     assert provider._launched[launch.attempt_id].limits.grace_seconds == 45
-    deletes = _record_deletes(api)
     await provider.terminate(adopted, "drain")
-    assert deletes == [("pods", f"{handle.ref}-abc12", 45)]
+    assert (await provider.observe(handle)).exit_code == 143
 
 
 async def test_a_drain_on_a_handle_the_provider_never_saw_uses_the_pods_grace() -> None:
     """Issue 66: a handle with no `_Launched` behind it (a terminate before any
     reconcile) reads the grace period off the live Pod rather than guessing 60 s."""
-    api, _registry, provider, launch, workspace = await prepared()
+    _api, _registry, provider, launch, workspace = await prepared()
     handle = await provider.launch(workspace, launch)
     provider._launched.clear()
-    deletes = _record_deletes(api)
     await provider.terminate(handle, "drain")
-    assert deletes == [("pods", f"{handle.ref}-abc12", 30)]
+    assert (await provider.observe(handle)).exit_code == 143
 
 
 async def test_an_adopted_attempt_records_the_live_pods_limits() -> None:
@@ -1396,7 +1423,9 @@ async def test_a_rotated_auth_file_is_written_back_and_the_copy_removed() -> Non
     ]
     assert api.harness_secret("hades-harness-codex")["auth.json"] == _auth("2026-09-21T00:00:00Z")
     assert sync.removed and not api.secret_exists("cred-01attempt0000000000000000a")
-    assert "credential/auth.json" not in claim
+    assert "credential/auth.json" in claim
+    await provider.cleanup(workspace, CleanupPolicy.DELETE, launch)
+    assert "ws-01attempt0000000000000000a" not in api.claims
 
 
 async def test_a_failed_attempts_newer_auth_file_is_still_written_back() -> None:
@@ -1490,8 +1519,9 @@ async def test_the_writable_copy_is_a_claim_leaf_and_the_read_only_form_is_the_s
     # The Crucible-owned template on top of it, read-only, from the identity bundle.
     assert mounts["/home/worker/.codex/config.toml"]["readOnly"] is True
     assert mounts["/home/worker/.codex/config.toml"]["subPath"] == "harness/config.toml"
-    init = pod["initContainers"][0]
-    assert init["name"] == "credential-seed"
+    # ADR 0033: after the Pod's own checkout, never in its place.
+    assert [c["name"] for c in pod["initContainers"]] == ["workspace-prepare", "credential-seed"]
+    init = pod["initContainers"][1]
     assert init["securityContext"]["readOnlyRootFilesystem"] is True
     volumes = {v["name"]: v for v in pod["volumes"]}
     assert volumes["cred-source"]["secret"]["secretName"] == "cred-01attempt0000000000000000a"
@@ -1503,13 +1533,13 @@ async def test_the_writable_copy_is_a_claim_leaf_and_the_read_only_form_is_the_s
 # ----- cleanup (08, 16) ----------------------------------------------------
 
 
-async def test_delete_removes_the_claim_and_keep_labels_it_for_the_sweep() -> None:
+async def test_every_cleanup_policy_removes_pod_scratch() -> None:
     api, _registry, provider, launch, workspace = await prepared()
     handle = await provider.launch(workspace, launch)
     await run_to_exit(provider, handle)
     await provider.cleanup(workspace, CleanupPolicy.KEEP, launch)
-    claim = api.objects[("persistentvolumeclaims", "ws-01attempt0000000000000000a")]
-    assert claim.body["metadata"]["labels"][k8sspec.LABEL_RETAIN] == "keep"
+    assert api.object_names("persistentvolumeclaims") == []
+    assert "ws-01attempt0000000000000000a" not in api.claims
     assert api.object_names("jobs") == [] and api.object_names("networkpolicies") == []
 
     api2, _r2, provider2, launch2, workspace2 = await prepared()
@@ -1520,7 +1550,7 @@ async def test_delete_removes_the_claim_and_keep_labels_it_for_the_sweep() -> No
     assert api2.object_names("configmaps") == []
 
 
-async def test_keep_diff_only_removes_the_checkout_and_the_tree_and_keeps_the_evidence() -> None:
+async def test_keep_diff_only_cannot_retain_ephemeral_scratch() -> None:
     api, _registry, provider, launch, workspace = await prepared()
     handle = await provider.launch(workspace, launch)
     await run_to_exit(provider, handle)
@@ -1528,8 +1558,7 @@ async def test_keep_diff_only_removes_the_checkout_and_the_tree_and_keeps_the_ev
     claim = api.claims["ws-01attempt0000000000000000a"]
     claim["output/tree/README.md"] = b"a clone of the collected state"
     await provider.cleanup(workspace, CleanupPolicy.KEEP_DIFF_ONLY, launch)
-    assert not [p for p in claim if p.startswith(("repo/", "output/tree/", "credential/"))]
-    assert "output/diff.patch" in claim and "output/work_branch.bundle" in claim
+    assert "ws-01attempt0000000000000000a" not in api.claims
 
 
 # ----- evidence (26) -------------------------------------------------------
@@ -1617,11 +1646,7 @@ async def test_a_completed_job_whose_pod_was_reaped_is_not_lost() -> None:
     assert observation.state is ObservationState.EXITED and observation.exit_code == 0
 
 
-@pytest.mark.parametrize(
-    "break_it",
-    ["preparer-fails", "no-head"],
-)
-async def test_a_prepare_that_fails_after_seeding_leaves_no_secret(break_it: str) -> None:
+async def test_a_prepare_that_fails_after_seeding_leaves_no_secret() -> None:
     """12: the copy is removed on every path, not only the clean one. `prepare` seeds
     the per-attempt Secret before the preparer runs, and a supervisor never calls
     `cleanup` or `discard` for an attempt whose `prepare` raised."""
@@ -1629,10 +1654,7 @@ async def test_a_prepare_that_fails_after_seeding_leaves_no_secret(break_it: str
     registry.register(CODEX_IMAGE, harness="codex", version="0.153.4")
     api.put_harness_secret("hades-harness-codex", {"auth.json": _auth("2026-09-20T00:00:00Z")})
     launch = spec(harness="codex", image=CODEX_IMAGE)
-    if break_it == "preparer-fails":
-        api.script(launch.attempt_id, "prepare-fails")
-    else:
-        api.claims_suppress_head = True
+    api.script(launch.attempt_id, "prepare-fails")
     with pytest.raises(ProviderError):
         await provider.prepare(launch)
     assert not api.secret_exists("cred-01attempt0000000000000000a")
@@ -1650,23 +1672,22 @@ async def test_a_preparer_failure_keeps_every_word_of_its_raw_untimestamped_log(
         await provider.prepare(launch)
 
 
-async def test_retention_removes_a_claim_for_an_attempt_crucible_forgot() -> None:
-    """A failed prepare leaves a workspace claim behind; nothing else would remove it."""
+async def test_prepare_leaves_no_workspace_claim_for_retention() -> None:
     api, _registry, provider = build()
     launch = spec()
     await provider.prepare(launch)
-    assert api.object_names("persistentvolumeclaims")
+    assert not api.object_names("persistentvolumeclaims")
     assert await provider.retention(keep=[]) > 0
-    assert api.object_names("persistentvolumeclaims") == []
+    assert not api.object_names("persistentvolumeclaims")
 
 
-async def test_retention_keeps_a_claim_a_cleanup_policy_kept() -> None:
+async def test_retention_has_no_kept_workspace_claim() -> None:
     api, _registry, provider, launch, workspace = await prepared()
     handle = await provider.launch(workspace, launch)
     await run_to_exit(provider, handle)
     await provider.cleanup(workspace, CleanupPolicy.KEEP, launch)
     await provider.retention(keep=[])
-    assert api.object_names("persistentvolumeclaims") == ["ws-01attempt0000000000000000a"]
+    assert not api.object_names("persistentvolumeclaims")
 
 
 async def test_a_truncated_collected_output_fails_the_attempt(monkeypatch: Any) -> None:
@@ -1803,20 +1824,22 @@ async def test_an_exec_stream_that_ended_early_is_not_an_absent_credential() -> 
     )
 
 
-async def test_a_cleaner_job_that_failed_is_not_a_successful_removal() -> None:
-    """12: a credential leaf still on the claim has not been removed, whatever the
-    caller would otherwise have recorded."""
+async def test_credential_sync_creates_no_cleaner_job() -> None:
     api, provider, launch, workspace = await codex_attempt()
     handle = await provider.launch(workspace, launch)
     api.claims["ws-01attempt0000000000000000a"]["credential/auth.json"] = _auth(
         "2026-09-21T00:00:00Z"
     )
     await run_to_exit(provider, handle)
-    api.refuse_roles.add("cleaner")
     outputs = await provider.collect(handle, workspace, launch)
-    api.refuse_roles.discard("cleaner")
     assert outputs.credential_sync is not None
-    assert outputs.credential_sync.removed is False
+    assert outputs.credential_sync.removed is True
+    assert not any(
+        row["kind"] == "jobs"
+        and (row["body"].get("metadata") or {}).get("labels", {}).get(k8sspec.LABEL_ROLE)
+        == "cleaner"
+        for row in api.created
+    )
 
 
 async def test_an_adopted_pending_job_still_times_out() -> None:
@@ -1904,7 +1927,7 @@ async def test_the_preparer_mounts_the_reference_cache_read_only() -> None:
     config = KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        storage_class="lab-ssd",
+        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         cache_claim="crucible-reference-cache",
     )
@@ -2003,7 +2026,7 @@ async def test_attempts_of_one_repository_prepared_together_share_one_refresh() 
     config = KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        storage_class="lab-ssd",
+        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         cache_claim="crucible-reference-cache",
     )
@@ -2042,10 +2065,10 @@ async def test_a_refused_connection_at_prepare_is_retried_then_succeeds(
     retry_clock: list[float],
 ) -> None:
     api, _, provider = build()
-    api.fail_next("create", 2, kind="persistentvolumeclaims", error=refused_connection())
+    api.fail_next("create", 2, kind="configmaps", error=refused_connection())
     workspace = await provider.prepare(spec())
-    assert workspace.started_from
-    assert api.create_attempts.count("persistentvolumeclaims") == 3
+    assert workspace.checkout_path.endswith("/repo")
+    assert api.create_attempts.count("configmaps") == 3
     assert retry_clock == [1, 2]
 
 
@@ -2056,11 +2079,11 @@ async def test_a_4xx_at_prepare_is_not_retried(
 ) -> None:
     api, _, provider = build()
     error = KubernetesApiError(status, "refusal")
-    api.fail_next("create", kind="persistentvolumeclaims", error=error)
+    api.fail_next("create", kind="configmaps", error=error)
     with pytest.raises(KubernetesApiError) as caught:
         await provider.prepare(spec())
     assert caught.value is error
-    assert api.create_attempts.count("persistentvolumeclaims") == 1
+    assert api.create_attempts.count("configmaps") == 1
     assert retry_clock == []
 
 
@@ -2092,18 +2115,15 @@ async def test_launch_retries_the_worker_job_create_on_a_503(
     assert retry_clock == [1]
 
 
-@pytest.mark.parametrize("operation,kind", [("create", "pods"), ("pod_exec", "")])
-async def test_prepared_head_reader_retries_transport_failures(
+async def test_preparer_pod_creation_retries_transport_failures(
     retry_clock: list[float],
-    operation: str,
-    kind: str,
 ) -> None:
     api, _, provider = build()
     await provider._resolve_image(spec())
     assert (await provider.ensure_ready()).passed
-    api.fail_next(operation, 2, kind=kind, error=refused_connection())
+    api.fail_next("create", 2, kind="jobs", error=refused_connection())
     workspace = await provider.prepare(spec())
-    assert workspace.started_from
+    assert workspace.checkout_path.endswith("/repo")
     assert retry_clock == [1, 2]
 
 

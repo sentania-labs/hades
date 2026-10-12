@@ -28,7 +28,6 @@ from crucible.adapters.execution import k8sspec, scripts
 from crucible.adapters.execution.k8sapi import KubernetesApiError
 from crucible.adapters.execution.k8sfake import FakeKubernetesApi
 from crucible.adapters.execution.k8spublisher import (
-    BUNDLE_LEAF,
     ByWorkspacePublisher,
     KubernetesPublisher,
     KubernetesPublisherConfig,
@@ -39,7 +38,7 @@ from crucible.adapters.execution.k8spublisher import (
 from crucible.adapters.execution.kubernetes import KubernetesConfig, KubernetesProvider
 from crucible.adapters.execution.publisher import BUNDLE_SEAL_REFUSED
 from crucible.adapters.storage.disk import DiskArtifactStore
-from crucible.ports.execution import WORK_MOUNT, ProviderError
+from crucible.ports.execution import ProviderError
 from crucible.ports.github import InstallationToken
 from crucible.ports.publish import (
     MergeMainOutcome,
@@ -75,32 +74,17 @@ class MemoryStore:
 
 
 def _setup(
-    *, bundle: bytes | None = BUNDLE, claim: bool = True, **api_kwargs: Any
+    *, bundle: bytes | None = BUNDLE, **api_kwargs: Any
 ) -> tuple[FakeKubernetesApi, KubernetesProvider, KubernetesPublisher]:
     api, _registry, provider = build(
         config=KubernetesConfig(
             poll_interval_seconds=0,
             launch_timeout_seconds=5,
-            storage_class="lab-ssd",
+            workspace_ephemeral_class="lab-ssd",
             probe_image=IMAGE,
         ),
         **api_kwargs,
     )
-    name = k8sspec.object_name("ws", ATTEMPT)
-    if claim:
-        api.create(
-            "persistentvolumeclaims",
-            k8sspec.workspace_claim(
-                name=name,
-                namespace=provider.config.namespace,
-                object_labels={k8sspec.LABEL_ATTEMPT: ATTEMPT},
-                size="1Gi",
-                storage_class="lab-ssd",
-            ),
-        )
-        # Where the collector left it: a merge-main run's leaf check still reads it, and
-        # a push must not (ADR 0032).
-        api.claims[name][BUNDLE_LEAF] = b"the copy on the claim, never pushed"
     store = MemoryStore()
     if bundle is not None:
         store.blobs[BUNDLE_ARTIFACT] = bundle
@@ -241,8 +225,8 @@ async def test_the_secret_job_pod_and_policy_are_gone_when_the_push_is() -> None
     assert order.index(("secrets", token_secret_name(ATTEMPT))) > order.index(
         ("jobs", job_name(ATTEMPT))
     )
-    # The workspace claim is not the publisher's to remove.
-    assert k8sspec.object_name("ws", ATTEMPT) in api.object_names("persistentvolumeclaims")
+    # ADR 0033: the publisher created no claim either; nothing of the attempt is left.
+    assert api.object_names("persistentvolumeclaims") == []
 
 
 async def test_the_network_policy_selects_the_publisher_pod_and_opens_only_the_git_host() -> None:
@@ -343,8 +327,8 @@ async def test_an_unsealed_or_unstored_bundle_is_refused_before_a_token_is_place
 
 
 async def test_a_push_needs_no_workspace_claim() -> None:
-    """ADR 0032: the claim may be gone; the stored bundle is all a push reads."""
-    api, _provider, publisher = _setup(claim=False)
+    """ADR 0032 and 0033: there is no attempt claim; the stored bundle is all a push reads."""
+    api, _provider, publisher = _setup()
     outcome = await publisher.push(_request(), _token(installation_token_value()))
     assert outcome.pushed, outcome
     roles = [body["metadata"]["labels"][k8sspec.LABEL_ROLE] for body in _created(api, "jobs")]
@@ -533,7 +517,7 @@ async def test_a_pod_slow_to_be_removed_does_not_fail_a_finished_push(
     async def lingering(
         name: str, *, timeout: float = 15, force: bool = False, collection: bool = False
     ) -> None:
-        if name != job_name(ATTEMPT) and not name.startswith("cleaner"):
+        if name != job_name(ATTEMPT) and not name.startswith("verify-bundle"):
             return await gone(name)
         raise ProviderError(f"Pods for Job {name!r} were still present after {timeout:g} seconds")
 
@@ -545,7 +529,7 @@ async def test_a_pod_slow_to_be_removed_does_not_fail_a_finished_push(
     with pytest.raises(ProviderError, match="still present"):
         await provider._run_role_job(
             _request_spec(),
-            role=k8sspec.ROLE_CLEANER,
+            role=k8sspec.ROLE_BUNDLE,
             image=DIGEST_IMAGE,
             script="exit 0\n",
             mounts=[],
@@ -654,39 +638,25 @@ def test_the_leaf_script_refuses_a_publish_leaf_the_worker_uid_cannot_write(
     assert "not owned and writable as output is" in result.stderr
 
 
-async def test_the_publish_leaf_is_made_by_the_worker_uid_before_a_merge_main_pod() -> None:
+async def test_merge_main_uses_only_the_publishers_ephemeral_outcome_volume() -> None:
     api, _provider, publisher = _setup()
     outcome = await publisher.merge_main(_merge_request(), _token(installation_token_value()))
     assert outcome.merged, outcome
     jobs = _created(api, "jobs")
     roles = [body["metadata"]["labels"][k8sspec.LABEL_ROLE] for body in jobs]
-    assert roles == [k8sspec.ROLE_PREPARER, k8sspec.ROLE_PUBLISHER]
-    leaf_pod = jobs[0]["spec"]["template"]["spec"]
-    container = leaf_pod["containers"][0]
-    assert scripts.PUBLISH_LEAF_MARKER in container["command"][-1]
-    assert leaf_pod["securityContext"]["runAsUser"] == k8sspec.WORKER_UID
-    claim_mounts = [m for m in container["volumeMounts"] if m["name"] == "ws"]
-    assert [(m["mountPath"], m.get("subPath")) for m in claim_mounts] == [(WORK_MOUNT, None)]
-    assert "publish-token" not in json.dumps(leaf_pod)
-    # No network for it: no policy of its own, so the namespace's default deny holds.
-    assert k8sspec.ROLE_PREPARER not in [
-        body["metadata"]["labels"][k8sspec.LABEL_ROLE] for body in _created(api, "networkpolicies")
-    ]
+    assert roles == [k8sspec.ROLE_PUBLISHER]
+    pod = jobs[0]["spec"]["template"]["spec"]
+    volumes = {row["name"]: row for row in pod["volumes"]}
+    assert volumes["outcome"]["emptyDir"]["medium"] == "Memory"
+    assert "persistentVolumeClaim" not in json.dumps(pod)
 
 
-async def test_a_publish_leaf_that_cannot_be_made_is_refused_by_name_before_a_token() -> None:
+async def test_merge_main_does_not_depend_on_a_publish_leaf() -> None:
     api, _provider, publisher = _setup()
     api.publish_leaf_unwritable = True
     outcome = await publisher.merge_main(_merge_request(), _token(installation_token_value()))
-    assert not outcome.merged
-    assert outcome.step == "publish-leaf"
-    assert "publish/ leaf of the workspace claim" in outcome.detail
-    assert f"ws-{ATTEMPT.lower()}" in outcome.detail
-    assert _created(api, "secrets") == []
-    assert k8sspec.ROLE_PUBLISHER not in [
-        body["metadata"]["labels"][k8sspec.LABEL_ROLE] for body in _created(api, "jobs")
-    ]
-    assert api.merges == []
+    assert outcome.merged
+    assert api.merges
 
 
 # ----- hades #411: merge-main in a publisher Job -----------------------------------
@@ -737,10 +707,11 @@ async def test_a_conflicting_merge_main_reports_the_files_and_pushes_nothing() -
     assert api.pushes == []
 
 
-async def test_a_merge_main_without_its_workspace_claim_is_refused_before_a_token() -> None:
-    api, _provider, publisher = _setup(claim=False)
+async def test_a_merge_main_needs_no_workspace_claim() -> None:
+    """ADR 0033: a merge-main run has no attempt claim to read; it needs none."""
+    api, _provider, publisher = _setup()
 
     outcome = await publisher.merge_main(_merge_request(), _token(installation_token_value()))
 
-    assert (outcome.merged, outcome.step) == (False, "claim")
-    assert _created(api, "secrets") == []
+    assert outcome.merged
+    assert ("secrets", token_secret_name(ATTEMPT)) in api.deleted

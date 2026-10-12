@@ -79,7 +79,6 @@ ROLE_LOGIN = "login"
 # The ConfigMap that is one harness's login lock across every api replica (25, 26).
 ROLE_LOGIN_LOCK = "login-lock"
 ROLE_READER = "reader"
-ROLE_CLEANER = "cleaner"
 ROLE_CANARY = "canary"
 
 WORKER_UID = 1000
@@ -383,6 +382,7 @@ class PodRequest:
     host_aliases: Sequence[Mapping[str, Any]] = ()
     # hades #558, #85: the declared test services, each a native sidecar of this Pod.
     services: Sequence[DeclaredService] = ()
+    sidecars: Sequence[Mapping[str, Any]] = ()
 
 
 def pod_spec(request: PodRequest) -> dict[str, Any]:
@@ -442,7 +442,7 @@ def pod_spec(request: PodRequest) -> dict[str, Any]:
             "fsGroupChangePolicy": "OnRootMismatch",
             "seccompProfile": {"type": "RuntimeDefault"},
         },
-        "containers": [container],
+        "containers": [container, *[dict(c) for c in request.sidecars]],
         "volumes": [dict(v) for v in request.volumes],
     }
     init_containers = [dict(c) for c in request.init_containers]
@@ -482,6 +482,39 @@ def base_volumes(limits: Limits) -> list[dict[str, Any]]:
 
 def base_mounts() -> list[Mount]:
     return [Mount("tmp", "/tmp"), Mount("home", "/home/worker")]
+
+
+# ADR 0033: the worker Pod's init container that builds the checkout in the Pod's own
+# scratch, and what `terminate("drain")` runs in the agent's container: every process
+# there, then PID 1, which may be a shell that defers a signal while its child runs.
+# The collector beside it keeps running.
+WORKER_PREPARE_CONTAINER = "workspace-prepare"
+DRAIN_SCRIPT = "kill -TERM -1 2>/dev/null; kill -TERM 1 2>/dev/null; exit 0"
+# PID 1 is the launch wrapper. Killing its remaining children releases its wait and
+# preserves the separate collector container's process namespace and scratch.
+KILL_SCRIPT = "kill -KILL -1 2>/dev/null; kill -TERM 1 2>/dev/null; exit 0"
+
+
+def workspace_volume(*, size: str, storage_class: str = "") -> dict[str, Any]:
+    """One Pod's bounded scratch, never an attempt-scoped claim.
+
+    An explicitly configured class uses a generic ephemeral volume. Otherwise the
+    kubelet supplies a size-limited ``emptyDir`` that is removed with the Pod.
+    """
+    if not storage_class:
+        return {"name": "ws", "emptyDir": {"sizeLimit": size}}
+    return {
+        "name": "ws",
+        "ephemeral": {
+            "volumeClaimTemplate": {
+                "spec": {
+                    "accessModes": ["ReadWriteOnce"],
+                    "resources": {"requests": {"storage": size}},
+                    "storageClassName": storage_class,
+                }
+            }
+        },
+    }
 
 
 # ----- declared test services (hades #558, #85) -----------------------------
@@ -622,7 +655,7 @@ def bare_pod(
     object_labels: Mapping[str, str],
     pod: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """A Pod with no Job around it: the reader, the cleaner, and the readiness canary.
+    """A Pod with no Job around it: the reader and the readiness canary.
 
     None of the three is a role of the attempt in 26's table; each is a short-lived
     mechanism Crucible drives and waits on itself, so a Job's retry and deadline
@@ -633,22 +666,6 @@ def bare_pod(
         "metadata": {"name": name, "namespace": namespace, "labels": dict(object_labels)},
         "spec": dict(pod),
     }
-
-
-def workspace_claim(
-    *, name: str, namespace: str, object_labels: Mapping[str, str], size: str, storage_class: str
-) -> dict[str, Any]:
-    """`ws-<attempt>`: the workspace (26). ReadWriteOnce, because one Pod of the attempt
-    writes it at a time and the roles run one after another, never together."""
-    body: dict[str, Any] = {
-        "apiVersion": "v1",
-        "kind": "PersistentVolumeClaim",
-        "metadata": {"name": name, "namespace": namespace, "labels": dict(object_labels)},
-        "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": size}}},
-    }
-    if storage_class:
-        body["spec"]["storageClassName"] = storage_class
-    return body
 
 
 def config_map(
@@ -1010,7 +1027,6 @@ __all__ = [
     "ROLE_BUNDLE",
     "ROLE_CACHE_REFRESHER",
     "ROLE_CANARY",
-    "ROLE_CLEANER",
     "ROLE_COLLECTOR",
     "ROLE_LOGIN",
     "ROLE_LOGIN_LOCK",
@@ -1053,5 +1069,4 @@ __all__ = [
     "service_sidecar",
     "service_volume_name",
     "service_volumes",
-    "workspace_claim",
 ]

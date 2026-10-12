@@ -113,8 +113,8 @@ class KubernetesSettings(BaseModel):
     kubeconfig_context: str | None = None
     api_timeout_seconds: float = 30.0
     service_account: str = "hades-worker"
-    storage_class: str = ""
-    workspace_size: str = "20Gi"
+    workspace_ephemeral_class: str = ""
+    workspace_ephemeral_size: str = "20Gi"
     image_pull_secret: str | None = None
     # The cluster-side PersistentVolumeClaim holding the git reference cache the
     # preparer clones from. Without one the preparer clones from the remote.
@@ -132,8 +132,8 @@ class KubernetesSettings(BaseModel):
     prepare_pod_deletion_wait_seconds: float = 15.0
     collector_timeout_seconds: int = 900
     verifier_timeout_seconds: int = 3600
-    # The short roles' time once their Pod is Running (the bundle verifier, the cleaner,
-    # the Job that readies a claim for the publisher). Seeds the `kubernetes.timeouts`
+    # The short roles' time once their Pod is Running, including bundle verification
+    # and publication preparation. Seeds the `kubernetes.timeouts`
     # admin setting; a value saved through the admin API, CLI or UI wins over it.
     role_timeout_seconds: int = 120
     report_size_cap_bytes: int = 10 * 1024 * 1024

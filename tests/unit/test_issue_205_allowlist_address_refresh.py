@@ -153,7 +153,7 @@ def _config(*, overlap_seconds: float) -> KubernetesConfig:
     return KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        storage_class="lab-ssd",
+        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         resolve_ttl_seconds=0.01,
         address_overlap_window_seconds=overlap_seconds,
@@ -265,7 +265,12 @@ async def test_the_addresses_the_pod_is_pinned_to_are_never_dropped() -> None:
     api, provider, answers, handle = await _running_worker(overlap_seconds=0.0)
     job = api.get("jobs", f"worker-{ATTEMPT.lower()}")
     aliases = {a["ip"]: a["hostnames"] for a in job["spec"]["template"]["spec"]["hostAliases"]}
-    assert aliases == {"140.82.121.4": ["github.com"], "151.101.0.223": ["pypi.org"]}
+    # ADR 0033: api.github.com is pinned too, for the checkout init container.
+    assert aliases == {
+        "140.82.121.4": ["github.com"],
+        "140.82.121.6": ["api.github.com"],
+        "151.101.0.223": ["pypi.org"],
+    }
 
     answers.by_host["github.com"] = [NEW]
     await _observe_after_the_interval(provider, handle)
@@ -293,7 +298,7 @@ async def test_the_names_are_looked_up_again_only_on_the_interval() -> None:
     config = KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        storage_class="lab-ssd",
+        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         resolve_ttl_seconds=300.0,
     )
@@ -431,7 +436,7 @@ def _long_interval_worker() -> tuple[FakeKubernetesApi, KubernetesProvider, _Ans
     config = KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        storage_class="lab-ssd",
+        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         resolve_ttl_seconds=300.0,
     )

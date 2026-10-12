@@ -141,6 +141,7 @@ def _routing_setup(
     uow.events.latest_for_task_kind.return_value = None
     uow.routing_policies.get.return_value = MagicMock(document=routing.model_dump(mode="json"))
     supervisor = object.__new__(Supervisor)
+    supervisor._checkout_launch_tokens = {}
     supervisor._clock = FakeClock(NOW)
     # hades #423: no provider here derives a capacity, so no launch waits for room.
     supervisor._providers = {}

@@ -155,9 +155,15 @@ TYPED_SETTINGS = {
     "CRUCIBLE_KUBERNETES__DNS_NAMESPACE": ("cluster.dnsNamespace", "string"),
     "CRUCIBLE_KUBERNETES__DNS_POD_LABELS": ("cluster.dnsPodLabels", "object"),
     "CRUCIBLE_KUBERNETES__POD_PID_LIMIT_OVERRIDE": ("cluster.podPidLimitOverride", "integer"),
-    "CRUCIBLE_KUBERNETES__STORAGE_CLASS": ("provider.workspaceStorageClass", "string"),
+    "CRUCIBLE_KUBERNETES__WORKSPACE_EPHEMERAL_CLASS": (
+        "provider.workspaceEphemeral.class",
+        "string",
+    ),
     "CRUCIBLE_KUBERNETES__IMAGE_PULL_SECRET": ("cluster.imagePullSecret", None),
-    "CRUCIBLE_KUBERNETES__WORKSPACE_SIZE": ("provider.workspaceSize", "string"),
+    "CRUCIBLE_KUBERNETES__WORKSPACE_EPHEMERAL_SIZE": (
+        "provider.workspaceEphemeral.size",
+        "string",
+    ),
     "CRUCIBLE_KUBERNETES__MAX_CONCURRENCY": ("provider.maxConcurrency", "integer"),
     "CRUCIBLE_KUBERNETES__LAUNCH_TIMEOUT_SECONDS": ("provider.launchTimeoutSeconds", "integer"),
     "CRUCIBLE_KUBERNETES__PREPARE_TIMEOUT_SECONDS": ("provider.prepareTimeoutSeconds", "integer"),
@@ -287,7 +293,7 @@ def test_each_cluster_fact_and_provider_knob_is_a_typed_value_in_its_setting(
 
 
 def test_the_provider_knobs_left_room_runner() -> None:
-    moved = {"workspaceSize", "maxConcurrency"} | {
+    moved = {"workspaceEphemeral", "maxConcurrency"} | {
         f"{role}TimeoutSeconds" for role in ("launch", "prepare", "collector", "verifier")
     }
     room = SCHEMA["properties"]["roomRunner"]["properties"]
@@ -305,7 +311,7 @@ def test_the_provider_knobs_left_room_runner() -> None:
 def test_the_optional_settings_render_only_when_set() -> None:
     text = (TEMPLATES / "configmap.yaml").read_text()
     for path, key in (
-        ("provider.workspaceStorageClass", "STORAGE_CLASS"),
+        ("provider.workspaceEphemeral.class", "WORKSPACE_EPHEMERAL_CLASS"),
         ("cluster.imagePullSecret", "IMAGE_PULL_SECRET"),
         ("cluster.podPidLimitOverride", "POD_PID_LIMIT_OVERRIDE"),
     ):

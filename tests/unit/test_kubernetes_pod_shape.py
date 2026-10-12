@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from crucible.adapters.execution import k8sspec
+from crucible.adapters.execution import k8sspec, scripts
 from crucible.adapters.execution.kubernetes import KubernetesConfig
 from crucible.ports.execution import (
     IDENTITY_MOUNT,
@@ -20,7 +20,6 @@ from crucible.ports.execution import (
     PACKAGE_CACHE_MOUNT,
     REPO_MOUNT,
     REPORT_MOUNT,
-    VERIFY_MOUNT,
     WORK_MOUNT,
     CleanupPolicy,
 )
@@ -28,13 +27,8 @@ from tests.unit.kubernetes_fixtures import build, pod_of, spec
 
 # Every object an attempt's roles produce, by the prefix its name carries.
 ROLE_PREFIXES = (
-    "prepare-",
     "worker-",
-    "collect-",
-    "verify-bundle-",
     "verifier-",
-    "reader-",
-    "cleaner-",
 )
 
 
@@ -201,47 +195,53 @@ async def test_the_worker_mount_layout(ran: Any) -> None:
     assert mounts[REPORT_MOUNT]["readOnly"] is False
     assert mounts[IDENTITY_MOUNT]["readOnly"] is True
     volumes = {v["name"]: v for v in pod["volumes"]}
-    assert volumes["ws"]["persistentVolumeClaim"]["claimName"] == "ws-01attempt0000000000000000a"
+    assert volumes["ws"] == {
+        "name": "ws",
+        "ephemeral": {
+            "volumeClaimTemplate": {
+                "spec": {
+                    "accessModes": ["ReadWriteOnce"],
+                    "resources": {"requests": {"storage": "20Gi"}},
+                    "storageClassName": "lab-ssd",
+                }
+            }
+        },
+    }
     assert volumes["identity"]["configMap"]["name"] == "identity-01attempt0000000000000000a"
     # Every bundle file is projected at its own relative path, not at a flattened key.
     paths = {item["path"] for item in volumes["identity"]["configMap"]["items"]}
     assert "IDENTITY.md" in paths and "contract.yaml" in paths
 
 
-async def test_the_preparer_gets_the_whole_claim_and_the_collector_its_leaves(
+async def test_role_containers_mount_their_pod_owned_scratch(
     ran: Any,
 ) -> None:
     api, _provider, _launch = ran
-
-    def mounts(prefix: str) -> dict[str, Any]:
-        return {m["mountPath"]: m for m in pod_of(api, prefix)["containers"][0]["volumeMounts"]}
-
-    preparer = mounts("prepare-")
+    worker = pod_of(api, "worker-")
+    preparer_container = next(
+        row for row in worker["initContainers"] if row["name"] == "workspace-prepare"
+    )
+    preparer = {m["mountPath"]: m for m in preparer_container["volumeMounts"]}
     assert preparer[WORK_MOUNT]["readOnly"] is False and "subPath" not in preparer[WORK_MOUNT]
 
-    collector = mounts("collect-")
+    collector_container = next(row for row in worker["containers"] if row["name"] == "collector")
+    collector = {m["mountPath"]: m for m in collector_container["volumeMounts"]}
     # 08: the report directory read-only, an output directory writable. FDY-0140: the
     # checkout is writable, because what the worker left uncommitted is committed.
     assert collector[REPO_MOUNT]["readOnly"] is False
     assert collector[REPORT_MOUNT]["readOnly"] is True
     assert collector[OUTPUT_MOUNT]["readOnly"] is False
 
-    bundle = mounts("verify-bundle-")
-    assert bundle[OUTPUT_MOUNT]["readOnly"] is True
-
-    verifier = mounts("verifier-")
-    # 11: the verifier sees its own tree and its own log directory, never the
-    # collector's output directory.
-    assert verifier[REPO_MOUNT]["subPath"] == "output/tree"
-    assert verifier[VERIFY_MOUNT]["subPath"] == "verify"
-    assert OUTPUT_MOUNT not in verifier
+    verifier = {
+        m["mountPath"]: m for m in pod_of(api, "verifier-")["containers"][0]["volumeMounts"]
+    }
+    assert WORK_MOUNT in verifier
+    assert scripts.BUNDLE_MOUNT in verifier
     # FDY-0140: the package caches are claim leaves, never the memory-backed home, and
     # the verifier's is its own: a cache the worker wrote is never what it runs from.
-    worker = mounts("worker-")
-    assert worker[PACKAGE_CACHE_MOUNT]["subPath"] == "pkg-cache"
-    assert verifier[PACKAGE_CACHE_MOUNT]["subPath"] == "pkg-cache-verifier"
-    for pod in (worker, verifier):
-        assert pod[PACKAGE_CACHE_MOUNT]["readOnly"] is False
+    worker_mounts = {m["mountPath"]: m for m in worker["containers"][0]["volumeMounts"]}
+    assert worker_mounts[PACKAGE_CACHE_MOUNT]["subPath"] == "pkg-cache"
+    assert worker_mounts[PACKAGE_CACHE_MOUNT]["readOnly"] is False
     worker_env = {e["name"]: e.get("value") for e in pod_of(api, "worker-")["containers"][0]["env"]}
     assert worker_env["UV_CACHE_DIR"] == "/crucible/pkg-cache/uv"
     assert worker_env["PIP_CACHE_DIR"] == "/crucible/pkg-cache/pip"
@@ -251,8 +251,7 @@ async def test_the_preparer_gets_the_whole_claim_and_the_collector_its_leaves(
     }
     assert verifier_env["UV_CACHE_DIR"] == "/crucible/pkg-cache/uv"
 
-    reader = mounts("reader-")
-    assert reader[WORK_MOUNT]["readOnly"] is True
+    assert not any(str(row["name"]).startswith("reader-") for row in api.created)
 
 
 async def test_the_job_never_retries_and_carries_its_own_deadline(ran: Any) -> None:
@@ -261,8 +260,9 @@ async def test_the_job_never_retries_and_carries_its_own_deadline(ran: Any) -> N
     assert job["spec"]["backoffLimit"] == 0
     assert job["spec"]["template"]["spec"]["restartPolicy"] == "Never"
     # The contract's timeout plus the drain grace: Crucible drains before the deadline
-    # and classifies the exit itself (26).
-    assert job["spec"]["activeDeadlineSeconds"] == 630
+    # and classifies the exit itself (26). ADR 0033: plus the collection time, since the
+    # collector runs in this Pod after the agent has ended.
+    assert job["spec"]["activeDeadlineSeconds"] == 630 + _provider.config.collector_timeout_seconds
 
 
 async def test_every_object_carries_26s_four_labels_and_lives_in_the_workers_namespace(
@@ -292,14 +292,17 @@ async def test_the_image_pull_secret_is_on_every_pod_when_one_is_configured(ran:
         assert pod_of(api, prefix)["imagePullSecrets"] == [{"name": "ghcr-pull"}]
 
 
-async def test_the_workspace_claim_is_read_write_once_with_the_configured_class() -> None:
+async def test_the_workspace_is_a_generic_ephemeral_volume_with_the_configured_class() -> None:
     api, _registry, provider = build()
     launch = spec()
-    await provider.prepare(launch)
-    claim = next(row["body"] for row in api.created if row["kind"] == "persistentvolumeclaims")
-    assert claim["spec"]["accessModes"] == ["ReadWriteOnce"]
-    assert claim["spec"]["storageClassName"] == "lab-ssd"
-    assert claim["spec"]["resources"]["requests"]["storage"] == "20Gi"
+    workspace = await provider.prepare(launch)
+    await provider.launch(workspace, launch)
+    assert not any(row["kind"] == "persistentvolumeclaims" for row in api.created)
+    volume = next(row for row in pod_of(api, "worker-")["volumes"] if row["name"] == "ws")
+    claim = volume["ephemeral"]["volumeClaimTemplate"]["spec"]
+    assert claim["accessModes"] == ["ReadWriteOnce"]
+    assert claim["storageClassName"] == "lab-ssd"
+    assert claim["resources"]["requests"]["storage"] == "20Gi"
 
 
 async def test_a_bundle_above_the_configmap_cap_is_refused_rather_than_truncated() -> None:

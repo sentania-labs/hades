@@ -127,14 +127,17 @@ async def test_a_worker_under_a_policy_that_does_not_allowlist_github_does_not_g
     assert not allows(policy, GITHUB, 443)
     assert allows(policy, PYPI, 443)
     assert _env(pod)["CRUCIBLE_EGRESS_ALLOWLIST"] == "pypi.org"
-    assert all("github.com" not in alias["hostnames"] for alias in pod["hostAliases"])
+    # ADR 0033: the Pod's hosts file pins github.com for its checkout init container
+    # (hades #191), which only the short-lived checkout policy lets reach it; the
+    # worker's own policy above never does.
+    assert {"ip": GITHUB, "hostnames": ["github.com"]} in pod["hostAliases"]
 
 
 def _config(*, broad_egress: bool) -> KubernetesConfig:
     return KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        storage_class="lab-ssd",
+        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         broad_egress=broad_egress,
     )

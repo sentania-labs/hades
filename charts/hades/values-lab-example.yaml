@@ -76,8 +76,9 @@ secrets:
   githubAppWebhook: ""
   firstRunToken: hades-first-run-admin
 provider:
-  workspaceStorageClass: longhorn
-  workspaceSize: 20Gi
+  workspaceEphemeral:
+    class: longhorn
+    size: 20Gi
   maxConcurrency: 6
   launchTimeoutSeconds: 300
   prepareTimeoutSeconds: 900

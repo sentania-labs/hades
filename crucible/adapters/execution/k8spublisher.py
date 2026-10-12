@@ -351,23 +351,12 @@ class KubernetesPublisher:
     ) -> MergeMainOutcome:
         """hades #411: merge the base into the remote work branch tip in a publisher Job.
 
-        The Job is the publisher's, with the same Secret, NetworkPolicy and outcome leaf
-        of the attempt's workspace claim, and no bundle mounted: the remote tip is what
-        is merged. A claim that is gone or not ready refuses the merge, which the
-        caller hands to a worker correction."""
+        The Job is the publisher's, with the same Secret and NetworkPolicy. Its outcome
+        uses the Pod's own memory-backed volume and comes back over exec."""
         provider = self._provider
         spec = request_spec(request)
         if not request.image:
             return _merge_refused("create", "the merge-main request names no image")
-        claim = k8sspec.object_name("ws", request.attempt_id)
-        try:
-            await provider._call(provider.client.get, "persistentvolumeclaims", claim)
-        except KubernetesApiError as exc:
-            if exc.status == 404:
-                return _merge_refused(
-                    "claim", f"the workspace claim {claim!r} the merge would write to is gone"
-                )
-            return _merge_refused("container", f"the workspace claim could not be read: {exc}")
         try:
             probe = await provider.ensure_ready()
         except Exception as exc:
@@ -377,11 +366,8 @@ class KubernetesPublisher:
                 "namespace", f"the workers namespace is not ready ({probe.detail})"
             )
         limits = provider._limits(spec)
-        refusal = await self._prepare_claim(spec, request, claim, limits)
-        if refusal is not None:
-            return _merge_refused(refusal.step, refusal.detail)
         timeout = int(min(request.timeout_seconds, self.config.timeout_seconds))
-        script = scripts.merge_main_script(
+        body = scripts.merge_main_script(
             clone_url=request.repository_url,
             work_branch=request.work_branch,
             base_ref=request.base_ref,
@@ -391,17 +377,21 @@ class KubernetesPublisher:
             credential_host=self.config.credential_host,
             token_source="file",
         )
+        script = scripts.delivered_publisher_script(body, wait_seconds=0, read_seconds=timeout)
+        outcome: dict[str, bytes] = {}
         exit_code, failed = await self._run_with_token(
             spec,
             request,
             token,
             script=script,
             mounts=[
-                Mount("ws", scripts.PUBLISH_MOUNT, sub_path=PUBLISH_LEAF),
+                Mount(OUTCOME_VOLUME, scripts.PUBLISH_MOUNT),
                 Mount("publish-token", scripts.TOKEN_MOUNT, read_only=True),
             ],
+            volumes=[_memory_volume(OUTCOME_VOLUME, OUTCOME_VOLUME_BYTES)],
             limits=limits,
             timeout=timeout,
+            on_running=self._exchange(b"", outcome, timeout),
         )
         if failed is not None:
             return _merge_refused("container", failed)
@@ -412,23 +402,13 @@ class KubernetesPublisher:
                 detail=f"the merge-main Job did not finish within {timeout}s",
                 exit_code=-2,
             )
-        try:
-            files = await provider._read_files(
-                spec,
-                [f"{PUBLISH_LEAF}/{name}" for name in MERGE_OUTCOME_FILES],
-                limits,
-                limit=OUTCOME_READ_LIMIT,
-            )
-        except (ProviderError, KubernetesApiError) as exc:
-            # Unlike a publication, a merge whose new head cannot be read back is not
-            # recorded: the next poll sees the pushed head as Crucible's own push only
-            # through its outcome, so this is reported as not merged.
+        if not outcome:
             return _merge_refused(
                 "outcome",
-                f"the merge-main Job exited {exit_code}; its outcome is unreadable: {exc}",
+                f"the merge-main Job exited {exit_code}; its outcome is unreadable",
             )
         return merge_outcome_from_files(
-            {name: _text(files.get(f"{PUBLISH_LEAF}/{name}")) for name in MERGE_OUTCOME_FILES},
+            {name: _text(outcome.get(name)) for name in MERGE_OUTCOME_FILES},
             exit_code,
         )
 

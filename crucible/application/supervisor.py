@@ -226,7 +226,7 @@ from crucible.ports.execution import (
     WorkerStartError,
     Workspace,
 )
-from crucible.ports.github import GitHubClient
+from crucible.ports.github import GitHubClient, InstallationToken
 from crucible.ports.harness import (
     CommandLoopTracker,
     CommandTracker,
@@ -815,6 +815,7 @@ class Supervisor:
         self.fenced_token: int | None = None
         self._handles: dict[str, Handle] = {}
         self._workspaces: dict[str, Workspace] = {}
+        self._checkout_launch_tokens: dict[str, InstallationToken] = {}
         # The harnesses a login is running for, read once per launch pass (12, 25).
         self._logins_now: frozenset[str] = frozenset()
         self._workspace_fingerprints: dict[str, tuple[int, int, int] | None] = {}
@@ -2029,6 +2030,17 @@ class Supervisor:
             return held
 
     async def _finish_launch(self, item: _Pending, provider: ExecutionProvider) -> bool:
+        try:
+            return await self._finish_launch_attempt(item, provider)
+        finally:
+            # Kubernetes re-creates the checkout in the worker's init container.
+            # launch() waits for that init before returning, so revocation here covers
+            # both clones, including every cancellation and failed launch path.
+            token = self._checkout_launch_tokens.pop(item.attempt.id, None)
+            if token is not None:
+                await release_checkout_token(self._github, token)
+
+    async def _finish_launch_attempt(self, item: _Pending, provider: ExecutionProvider) -> bool:
         """The slow half, as a task of its own (hades #190): build the spec, prepare
         the checkout, and start the worker. A cancel is honoured before each step, while
         the prepare runs, just before the worker is created, and in the transaction that
@@ -3282,17 +3294,23 @@ class Supervisor:
     ) -> Workspace:
         """08, ADR 0019: build the checkout. A private repository's read-only checkout
         token is minted here, handed to the provider for the preparation step alone,
-        and revoked and emptied the moment `prepare` returns or raises: the worker that
-        launches next never had it, and nothing in this process keeps it. The provider
+        and revoked when preparation ends. Kubernetes also clones in the worker init,
+        so its token stays until launch finishes; the agent never mounts it. The provider
         asks whether the task was cancelled before each of its steps (hades #189)."""
 
         token = await checkout_token_for(self._github, repository)
+        held_for_launch = False
         try:
-            return await provider.prepare(
+            ws = await provider.prepare(
                 spec, checkout_token=token, cancelled=self._cancel_check(spec.task_id)
             )
+            if provider.name == "kubernetes" and token is not None:
+                self._checkout_launch_tokens[spec.attempt_id] = token
+                held_for_launch = True
+            return ws
         finally:
-            await release_checkout_token(self._github, token)
+            if not held_for_launch:
+                await release_checkout_token(self._github, token)
 
     def _cancel_check(self, task_id: str) -> CancelCheck:
         """What a provider asks while it prepares or launches. A look that fails is not
@@ -4501,7 +4519,12 @@ class Supervisor:
                     continue
                 finally:
                     self._workspaces.pop(attempt.id, None)
-                await self._db(partial(self._mark_cleaned, attempt.id, choice))
+                marker = (
+                    self._mark_cleaned_ephemeral
+                    if provider_name == "kubernetes"
+                    else self._mark_cleaned
+                )
+                await self._db(partial(marker, attempt.id, choice))
                 self._workspace_fingerprints.pop(attempt.id, None)
                 self._handles.pop(attempt.id, None)
                 cleaned += 1
@@ -4532,7 +4555,12 @@ class Supervisor:
             except ProviderError:
                 log.exception("cleanup failed; the next tick tries again")
                 continue
-            await self._db(partial(self._mark_cleaned, attempt.id, choice))
+            marker = (
+                self._mark_cleaned_ephemeral
+                if provider_name == "kubernetes"
+                else self._mark_cleaned
+            )
+            await self._db(partial(marker, attempt.id, choice))
             self._collect_pending_ticks.pop(attempt.id, None)
             self._collect_failing_since.pop(attempt.id, None)
             self._collect_retry_at.pop(attempt.id, None)
@@ -4563,6 +4591,18 @@ class Supervisor:
                 attempt_id=attempt_id,
                 payload={"workspace": choice},
             )
+            uow.commit()
+
+    def _mark_cleaned_ephemeral(self, attempt_id: str, choice: str) -> None:
+        """Mark object cleanup without inventing a retained Kubernetes workspace."""
+        del choice
+        with self._fenced() as uow:
+            attempt = uow.attempts.get(attempt_id, for_update=True)
+            if attempt is None or attempt.cleaned_up_at is not None:
+                return
+            attempt.cleaned_up_at = self._clock.now()
+            uow.attempts.save(attempt)
+            self._release_checkout_leases(uow, attempt)
             uow.commit()
 
     async def _retention_step(self) -> int:
@@ -4652,6 +4692,8 @@ class Supervisor:
                     break
                 execution = uow.executions.get(attempt.execution_id)
                 if execution is None:
+                    continue
+                if execution.provider == "kubernetes":
                     continue
                 task = uow.tasks.get(attempt.task_id)
                 section, name, version = self._retention_for(uow, task)

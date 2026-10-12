@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -219,7 +219,7 @@ def supervisor_for(
 # ---------------------------------------------------------------------------
 
 
-async def test_in_flight_error_not_replaced_by_lingering_pod_reader(
+async def test_in_flight_error_propagates_from_worker_scratch_reader(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """AC1: when a read in the reader Pod raises an OSError, the lingering Pod is
@@ -246,8 +246,7 @@ async def test_in_flight_error_not_replaced_by_lingering_pod_reader(
         async with provider._reader(launch, k8sspec.limits_from_policy({})):
             raise DiskFullError("no space left on device")
 
-    # The reader Pod still lingers; it was logged, not raised.
-    assert delayed.pending
+    assert not delayed.pending
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +254,7 @@ async def test_in_flight_error_not_replaced_by_lingering_pod_reader(
 # ---------------------------------------------------------------------------
 
 
-async def test_preparer_read_back_uses_short_wait(
+async def test_preparer_validation_requires_no_cross_pod_read_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """AC2: the preparer's _read_files call uses ``collection=False`` so it gets the
@@ -291,11 +290,7 @@ async def test_preparer_read_back_uses_short_wait(
 
     workspace = await provider.prepare(launch)
 
-    # The preparer's read-back must use collection=False.
-    assert captured_kwargs.get("collection") is False, (
-        "preparer should call _read_files with collection=False to avoid the "
-        f"35-second collection wait, but got collection={captured_kwargs.get('collection')}"
-    )
+    assert captured_kwargs == {}
     assert workspace.work_branch is not None
     assert "crucible/EX-0001" in workspace.work_branch
 
@@ -361,7 +356,7 @@ async def test_collection_retry_tick_increments_on_pending_error(
     up to the configured retry count.
     """
     _api, provider, launch, workspace, handle = await finished_worker()
-    delayed = DelayedPods(_api, polls=1000)
+    delayed = DelayedPods(_api, role=k8sspec.ROLE_VERIFIER, polls=1000)
     delayed.install(monkeypatch)
     state = AsyncMock(wraps=provider._workspace_state)
     monkeypatch.setattr(provider, "_workspace_state", state)
@@ -482,6 +477,7 @@ async def test_in_flight_role_error_is_not_replaced_by_lingering_pod(
     launch = spec()
     delayed = DelayedPods(api, role=k8sspec.ROLE_PREPARER, polls=1000, unavailable_at=None)
     delayed.install(monkeypatch)
+    provider.config = replace(provider.config, prepare_pod_deletion_wait_seconds=0)
     monkeypatch.setattr(provider, "_await_job", AsyncMock(side_effect=OSError("read failed")))
 
     with pytest.raises(OSError, match="read failed"):
@@ -505,14 +501,10 @@ async def test_in_flight_role_error_is_not_replaced_by_lingering_pod(
 # ---------------------------------------------------------------------------
 
 
-async def test_preparer_read_back_uses_non_collection_reader(
+async def test_preparer_needs_no_reader_after_its_validation_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The preparer's read-back avoids the 35-second collection deletion wait.
-
-    ``_read_files`` defaults ``collection`` to True. Removing ``collection=False``
-    from ``prepare`` therefore makes this regression test fail.
-    """
+    """Preparation validates its disposable scratch and does not read it from another Pod."""
     api, _registry, provider = build()
     api.script_all("succeed", after=1)
     launch = spec()
@@ -527,5 +519,5 @@ async def test_preparer_read_back_uses_non_collection_reader(
 
     workspace = await provider.prepare(launch)
 
-    assert collections == [False]
+    assert collections == []
     assert workspace.work_branch == "crucible/EX-0001"

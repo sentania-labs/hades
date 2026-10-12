@@ -14,6 +14,7 @@ import re
 import socket
 import subprocess
 import time
+from collections.abc import Sequence
 from dataclasses import replace
 from itertools import pairwise
 from pathlib import Path
@@ -30,6 +31,7 @@ from crucible.adapters.execution import k8sspec
 from crucible.adapters.execution import kubernetes as kubernetes_module
 from crucible.adapters.execution.fake import FakeProvider
 from crucible.adapters.execution.k8sapi import (
+    ExecResult,
     KubernetesApiError,
     KubernetesClient,
     kubeconfig_access,
@@ -49,6 +51,7 @@ from crucible.application.admin.context import AdminContext
 from crucible.application.admin.login import FLOWS, LoginFlow
 from crucible.application.auth import mint_token
 from crucible.application.delivery_tick import DeliveryConfig
+from crucible.application.evidence import work_bundle_artifact
 from crucible.application.harnesses import HarnessRegistry
 from crucible.application.repositories import register_repository
 from crucible.application.supervisor import Supervisor
@@ -155,8 +158,8 @@ def _provider(
     **overrides: Any,
 ) -> KubernetesProvider:
     settings: dict[str, Any] = {
-        "storage_class": "standard",
-        "workspace_size": "64Mi",
+        "workspace_ephemeral_class": "standard",
+        "workspace_ephemeral_size": "64Mi",
         "cache_claim": "hades-reference-cache",
         "poll_interval_seconds": 0.25,
         "launch_timeout_seconds": 45,
@@ -540,9 +543,9 @@ async def test_rows_5_7_11_23_supervisor_restart_and_full_gate_lifecycle(
             "image_resolved",
             "attempt_logs_drained",
             "verification_completed",
-            "attempt_cleaned_up",
         ):
             assert kind in event_kinds(client, task_id)
+        assert "attempt_cleaned_up" not in event_kinds(client, task_id)
 
         timeout_origin = _origin("supervisor-timeout", "hang")
         register(ctx, "supervisor-timeout", timeout_origin)
@@ -756,10 +759,27 @@ async def test_row_12_concurrent_attempts_use_distinct_claims(
         for row in api.list_objects("persistentvolumeclaims")
         if str((row.get("metadata") or {}).get("labels", {}).get(k8sspec.LABEL_ATTEMPT)) in attempts
     }
-    assert claims == {
-        k8sspec.object_name("ws", first.attempt_id),
-        k8sspec.object_name("ws", second.attempt_id),
-    }
+    assert not claims
+    pods = [await provider._pod_of(handle.ref) for handle in (first_handle, second_handle)]
+    assert all(pod is not None for pod in pods)
+    first_pod, second_pod = pods
+    assert first_pod is not None and second_pod is not None
+    assert first_pod["metadata"]["uid"] != second_pod["metadata"]["uid"]
+    for index, pod in enumerate(pods):
+        assert pod is not None
+        scratch = next(v for v in pod["spec"]["volumes"] if v["name"] == "ws")
+        assert "persistentVolumeClaim" not in scratch
+        assert "ephemeral" in scratch or "emptyDir" in scratch
+        result = api.pod_exec(
+            pod["metadata"]["name"],
+            [
+                "sh",
+                "-c",
+                f"test ! -e /crucible/work/isolation && echo {index} > /crucible/work/isolation",
+            ],
+            container=k8sspec.ROLE_COLLECTOR,
+        )
+        assert result.exit_code == 0
     await asyncio.gather(
         provider.cleanup(first_ws, CleanupPolicy.DELETE, first),
         provider.cleanup(second_ws, CleanupPolicy.DELETE, second),
@@ -892,6 +912,10 @@ async def test_deleted_pod_is_lost_and_sigterm_ignoring_pod_dies_at_grace(
     await _running(provider, stubborn_handle)
     started = time.monotonic()
     await provider.terminate(stubborn_handle, "drain")
+    # The supervisor owns the grace clock, then requests kill. Neither step
+    # deletes the Pod because the collector still needs this Pod's checkout.
+    await asyncio.sleep(provider._limits(stubborn).grace_seconds)
+    await provider.terminate(stubborn_handle, "kill")
     assert (await _terminal(provider, stubborn_handle, timeout=15)).state is ObservationState.EXITED
     assert time.monotonic() - started >= 1.5
     await provider.cleanup(stubborn_ws, CleanupPolicy.DELETE, stubborn)
@@ -954,8 +978,10 @@ async def test_an_adopted_attempt_drains_with_its_policy_grace_and_reports_pod_l
     assert launched.limits.grace_seconds == 7
     await successor.terminate(adopted, "drain")
     draining = api.get("pods", str(pod["metadata"]["name"]))
-    print("deletionGracePeriodSeconds:", draining["metadata"].get("deletionGracePeriodSeconds"))
-    assert draining["metadata"].get("deletionGracePeriodSeconds") == 7
+    assert "deletionTimestamp" not in draining["metadata"]
+    assert draining["spec"]["terminationGracePeriodSeconds"] == 7
+    await asyncio.sleep(launched.limits.grace_seconds)
+    await successor.terminate(adopted, "kill")
     assert (await _terminal(successor, adopted, timeout=30)).state is ObservationState.EXITED
     await successor.cleanup(workspace, CleanupPolicy.DELETE, spec)
 
@@ -2821,9 +2847,8 @@ async def test_fdy_0133_a_task_in_publishing_is_pushed_by_the_kubernetes_publish
 
 
 class OutageKubernetesClient(RecordingKubernetesClient):
-    """The real API, except that the next `outages` creates of a role's Job go to an
-    API server address that refuses the connection: the real transport failure a
-    restarting API server produces, through the real `_request` path."""
+    """The real API, except that selected calls go to an API server address that
+    refuses the connection through the real transport path."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -2844,6 +2869,20 @@ class OutageKubernetesClient(RecordingKubernetesClient):
             return down.create(kind, body)
         return super().create(kind, body, **kwargs)
 
+    def pod_exec(self, name: str, command: Sequence[str], **kwargs: Any) -> ExecResult:
+        role = str(kwargs.get("container") or "")
+        if self.outages.get(role, 0) > 0:
+            self.outages[role] -= 1
+            self.refused.append(role)
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                closed = int(probe.getsockname()[1])
+            down = KubernetesClient(
+                replace(self.access, server=f"https://127.0.0.1:{closed}"), self.namespace
+            )
+            return down.pod_exec(name, command, **kwargs)
+        return super().pod_exec(name, command, **kwargs)
+
 
 def _claim_exists(api: KubernetesClient, attempt_id: str) -> bool:
     try:
@@ -2863,10 +2902,9 @@ async def test_lab_findings_a_long_collect_blocks_no_launch_and_the_sweep_frees_
     registry: CraneRegistryClient,
 ) -> None:
     """A collection whose verifier runs 25 seconds, past the 15 second lease: every tick
-    still renews the lease and another task launches beside it. Then the claims: both
-    attempts keep theirs (keep_diff_only) while their tasks wait on review; cancelling
-    one task frees its claim on the next tick, and the other task's claim, which a
-    publication still needs, stays."""
+    still renews the lease and another task launches beside it. Both workspaces then
+    disappear even under keep_diff_only. Cancelling one task requires no retained
+    claim and leaves the other task's stored publication bundle readable."""
     provider = _provider(api, registry)
     ctx, tokens, app, harnesses = _kind_app(engine, migrated, artifact_root, provider, registry)
     supervisor = Supervisor(
@@ -2941,7 +2979,21 @@ async def test_lab_findings_a_long_collect_blocks_no_launch_and_the_sweep_frees_
                 {"a": slow_attempt, "b": other_attempt_id},
             ).scalar()
         assert cleaned == 2
-        assert _claim_exists(api, slow_attempt) and _claim_exists(api, other_attempt_id)
+        assert not _claim_exists(api, slow_attempt)
+        assert not _claim_exists(api, other_attempt_id)
+        for attempt_id in (slow_attempt, other_attempt_id):
+            await _pods_gone(api, attempt_id)
+        with ctx.uow_factory() as uow:
+            bundle_head = next(
+                row
+                for row in uow.evidence.list_for_attempt(other_attempt_id)
+                if row.kind == "bundle_head"
+            )
+            artifact = work_bundle_artifact(uow, bundle_head)
+            assert artifact is not None
+        assert ctx.artifact_store is not None
+        bundle = ctx.artifact_store.get(artifact.path)
+        assert hashlib.sha256(bundle).hexdigest() == artifact.sha256
 
         response = client.post(
             f"/v1/tasks/{slow}/cancel",
@@ -2953,12 +3005,10 @@ async def test_lab_findings_a_long_collect_blocks_no_launch_and_the_sweep_frees_
             await supervisor.tick()
             await asyncio.sleep(1)
         assert not _claim_exists(api, slow_attempt), "the cancelled task's claim stayed"
-        assert _claim_exists(api, other_attempt_id), "a claim a task still needs was removed"
-        assert "retention_applied" in event_kinds(client, slow)
-        print(
-            f"lab findings: {k8sspec.object_name('ws', slow_attempt)} freed after the cancel; "
-            f"{k8sspec.object_name('ws', other_attempt_id)} kept for the open task"
-        )
+        await supervisor.tick()
+        assert not _claim_exists(api, other_attempt_id)
+        assert "attempt_cleaned_up" not in event_kinds(client, slow)
+        assert ctx.artifact_store.get(artifact.path) == bundle
         client.post(
             f"/v1/tasks/{other}/cancel",
             json={"reason": "lab findings proof done", "verbatim": "stop", "decided_by": "tests"},
@@ -2979,10 +3029,9 @@ async def test_lab_findings_an_api_server_outage_during_collect_loses_no_attempt
     registry: CraneRegistryClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The collector Job's create meets a refused connection twice (the real transport
-    error, through the real client). The attempt is not failed as environment: it is
-    collected again from the untouched claim and the task reaches review with every
-    gate passing."""
+    """Releasing the in-Pod collector meets a refused connection twice through the real
+    transport path. The attempt is not failed as environment: it is collected again
+    from the live worker Pod and reaches review with every gate passing."""
     # The retry interval only paces the tier; the rule is the same at 30 seconds.
     monkeypatch.setattr(supervisor_module, "COLLECT_RETRY_INTERVAL_SECONDS", 5)
     outage_api = OutageKubernetesClient(
@@ -3015,7 +3064,7 @@ async def test_lab_findings_an_api_server_outage_during_collect_loses_no_attempt
         )
         attempt = client.get(f"/v1/tasks/{task_id}").json()["latest_attempt"]
         print(
-            f"lab findings: collector creates refused {len(outage_api.refused)} time(s); "
+            f"lab findings: collector execs refused {len(outage_api.refused)} time(s); "
             f"task {state}, attempt exit class {attempt['exit_class']}"
         )
         assert outage_api.refused == [k8sspec.ROLE_COLLECTOR, k8sspec.ROLE_COLLECTOR]

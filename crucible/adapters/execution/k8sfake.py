@@ -48,13 +48,14 @@ from crucible.adapters.execution.k8sapi import (
 from crucible.adapters.execution.k8sregistry import RegistryError
 from crucible.adapters.execution.k8sspec import (
     CONTAINER_NAME,
+    DRAIN_SCRIPT,
+    KILL_SCRIPT,
     LABEL_ATTEMPT,
     LABEL_CANARY,
     LABEL_ROLE,
     ROLE_BUNDLE,
     ROLE_CACHE_REFRESHER,
     ROLE_CANARY,
-    ROLE_CLEANER,
     ROLE_COLLECTOR,
     ROLE_LOGIN,
     ROLE_LOGIN_LOCK,
@@ -63,6 +64,7 @@ from crucible.adapters.execution.k8sspec import (
     ROLE_READER,
     ROLE_VERIFIER,
     ROLE_WORKER,
+    WORKER_PREPARE_CONTAINER,
 )
 from crucible.adapters.execution.scripts import (
     ACTIVITY_MARKER,
@@ -272,6 +274,10 @@ class FakeKubernetesApi:
     login_runs: dict[str, _LoginRun] = field(default_factory=dict)
     # Every stdin an exec was given, by Pod name, so a test sees what went in.
     exec_stdin: dict[str, list[bytes]] = field(default_factory=dict)
+    # ADR 0033: each in-Pod collection's release (attempt id, `quota` or `normal`), and
+    # each correction whose sealed bundle reached its worker Pod's checkout.
+    collect_modes: list[tuple[str, str]] = field(default_factory=list)
+    worker_deliveries: list[str] = field(default_factory=list)
     # FDY-0140: what the activity probe prints for a Pod, one answer per ask.
     activity_answers: dict[str, list[bytes]] = field(default_factory=dict)
     # The Job controller's `activeDeadlineSeconds` firing on a hanging worker before
@@ -424,7 +430,7 @@ class FakeKubernetesApi:
             raise KubernetesApiError(409, f"{kind}/{name} already exists")
         stored: dict[str, Any] = json.loads(json.dumps(dict(body)))
         stored.setdefault("metadata", {})["resourceVersion"] = str(self._next_rv())
-        if kind == "jobs" or (
+        if kind in ("jobs", "pods") or (
             kind == "configmaps"
             and (stored.get("metadata") or {}).get("labels", {}).get(LABEL_ROLE) == ROLE_LOGIN_LOCK
         ):
@@ -504,10 +510,20 @@ class FakeKubernetesApi:
                 return
         self.deleted.append((kind, name))
         del self.objects[(kind, name)]
+        if kind == "pods":
+            self.claims.pop(f"pod:{name}", None)
+            labels = (obj.body.get("metadata") or {}).get("labels") or {}
+            attempt_id = str(labels.get(LABEL_ATTEMPT, ""))
+            if attempt_id:
+                self.claims.pop(f"ws-{attempt_id.lower()}", None)
         if kind == "jobs" and propagation != "Orphan":
             for key, other in list(self.objects.items()):
                 labels = (other.body.get("metadata") or {}).get("labels") or {}
                 if key[0] == "pods" and labels.get("job-name") == name:
+                    self.claims.pop(f"pod:{key[1]}", None)
+                    attempt_id = str(labels.get(LABEL_ATTEMPT, ""))
+                    if attempt_id:
+                        self.claims.pop(f"ws-{attempt_id.lower()}", None)
                     del self.objects[key]
         if kind == "persistentvolumeclaims":
             self.claims.pop(name, None)
@@ -600,6 +616,13 @@ class FakeKubernetesApi:
         stdout_to: IO[bytes] | None = None,
     ) -> ExecResult:
         self._outage("pod_exec", "pods")
+        obj = self.objects.get(("pods", name))
+        if obj is not None:
+            labels = (obj.body.get("metadata") or {}).get("labels") or {}
+            if labels.get(LABEL_ROLE) == ROLE_VERIFIER and (obj.body.get("status") or {}).get(
+                "phase"
+            ) in ("Succeeded", "Failed"):
+                raise KubernetesApiError(400, "cannot exec into a terminated verifier")
         result = self._exec(name, command, stdin)
         if stdout_to is None:
             return result
@@ -653,6 +676,32 @@ class FakeKubernetesApi:
             return self._collect(obj)
         if ACTIVITY_MARKER in script:
             return self._activity(name, claim)
+        if "git bundle verify" in script:
+            return ExecResult(b"", b"", 0)
+        if "bundle create - HEAD" in script:
+            return ExecResult(claim.get("output/work_branch.bundle", b""), b"", 0)
+        if "touch /crucible/work/.collection-read" in script:
+            claim[".collection-read"] = b""
+            return ExecResult(b"", b"", 0)
+        if script == "touch /crucible/work/.verify-read":
+            self._finish(obj, 0)
+            return ExecResult(b"", b"", 0)
+        mode = re.match(r"^printf '%s\\n' (quota|normal) > /crucible/work/\.collect-mode$", script)
+        if mode is not None:
+            return self._collect_in_worker(obj, mode.group(1))
+        if script in (DRAIN_SCRIPT, KILL_SCRIPT):
+            labels = (obj.body.get("metadata") or {}).get("labels") or {}
+            attempt_id = str(labels.get(LABEL_ATTEMPT, ""))
+            worker = self.workers.get(attempt_id)
+            if worker is not None:
+                worker.behavior = "environment"
+                worker.remaining = 0
+                self._advance(obj)
+                worker.exit_code = 143 if script == DRAIN_SCRIPT else 137
+                statuses = (obj.body.get("status") or {}).get("containerStatuses") or []
+                if statuses:
+                    statuses[0]["state"]["terminated"]["exitCode"] = worker.exit_code
+            return ExecResult(b"", b"", 0)
         if "tar cf -" in script:
             if f"output/{CHANGED_BLOBS_DIR}" in script and "--exclude" not in script:
                 return ExecResult(_changed_blobs_tar(claim), b"", 0)
@@ -677,9 +726,17 @@ class FakeKubernetesApi:
             self._claim_of(obj)[target.removeprefix(work)] = content
         else:
             self.pod_files.setdefault(obj.name, {})[target] = content
-        if _command_of(obj).find(RESUME_DELIVERY_MARKER) >= 0:
-            labels = (obj.body.get("metadata") or {}).get("labels") or {}
+        labels = (obj.body.get("metadata") or {}).get("labels") or {}
+        if labels.get(LABEL_ROLE) == ROLE_VERIFIER:
+            self._act_verifier(obj, str(labels.get(LABEL_ATTEMPT, "")))
+        elif _command_of(obj).find(RESUME_DELIVERY_MARKER) >= 0:
             self._act_preparer(obj, str(labels.get(LABEL_ATTEMPT, "")), delivered=True)
+        elif labels.get(LABEL_ROLE) == ROLE_WORKER and _waits_for_resume(obj):
+            # ADR 0033: the worker's own checkout had the bundle it waited for; the
+            # init container ends and the agent starts.
+            self.worker_deliveries.append(str(labels.get(LABEL_ATTEMPT, "")))
+            obj.body["status"] = _running(self.node_name)
+            self._act_worker(obj, str(labels.get(LABEL_ATTEMPT, "")))
         return ExecResult(b"", b"", 0)
 
     def _collect(self, obj: _Object) -> ExecResult:
@@ -717,6 +774,17 @@ class FakeKubernetesApi:
             claim = (volume.get("persistentVolumeClaim") or {}).get("claimName")
             if claim:
                 return self.claims.setdefault(str(claim), {})
+        if any(
+            volume.get("name") == "ws"
+            for volume in (obj.body.get("spec") or {}).get("volumes") or []
+        ):
+            data = self.claims.setdefault(f"pod:{obj.name}", {})
+            attempt_id = str(
+                ((obj.body.get("metadata") or {}).get("labels") or {}).get(LABEL_ATTEMPT, "")
+            )
+            if attempt_id:
+                self.claims.setdefault(f"ws-{attempt_id.lower()}", data)
+            return data
         return {}
 
     def _start_job(self, job: Mapping[str, Any]) -> None:
@@ -748,6 +816,8 @@ class FakeKubernetesApi:
             "metadata": {"name": pod_name, "namespace": self.namespace, "labels": labels},
             "spec": {**dict(template.get("spec") or {}), "nodeName": self.node_name},
         }
+        self._uids += 1
+        pod["metadata"]["uid"] = f"uid-{self._uids}"
         self.objects[("pods", pod_name)] = _Object("pods", pod_name, pod)
         # The Job controller counts the Pod it created, which is how `launch` knows the
         # quota admitted it without listing Pods (hades #423).
@@ -776,6 +846,16 @@ class FakeKubernetesApi:
                 ],
             }
             return
+        if role == ROLE_WORKER and _waits_for_resume(obj):
+            # ADR 0033: a correction's worker Pod sits in its checkout init container
+            # until the sealed bundle is delivered into it (`_delivery`).
+            obj.body["status"] = {
+                "phase": "Pending",
+                "initContainerStatuses": [
+                    {"name": WORKER_PREPARE_CONTAINER, "state": {"running": {}}}
+                ],
+            }
+            return
         if role in (ROLE_READER, ROLE_WORKER):
             obj.body["status"] = _running(self.node_name)
         else:
@@ -786,7 +866,6 @@ class FakeKubernetesApi:
             ROLE_COLLECTOR: self._act_collector,
             ROLE_BUNDLE: self._act_bundle,
             ROLE_VERIFIER: self._act_verifier,
-            ROLE_CLEANER: self._act_cleaner,
             ROLE_CANARY: self._act_canary,
             ROLE_WORKER: self._act_worker,
             ROLE_LOGIN: self._act_login,
@@ -1025,6 +1104,8 @@ class FakeKubernetesApi:
     def _act_verifier(self, obj: _Object, attempt_id: str) -> None:
         from crucible.adapters.execution.scripts import encode_check_id  # noqa: PLC0415
 
+        if ".verify-ready" in _command_of(obj) and not self.pod_files.get(obj.name):
+            return
         behavior, _ = self._behavior(attempt_id, obj)
         claim = self._claim_of(obj)
         spec = self._spec_of(attempt_id)
@@ -1035,7 +1116,8 @@ class FakeKubernetesApi:
             safe = encode_check_id(str(check.get("id")))
             claim[f"verify/{safe}.exit"] = f"{expect + 1 if failed else expect}\n".encode()
             claim[f"verify/{safe}.log"] = f"fake verifier re-ran {check.get('command')!r}".encode()
-        self._finish(obj, 0)
+        if ".verify-ready" not in _command_of(obj):
+            self._finish(obj, 0)
 
     def _act_cleaner(self, obj: _Object, attempt_id: str) -> None:
         claim = self._claim_of(obj)
@@ -1194,6 +1276,8 @@ class FakeKubernetesApi:
                     claim[f"credential/{item.get('path')}"] = base64.b64decode(str(raw))
 
     def _act_worker(self, obj: _Object, attempt_id: str) -> None:
+        # The Pod's own scratch exists from its start (ADR 0033).
+        self._claim_of(obj)
         self._seed_claim(obj)
         behavior, after = self._behavior(attempt_id, obj)
         self.workers[attempt_id] = _Worker(behavior=behavior, remaining=after)
@@ -1237,7 +1321,24 @@ class FakeKubernetesApi:
             self.logs[obj.name].append(
                 f'{_stamp(2)} {{"type":"turn.failed","error":{{"code":"usage_limit_reached"}}}}'
             )
-        self._finish(obj, code, reason=reason)
+        # ADR 0033: the agent's container has ended and the collector waits beside it
+        # for the provider's word (`_collect_in_worker`).
+        obj.body["status"] = _agent_exited(code, reason)
+
+    def _collect_in_worker(self, obj: _Object, mode: str) -> ExecResult:
+        """ADR 0033: `collect` released the worker Pod's collector with `mode`; it
+        packages the tree in the same Pod and records its exit for the provider."""
+        labels = (obj.body.get("metadata") or {}).get("labels") or {}
+        attempt_id = str(labels.get(LABEL_ATTEMPT, ""))
+        status = obj.body.get("status")
+        claim = self._claim_of(obj)
+        claim[".collect-mode"] = f"{mode}\n".encode()
+        self.collect_modes.append((attempt_id, mode))
+        self._act_collector(obj, attempt_id)
+        claim[".collector-exit"] = b"0\n"
+        claim[".collection-ready"] = b""
+        obj.body["status"] = status
+        return ExecResult(b"", b"", 0)
 
 
 # ----- helpers -----------------------------------------------------------
@@ -1246,6 +1347,26 @@ class FakeKubernetesApi:
 def _command_of(obj: _Object) -> str:
     container = ((obj.body.get("spec") or {}).get("containers") or [{}])[0]
     return str((container.get("command") or [""])[-1])
+
+
+def _agent_exited(code: int, reason: str) -> dict[str, Any]:
+    return {
+        "phase": "Running",
+        "containerStatuses": [
+            {
+                "name": CONTAINER_NAME,
+                "state": {"terminated": {"exitCode": code, "reason": reason}},
+            },
+            {"name": ROLE_COLLECTOR, "state": {"running": {}}},
+        ],
+    }
+
+
+def _waits_for_resume(obj: _Object) -> bool:
+    for container in (obj.body.get("spec") or {}).get("initContainers") or []:
+        if container.get("name") == WORKER_PREPARE_CONTAINER:
+            return RESUME_DELIVERY_MARKER in str((container.get("command") or [""])[-1])
+    return False
 
 
 def _running(node: str) -> dict[str, Any]:
