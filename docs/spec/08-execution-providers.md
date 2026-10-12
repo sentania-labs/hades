@@ -202,7 +202,8 @@ It is a test fixture: wired only when `test_fixtures` is on (18).
 ## Kubernetes provider (C8, specified in 26)
 
 Same contract. Role Pods run in a worker namespace. The worker Pod contains a
-checkout-preparer init container, the agent and the collector; verifier and publisher
+checkout-preparer init container, the agent and the collector, which the provider
+releases once it has classified the agent's exit; verifier and publisher
 remain separate Jobs. Every Pod has its own ephemeral scratch and no Pod inherits files
 from another Pod. Identity is a
 ConfigMap or projected volume, the harness credential as a per-attempt

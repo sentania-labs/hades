@@ -18,7 +18,11 @@ from typing import Any
 import pytest
 
 from crucible.adapters.execution import k8sspec
-from crucible.adapters.execution.kubernetes import _observe_service_images, _terminated_init
+from crucible.adapters.execution.kubernetes import (
+    CHECKOUT_POLICY_PREFIX,
+    _observe_service_images,
+    _terminated_init,
+)
 from crucible.contracts.policy import parse_policy
 from crucible.contracts.task_contract import TaskContractV1
 from crucible.domain.test_services import (
@@ -292,10 +296,12 @@ async def test_the_worker_job_carries_the_sidecar_and_the_variable() -> None:
     # a service, since loopback traffic never leaves the Pod.
     policies = [
         body
-        for (kind, _name), obj in api.objects.items()
+        for (kind, name), obj in api.objects.items()
         if kind == "networkpolicies"
         for body in [obj.body]
         if body["spec"]["podSelector"]["matchLabels"].get(k8sspec.LABEL_ROLE) == "worker"
+        # ADR 0033: the worker's own policy, not its checkout's short-lived one.
+        and not name.startswith(CHECKOUT_POLICY_PREFIX)
     ]
     assert len(policies) == 1
     rules = json.dumps(policies[0]["spec"]["egress"])

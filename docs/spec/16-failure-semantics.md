@@ -257,7 +257,10 @@ to one Pod and is deleted with that Pod, so `workspace_on_success` and
 and `completed_workspaces_days` do not apply there. The Docker provider keeps its
 host-path cleanup behavior. If a Kubernetes worker Pod is lost through OOM, eviction or
 node loss before collection finishes, the attempt follows the existing `lost` path and
-is retried when policy permits; no later Pod can recover its scratch.
+is retried when policy permits; no later Pod can recover its scratch. Its collector runs
+in the worker Pod and starts only when the provider has classified the agent's exit, so
+a quota checkpoint there is committed as `wip` or refused exactly as the Docker
+collector does it.
 
 | Setting | Options | Default |
 |---|---|---|

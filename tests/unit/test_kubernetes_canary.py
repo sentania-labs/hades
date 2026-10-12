@@ -17,6 +17,7 @@ import pytest
 from crucible.adapters.execution import k8sspec
 from crucible.adapters.execution.k8sfake import FakeKubernetesApi, FakeRegistry
 from crucible.adapters.execution.kubernetes import (
+    CHECKOUT_POLICY_PREFIX,
     KubernetesConfig,
     KubernetesProvider,
     NamespaceProbe,
@@ -359,6 +360,8 @@ async def test_prepare_refreshes_settings_before_rendering_its_policy() -> None:
         if row["kind"] == "networkpolicies"
         and row["body"]["spec"]["podSelector"]["matchLabels"][k8sspec.LABEL_ROLE]
         == k8sspec.ROLE_WORKER
+        # ADR 0033: the worker's own policy, not its checkout's short-lived one.
+        and not str(row["name"]).startswith(CHECKOUT_POLICY_PREFIX)
     ]
     peers = [
         d for rule in worker["spec"]["egress"] for d in rule.get("to") or [] if "ipBlock" not in d

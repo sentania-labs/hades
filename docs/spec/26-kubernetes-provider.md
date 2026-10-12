@@ -24,9 +24,24 @@ files.
 
 The worker Pod contains `workspace-prepare` as an init container, the agent as
 `crucible`, and the collector as `collector`. The init container clones into that Pod's
-scratch. The agent's exit wrapper releases the collector on every normal exit and when
-it receives the supervised timeout signal. The collector finishes while the checkout
-still exists and stays available for bounded read-back. The verifier and publisher are
+scratch with the same preparer script the `prepare-<attempt>` Job ran, which proved the
+checkout can be built; harness credential init containers, when the harness has them,
+come after it. A correction's sealed bundle is delivered from the artifact store into
+that init container over exec, as it is into the preparer (ADR 0032). The clone reaches
+the remote even with a reference cache, which is only an object source, so the worker
+Pod gets a second NetworkPolicy, `np-checkout-<attempt>`, with the preparer's git
+destinations, and a private repository's `checkout-<attempt>` Secret is mounted into
+that init container and no other container. Whether the Secret is mounted is read from
+the cluster at launch, so a supervisor restarted between prepare and launch still mounts
+it. The provider deletes both once the Pod has left `Pending`, which a Pod does only
+after its init containers have run; `cleanup` deletes them on every other path. The
+worker's own policy stays exactly its allowlist. The agent's container is ended by
+signalling its processes (drain) or by deleting the Pod (kill), and the collector waits
+for the provider: once `collect` has seen the agent's exit and classified it, it writes
+`quota` or `normal` to `.collect-mode` in the scratch, so a quota checkpoint (16) is
+packaged or refused as one. The collector finishes while the checkout still exists and
+stays available for bounded read-back. The worker Job's `activeDeadlineSeconds` is the
+contract's timeout plus the drain grace plus the collector timeout. The verifier and publisher are
 separate Jobs; they clone from the reference cache or receive the sealed bundle from
 the artifact store. References below to an attempt workspace claim, reader Pod,
 cleaner Job, retention label, claim-name retry, or keeping a Kubernetes workspace are
@@ -122,7 +137,7 @@ Per attempt the provider creates, in `crucible-workers`, all labelled
 | PersistentVolumeClaim `ws-<attempt>` | the workspace: `repo/`, `report/`, `output/`, `resume/` (a correction's sealed bundle, delivered from the artifact store, ADR 0032), and `publish/` (a merge-main run's outcome). The collector's bundle in `output/` is copied out at collection and stored as the `work_bundle` artifact; no later Pod reads it from here, and no Pod mounts another attempt's claim | attempt, then per cleanup policy; a kept claim is deleted by the retention step once nothing needs it (16); the claim of an attempt that never launched is deleted, unless it is a resume source (hades #394, below) |
 | ConfigMap `identity-<attempt>` (or a projected volume from an object store above the ConfigMap size cap, 08) | the identity bundle, read-only | attempt |
 | Secret `cred-<attempt>` | the per-attempt copy of one harness credential directory, seeded from the harness's dedicated Secret in `crucible-workers`, `rw-narrow` where the adapter declares it (12) | attempt, deleted under every cleanup policy |
-| Secret `checkout-<attempt>` | a private repository's read-only installation token (ADR 0019), key `token`, mounted mode 0400 at `/run/crucible-token` into the refresher and the preparer Jobs and nothing else | created just before the refresher, deleted once the preparer's Pod is gone, on every path; a deletion that fails fails the prepare, and `discard`, `cleanup` and the retention sweep retry it |
+| Secret `checkout-<attempt>` | a private repository's read-only installation token (ADR 0019), key `token`, mounted mode 0400 at `/run/crucible-token` into the refresher and the preparer Jobs and the worker Pod's `workspace-prepare` init container (ADR 0033), and nothing else | created just before the refresher; deleted when the prepare fails, and otherwise once the worker Pod has left `Pending`, retried on each later look; `discard` and `cleanup` retry it |
 | Job `refresh-cache-<attempt>` | the reference cache's only writer: fetches the repository's bare mirror on the cache PVC (or clones it when absent), with git egress only and no workspace or identity bundle; for a private repository it also mounts `checkout-<attempt>` and fetches with it. It gives the remote 20 seconds to answer a ref listing and otherwise leaves the mirror as it is, so a refresh that cannot connect costs seconds, not the kernel's two-minute connect timeout (hades #191) | until complete, then deleted, before the preparer starts |
 | Job `prepare-<attempt>` | the preparer: clone into the PVC from the reference cache, mounted read-only, then branch, shims, author identity, `origin` placeholder (08). Its stdout and stderr are read before it is deleted; when it failed they are kept as the attempt's `crucible/preparer.log` artifact (hades #370) | until complete, then deleted |
 | Job `worker-<attempt>` | the worker, one Pod, `backoffLimit: 0`, `restartPolicy: Never` | until terminal, then deleted after `logs_drained` (or, for an attempt that never launched, by its pre-launch cleanup, hades #394) |

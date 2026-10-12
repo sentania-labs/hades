@@ -286,6 +286,11 @@ KILL_EXIT_CODE = 137
 # roles and that is the whole mapping.
 # The key the checkout token Secret keeps a private repository's token under (ADR 0019).
 CHECKOUT_TOKEN_KEY = "token"
+# ADR 0033: the file in the worker Pod's scratch that releases the in-Pod collector,
+# written by `collect` with `quota` or `normal` once the agent's exit is classified.
+COLLECT_MODE_FILE = f"{WORK_MOUNT}/.collect-mode"
+# ADR 0033: the worker Pod's second, short-lived NetworkPolicy, for its checkout.
+CHECKOUT_POLICY_PREFIX = "np-checkout"
 
 OBJECT_PREFIX: dict[str, str] = {
     k8sspec.ROLE_PREPARER: "prepare",
@@ -641,6 +646,10 @@ class _Launched:
     allowed: AllowedAddresses | None = None
     # When the names were last looked up (monotonic).
     egress_refreshed_at: float = 0.0
+    # ADR 0019, 0033: the checkout token Secret the worker's init container mounts, to
+    # be deleted as soon as that container has run.
+    checkout_token: bool = False
+    checkout_policy: str | None = None
     # hades #558: each declared service sidecar's image as the live Pod reported it
     # (`initContainerStatuses[].imageID`), by container name, once seen.
     service_images: dict[str, str] = field(default_factory=dict)
@@ -1808,15 +1817,10 @@ class KubernetesProvider:
             raise self._prepare_failed(
                 exit_code, detail, resume_source, redact("".join(preparer_log))
             )
-        if cache_name is not None:
-            # The worker clones the refreshed reference cache into its own scratch.
-            # The short-lived checkout credential is no longer needed by any Pod.
-            if not await self._delete_checkout_secret(spec.attempt_id):
-                raise ProviderError(
-                    f"the checkout token Secret {token_name!r} could not be deleted after the "
-                    "preparation step, so no worker is launched beside it"
-                )
-            self._checkout_tokens.discard(spec.attempt_id)
+        # ADR 0033: the worker's init container clones again, into its own scratch, and
+        # with the reference cache only as an object source it reaches the remote too.
+        # The token Secret therefore stays for that container; `observe` deletes it once
+        # the init container has run, and `discard` and `cleanup` on every other path.
         root = f"k8s://{self.config.namespace}/{k8sspec.object_name('worker', spec.attempt_id)}"
         return Workspace(
             attempt_id=spec.attempt_id,
@@ -2144,13 +2148,21 @@ class KubernetesProvider:
 
         return deliver
 
-    async def _deliver(self, pod: str, target: str, content: bytes, role: str) -> bool:
+    async def _deliver(
+        self,
+        pod: str,
+        target: str,
+        content: bytes,
+        role: str,
+        *,
+        container: str = k8sspec.CONTAINER_NAME,
+    ) -> bool:
         try:
             result: ExecResult = await self._call(
                 self.client.pod_exec,
                 pod,
                 ["sh", "-c", scripts.DELIVER_SCRIPT, "deliver", target, str(len(content))],
-                container=k8sspec.CONTAINER_NAME,
+                container=container,
                 timeout=self.config.role_timeout_seconds,
                 limit=64 * 1024,
                 stdin=content,
@@ -2303,6 +2315,93 @@ class KubernetesProvider:
                 "refusing to launch: the Codex credential is dead; log in again"
             )
 
+    async def _checkout_secret_present(self, attempt_id: str) -> bool:
+        """Whether `prepare` left this attempt's checkout token Secret (ADR 0019)."""
+        name = k8sspec.object_name("checkout", attempt_id)
+        try:
+            await self._call(self.client.get, "secrets", name)
+        except KubernetesUnavailableError:
+            raise
+        except KubernetesApiError as exc:
+            if exc.status == 404:
+                return False
+            raise ProviderError(
+                f"could not read the checkout token Secret {name!r}: {exc}"
+            ) from exc
+        return True
+
+    async def _apply_checkout_policy(
+        self, spec: LaunchSpec, private: bool
+    ) -> tuple[str | None, EgressPlan]:
+        """ADR 0033: the worker Pod's init container clones the checkout from the remote
+        (the reference cache is only an object source), so the Pod is granted the
+        preparer's git destinations by a second NetworkPolicy of its own. Policies add
+        up, so the worker's own policy stays exactly its allowlist (hades #425), and
+        this one is deleted as soon as the init container has run (`observe`)."""
+        plan = self._checkout_plan(spec, k8sspec.ROLE_PREPARER, private)
+        if plan.empty:
+            return None, plan
+        plan = await self._resolve_plan(plan, broad=self._broad_for(k8sspec.ROLE_PREPARER))
+        name = k8sspec.object_name(CHECKOUT_POLICY_PREFIX, spec.attempt_id)
+        body = self._policy_body(
+            name,
+            self._labels(spec, k8sspec.ROLE_WORKER),
+            spec.attempt_id,
+            k8sspec.ROLE_WORKER,
+            plan,
+        )
+        await self._create_with_backoff("networkpolicies", body)
+        return name, plan
+
+    async def _close_checkout_egress(self, launched: _Launched, attempt_id: str) -> None:
+        """ADR 0019, 0033: once the worker's init container has run, nothing in the Pod
+        needs the checkout token or the git destinations. Each is retried on the next
+        look until it is gone; `cleanup` removes both on every other path."""
+        if launched.checkout_token and await self._delete_checkout_secret(attempt_id):
+            launched.checkout_token = False
+        if launched.checkout_policy is not None:
+            try:
+                await self._call(self.client.delete, "networkpolicies", launched.checkout_policy)
+            except KubernetesApiError as exc:
+                if exc.status != 404:
+                    log.warning("checkout policy removal failed", extra={"error": str(exc)})
+                    return
+            launched.checkout_policy = None
+
+    async def _deliver_resume_to_worker(self, job_name: str, content: bytes) -> None:
+        """ADR 0032, 0033: write the sealed bundle into the worker Pod's init container,
+        which waits for it as the standalone preparer did. A delivery that cannot be
+        made is logged; the init container then refuses as for a bundle that is gone,
+        and the attempt ends with that refusal rather than a checkout of the remote."""
+        target = f"{WORK_MOUNT}/{scripts.RESUME_BUNDLE_LEAF}"
+        deadline = time.monotonic() + self.config.launch_timeout_seconds
+        while True:
+            pod: dict[str, Any] | None = None
+            with contextlib.suppress(KubernetesApiError):
+                pod = await self._pod_of(job_name)
+            if pod is not None:
+                status = pod.get("status") or {}
+                name = str((pod.get("metadata") or {}).get("name") or "")
+                for entry in status.get("initContainerStatuses") or []:
+                    if entry.get("name") == k8sspec.WORKER_PREPARE_CONTAINER and (
+                        "running" in (entry.get("state") or {})
+                    ):
+                        await self._deliver(
+                            name,
+                            target,
+                            content,
+                            k8sspec.ROLE_WORKER,
+                            container=k8sspec.WORKER_PREPARE_CONTAINER,
+                        )
+                        return
+                if str(status.get("phase", "")) not in _PENDING_PHASES:
+                    log.warning("the worker Pod %s passed its checkout before the bundle", name)
+                    return
+            if time.monotonic() >= deadline:
+                log.warning("the worker Pod of %s never ran its checkout for the bundle", job_name)
+                return
+            await asyncio.sleep(self.config.poll_interval_seconds)
+
     async def launch(
         self, ws: Workspace, spec: LaunchSpec, cancelled: CancelCheck | None = None
     ) -> Handle:
@@ -2315,8 +2414,18 @@ class KubernetesProvider:
         copy = self._credential_copy(spec)
         if copy is not None:
             copy.seeded.update(self._seeded.pop(spec.attempt_id, {}))
+        # ADR 0019, 0033: whether the worker's init container clones with a token is
+        # read from the cluster, not from this process's memory, so a supervisor that
+        # restarted between prepare and launch still mounts the Secret prepare made.
+        checkout_token = await self._checkout_secret_present(spec.attempt_id)
+        # ADR 0032, 0033: a correction's sealed bundle is read before anything is made,
+        # and delivered into the worker's init container once it runs.
+        resume_content = (
+            await self._resume_bundle_content(spec) if spec.resume_bundle_attempt_id else None
+        )
         plan = self._egress_plan(spec, k8sspec.ROLE_WORKER)
         policy_name: str | None = None
+        checkout_policy: str | None = None
         identity_paths = await self._identity_paths(spec.attempt_id)
         cred_secret_name = k8sspec.object_name("cred", spec.attempt_id)
         try:
@@ -2349,6 +2458,7 @@ class KubernetesProvider:
             policy_name, plan = await self._apply_policy(
                 spec, k8sspec.ROLE_WORKER, plan, use_backoff=True
             )
+            checkout_policy, checkout_plan = await self._apply_checkout_policy(spec, checkout_token)
             body = k8sspec.job(
                 name=job_name,
                 namespace=self.config.namespace,
@@ -2361,18 +2471,29 @@ class KubernetesProvider:
                     copy=copy,
                     identity_paths=identity_paths,
                     credential_keys=credential_keys,
-                    host_aliases=k8sspec.host_aliases(plan),
+                    host_aliases=_merged_aliases(
+                        k8sspec.host_aliases(plan), k8sspec.host_aliases(checkout_plan)
+                    ),
+                    checkout_token=checkout_token,
                 ),
-                active_deadline_seconds=max(60, spec.timeout_seconds + limits.grace_seconds),
+                # ADR 0033: the collector runs in this Pod after the agent, so the Job's
+                # deadline leaves it the collection time beyond the drain grace.
+                active_deadline_seconds=max(
+                    60,
+                    spec.timeout_seconds
+                    + limits.grace_seconds
+                    + self.config.collector_timeout_seconds,
+                ),
             )
             await self._create_with_backoff("jobs", body)
             refusal = await self._await_worker_pod(job_name)
         except (KubernetesApiError, SpecError) as exc:
             with contextlib.suppress(Exception):
                 await self._call(self.client.delete, "jobs", job_name)
-            if policy_name:
-                with contextlib.suppress(Exception):
-                    await self._call(self.client.delete, "networkpolicies", policy_name)
+            for name in (policy_name, checkout_policy):
+                if name:
+                    with contextlib.suppress(Exception):
+                        await self._call(self.client.delete, "networkpolicies", name)
             # 12: the per-attempt Secret exists from `prepare`; a launch that never
             # started must not leave it behind for nothing to come back for.
             with contextlib.suppress(Exception):
@@ -2390,14 +2511,17 @@ class KubernetesProvider:
             # for room rather than ending with an exit class it never earned.
             with contextlib.suppress(Exception):
                 await self._call(self.client.delete, "jobs", job_name)
-            if policy_name:
-                with contextlib.suppress(Exception):
-                    await self._call(self.client.delete, "networkpolicies", policy_name)
+            for name in (policy_name, checkout_policy):
+                if name:
+                    with contextlib.suppress(Exception):
+                        await self._call(self.client.delete, "networkpolicies", name)
             with contextlib.suppress(Exception):
                 await self._delete_credential_secret(spec.attempt_id)
             with contextlib.suppress(Exception):
                 await self._await_job_pods_gone(job_name)
             raise LaunchWaitError(f"the namespace quota has no room for the worker: {refusal}")
+        if resume_content is not None:
+            await self._deliver_resume_to_worker(job_name, resume_content)
         self._launched[spec.attempt_id] = _Launched(
             job_name=job_name,
             spec=spec,
@@ -2413,6 +2537,8 @@ class KubernetesProvider:
                 else None
             ),
             egress_refreshed_at=time.monotonic(),
+            checkout_token=checkout_token,
+            checkout_policy=checkout_policy,
         )
         return Handle(
             provider=self.name,
@@ -2492,6 +2618,14 @@ class KubernetesProvider:
             _observe_limits(launched, pod)
         if launched is not None:
             _observe_service_images(launched, status)
+        if (
+            launched is not None
+            and (launched.checkout_token or launched.checkout_policy is not None)
+            and phase not in _PENDING_PHASES
+        ):
+            # The init container that cloned has finished (a Pod leaves Pending only
+            # then); no container left in the Pod uses the token or the git hosts.
+            await self._close_checkout_egress(launched, h.attempt_id)
         if phase == "Failed" and str(status.get("reason", "")) in _LOST_REASONS:
             # 26: an evicted Pod, or one whose node is gone, is `lost`, not an exit.
             # Check lost reasons before inspecting the terminated container so that a
@@ -2964,6 +3098,7 @@ class KubernetesProvider:
             is ExitClass.QUOTA_EXHAUSTED
         )
         del work_branch
+        await self._release_collector(spec, limits, quota_checkpoint)
         deadline = time.monotonic() + self.config.collector_timeout_seconds
         collector_exit: int | None = None
         while time.monotonic() < deadline:
@@ -3077,6 +3212,32 @@ class KubernetesProvider:
             metrics=metrics,
         )
 
+    async def _release_collector(
+        self, spec: LaunchSpec, limits: Limits, quota_checkpoint: bool
+    ) -> None:
+        """ADR 0033: start the in-Pod collector, telling it how the agent's exit was
+        classified. A quota checkpoint (16) is packaged as one, or refused, before any
+        bytes are read; rewriting the same word on a later try changes nothing."""
+        mode = "quota" if quota_checkpoint else "normal"
+        async with self._reader(spec, limits) as pod:
+            result: ExecResult = await self._call(
+                self.client.pod_exec,
+                pod,
+                ["sh", "-c", f"printf '%s\\n' {mode} > {COLLECT_MODE_FILE}"],
+                container=k8sspec.ROLE_COLLECTOR,
+                timeout=self.config.role_timeout_seconds,
+                limit=1024,
+            )
+        if result.exit_code is None:
+            raise CollectionUnavailableError(
+                "the collection exec stream ended before it reported status"
+            )
+        if result.exit_code != 0:
+            raise CollectionUnavailableError(
+                "the in-pod collector could not be released: "
+                + result.stderr.decode("utf-8", "replace")[-300:]
+            )
+
     def _launch_evidence(self, spec: LaunchSpec, observation: Observation) -> CollectedArtifact:
         """26's observability list, as one artifact of the attempt.
 
@@ -3157,10 +3318,12 @@ class KubernetesProvider:
             if mode == "drain":
                 # End only the agent container. The collector sidecar owns the same
                 # scratch and must remain alive long enough to package the final tree.
+                # PID 1 may be a shell that defers a signal while its child runs, so
+                # every process of the agent's container is signalled, then PID 1.
                 await self._call(
                     self.client.pod_exec,
                     name,
-                    ["sh", "-c", "kill -TERM 1"],
+                    ["sh", "-c", k8sspec.DRAIN_SCRIPT],
                     container=k8sspec.CONTAINER_NAME,
                     timeout=max(1, grace),
                     limit=1024,
@@ -3288,6 +3451,11 @@ class KubernetesProvider:
                     limits=k8sspec.limits_from_pod(pod_spec, k8sspec.limits_from_policy({})),
                     launched_at=time.monotonic() - created,
                     limits_source="pod" if pod_spec is live_spec else "template",
+                    # ADR 0033: whatever of the checkout's egress the launching process
+                    # left is closed once the adopted Pod is past its init container;
+                    # a missing object is already the goal.
+                    checkout_token=True,
+                    checkout_policy=k8sspec.object_name(CHECKOUT_POLICY_PREFIX, attempt_id),
                 )
             launched = self._launched[attempt_id]
             if launched.egress_plan is None and launched.network_policy is None:
@@ -4245,6 +4413,7 @@ class KubernetesProvider:
         identity_paths: Mapping[str, str],
         credential_keys: Sequence[str],
         host_aliases: Sequence[Mapping[str, Any]] = (),
+        checkout_token: bool = False,
     ) -> dict[str, Any]:
         if copy is None and spec.env_from_files:
             spec = replace(spec, env_from_files={})
@@ -4303,6 +4472,9 @@ class KubernetesProvider:
             "requests": {"cpu": limits.cpu_request, "memory": limits.memory_request},
         }
         cache_name = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16] if url else None
+        resume_bundle = (
+            f"{WORK_MOUNT}/{scripts.RESUME_BUNDLE_LEAF}" if spec.resume_bundle_attempt_id else None
+        )
         prep_mounts = [
             {"name": "ws", "mountPath": WORK_MOUNT, "readOnly": False},
             {"name": "identity", "mountPath": IDENTITY_MOUNT, "readOnly": True},
@@ -4322,7 +4494,9 @@ class KubernetesProvider:
                     },
                 }
             )
-        if spec.attempt_id in self._checkout_tokens:
+        if checkout_token:
+            # ADR 0019, 0033: the token Secret is mounted into this init container, the
+            # one in the Pod that talks to the remote, and into no other container.
             prep_mounts.append(
                 {"name": "checkout-token", "mountPath": scripts.TOKEN_MOUNT, "readOnly": True}
             )
@@ -4337,7 +4511,7 @@ class KubernetesProvider:
                 }
             )
         preparer = {
-            "name": "workspace-prepare",
+            "name": k8sspec.WORKER_PREPARE_CONTAINER,
             "image": resolved,
             "command": [
                 "sh",
@@ -4358,7 +4532,17 @@ class KubernetesProvider:
                     shims=workspace.SHIM_NAMES,
                     exclude_entries=workspace.EXCLUDE_ENTRIES,
                     identity_mount=IDENTITY_MOUNT,
-                    checkout_token=("file" if spec.attempt_id in self._checkout_tokens else None),
+                    # ADR 0032, 0033: a correction's sealed bundle is delivered into this
+                    # init container over exec (`launch`); the standalone preparer's copy
+                    # went with that Pod's scratch.
+                    resume_bundle=resume_bundle,
+                    resume_bundle_head=spec.resume_bundle_head,
+                    resume_bundle_sha256=spec.resume_bundle_sha256,
+                    resume_bundle_ancestor=spec.resume_bundle_ancestor,
+                    resume_bundle_wait=(
+                        self.config.role_timeout_seconds if resume_bundle is not None else 0
+                    ),
+                    checkout_token=("file" if checkout_token else None),
                     credential_host=self.config.credential_host,
                 ),
             ],
@@ -4369,31 +4553,28 @@ class KubernetesProvider:
         init_containers: list[dict[str, Any]] = [preparer]
         volumes.extend(prep_volumes)
         if copy is not None:
-            credential_mounts, credential_volumes, init_containers = self._credential_mounts(
+            # The checkout comes first: the credential seed writes beside it into the
+            # same scratch, and the agent's subPath mounts need the checkout's leaves.
+            credential_mounts, credential_volumes, credential_inits = self._credential_mounts(
                 spec, copy, resolved, limits, credential_keys, identity_paths
             )
+            init_containers.extend(credential_inits)
             mounts.extend(credential_mounts)
             volumes.extend(credential_volumes)
             env.update(copy.spec.env())
-        marker = f"{WORK_MOUNT}/.agent-finished"
-        original = list(command)
-        command = [
-            "sh",
-            "-c",
-            f"trap 'touch {marker}' EXIT TERM; \"$@\"",
-            "worker",
-            *original,
-        ]
+        # ADR 0033: the collector waits for the provider's word rather than for the
+        # agent's. `collect` writes COLLECT_MODE_FILE once it has seen the agent exit and
+        # classified that exit, so a quota checkpoint (16) is packaged as one.
         collector_script = scripts.collector_script(
             base_ref=str(repository.get("base_ref", "main")),
             work_branch=work_branch,
             size_cap_bytes=self.config.report_size_cap_bytes,
             attempt_id=spec.attempt_id,
-            quota_checkpoint=False,
             author_name=scripts.policy_git(spec.policy, "author_name"),
             author_email=scripts.policy_git(spec.policy, "author_email"),
             commit_trailer=scripts.policy_git(spec.policy, "commit_trailer"),
             trailer_value=spec.external_id,
+            quota_checkpoint_file=COLLECT_MODE_FILE,
         )
         sidecar = {
             "name": k8sspec.ROLE_COLLECTOR,
@@ -4403,20 +4584,26 @@ class KubernetesProvider:
                 "-c",
                 (
                     "trap '' TERM\n"
-                    f"while [ ! -e {marker} ]; do sleep 1; done\n"
-                    "set +e\n"
-                    f"{collector_script}\n"
+                    f"while [ ! -f {COLLECT_MODE_FILE} ]; do sleep 1; done\n"
+                    # Its own shell, so the collector's `set -e` and its refusals end the
+                    # collection and not this wrapper: the exit code is always recorded.
+                    'sh -c "$1" collector\n'
                     "collector_rc=$?\n"
                     f"printf '%s\\n' \"$collector_rc\" > {WORK_MOUNT}/.collector-exit\n"
                     f"touch {WORK_MOUNT}/.collection-ready\n"
                     f"while [ ! -e {WORK_MOUNT}/.collection-read ]; do sleep 1; done\n"
                     'exit "$collector_rc"\n'
                 ),
+                k8sspec.ROLE_COLLECTOR,
+                collector_script,
             ],
             "workingDir": REPO_MOUNT,
             "securityContext": common_security,
             "resources": common_resources,
             "volumeMounts": [
+                # The whole scratch, for the provider's reads and the handshake files;
+                # the agent's container never mounts this root.
+                {"name": "ws", "mountPath": WORK_MOUNT, "readOnly": False},
                 {
                     "name": "ws",
                     "mountPath": REPO_MOUNT,
@@ -6526,6 +6713,18 @@ class KubernetesProvider:
 
 
 # ----- pure helpers -------------------------------------------------------
+
+
+def _merged_aliases(*groups: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """One `hostAliases` list from several plans' (ADR 0033), each address once."""
+    by_address: dict[str, list[str]] = {}
+    for group in groups:
+        for alias in group:
+            names = by_address.setdefault(str(alias["ip"]), [])
+            names.extend(str(name) for name in alias["hostnames"] if name not in names)
+    return [
+        {"ip": address, "hostnames": sorted(names)} for address, names in sorted(by_address.items())
+    ]
 
 
 def _canary_failed(detail: str, exc: KubernetesApiError) -> NamespaceProbe:

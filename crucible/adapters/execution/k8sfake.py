@@ -48,6 +48,7 @@ from crucible.adapters.execution.k8sapi import (
 from crucible.adapters.execution.k8sregistry import RegistryError
 from crucible.adapters.execution.k8sspec import (
     CONTAINER_NAME,
+    DRAIN_SCRIPT,
     LABEL_ATTEMPT,
     LABEL_CANARY,
     LABEL_ROLE,
@@ -62,6 +63,7 @@ from crucible.adapters.execution.k8sspec import (
     ROLE_READER,
     ROLE_VERIFIER,
     ROLE_WORKER,
+    WORKER_PREPARE_CONTAINER,
 )
 from crucible.adapters.execution.scripts import (
     ACTIVITY_MARKER,
@@ -271,6 +273,10 @@ class FakeKubernetesApi:
     login_runs: dict[str, _LoginRun] = field(default_factory=dict)
     # Every stdin an exec was given, by Pod name, so a test sees what went in.
     exec_stdin: dict[str, list[bytes]] = field(default_factory=dict)
+    # ADR 0033: each in-Pod collection's release (attempt id, `quota` or `normal`), and
+    # each correction whose sealed bundle reached its worker Pod's checkout.
+    collect_modes: list[tuple[str, str]] = field(default_factory=list)
+    worker_deliveries: list[str] = field(default_factory=list)
     # FDY-0140: what the activity probe prints for a Pod, one answer per ask.
     activity_answers: dict[str, list[bytes]] = field(default_factory=dict)
     # The Job controller's `activeDeadlineSeconds` firing on a hanging worker before
@@ -667,7 +673,10 @@ class FakeKubernetesApi:
         if "touch /crucible/work/.collection-read" in script:
             claim[".collection-read"] = b""
             return ExecResult(b"", b"", 0)
-        if script == "kill -TERM 1":
+        mode = re.match(r"^printf '%s\\n' (quota|normal) > /crucible/work/\.collect-mode$", script)
+        if mode is not None:
+            return self._collect_in_worker(obj, mode.group(1))
+        if script == DRAIN_SCRIPT:
             labels = (obj.body.get("metadata") or {}).get("labels") or {}
             attempt_id = str(labels.get(LABEL_ATTEMPT, ""))
             worker = self.workers.get(attempt_id)
@@ -704,9 +713,15 @@ class FakeKubernetesApi:
             self._claim_of(obj)[target.removeprefix(work)] = content
         else:
             self.pod_files.setdefault(obj.name, {})[target] = content
+        labels = (obj.body.get("metadata") or {}).get("labels") or {}
         if _command_of(obj).find(RESUME_DELIVERY_MARKER) >= 0:
-            labels = (obj.body.get("metadata") or {}).get("labels") or {}
             self._act_preparer(obj, str(labels.get(LABEL_ATTEMPT, "")), delivered=True)
+        elif labels.get(LABEL_ROLE) == ROLE_WORKER and _waits_for_resume(obj):
+            # ADR 0033: the worker's own checkout had the bundle it waited for; the
+            # init container ends and the agent starts.
+            self.worker_deliveries.append(str(labels.get(LABEL_ATTEMPT, "")))
+            obj.body["status"] = _running(self.node_name)
+            self._act_worker(obj, str(labels.get(LABEL_ATTEMPT, "")))
         return ExecResult(b"", b"", 0)
 
     def _collect(self, obj: _Object) -> ExecResult:
@@ -811,6 +826,16 @@ class FakeKubernetesApi:
                         "reason": "Unschedulable",
                         "message": "0/1 nodes are available",
                     }
+                ],
+            }
+            return
+        if role == ROLE_WORKER and _waits_for_resume(obj):
+            # ADR 0033: a correction's worker Pod sits in its checkout init container
+            # until the sealed bundle is delivered into it (`_delivery`).
+            obj.body["status"] = {
+                "phase": "Pending",
+                "initContainerStatuses": [
+                    {"name": WORKER_PREPARE_CONTAINER, "state": {"running": {}}}
                 ],
             }
             return
@@ -1231,6 +1256,8 @@ class FakeKubernetesApi:
                     claim[f"credential/{item.get('path')}"] = base64.b64decode(str(raw))
 
     def _act_worker(self, obj: _Object, attempt_id: str) -> None:
+        # The Pod's own scratch exists from its start (ADR 0033).
+        self._claim_of(obj)
         self._seed_claim(obj)
         behavior, after = self._behavior(attempt_id, obj)
         self.workers[attempt_id] = _Worker(behavior=behavior, remaining=after)
@@ -1274,20 +1301,24 @@ class FakeKubernetesApi:
             self.logs[obj.name].append(
                 f'{_stamp(2)} {{"type":"turn.failed","error":{{"code":"usage_limit_reached"}}}}'
             )
-        self._act_collector(obj, attempt_id)
+        # ADR 0033: the agent's container has ended and the collector waits beside it
+        # for the provider's word (`_collect_in_worker`).
+        obj.body["status"] = _agent_exited(code, reason)
+
+    def _collect_in_worker(self, obj: _Object, mode: str) -> ExecResult:
+        """ADR 0033: `collect` released the worker Pod's collector with `mode`; it
+        packages the tree in the same Pod and records its exit for the provider."""
+        labels = (obj.body.get("metadata") or {}).get("labels") or {}
+        attempt_id = str(labels.get(LABEL_ATTEMPT, ""))
+        status = obj.body.get("status")
         claim = self._claim_of(obj)
+        claim[".collect-mode"] = f"{mode}\n".encode()
+        self.collect_modes.append((attempt_id, mode))
+        self._act_collector(obj, attempt_id)
         claim[".collector-exit"] = b"0\n"
         claim[".collection-ready"] = b""
-        obj.body["status"] = {
-            "phase": "Running",
-            "containerStatuses": [
-                {
-                    "name": CONTAINER_NAME,
-                    "state": {"terminated": {"exitCode": code, "reason": reason}},
-                },
-                {"name": ROLE_COLLECTOR, "state": {"running": {}}},
-            ],
-        }
+        obj.body["status"] = status
+        return ExecResult(b"", b"", 0)
 
 
 # ----- helpers -----------------------------------------------------------
@@ -1296,6 +1327,26 @@ class FakeKubernetesApi:
 def _command_of(obj: _Object) -> str:
     container = ((obj.body.get("spec") or {}).get("containers") or [{}])[0]
     return str((container.get("command") or [""])[-1])
+
+
+def _agent_exited(code: int, reason: str) -> dict[str, Any]:
+    return {
+        "phase": "Running",
+        "containerStatuses": [
+            {
+                "name": CONTAINER_NAME,
+                "state": {"terminated": {"exitCode": code, "reason": reason}},
+            },
+            {"name": ROLE_COLLECTOR, "state": {"running": {}}},
+        ],
+    }
+
+
+def _waits_for_resume(obj: _Object) -> bool:
+    for container in (obj.body.get("spec") or {}).get("initContainers") or []:
+        if container.get("name") == WORKER_PREPARE_CONTAINER:
+            return RESUME_DELIVERY_MARKER in str((container.get("command") or [""])[-1])
+    return False
 
 
 def _running(node: str) -> dict[str, Any]:

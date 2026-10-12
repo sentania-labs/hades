@@ -765,6 +765,7 @@ def collector_script(
     author_email: str = "crucible-worker@users.noreply.github.com",
     commit_trailer: str = "Crucible-Attempt",
     trailer_value: str = "",
+    quota_checkpoint_file: str = "",
 ) -> str:
     """Produce the full diff, the path list, the head, the log, the bundle, and a copy
     of the report directory (08). Never a push, never a network: `--network none`.
@@ -785,7 +786,14 @@ def collector_script(
     checkout has one, else base_ref), so the `commit_policy` gate can show the reviewer
     a commit authored by someone other than the fixed task author (hades FDY-0135). The
     answer goes to `commit-policy/`, with `checked` written only once the check has
-    finished."""
+    finished.
+
+    `quota_checkpoint_file` (ADR 0033, Kubernetes) names a file whose content decides
+    the quota checkpoint at run time instead: the collector runs inside the worker Pod,
+    and the provider writes `quota` or `normal` there once it has classified the exit."""
+    quota = f"QUOTA={_quote('1' if quota_checkpoint else '')}"
+    if quota_checkpoint_file:
+        quota = f'QUOTA=\nif [ "$(cat {_quote(quota_checkpoint_file)})" = quota ]; then QUOTA=1; fi'
     return f"""set -eu
 {GIT_ENV}
 OUT={OUTPUT_MOUNT}
@@ -795,7 +803,7 @@ BASE_REF={_quote(base_ref)}
 SIZE_CAP={_quote(str(size_cap_bytes))}
 DIFF_ARTIFACT_CAP={_quote(str(min(size_cap_bytes, DIFF_ARTIFACT_CAP_BYTES)))}
 COMMIT_ATTEMPT={_quote(attempt_id)}
-QUOTA={_quote("1" if quota_checkpoint else "")}
+{quota}
 POLICY_AUTHOR_EMAIL={_quote(COMMIT_AUTHOR_EMAIL)}
 TRAILER={_quote(commit_trailer)}
 TRAILER_VALUE={_quote(trailer_value or attempt_id)}

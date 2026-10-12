@@ -260,8 +260,9 @@ async def test_the_job_never_retries_and_carries_its_own_deadline(ran: Any) -> N
     assert job["spec"]["backoffLimit"] == 0
     assert job["spec"]["template"]["spec"]["restartPolicy"] == "Never"
     # The contract's timeout plus the drain grace: Crucible drains before the deadline
-    # and classifies the exit itself (26).
-    assert job["spec"]["activeDeadlineSeconds"] == 630
+    # and classifies the exit itself (26). ADR 0033: plus the collection time, since the
+    # collector runs in this Pod after the agent has ended.
+    assert job["spec"]["activeDeadlineSeconds"] == 630 + _provider.config.collector_timeout_seconds
 
 
 async def test_every_object_carries_26s_four_labels_and_lives_in_the_workers_namespace(

@@ -484,6 +484,14 @@ def base_mounts() -> list[Mount]:
     return [Mount("tmp", "/tmp"), Mount("home", "/home/worker")]
 
 
+# ADR 0033: the worker Pod's init container that builds the checkout in the Pod's own
+# scratch, and what `terminate("drain")` runs in the agent's container: every process
+# there, then PID 1, which may be a shell that defers a signal while its child runs.
+# The collector beside it keeps running.
+WORKER_PREPARE_CONTAINER = "workspace-prepare"
+DRAIN_SCRIPT = "kill -TERM -1 2>/dev/null; kill -TERM 1 2>/dev/null; exit 0"
+
+
 def workspace_volume(*, size: str, storage_class: str = "") -> dict[str, Any]:
     """One Pod's bounded scratch, never an attempt-scoped claim.
 

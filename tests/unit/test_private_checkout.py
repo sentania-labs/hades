@@ -453,7 +453,9 @@ async def test_kubernetes_mounts_the_token_secret_into_the_git_pods_only() -> No
     assert made["metadata"]["name"] == SECRET_NAME
     assert made["metadata"]["labels"][k8sspec.LABEL_ATTEMPT] == kf.ATTEMPT
     assert set(made["data"]) == {"token"}
-    assert not api.secret_exists(SECRET_NAME), "the Secret outlived the preparation step"
+    # ADR 0033: the worker Pod's own checkout clones from the remote too, so the
+    # Secret stays until that init container has run.
+    assert api.secret_exists(SECRET_NAME)
 
     pods = _pods(api)
     refresher = next(p for n, p in pods.items() if n.startswith("refresh-cache-"))
@@ -468,14 +470,21 @@ async def test_kubernetes_mounts_the_token_secret_into_the_git_pods_only() -> No
         script = pod["containers"][0]["command"][-1]
         assert "CRUCIBLE_TOKEN_FILE" in script and 'cat > "$CRUCIBLE_TOKEN_FILE"' not in script
 
-    await provider.launch(ws, launch)
+    handle = await provider.launch(ws, launch)
     pods = _pods(api)
     for name, pod in pods.items():
-        if name.startswith(("refresh-cache-", "prepare-")):
+        if name.startswith(("refresh-cache-", "prepare-", "worker-")):
             continue
         assert not _token_volume(pod), f"{name} mounts the checkout token"
     worker = next(p for n, p in pods.items() if n.startswith("worker-"))
-    assert scripts.TOKEN_MOUNT not in json.dumps(worker)
+    # In the worker Pod only its checkout init container mounts the token; the agent,
+    # the collector and every other init container never do.
+    assert len(_token_volume(worker)) == 1
+    for container in [*worker["containers"], *worker["initContainers"]]:
+        mounted = scripts.TOKEN_MOUNT in json.dumps(container["volumeMounts"])
+        assert mounted is (container["name"] == "workspace-prepare"), container["name"]
+    await provider.observe(handle)
+    assert not api.secret_exists(SECRET_NAME), "the Secret outlived the worker's checkout"
     for row in api.created:
         if row["kind"] == "secrets":
             continue
@@ -572,24 +581,31 @@ async def test_kubernetes_deletes_the_token_secret_when_prepare_is_cancelled() -
     assert not api.secret_exists(SECRET_NAME)
 
 
-async def test_kubernetes_launches_no_worker_beside_a_secret_it_could_not_delete() -> None:
+async def test_kubernetes_retries_a_token_secret_it_could_not_delete_after_the_checkout() -> None:
+    """ADR 0019, 0033: the Secret goes once the worker Pod's checkout has run. A
+    deletion the API server refused is tried again on the next look, never forgotten."""
     from crucible.adapters.execution.k8sapi import KubernetesApiError  # noqa: PLC0415
 
     api, _registry, provider = kf.build(config=_k8s_config())
+    launch = kf.spec()
+    ws = await provider.prepare(launch, checkout_token=_token())
+    handle = await provider.launch(ws, launch)
     original = api.delete
-    created: list[bool] = []
+    refused: list[bool] = []
 
-    def refuse_once_made(kind: str, name: str, **kw: Any) -> None:
-        if kind == "secrets" and name == SECRET_NAME and api.secret_exists(name):
-            created.append(True)
+    def refuse_one_look(kind: str, name: str, **kw: Any) -> None:
+        # Both of one look's tries are refused (`_delete_token_secret` tries twice).
+        if kind == "secrets" and name == SECRET_NAME and len(refused) < 2:
+            refused.append(True)
             raise KubernetesApiError(500, "etcd is unhappy")
         original(kind, name, **kw)
 
-    api.delete = refuse_once_made  # type: ignore[method-assign]
-    with pytest.raises(ProviderError, match="no worker is launched beside it"):
-        await provider.prepare(kf.spec(), checkout_token=_token())
-    assert created, "the deletion was never attempted"
-    assert not kf.created(api, "jobs", "worker-")
+    api.delete = refuse_one_look  # type: ignore[method-assign]
+    await provider.observe(handle)
+    assert refused, "the deletion was never attempted"
+    assert api.secret_exists(SECRET_NAME)
+    await provider.observe(handle)
+    assert not api.secret_exists(SECRET_NAME)
 
 
 async def test_kubernetes_discard_and_cleanup_remove_a_leftover_token_secret() -> None:

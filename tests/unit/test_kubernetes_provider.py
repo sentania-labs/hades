@@ -1488,8 +1488,9 @@ async def test_the_writable_copy_is_a_claim_leaf_and_the_read_only_form_is_the_s
     # The Crucible-owned template on top of it, read-only, from the identity bundle.
     assert mounts["/home/worker/.codex/config.toml"]["readOnly"] is True
     assert mounts["/home/worker/.codex/config.toml"]["subPath"] == "harness/config.toml"
-    init = pod["initContainers"][0]
-    assert init["name"] == "credential-seed"
+    # ADR 0033: after the Pod's own checkout, never in its place.
+    assert [c["name"] for c in pod["initContainers"]] == ["workspace-prepare", "credential-seed"]
+    init = pod["initContainers"][1]
     assert init["securityContext"]["readOnlyRootFilesystem"] is True
     volumes = {v["name"]: v for v in pod["volumes"]}
     assert volumes["cred-source"]["secret"]["secretName"] == "cred-01attempt0000000000000000a"

@@ -19,7 +19,7 @@ import pytest
 
 from crucible.adapters.execution import k8sspec
 from crucible.adapters.execution.k8sspec import EgressPlan, SpecError
-from crucible.adapters.execution.kubernetes import KubernetesConfig
+from crucible.adapters.execution.kubernetes import CHECKOUT_POLICY_PREFIX, KubernetesConfig
 from crucible.domain.cluster_egress import ClusterEgress
 from crucible.ports.execution import CleanupPolicy, ProviderError
 from tests.unit.kubernetes_fixtures import build, fake_resolver, spec
@@ -75,13 +75,22 @@ async def policies(**kwargs: Any) -> dict[str, dict[str, Any]]:
         pass
     await provider.collect(handle, workspace, launch)
     await provider.cleanup(workspace, CleanupPolicy.DELETE, launch)
+    # ADR 0033: the worker Pod's short-lived checkout policy selects the worker's Pod
+    # too, and is keyed by its own name so it never stands in for the worker's.
     return {
-        row["body"]["spec"]["podSelector"]["matchLabels"][k8sspec.LABEL_ROLE]: row["body"]
+        (
+            CHECKOUT
+            if str(row["name"]).startswith(CHECKOUT_POLICY_PREFIX)
+            else row["body"]["spec"]["podSelector"]["matchLabels"][k8sspec.LABEL_ROLE]
+        ): row["body"]
         for row in api.created
         if row["kind"] == "networkpolicies"
         and row["body"]["spec"]["podSelector"]["matchLabels"][k8sspec.LABEL_ROLE]
         != k8sspec.ROLE_CANARY
     }
+
+
+CHECKOUT = "worker-checkout"
 
 
 @pytest.fixture
@@ -95,7 +104,7 @@ async def test_the_selector_is_this_attempts_pods_of_this_role(
     for role, policy in rendered.items():
         assert policy["spec"]["podSelector"]["matchLabels"] == {
             k8sspec.LABEL_ATTEMPT: "01ATTEMPT0000000000000000A",
-            k8sspec.LABEL_ROLE: role,
+            k8sspec.LABEL_ROLE: k8sspec.ROLE_WORKER if role == CHECKOUT else role,
         }
         # No ingress section at all: nothing ever connects to a worker.
         assert policy["spec"]["policyTypes"] == ["Egress"]
@@ -128,10 +137,10 @@ async def test_the_worker_reaches_what_the_allowlist_names_and_nothing_else(
 async def test_the_validation_preparer_and_worker_allow_checkout(
     rendered: dict[str, dict[str, Any]],
 ) -> None:
-    """The validation Pod and the worker's init container can both reach checkout."""
+    """The validation Pod and the worker's init container can both reach checkout; the
+    worker Pod's access comes from its own checkout policy (ADR 0033)."""
     assert allows(rendered[k8sspec.ROLE_PREPARER], "140.82.121.4", 443)
-    worker = rendered[k8sspec.ROLE_WORKER]
-    assert allows(worker, "140.82.121.4", 443)
+    assert allows(rendered[CHECKOUT], "140.82.121.4", 443)
 
 
 async def test_the_provider_never_adds_github_to_a_worker() -> None:
@@ -156,6 +165,11 @@ async def test_the_provider_never_adds_github_to_a_worker() -> None:
     assert not allows(worker, "140.82.121.4", 443)
     assert not allows(worker, "140.82.121.6", 443)
     assert allows(worker, "151.101.0.223", 443)
+    # ADR 0033: the worker Pod's checkout is granted GitHub by a policy of its own,
+    # which carries nothing of the worker's allowlist and is removed after the init.
+    checkout = rendered[CHECKOUT]
+    assert allows(checkout, "140.82.121.4", 443)
+    assert not allows(checkout, "151.101.0.223", 443)
 
 
 async def test_a_host_that_does_not_resolve_refuses_the_launch() -> None:
@@ -221,6 +235,7 @@ async def test_a_hostname_local_route_resolves_to_exact_addresses_and_port() -> 
         row["body"]["spec"]["podSelector"]["matchLabels"][k8sspec.LABEL_ROLE]: row["body"]
         for row in api.created
         if row["kind"] == "networkpolicies"
+        and not str(row["name"]).startswith(CHECKOUT_POLICY_PREFIX)
     }
     worker = rendered[k8sspec.ROLE_WORKER]
     assert allows(worker, "10.10.0.42", 8443)
