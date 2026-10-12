@@ -25,14 +25,14 @@ PEM = b"-----BEGIN " + _LABEL + b"-----\nnot-a-real-key\n-----END " + _LABEL + b
 
 def test_the_secret_store_is_created_as_the_services_own_and_read_back() -> None:
     api = FakeKubernetesApi()
-    store = SecretAppCredentials(api, name="crucible-github-app")
+    store = SecretAppCredentials(api, name="hades-github-app")
     assert store.read() is None
     assert store.describe()["exists"] is False
 
     done = store.write(app_id=42, private_key=PEM, webhook_secret=b"hook")
 
-    assert done == {"store": "secret", "name": "crucible-github-app", "created": True}
-    body = api.objects[("secrets", "crucible-github-app")].body
+    assert done == {"store": "secret", "name": "hades-github-app", "created": True}
+    body = api.objects[("secrets", "hades-github-app")].body
     assert body["metadata"]["labels"] == {
         k8sspec.LABEL_MANAGED_BY: "crucible",
         k8sspec.LABEL_CREDENTIAL: "github-app",
@@ -65,7 +65,7 @@ def test_a_gitops_secret_counts_only_with_the_settings_app_id_and_enabled() -> N
     api.create(
         "secrets",
         k8sspec.secret(
-            name="crucible-github-app", namespace="", object_labels={}, data={"app.pem": PEM}
+            name="hades-github-app", namespace="", object_labels={}, data={"app.pem": PEM}
         ),
     )
     assert SecretAppCredentials(api).read() is None
@@ -80,7 +80,7 @@ def test_an_unreadable_secret_is_a_refusal_not_an_absence() -> None:
         def get(self, kind: str, name: str) -> dict[str, object]:
             raise KubernetesApiError(403, "forbidden")
 
-    store = SecretAppCredentials(Forbidden(), name="crucible-github-app")
+    store = SecretAppCredentials(Forbidden(), name="hades-github-app")
     with pytest.raises(GitHubAppStoreError, match="not readable"):
         store.read()
     assert store.describe()["exists"] is None
@@ -91,7 +91,7 @@ def test_a_secret_of_another_type_under_the_name_is_never_used_or_adopted() -> N
     could sit under this name; it is refused, not read as the App credential."""
     api = FakeKubernetesApi()
     body = k8sspec.secret(
-        name="crucible-github-app", namespace="", object_labels={}, data={"app.pem": PEM}
+        name="hades-github-app", namespace="", object_labels={}, data={"app.pem": PEM}
     )
     body["type"] = "kubernetes.io/service-account-token"
     api.create("secrets", body)
@@ -256,7 +256,7 @@ def test_an_api_server_that_refuses_the_connection_is_an_unreadable_row() -> Non
 
     class Refusing:
         def credential_secret(self, harness: str) -> str:
-            return f"crucible-harness-{harness}"
+            return f"hades-harness-{harness}"
 
         def read_credential_secret(self, harness: str) -> None:
             raise ConnectionRefusedError(111, "Connection refused")
@@ -323,7 +323,7 @@ def test_status_waits_a_bounded_time_for_a_slow_app_credential_store() -> None:
     release = threading.Event()
 
     class Stalled:
-        name = "crucible-github-app"
+        name = "hades-github-app"
         namespace = "crucible"
 
         def describe(self) -> dict[str, object]:
@@ -344,5 +344,5 @@ def test_status_waits_a_bounded_time_for_a_slow_app_credential_store() -> None:
 
     described, credential = asyncio.run(scenario())
     assert credential is None and described is not None
-    assert described["exists"] is None and described["name"] == "crucible-github-app"
+    assert described["exists"] is None and described["name"] == "hades-github-app"
     assert "did not answer within 0.2 seconds" in str(described["detail"])

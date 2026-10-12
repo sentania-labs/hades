@@ -13,7 +13,13 @@ from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo
 
 from crucible.application.acceptance import record_acceptance
-from crucible.application.admin.board_lanes import LANES, is_scott_question, lane_for_state
+from crucible.application.admin.board_lanes import (
+    LANE_BY_STATE,
+    LANES,
+    is_scott_question,
+    lane_for_state,
+)
+from crucible.application.admin.stuck import task_stuck_reason
 from crucible.application.cancel_task import cancel_task
 from crucible.application.corrections import (
     CORRECTABLE_STATES,
@@ -28,8 +34,10 @@ from crucible.application.proposals import approve_task
 from crucible.application.start_task import start_task
 from crucible.application.task_notes import add_note, require_operator
 from crucible.application.transitions import record_event, require_contract
+from crucible.application.wakes import create_wake
 from crucible.contracts.api import AcceptRequest, CancelRequest, DecisionRequest, StartRequest
 from crucible.contracts.task_contract import TaskContractV1
+from crucible.contracts.wake import WakeReason
 from crucible.domain.entities import (
     AcceptanceVerdict,
     Escalation,
@@ -104,6 +112,13 @@ MOVES: dict[str, Move] = {
             "verbatim; a blocked task is scheduled again.",
         ),
         Move(
+            "send_back",
+            "Send back to Foundry",
+            "create_wake sent_back for the task's orchestrator",
+            "Foundry is woken with the open escalation, the reason the task is stuck and "
+            "the note; the task stays where it is until Foundry acts.",
+        ),
+        Move(
             "cancel",
             "Cancel with reason",
             "cancel_task (POST /v1/tasks/{id}/cancel)",
@@ -143,6 +158,14 @@ def default_move_table() -> list[dict[str, str]]:
 def default_move(lane: str) -> str | None:
     found = DEFAULT_MOVES.get(lane)
     return found[1] if found else None
+
+
+def default_move_for(lane: str, escalation: Escalation | None) -> str | None:
+    """The lane's default, except that a Stuck card waiting on the operator's answer
+    defaults to Answer, as Waiting on me does (hades #607)."""
+    if lane == "stuck" and is_scott_question(escalation):
+        return "answer"
+    return default_move(lane)
 
 
 # The correction reason a state calls for (05): the one state that restricts the reason
@@ -188,6 +211,12 @@ def valid_moves(
         allowed.add("accept")
     if escalation is not None and state not in TASK_TERMINAL:
         allowed.add("answer")
+    if state not in TASK_TERMINAL and (
+        LANE_BY_STATE[state] == "stuck"
+        or escalation is not None
+        or state is _S.AWAITING_INTERNAL_REVIEW
+    ):
+        allowed.add("send_back")
     if (state, _S.CANCELLED) in TASK_TRANSITIONS or (state, _S.CANCELLING) in TASK_TRANSITIONS:
         allowed.add("cancel")
     return [key for key in MOVE_ORDER if key in allowed]
@@ -308,6 +337,29 @@ def apply_move(
             wired_providers=deps.wired_providers,
         )
         message = f"Attached correction version {task.contract_version} to {task.external_id}."
+    elif move == "send_back":
+        stuck = task_stuck_reason(uow, task, escalation)
+        sentence = stuck.sentence if stuck is not None else "the operator sent it back"
+        asked = f" Escalation {escalation.id}: {escalation.question}" if escalation else ""
+        create_wake(
+            uow,
+            clock,
+            principal_id=task.principal_id,
+            reason=WakeReason.SENT_BACK,
+            summary=(
+                f"the operator sent {task.external_id} back to Foundry: {sentence}{asked} "
+                f"Note: {note.text}"
+            )[:2000],
+            task=task,
+            raised_by=principal.name,
+            extra={
+                "stuck_reason": stuck.key if stuck is not None else None,
+                "escalation_id": escalation.id if escalation is not None else None,
+                "question": escalation.question if escalation is not None else None,
+                "note": note.text,
+            },
+        )
+        message = f"Sent {task.external_id} back to Foundry; Foundry is woken with it."
     elif move == "accept":
         task = record_acceptance(
             uow,
@@ -368,8 +420,9 @@ def next_phase(
     task = uow.tasks.get(task_id)
     if task is None:
         raise NotFoundError(f"task {task_id} not found")
-    lane = card_lane(task, open_escalation(uow, task.id))
-    move = default_move(lane)
+    escalation = open_escalation(uow, task.id)
+    lane = card_lane(task, escalation)
+    move = default_move_for(lane, escalation)
     if move is None:
         raise ConflictError(f"the {LANE_NAMES[lane]} lane has no next phase")
     return apply_move(
@@ -402,6 +455,7 @@ __all__ = [
     "card_lane",
     "correction_document",
     "default_move",
+    "default_move_for",
     "default_move_table",
     "move_labels",
     "moves_for_card",

@@ -146,7 +146,15 @@ from crucible.ports.execution import (
     WorkspaceState,
 )
 from crucible.ports.github import InstallationToken
-from crucible.ports.harness import AuthFile, CredentialSpec, ExitInfo, LaunchContext, MountMode
+from crucible.ports.harness import (
+    AuthFile,
+    CredentialSpec,
+    ExitInfo,
+    HarnessAdapter,
+    LaunchContext,
+    MountMode,
+    ReportMetrics,
+)
 
 log = logging.getLogger("crucible.provider.kubernetes")
 
@@ -181,11 +189,23 @@ PROVIDER_NAME = "kubernetes"
 # verifier is told when its contract requires both image checks. The egress rule for
 # that attempt selects the Service's pods, and HTTPS to the hosts `make registry-check`
 # resolves: GHCR, which redirects config and blob reads to a second host (as
-# docs/deployment.md records for the control plane's own crane).
-BUILDKIT_NAMESPACE = "crucible-buildkit"
-BUILDKIT_POD_LABELS: Mapping[str, str] = {"app.kubernetes.io/name": "crucible-buildkit"}
+# docs/deployment.md records for the control plane's own crane). The namespace is the
+# `kubernetes.buildkit_namespace` setting; the Service and the Pods' label carry the
+# same name, so one setting addresses all three.
+BUILDKIT_NAMESPACE = "hades-buildkit"
 BUILDKIT_PORT = 1234
-BUILDKIT_HOST = f"tcp://crucible-buildkit.{BUILDKIT_NAMESPACE}.svc:{BUILDKIT_PORT}"
+
+
+def buildkit_pod_labels(namespace: str) -> Mapping[str, str]:
+    return {"app.kubernetes.io/name": namespace}
+
+
+def buildkit_host(namespace: str) -> str:
+    return f"tcp://{namespace}.{namespace}.svc:{BUILDKIT_PORT}"
+
+
+BUILDKIT_POD_LABELS: Mapping[str, str] = buildkit_pod_labels(BUILDKIT_NAMESPACE)
+BUILDKIT_HOST = buildkit_host(BUILDKIT_NAMESPACE)
 IMAGE_CHECK_COMMANDS = frozenset({"make images-check", "make registry-check"})
 IMAGE_CHECK_HOSTS = ("ghcr.io", "pkg-containers.githubusercontent.com")
 
@@ -387,8 +407,8 @@ HarnessRefusedError = LaunchRefusedError
 class KubernetesConfig:
     """Everything the provider needs that is not on the launch spec."""
 
-    namespace: str = "crucible-workers"
-    service_account: str = "crucible-worker"
+    namespace: str = "hades-workers"
+    service_account: str = "hades-worker"
     storage_class: str = ""
     workspace_size: str = "20Gi"
     image_pull_secret: str | None = None
@@ -441,7 +461,7 @@ class KubernetesConfig:
     # runtime by the `kubernetes.egress` admin setting.
     egress: ClusterEgress = field(default_factory=ClusterEgress)
     # Crucible's own namespace. No selector may name it or the workers namespace.
-    control_namespace: str = "crucible"
+    control_namespace: str = "hades"
     # The enabled local model endpoint the readiness canary proves a connection to,
     # from the routing policy in force. Empty when no local model is enabled.
     local_endpoint_url: str = ""
@@ -469,8 +489,10 @@ class KubernetesConfig:
     extra_image_allowlist: tuple[str, ...] = ()
     # The harness credential Secrets in the workers namespace, by harness name (12, 26).
     # The service creates and owns them (ADR 0015); this only names them, and a harness
-    # left out is `crucible-harness-<harness>` with `_` as `-`.
+    # left out is `hades-harness-<harness>` with `_` as `-`.
     credential_secrets: Mapping[str, str] = field(default_factory=dict)
+    # Hades's own BuildKit's namespace, Service name and Pod label (hades #475).
+    buildkit_namespace: str = BUILDKIT_NAMESPACE
     # The operator's declared mount mode per harness, as the Docker configuration
     # carries it. It may raise the adapter's minimum and never lowers it (25 step 7).
     credential_modes: Mapping[str, MountMode] = field(default_factory=dict)
@@ -505,9 +527,9 @@ class KubernetesConfig:
 
     def credential_secret_name(self, harness: str) -> str:
         # A Secret name is a DNS subdomain, which has no underscore: claude_code's
-        # default is `crucible-harness-claude-code`, the name the deployment maps it to.
+        # default is `hades-harness-claude-code`, the name the deployment maps it to.
         return self.credential_secrets.get(harness) or (
-            f"crucible-harness-{harness.replace('_', '-')}"
+            f"hades-harness-{harness.replace('_', '-')}"
         )
 
 
@@ -714,6 +736,22 @@ def _pod_words(pod: Mapping[str, Any]) -> str:
     phase = str(status.get("phase") or "unknown phase")
     terminating = ", deletion under way" if metadata.get("deletionTimestamp") else ""
     return f"Pod {name} was {phase}{terminating}"
+
+
+def _report_metrics(
+    adapter: HarnessAdapter | None, report_dir: Path, observation: Observation
+) -> ReportMetrics | None:
+    """hades #604: the harness's usage report, read while the collected report directory
+    exists. The supervisor parses its local report directory, and a Kubernetes attempt
+    has none, so without this its tokens and cost stayed null. Reading it is never a
+    reason the collection fails."""
+    if adapter is None or not report_dir.is_dir():
+        return None
+    try:
+        parsed = adapter.parse_report(report_dir, ExitInfo(exit_code=observation.exit_code))
+    except Exception:
+        return None
+    return parsed.metrics
 
 
 class KubernetesProvider:
@@ -1315,7 +1353,7 @@ class KubernetesProvider:
         is, and its seeding refuses a Secret that is missing or empty with the reason.
         An optional one (Hermes) is mounted when its Secret holds the declared file.
 
-        The Secret's name is the configured one or `crucible-harness-<harness>`, which
+        The Secret's name is the configured one or `hades-harness-<harness>`, which
         is the name the service creates it under (ADR 0015); a mapping is no longer
         what makes a harness have a credential."""
         adapter = self.harnesses.get(harness)
@@ -2836,6 +2874,7 @@ class KubernetesProvider:
                 tail_bytes=self.config.log_tail_bytes,
                 changed_blobs=changed_blobs,
             )
+            metrics = _report_metrics(adapter, root / "output" / "report", observation)
         state = await self._workspace_state(spec.attempt_id)
         return CollectedOutputs(
             report=outputs.report,
@@ -2860,6 +2899,7 @@ class KubernetesProvider:
             checkpoint_refusal=outputs.checkpoint_refusal,
             leftover_committed=outputs.leftover_committed,
             leftover_note=outputs.leftover_note,
+            metrics=metrics,
         )
 
     def _launch_evidence(self, spec: LaunchSpec, observation: Observation) -> CollectedArtifact:
@@ -3890,7 +3930,7 @@ class KubernetesProvider:
                 session.error = (
                     f"the login Job has had no Pod for {self.config.launch_timeout_seconds}s; "
                     "the namespace's ResourceQuota or admission may be refusing it (see the "
-                    "Job's events in crucible-workers)"
+                    f"Job's events in {self.config.namespace})"
                 )
                 break
             if pod is not None:
@@ -4098,7 +4138,7 @@ class KubernetesProvider:
             **launch_env,
         }
         if requires_image_checks(spec.contract):
-            env["BUILDKIT_HOST"] = BUILDKIT_HOST
+            env["BUILDKIT_HOST"] = buildkit_host(self.config.buildkit_namespace)
         # hades #558, #85: the declared test services ride beside the worker as native
         # sidecars, and the worker is told where each listens on its own loopback.
         services = self._services(spec)
@@ -4429,7 +4469,10 @@ class KubernetesProvider:
             plan = replace(
                 plan,
                 hosts=tuple(dict.fromkeys((*plan.hosts, *IMAGE_CHECK_HOSTS))),
-                buildkit_selector=PeerSelector.of(BUILDKIT_NAMESPACE, BUILDKIT_POD_LABELS),
+                buildkit_selector=PeerSelector.of(
+                    self.config.buildkit_namespace,
+                    buildkit_pod_labels(self.config.buildkit_namespace),
+                ),
                 buildkit_port=BUILDKIT_PORT,
             )
         if role == k8sspec.ROLE_WORKER:
@@ -5242,7 +5285,9 @@ class KubernetesProvider:
             env={
                 **PACKAGE_CACHE_ENV,
                 **(
-                    {"BUILDKIT_HOST": BUILDKIT_HOST} if requires_image_checks(spec.contract) else {}
+                    {"BUILDKIT_HOST": buildkit_host(self.config.buildkit_namespace)}
+                    if requires_image_checks(spec.contract)
+                    else {}
                 ),
                 # hades #608: the re-run sees the same database the worker's run did.
                 **services_env(services),

@@ -42,6 +42,7 @@ storage:
 # A new privileged namespace is the cluster operator's call; the lab has not made it.
 buildkit:
   enabled: false
+  namespace: hades-buildkit
 cluster:
   # k3s's cluster DNS Service address.
   dnsIp: 10.43.0.10

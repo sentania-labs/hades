@@ -20,7 +20,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: crucible
+  name: hades
   namespace: argocd
   labels:
     app.kubernetes.io/name: crucible
@@ -48,7 +48,7 @@ spec:
         factor: 2
         maxDuration: 5m
 # An attempt's Jobs, Pods, ConfigMaps, Secrets, NetworkPolicies and claims are created by
-# Crucible at runtime in `crucible-workers`. Argo tracks only what it applied, so those
+# Crucible at runtime in `hades-workers`. Argo tracks only what it applied, so those
 # objects are invisible to it and a prune cannot reach a running attempt. That is worth
 # re-checking before automated sync is ever turned on, because it is the one assumption
 # standing between a sync and a deleted worker.

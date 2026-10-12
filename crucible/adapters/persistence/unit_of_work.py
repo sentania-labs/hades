@@ -29,6 +29,7 @@ from crucible.adapters.persistence.delivery import (
 from crucible.adapters.persistence.models import (
     AttemptRow,
     CompletionClaimRow,
+    DeviceRow,
     EventRow,
     ExecutionRow,
     HeartbeatRow,
@@ -74,6 +75,7 @@ from crucible.adapters.persistence.records import (
 from crucible.domain.entities import (
     Attempt,
     CompletionClaimRecord,
+    Device,
     Event,
     Execution,
     ExecutionRole,
@@ -109,6 +111,7 @@ from crucible.ports.repository import (
     ContractRepository,
     DecisionLedgerRepository,
     DecisionRepository,
+    DeviceRepository,
     DispositionRepository,
     EscalationRepository,
     EventRepository,
@@ -415,6 +418,81 @@ class UiSessions:
             .where(UiSessionRow.id == session_id)
             .values(last_seen_at=last_seen_at)
         )
+
+
+class Devices:
+    def __init__(self, session: Session) -> None:
+        self._s = session
+
+    @staticmethod
+    def _to_entity(row: DeviceRow) -> Device:
+        return Device(
+            principal_id=row.principal_id,
+            name=row.name,
+            created_by=row.created_by,
+            created_at=ensure_utc(row.created_at),
+            last_used_at=_dt(row.last_used_at),
+            last_user_agent=row.last_user_agent,
+            exchanged_at=_dt(row.exchanged_at),
+            revoked_at=_dt(row.revoked_at),
+            revoked_by=row.revoked_by,
+        )
+
+    def add(self, device: Device) -> None:
+        self._s.add(
+            DeviceRow(
+                principal_id=device.principal_id,
+                name=device.name,
+                created_by=device.created_by,
+                created_at=device.created_at,
+                last_used_at=device.last_used_at,
+                last_user_agent=device.last_user_agent,
+                exchanged_at=device.exchanged_at,
+                revoked_at=device.revoked_at,
+                revoked_by=device.revoked_by,
+            )
+        )
+        self._s.flush()
+
+    def get(self, principal_id: str) -> Device | None:
+        row = self._s.get(DeviceRow, principal_id)
+        return self._to_entity(row) if row else None
+
+    def get_by_name(self, name: str) -> Device | None:
+        row = self._s.scalar(select(DeviceRow).where(DeviceRow.name == name))
+        return self._to_entity(row) if row else None
+
+    def list_all(self) -> Sequence[Device]:
+        rows = self._s.scalars(select(DeviceRow).order_by(DeviceRow.name)).all()
+        return [self._to_entity(r) for r in rows]
+
+    def record_use(self, principal_id: str, at: datetime, user_agent: str | None) -> None:
+        self._s.execute(
+            update(DeviceRow)
+            .where(DeviceRow.principal_id == principal_id)
+            .values(last_used_at=at, last_user_agent=user_agent)
+        )
+
+    def mark_exchanged(self, principal_id: str, at: datetime, user_agent: str | None) -> bool:
+        # One statement, so two browsers racing with the same token cannot both win.
+        result = self._s.execute(
+            update(DeviceRow)
+            .where(
+                DeviceRow.principal_id == principal_id,
+                DeviceRow.exchanged_at.is_(None),
+                DeviceRow.revoked_at.is_(None),
+            )
+            .values(exchanged_at=at, last_used_at=at, last_user_agent=user_agent)
+        )
+        return bool(result.rowcount)  # type: ignore[attr-defined]
+
+    def revoke(self, principal_id: str, at: datetime, by: str) -> bool:
+        result = self._s.execute(
+            update(DeviceRow)
+            .where(DeviceRow.principal_id == principal_id, DeviceRow.revoked_at.is_(None))
+            .values(revoked_at=at, revoked_by=by)
+        )
+        return bool(result.rowcount)  # type: ignore[attr-defined]
 
 
 class Repositories:
@@ -1688,6 +1766,7 @@ class SqlUnitOfWork:
     personas: PersonaRepository
     scheduled_jobs: ScheduledJobRepository
     ui_sessions: UiSessionRepository
+    devices: DeviceRepository
     repositories: RepositoryRegistry
     policies: PolicyRepository
     tasks: TaskRepository
@@ -1752,6 +1831,7 @@ class SqlUnitOfWork:
         self.personas = Personas(s)
         self.scheduled_jobs = ScheduledJobs(s)
         self.ui_sessions = UiSessions(s)
+        self.devices = Devices(s)
         self.repositories = Repositories(s)
         self.policies = Policies(s)
         self.tasks = Tasks(s)

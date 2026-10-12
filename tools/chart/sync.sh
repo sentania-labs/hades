@@ -14,4 +14,4 @@ helm template hades charts/hades -f tools/chart/values-base.yaml > "$tmp/helm.ya
 # (`buildkit.enabled: false`), and nothing else different.
 helm template hades charts/hades > "$tmp/helm-default.yaml"
 "${UV:-uv}" run python tools/chart/sync.py "$tmp/kustomize.yaml" "$tmp/helm-default.yaml" \
-  --without-namespace crucible-buildkit
+  --without-namespace hades-buildkit

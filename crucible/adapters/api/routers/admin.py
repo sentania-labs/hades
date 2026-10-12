@@ -16,6 +16,7 @@ from crucible.application.admin import (
     board,
     credentials,
     delivery,
+    devices,
     gateway,
     github,
     github_manifest,
@@ -931,6 +932,52 @@ def admin_rename_principal(
         principal_id=principal_id,
         name=name,
         reason=_reason(body),
+    )
+    uow.commit()
+    return result
+
+
+@router.get("/admin/devices")
+def admin_devices(uow: UoW, _principal: Admin) -> dict[str, Any]:
+    """hades #576 (U9): every device token, with its last use; never a token."""
+    return {"items": devices.list_devices(uow)}
+
+
+@router.post("/admin/devices")
+def admin_mint_device(
+    ctx: Ctx, uow: UoW, principal: Admin, body: Annotated[dict[str, Any], Body()]
+) -> dict[str, Any]:
+    """hades #576 (U9): mint a device token, bound to `role` (operator by default). The
+    token is in this response once and is never shown again."""
+    name = body.get("name")
+    role = body.get("role")
+    if not isinstance(name, str) or (role is not None and not isinstance(role, str)):
+        raise RequestValidationError(
+            [
+                {
+                    "loc": ("body",),
+                    "msg": "name must be a string, and role a string when given",
+                    "type": "value_error",
+                }
+            ]
+        )
+    minted, device = devices.mint(
+        _admin(ctx), uow, principal=principal.name, name=name, role=role, reason=_reason(body)
+    )
+    uow.commit()
+    return {**device, "token": minted.token}
+
+
+@router.post("/admin/devices/{device_id}/revoke")
+def admin_revoke_device(
+    device_id: str,
+    ctx: Ctx,
+    uow: UoW,
+    principal: Admin,
+    body: Annotated[dict[str, Any], Body()],
+) -> dict[str, Any]:
+    result = devices.revoke(
+        _admin(ctx), uow, principal=principal.name, device_id=device_id, reason=_reason(body)
     )
     uow.commit()
     return result

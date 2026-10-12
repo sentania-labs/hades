@@ -171,13 +171,13 @@ probe() {
   python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["spec"]["egress"], indent=1))' \
     "$scratch/np-$form.json"
   k apply -f "$scratch/np-$form.json" >/dev/null
-  k -n crucible-workers delete pod "probe-$form" --ignore-not-found >/dev/null
+  k -n hades-workers delete pod "probe-$form" --ignore-not-found >/dev/null
   k apply -f - >/dev/null <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
   name: probe-$form
-  namespace: crucible-workers
+  namespace: hades-workers
   labels: {crucible.attempt: PROOF, crucible.role: worker}
 spec:
   restartPolicy: Never
@@ -213,11 +213,11 @@ spec:
           check "API server node  \$NODE_IP:6443     " nc -z -w 5 \$NODE_IP 6443
           check "public internet 1.1.1.1:443         " nc -z -w 5 1.1.1.1 443
 EOF
-  k -n crucible-workers wait --for=jsonpath='{.status.phase}'=Succeeded "pod/probe-$form" --timeout=240s >/dev/null
+  k -n hades-workers wait --for=jsonpath='{.status.phase}'=Succeeded "pod/probe-$form" --timeout=240s >/dev/null
   echo "--- probe pod under the $form policy ---"
-  k -n crucible-workers logs "probe-$form"
-  k -n crucible-workers delete pod "probe-$form" --wait=true >/dev/null
-  k -n crucible-workers delete networkpolicy "np-proof-$form" >/dev/null
+  k -n hades-workers logs "probe-$form"
+  k -n hades-workers delete pod "probe-$form" --wait=true >/dev/null
+  k -n hades-workers delete networkpolicy "np-proof-$form" >/dev/null
 }
 
 probe main

@@ -422,6 +422,13 @@ PROPOSAL_ANSWERS = (
 
 CARD_CLICK_REASON = "answered with one click on the card page"
 
+# hades #607: the words field beside a stuck card's clicks. Answer is the operator's
+# reply and needs words; the others take an optional note.
+MOVE_NOTES = {
+    "answer": "Your answer (the worker or Foundry reads it as written)",
+    "send_back": "Note to Foundry (optional)",
+}
+
 
 def card_page_actions(
     task_id: str,
@@ -442,8 +449,11 @@ def card_page_actions(
             "hint": move.get("meaning", ""),
             "action": f"/ui/board/{quoted}/actions",
             "hidden": {"move": move["key"], "apply": "go"},
-            "note": "Note (optional)" if move["key"] in REMOVE_LIKE_MOVES else None,
+            "note": MOVE_NOTES.get(
+                move["key"], "Note (optional)" if move["key"] in REMOVE_LIKE_MOVES else None
+            ),
             "note_name": "note",
+            "required": move["key"] == "answer",
             "primary": move["key"] == default_move,
             "confirm": move["key"] in REMOVE_LIKE_MOVES,
         }
@@ -507,6 +517,21 @@ def board_card_page(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Respo
     timezone = _timezone(request)
     card = _localize(document, timezone)
     view = task_view(uow, task_id)
+    actions = card_page_actions(
+        task_id, view.state, principal.role, document["moves"], document["default_move"]
+    )
+    # hades #607: a card with a stuck reason offers only that reason's clicks, beside
+    # its sentence; no other phase move is offered in the panel.
+    reason_actions: list[dict[str, Any]] = []
+    if document["reason"] is not None:
+        move_keys = {move["key"] for move in document["moves"]}
+        by_key = {item["key"]: item for item in actions}
+        reason_actions = [
+            {**by_key[key], "primary": key == "answer"}
+            for key in document["reason"]["clicks"]
+            if key in by_key
+        ]
+        actions = [item for item in actions if item["key"] not in move_keys]
     waivers = _localize(
         [d for d in view.decisions if d.get("kind") in (WAIVE_EXTERNAL_REVIEW, ACCEPT_NO_CI)],
         timezone,
@@ -534,9 +559,8 @@ def board_card_page(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Respo
             ),
             "card": card,
             "can_act": principal.role in OPERATOR_ROLES,
-            "actions": card_page_actions(
-                task_id, view.state, principal.role, document["moves"], document["default_move"]
-            ),
+            "actions": actions,
+            "reason_actions": reason_actions,
             "waivers": waivers,
             "egress": egress_rows(view),
             "return_to": f"/ui/board/{quote(task_id)}",

@@ -5,7 +5,7 @@ Four things, each with its own proof:
 - the pre-PR gate `image_checks_required`: a diff under the image build inputs fails
   unless the contract requires both `make images-check` and `make registry-check`;
 - the per-attempt egress a contract that requires them earns: the BuildKit Service's
-  pods in `crucible-buildkit` on 1234, and HTTPS to GHCR and the host it redirects blob
+  pods in `hades-buildkit` on 1234, and HTTPS to GHCR and the host it redirects blob
   reads to; a contract that does not require them earns none of it;
 - `images/build.sh` through `BUILDKIT_HOST`: the buildctl invocation carries exactly the
   build arguments, labels and outputs the docker-container path carries, so the tag
@@ -149,8 +149,9 @@ def _provider() -> KubernetesProvider:
         (),
         {
             "egress": type("E", (), {"endpoint_in_cluster": False})(),
-            "namespace": "crucible-workers",
-            "control_namespace": "crucible",
+            "namespace": "hades-workers",
+            "control_namespace": "hades",
+            "buildkit_namespace": BUILDKIT_NAMESPACE,
         },
     )()
     provider.harnesses = type("Harnesses", (), {"get": lambda *_: None})()
@@ -162,7 +163,7 @@ def test_requires_image_checks_needs_both_commands() -> None:
     assert not requires_image_checks({"required_verification": CHECKS[:1]})
     assert not requires_image_checks({"required_verification": []})
     assert not requires_image_checks({})
-    assert BUILDKIT_HOST == "tcp://crucible-buildkit.crucible-buildkit.svc:1234"
+    assert BUILDKIT_HOST == "tcp://hades-buildkit.hades-buildkit.svc:1234"
 
 
 @pytest.mark.parametrize("role", [k8sspec.ROLE_WORKER, k8sspec.ROLE_VERIFIER])
@@ -186,7 +187,7 @@ def test_a_contract_requiring_the_image_checks_gets_buildkit_and_the_registry(
     )
     policy = k8sspec.egress_policy(
         name="image-checks",
-        namespace="crucible-workers",
+        namespace="hades-workers",
         object_labels={},
         attempt_id="A1",
         role=role,
@@ -206,7 +207,7 @@ def test_a_contract_requiring_the_image_checks_gets_buildkit_and_the_registry(
             "namespaceSelector": {
                 "matchLabels": {"kubernetes.io/metadata.name": BUILDKIT_NAMESPACE}
             },
-            "podSelector": {"matchLabels": {"app.kubernetes.io/name": "crucible-buildkit"}},
+            "podSelector": {"matchLabels": {"app.kubernetes.io/name": "hades-buildkit"}},
         }
     ]
 
@@ -222,7 +223,7 @@ def test_a_contract_without_the_image_checks_gets_neither(role: str) -> None:
         assert not set(IMAGE_CHECK_HOSTS) & set(plan.hosts)
         policy = k8sspec.egress_policy(
             name="no-image-checks",
-            namespace="crucible-workers",
+            namespace="hades-workers",
             object_labels={},
             attempt_id="A1",
             role=role,
@@ -365,7 +366,7 @@ def test_build_sh_passes_buildctl_exactly_what_it_passes_buildx(tmp_path: Path) 
     bindir.mkdir()
     _executable(bindir / "buildctl", _FAKE_BUILDCTL)
     _executable(bindir / "docker", _FAKE_DOCKER)
-    host = "tcp://crucible-buildkit.crucible-buildkit.svc:1234"
+    host = "tcp://hades-buildkit.hades-buildkit.svc:1234"
 
     remote_log = tmp_path / "remote"
     remote_log.mkdir()
@@ -545,7 +546,7 @@ def test_the_base_ships_the_rootless_buildkit_in_its_own_namespace() -> None:
     for doc in objects.values():
         assert doc["metadata"]["namespace"] == BUILDKIT_NAMESPACE
     service = objects["Service"]
-    assert service["metadata"]["name"] == "crucible-buildkit"
+    assert service["metadata"]["name"] == "hades-buildkit"
     assert service["spec"]["type"] == "ClusterIP"
     assert service["spec"]["selector"] == dict(BUILDKIT_POD_LABELS)
     assert service["spec"]["ports"] == [
@@ -573,7 +574,7 @@ def test_the_base_ships_the_rootless_buildkit_in_its_own_namespace() -> None:
     assert container["resources"]["requests"] == {"cpu": "500m", "memory": "1Gi"}
     assert container["ports"] == [{"name": "buildkit", "containerPort": 1234}]
     assert pod["spec"]["volumes"] == [
-        {"name": "cache", "persistentVolumeClaim": {"claimName": "crucible-buildkit-cache"}}
+        {"name": "cache", "persistentVolumeClaim": {"claimName": "hades-buildkit-cache"}}
     ]
 
     (policy,) = _documents(BUILDKIT_DIR / "networkpolicy.yaml")
@@ -581,7 +582,7 @@ def test_the_base_ships_the_rootless_buildkit_in_its_own_namespace() -> None:
     assert policy["spec"]["policyTypes"] == ["Ingress"]
     (rule,) = policy["spec"]["ingress"]
     assert rule["from"] == [
-        {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "crucible-workers"}}}
+        {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "hades-workers"}}}
     ]
     assert rule["ports"] == [{"protocol": "TCP", "port": 1234}]
 
@@ -592,8 +593,8 @@ def test_the_kind_tier_starts_the_same_buildkit() -> None:
     by_kind = {(doc["kind"], doc["metadata"]["name"]): doc for doc in docs}
     namespace = by_kind[("Namespace", BUILDKIT_NAMESPACE)]
     assert namespace["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] == "privileged"
-    assert ("Namespace", "crucible") not in by_kind, "e2e-kind.sh creates it; nothing relabels it"
-    deployment = by_kind[("Deployment", "crucible-buildkit")]
+    assert ("Namespace", "hades") not in by_kind, "e2e-kind.sh creates it; nothing relabels it"
+    deployment = by_kind[("Deployment", "hades-buildkit")]
     assert deployment["metadata"]["namespace"] == BUILDKIT_NAMESPACE
     (container,) = deployment["spec"]["template"]["spec"]["containers"]
     assert container["image"] == pins["BUILDKIT_ROOTLESS_IMAGE"]
@@ -601,18 +602,18 @@ def test_the_kind_tier_starts_the_same_buildkit() -> None:
     assert deployment["spec"]["template"]["spec"]["securityContext"]["seccompProfile"] == {
         "type": "Unconfined"
     }
-    service = by_kind[("Service", "crucible-buildkit")]
+    service = by_kind[("Service", "hades-buildkit")]
     assert service["metadata"]["namespace"] == BUILDKIT_NAMESPACE
     assert service["spec"]["ports"][0]["port"] == 1234
-    claim = by_kind[("PersistentVolumeClaim", "crucible-buildkit-cache")]
+    claim = by_kind[("PersistentVolumeClaim", "hades-buildkit-cache")]
     assert claim["spec"]["storageClassName"] == "standard"
-    policy = by_kind[("NetworkPolicy", "crucible-buildkit")]
+    policy = by_kind[("NetworkPolicy", "hades-buildkit")]
     assert policy["spec"]["ingress"][0]["from"][0]["namespaceSelector"]["matchLabels"] == {
-        "kubernetes.io/metadata.name": "crucible-workers"
+        "kubernetes.io/metadata.name": "hades-workers"
     }
     kind_storage = _documents(ROOT / "deploy/kubernetes/overlays/kind/storage.yaml")
     assert any(
-        doc["metadata"]["name"] == "crucible-buildkit-cache"
+        doc["metadata"]["name"] == "hades-buildkit-cache"
         and doc["metadata"]["namespace"] == BUILDKIT_NAMESPACE
         and doc["spec"]["storageClassName"] == "standard"
         for doc in kind_storage

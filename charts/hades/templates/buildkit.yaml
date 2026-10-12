@@ -18,22 +18,22 @@
 # Nothing here reaches the node: no hostPath, no host namespace, no Docker socket.
 #
 # TLS is off on purpose. The port is a ClusterIP in a namespace whose own NetworkPolicy
-# admits only `crucible-workers`, and a worker reaches it only through the per-attempt
+# admits only `hades-workers`, and a worker reaches it only through the per-attempt
 # egress rule the provider writes (26), so the policies are the trust boundary.
 #
 # Off unless `buildkit.enabled`: a namespace at the `privileged` Pod Security level is
-# the cluster operator's decision. Names stay `crucible-buildkit` under nameOverride
-# because the provider addresses the builder by that constant; only the namespace it
-# admits follows the workers namespace.
+# the cluster operator's decision. Every name here is `buildkit.namespace`, which the
+# settings hand to the provider as KUBERNETES__BUILDKIT_NAMESPACE; it does not follow
+# nameOverride. The namespace it admits follows the workers namespace.
 {{- if .Values.buildkit.enabled }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: crucible-buildkit-cache
-  namespace: crucible-buildkit
+  name: {{ .Values.buildkit.namespace }}-cache
+  namespace: {{ .Values.buildkit.namespace }}
   labels:
-    app.kubernetes.io/name: crucible-buildkit
+    app.kubernetes.io/name: {{ .Values.buildkit.namespace }}
 spec:
   {{- with include "hades.buildkitCacheStorageClass" . }}
   storageClassName: {{ . | quote }}
@@ -50,14 +50,14 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: crucible-buildkit
-  namespace: crucible-buildkit
+  name: {{ .Values.buildkit.namespace }}
+  namespace: {{ .Values.buildkit.namespace }}
   labels:
-    app.kubernetes.io/name: crucible-buildkit
+    app.kubernetes.io/name: {{ .Values.buildkit.namespace }}
 spec:
   type: ClusterIP
   selector:
-    app.kubernetes.io/name: crucible-buildkit
+    app.kubernetes.io/name: {{ .Values.buildkit.namespace }}
   ports:
     - name: buildkit
       port: 1234
@@ -66,10 +66,10 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: crucible-buildkit
-  namespace: crucible-buildkit
+  name: {{ .Values.buildkit.namespace }}
+  namespace: {{ .Values.buildkit.namespace }}
   labels:
-    app.kubernetes.io/name: crucible-buildkit
+    app.kubernetes.io/name: {{ .Values.buildkit.namespace }}
 spec:
   replicas: 1
   # One daemon owns the cache claim; a rollout stops the old one first.
@@ -77,11 +77,11 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: crucible-buildkit
+      app.kubernetes.io/name: {{ .Values.buildkit.namespace }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: crucible-buildkit
+        app.kubernetes.io/name: {{ .Values.buildkit.namespace }}
       annotations:
         # The pre-1.30 spelling of the container's appArmorProfile below.
         container.apparmor.security.beta.kubernetes.io/buildkitd: unconfined
@@ -134,12 +134,12 @@ spec:
       volumes:
         - name: cache
           persistentVolumeClaim:
-            claimName: crucible-buildkit-cache
+            claimName: {{ .Values.buildkit.namespace }}-cache
 
 # Who may reach the builder: an attempt's worker or verifier Pod, through the egress
 # rule the provider writes for a contract that requires the image checks (26, hades
 # #475). Everything else in the cluster is refused at this end as well, so a Pod outside
-# `crucible-workers` cannot use Hades's builder even without a policy of its own.
+# `hades-workers` cannot use Hades's builder even without a policy of its own.
 # Egress is not restricted here: BuildKit fetches the pinned base image, the Debian
 # snapshot and the release archives the worker Dockerfile names, exactly as CI's
 # builder does.
@@ -147,12 +147,12 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: crucible-buildkit
-  namespace: crucible-buildkit
+  name: {{ .Values.buildkit.namespace }}
+  namespace: {{ .Values.buildkit.namespace }}
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: crucible-buildkit
+      app.kubernetes.io/name: {{ .Values.buildkit.namespace }}
   policyTypes: [Ingress]
   ingress:
     - from:

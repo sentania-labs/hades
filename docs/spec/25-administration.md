@@ -97,6 +97,7 @@ mapped to an existing operation:
 | Correction, resume from the last attempt | `corrections` with `resume_from: last_attempt` | a correctable state |
 | Accept the collected head | `accept` with verdict `accepted` | `awaiting_acceptance` |
 | Answer the open escalation | `decisions` on the escalation (rescheduling a blocked task) | an open escalation |
+| Send back to Foundry | a `sent_back` wake to the task's orchestrator with the escalation (hades #607) | a stuck task, an open escalation, or `awaiting_internal_review` |
 | Cancel with reason | `cancel` | any state the lifecycle lets cancel |
 
 The operator's words are required. **Go** stores them as a note and applies the
@@ -105,7 +106,9 @@ the acceptance reasoning, the decision verbatim, the approval reason. **Next pha
 applies the lane's default move, published on the card: Inbox to Holding pen
 (approve), Holding pen to In progress (start now), Stuck to In progress (correction,
 resume from the PR branch), Waiting on Scott to In progress (answer the escalation),
-In progress to Graveyard (cancel). Wins and Graveyard have no next phase. Every action
+In progress to Graveyard (cancel); a Stuck card waiting on the operator's answer
+defaults to answer. A card with a stuck reason (hades #607, `docs/board.md`) offers only
+that reason's clicks, so it shows no Next phase. Wins and Graveyard have no next phase. Every action
 records a `task_phase_action_applied` event with the move, the operation, the lane,
 and the note's text as `verbatim`, beside the operation's own event; both show on
 the Audit page with the words as the reason. The actions are open to operator and
@@ -583,9 +586,31 @@ any disable. Shredding is complete or it says so (12).
 
 ## Administrative interface
 
-The Status page's "Before a task can run" list is the status document's
-`readiness` part (crucible#123), so it can never disagree with the pages it
-links to. Where a field refers to something the system knows or can discover
+The Set up page (`/ui/setup`, hades #169) is one ordered list of the first-run
+steps: GitHub App, repository, harness login, routing, first task. Each reads
+done or not done from live rows and links to the page where it is done; the
+navigation shows a Set up entry with the count of steps to do only while one is
+undone, and `/ui` leads there until every step is done, then to the Board. The
+page's Service and Each harness sections read the status document's
+`readiness` part (crucible#123), so they can never disagree with the pages they
+link to. The former Status page is folded into the Board's service strip and
+the Admin About block on Settings, which shows the running version and the
+image digest the deployment names in `service.image` (hades #214). Compose and
+the Helm chart set it from the image they run (`CRUCIBLE_IMAGE`,
+`serviceImage`); kustomize's image pin cannot reach a ConfigMap value, so a
+kustomize deployment sets `CRUCIBLE_SERVICE__IMAGE` itself or it reads "not
+reported". The GitHub App step is done only while the App credential is in
+place (the client's `configured()`, ADR 0017); a wired client or a repository's
+installation id alone does not count.
+
+The navigation (hades #576 U5) groups the pages as Work (Board, Hades,
+Personas, Jobs, Workers, All tasks, Usage), Admin (Routing, Policies, Settings,
+Tokens, Credentials, Harnesses, Images, Repositories, GitHub, Memory, Catalog,
+Audit) and a Diagnostics group kept closed until opened or until one of its
+pages is shown (Wakes, Retention, Bootstrap, Gateway). The page shown is the
+active entry. At phone width the navigation is a drawer opened from Menu, and
+every data table becomes stacked cards under 600 px, so no page scrolls
+sideways. Where a field refers to something the system knows or can discover
 (the gateway's models, the App's installations and repositories), the page
 offers the valid values rather than a free-text field (crucible#121).
 
@@ -624,6 +649,35 @@ A principal is renamed with `POST /admin/tokens/{principal_id}/rename`
 reason required (ADR 0029). Its tasks and token follow it by id; events keep the
 name they were written with. A taken or reserved name is refused, and the
 first-run principal keeps its name.
+
+### Device tokens (hades #576, U9)
+
+An administrator mints a named, long-lived token for one device, such as a phone or
+the iOS app, with `POST /admin/devices` (`name`, 1 to 100 printable characters;
+`role`, `operator` unless another role is named; an optional `reason`). The response
+carries the token once, beside the device, and nothing serves it again. The token is
+the token of the device's own principal, `device:<name>`, stored as a salted hash
+like any other, so it authenticates `/v1` as any bearer token does; the `device:`
+prefix is reserved, so `token create` refuses it and a device's principal keeps its
+name. `GET /admin/devices` lists every device with its role, state, who minted it,
+`last_used_at` and the last user agent, the time of its one UI exchange, and its
+revocation, each time also as local Central text (`*_local`), and never a token.
+
+A browser on the device exchanges the token once for an ordinary server-side UI
+session at `POST /ui/device-sign-in` (form field `token`, or `Authorization: Bearer`;
+an `Origin` naming another host is refused). The exchange is taken in one
+conditional update, so two browsers racing with one token cannot both win; a second
+exchange, through this door or the sign-in form, is refused with 409 and an
+administrator mints a new token. The API keeps accepting the token afterwards.
+
+Each `/v1` request a device token authenticates records the time and user agent,
+written at most once a minute unless the user agent changed. The audit records
+`device_token_minted` (principal, reason, device, role), `device_token_used` (the
+first use, a use from a new user agent, a use after an hour without one, and the UI
+exchange, with `via` `api` or `ui_session`) and `device_token_revoked`.
+`POST /admin/devices/{id}/revoke`, reason required, disables the device's principal,
+which ends the token and every UI session it opened (ADR 0030). A credential-shaped
+user agent is recorded as withheld.
 
 ## What Foundry may do
 

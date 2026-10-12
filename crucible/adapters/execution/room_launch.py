@@ -264,7 +264,7 @@ class KubernetesRoomLauncher:
     """Room runners as Jobs in the workers namespace, through the Kubernetes provider."""
 
     provider: KubernetesProvider
-    api_namespace: str = "crucible"
+    api_namespace: str = "hades"
     api_pod_labels: Mapping[str, str] = field(
         default_factory=lambda: {
             "app.kubernetes.io/name": "crucible",

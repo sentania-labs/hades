@@ -812,6 +812,7 @@ class DeliveryCoordinator:
                         attempt_id=plan.attempt_id,
                         question=question,
                         wake_reason=reason,
+                        reason="decision",
                         summary=summary,
                     )
                     uow.commit()

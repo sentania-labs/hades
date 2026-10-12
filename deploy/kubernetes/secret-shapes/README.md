@@ -10,13 +10,13 @@ them (ADR 0015, ADR 0017).
 
 | Object | Namespace | Keys | Read by |
 |---|---|---|---|
-| `crucible-database` | `crucible` | `password`, `url` | the PostgreSQL StatefulSet (`password`) and the api, supervisor and migration Job (`url`) |
-| `crucible-github-app` | `crucible` | `app-id`, `app.pem`, `webhook.secret` | written only by Crucible (Create GitHub App on the GitHub page); read by the api and supervisor through the API server, and mounted on those pods only for the webhook secret (12). **Never delivered by GitOps.** |
-| `crucible-harness-<harness>` | `crucible-workers` | one per auth file the adapter declares | written only by Crucible (the login, the Hermes key, the sync-back); copied per attempt into `cred-<attempt>` (12, 26). **Never delivered by GitOps.** |
+| `hades-database` | `hades` | `password`, `url` | the PostgreSQL StatefulSet (`password`) and the api, supervisor and migration Job (`url`) |
+| `hades-github-app` | `hades` | `app-id`, `app.pem`, `webhook.secret` | written only by Crucible (Create GitHub App on the GitHub page); read by the api and supervisor through the API server, and mounted on those pods only for the webhook secret (12). **Never delivered by GitOps.** |
+| `hades-harness-<harness>` | `hades-workers` | one per auth file the adapter declares | written only by Crucible (the login, the Hermes key, the sync-back); copied per attempt into `cred-<attempt>` (12, 26). **Never delivered by GitOps.** |
 | an image pull secret | both | `.dockerconfigjson` | the kubelet, when the packages are private |
 
 `password` and `url` must agree: `url` is the whole DSN
-(`postgresql+psycopg://crucible:<password>@crucible-postgres:5432/crucible`) because
+(`postgresql+psycopg://crucible:<password>@hades-postgres:5432/crucible`) because
 pydantic-settings reads one environment variable and does no interpolation.
 
 A harness whose auth file sits in a subdirectory is keyed with the separator replaced by
@@ -33,7 +33,7 @@ replaces its data whole on each later write; the supervisor writes a newer refre
 token back after an attempt. A Secret written by both Crucible and GitOps drifts, and a
 sync would restore a token the harness has already rotated, so none of these is sealed,
 sourced or applied by GitOps. The supervisor's Role already carries the verbs this needs
-(`create`, `get` and `patch` on Secrets in `crucible-workers`).
+(`create`, `get` and `patch` on Secrets in `hades-workers`).
 
 A deployment that delivered them through GitOps before this change removes them from
 its GitOps repository first. Argo's prune deletes a Secret it stops tracking, which
@@ -45,9 +45,9 @@ replaces its data.
 ## The GitHub App Secret is Crucible's
 
 The operator presses Create GitHub App on the GitHub page. GitHub makes the App and its
-key and hands them to Crucible once, which then creates `crucible-github-app` in
-`crucible`, labelled `app.kubernetes.io/managed-by: crucible`, and replaces its data when
-the App is replaced. The control plane's Role in `crucible`
+key and hands them to Crucible once, which then creates `hades-github-app` in
+`hades`, labelled `app.kubernetes.io/managed-by: crucible`, and replaces its data when
+the App is replaced. The control plane's Role in `hades`
 (`../base/crucible/github-app-rbac.yaml`) allows exactly that: `get` and `patch` on this
 one Secret and `create`. A deployment that sealed it before this change removes it from
 its GitOps repository without pruning it, as above, or creates the App again.

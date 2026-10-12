@@ -8,8 +8,8 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: crucible-settings
-  namespace: crucible
+  name: hades-settings
+  namespace: hades
 data:
   CRUCIBLE_KUBERNETES__STORAGE_CLASS: standard
   CRUCIBLE_KUBERNETES__WORKSPACE_SIZE: 256Mi

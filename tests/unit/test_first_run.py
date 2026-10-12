@@ -29,7 +29,7 @@ def test_the_secret_holds_the_token_and_names_only_where_it_is() -> None:
     assert base64.b64decode(secret["data"]["token"]).decode() == TOKEN
     assert secret["metadata"]["labels"]["app.kubernetes.io/managed-by"] == "crucible"
     where = delivery.where()
-    assert "crucible/crucible-first-run-admin" in where and TOKEN not in where
+    assert "crucible/hades-first-run-admin" in where and TOKEN not in where
 
 
 def test_a_second_delivery_replaces_a_stale_secret_whole() -> None:
@@ -79,7 +79,7 @@ def test_only_the_first_run_principal_discards(tmp_path: Path) -> None:
 def test_a_failed_discard_is_logged_without_the_token(caplog: pytest.LogCaptureFixture) -> None:
     class Failing:
         def where(self) -> str:
-            return "the Secret crucible/crucible-first-run-admin"
+            return "the Secret crucible/hades-first-run-admin"
 
         def deliver(self, token: str) -> None:
             raise AssertionError("never called")
@@ -108,7 +108,7 @@ def test_wiring_uses_configured_first_run_secret_for_create_reset_and_cleanup(
     delivery.deliver(TOKEN)
     secret = api.get("secrets", "lab-bootstrap")
     assert base64.b64decode(secret["data"]["token"]).decode() == TOKEN
-    assert "crucible/lab-bootstrap" in delivery.where()
+    assert "hades/lab-bootstrap" in delivery.where()
     discard_after_use(delivery, "first-run-admin")
     with pytest.raises(KubernetesApiError):
         api.get("secrets", "lab-bootstrap")

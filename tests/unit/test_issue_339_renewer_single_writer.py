@@ -210,7 +210,7 @@ def test_k8s_store_rejects_stale_resource_version() -> None:
     client.create(
         "secrets",
         k8sspec.secret(
-            name="crucible-harness-codex",
+            name="hades-harness-codex",
             namespace="crucible",
             object_labels={},
             data={"auth.json": json.dumps(login).encode()},
@@ -247,7 +247,7 @@ def test_k8s_store_patch_succeeds_when_version_matches() -> None:
     client.create(
         "secrets",
         k8sspec.secret(
-            name="crucible-harness-codex",
+            name="hades-harness-codex",
             namespace="crucible",
             object_labels={},
             data={"auth.json": json.dumps(login).encode()},

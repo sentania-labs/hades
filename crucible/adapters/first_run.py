@@ -15,7 +15,7 @@ from pathlib import Path
 
 from crucible.adapters.execution.k8sapi import KubernetesApiError, KubernetesClient
 
-SECRET_NAME = "crucible-first-run-admin"
+SECRET_NAME = "hades-first-run-admin"
 SECRET_KEY = "token"
 FILE_NAME = "first-run-admin-token"
 

@@ -4,7 +4,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: crucible-workers
+  name: hades-workers
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: workers

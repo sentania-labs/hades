@@ -248,7 +248,7 @@ def mint_token(principal: str) -> str:
 
 
 FIRST_RUN_FILE = "/var/lib/crucible/credentials/first-run-admin-token"
-FIRST_RUN_LANDING_MARKER = b"<h1>Status</h1>"
+FIRST_RUN_LANDING_MARKER = b"<h1>Set up</h1>"
 BOARD_MARKER = b"<h1>Board</h1>"
 TOKEN_PATTERN = re.compile(r"\bcru_[A-Z0-9]{26}\.[A-Za-z0-9_-]+\b")
 
@@ -290,11 +290,11 @@ def walk_first_run_ui(base_url: str) -> None:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
-        # The explicit next=/ui returns to Status and its first-run setup steps.
-        # The root and the default sign-in destination instead lead to the board.
+        # The explicit next=/ui lands on Set up while a first-run step is undone (hades
+        # #169). The root and the default sign-in destination instead lead to the board.
         with opener.open(request_object, timeout=DEFAULT_TIMEOUT) as response:
             if response.status != 200 or FIRST_RUN_LANDING_MARKER not in response.read():
-                raise SmokeError("first-run administrator sign-in did not render the Status page")
+                raise SmokeError("first-run administrator sign-in did not render the Set up page")
         with opener.open(f"{base_url}/ui/board", timeout=DEFAULT_TIMEOUT) as response:
             if response.status != 200 or BOARD_MARKER not in response.read():
                 raise SmokeError("the first-run Board page did not render")

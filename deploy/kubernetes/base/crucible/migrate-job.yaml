@@ -8,8 +8,8 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: crucible-migrate
-  namespace: crucible
+  name: hades-migrate
+  namespace: hades
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: migrate
@@ -28,7 +28,7 @@ spec:
       # The one API call this Job makes is creating the first-run administrator Secret
       # (ADR 0016), under an account that may do that and nothing else
       # (first-run-rbac.yaml). The token is never printed.
-      serviceAccountName: crucible-migrate
+      serviceAccountName: hades-migrate
       automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
@@ -76,7 +76,7 @@ spec:
             - name: CRUCIBLE_DATABASE__URL
               valueFrom:
                 secretKeyRef:
-                  name: crucible-database
+                  name: hades-database
                   key: url
           resources:
             requests:
@@ -97,12 +97,12 @@ spec:
               drop: ["ALL"]
           envFrom:
             - configMapRef:
-                name: crucible-settings
+                name: hades-settings
           env:
             - name: CRUCIBLE_DATABASE__URL
               valueFrom:
                 secretKeyRef:
-                  name: crucible-database
+                  name: hades-database
                   key: url
           resources:
             requests:

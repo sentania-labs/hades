@@ -204,7 +204,7 @@ class FakeKubernetesApi:
     The workspace claim is a dict of path to bytes, which is what makes the reader Pod's
     `tar` and its single-file read answerable without a filesystem."""
 
-    namespace: str = "crucible-workers"
+    namespace: str = "hades-workers"
     # A canary that cannot reach the API server and a node with a pod PID limit: the
     # namespace 26 asks lab-admin for. A test flips either to prove the refusal.
     egress_enforced: bool = True
@@ -689,7 +689,7 @@ class FakeKubernetesApi:
                     "involvedObject": {"kind": "Job", "name": name, "uid": uid},
                     "message": (
                         f'Error creating: pods "{name}-abc12" is forbidden: exceeded quota: '
-                        "crucible-workers, requested: limits.memory=4Gi, used: "
+                        "hades-workers, requested: limits.memory=4Gi, used: "
                         "limits.memory=12Gi, limited: limits.memory=12Gi"
                     ),
                 }

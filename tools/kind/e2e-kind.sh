@@ -213,24 +213,24 @@ crucible_kind_wait_and_retry() {
       # On retry we must redo the cluster setup that was already done on the
       # first pass (namespaces, RBAC, CoreDNS tuning).  These commands are
       # idempotent so we can re-run them safely.
-      KUBECONFIG="$kubeconfig" kubectl create namespace crucible >/dev/null || :
-      KUBECONFIG="$kubeconfig" kubectl -n crucible create serviceaccount crucible-supervisor >/dev/null || :
+      KUBECONFIG="$kubeconfig" kubectl create namespace hades >/dev/null || :
+      KUBECONFIG="$kubeconfig" kubectl -n hades create serviceaccount hades-supervisor >/dev/null || :
       KUBECONFIG="$kubeconfig" kubectl apply -f "$root/deploy/kind/workers.yaml" >/dev/null || :
       KUBECONFIG="$kubeconfig" kubectl apply -f "$root/deploy/kubernetes/base/workers/role.yaml" >/dev/null || :
       KUBECONFIG="$kubeconfig" kubectl apply -f "$root/deploy/kubernetes/base/workers/rolebinding.yaml" >/dev/null || :
       supervisor_kubeconfig="$scratch/supervisor-kubeconfig"
       api_server=$(KUBECONFIG="$kubeconfig" kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')
       ca_data=$(KUBECONFIG="$kubeconfig" kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
-      supervisor_token=$(KUBECONFIG="$kubeconfig" kubectl -n crucible create token crucible-supervisor)
+      supervisor_token=$(KUBECONFIG="$kubeconfig" kubectl -n hades create token hades-supervisor)
       ca_file="$scratch/cluster-ca.crt"
       printf '%s' "$ca_data" | base64 -d > "$ca_file"
       KUBECONFIG="$supervisor_kubeconfig" kubectl config set-cluster kind \
         --server="$api_server" --certificate-authority="$ca_file" --embed-certs=true >/dev/null
-      KUBECONFIG="$supervisor_kubeconfig" kubectl config set-credentials crucible-supervisor \
+      KUBECONFIG="$supervisor_kubeconfig" kubectl config set-credentials hades-supervisor \
         --token="$supervisor_token" >/dev/null
-      KUBECONFIG="$supervisor_kubeconfig" kubectl config set-context crucible-supervisor \
-        --cluster=kind --user=crucible-supervisor --namespace=crucible-workers >/dev/null
-      KUBECONFIG="$supervisor_kubeconfig" kubectl config use-context crucible-supervisor >/dev/null
+      KUBECONFIG="$supervisor_kubeconfig" kubectl config set-context hades-supervisor \
+        --cluster=kind --user=hades-supervisor --namespace=hades-workers >/dev/null
+      KUBECONFIG="$supervisor_kubeconfig" kubectl config use-context hades-supervisor >/dev/null
       corefile=$(KUBECONFIG="$kubeconfig" kubectl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}')
       corefile=$(printf '%s\n' "$corefile" | awk '
         { print }
@@ -253,8 +253,8 @@ crucible_kind_wait_and_retry() {
       KUBECONFIG="$kubeconfig" kubectl -n kube-system rollout status deployment/coredns --timeout=180s
       KUBECONFIG="$kubeconfig" kubectl -n kube-system wait --for=condition=Ready pod/range-http --timeout=90s
       KUBECONFIG="$kubeconfig" kubectl -n crucible-kind-peer wait --for=condition=Ready pod/peer-http --timeout=90s
-      KUBECONFIG="$kubeconfig" kubectl -n crucible-workers wait \
-        --for=jsonpath='{.status.phase}'=Bound pvc/crucible-reference-cache --timeout=90s
+      KUBECONFIG="$kubeconfig" kubectl -n hades-workers wait \
+        --for=jsonpath='{.status.phase}'=Bound pvc/hades-reference-cache --timeout=90s
     fi
     if crucible_kind_wait_ready "$kubeconfig"; then
       return 0
@@ -288,8 +288,8 @@ docker exec "$node" ip route add blackhole 198.51.100.30/32
 crucible_kind_install_calico "$scratch" "$kubeconfig"
 
 # Cluster setup: namespaces, RBAC, CoreDNS tuning (189, 190, 191).
-KUBECONFIG="$kubeconfig" kubectl create namespace crucible >/dev/null
-KUBECONFIG="$kubeconfig" kubectl -n crucible create serviceaccount crucible-supervisor >/dev/null
+KUBECONFIG="$kubeconfig" kubectl create namespace hades >/dev/null
+KUBECONFIG="$kubeconfig" kubectl -n hades create serviceaccount hades-supervisor >/dev/null
 KUBECONFIG="$kubeconfig" kubectl apply -f "$root/deploy/kind/workers.yaml" >/dev/null
 # The tier consumes the deployed RBAC files directly. A provider change needing another
 # verb therefore exercises the same Role and RoleBinding that the deployment uses.
@@ -298,16 +298,16 @@ KUBECONFIG="$kubeconfig" kubectl apply -f "$root/deploy/kubernetes/base/workers/
 supervisor_kubeconfig="$scratch/supervisor-kubeconfig"
 api_server=$(KUBECONFIG="$kubeconfig" kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')
 ca_data=$(KUBECONFIG="$kubeconfig" kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
-supervisor_token=$(KUBECONFIG="$kubeconfig" kubectl -n crucible create token crucible-supervisor)
+supervisor_token=$(KUBECONFIG="$kubeconfig" kubectl -n hades create token hades-supervisor)
 ca_file="$scratch/cluster-ca.crt"
 printf '%s' "$ca_data" | base64 -d > "$ca_file"
 KUBECONFIG="$supervisor_kubeconfig" kubectl config set-cluster kind \
   --server="$api_server" --certificate-authority="$ca_file" --embed-certs=true >/dev/null
-KUBECONFIG="$supervisor_kubeconfig" kubectl config set-credentials crucible-supervisor \
+KUBECONFIG="$supervisor_kubeconfig" kubectl config set-credentials hades-supervisor \
   --token="$supervisor_token" >/dev/null
-KUBECONFIG="$supervisor_kubeconfig" kubectl config set-context crucible-supervisor \
-  --cluster=kind --user=crucible-supervisor --namespace=crucible-workers >/dev/null
-KUBECONFIG="$supervisor_kubeconfig" kubectl config use-context crucible-supervisor >/dev/null
+KUBECONFIG="$supervisor_kubeconfig" kubectl config set-context hades-supervisor \
+  --cluster=kind --user=hades-supervisor --namespace=hades-workers >/dev/null
+KUBECONFIG="$supervisor_kubeconfig" kubectl config use-context hades-supervisor >/dev/null
 corefile=$(KUBECONFIG="$kubeconfig" kubectl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}')
 corefile=$(printf '%s\n' "$corefile" | awk '
   { print }
@@ -330,8 +330,8 @@ KUBECONFIG="$kubeconfig" kubectl -n kube-system patch service kube-dns --type=js
 KUBECONFIG="$kubeconfig" kubectl -n kube-system rollout status deployment/coredns --timeout=180s
 KUBECONFIG="$kubeconfig" kubectl -n kube-system wait --for=condition=Ready pod/range-http --timeout=90s
 KUBECONFIG="$kubeconfig" kubectl -n crucible-kind-peer wait --for=condition=Ready pod/peer-http --timeout=90s
-KUBECONFIG="$kubeconfig" kubectl -n crucible-workers wait \
-  --for=jsonpath='{.status.phase}'=Bound pvc/crucible-reference-cache --timeout=90s
+KUBECONFIG="$kubeconfig" kubectl -n hades-workers wait \
+  --for=jsonpath='{.status.phase}'=Bound pvc/hades-reference-cache --timeout=90s
 
 # Required even though the real registry path below is what proves resolution and pull.
 kind load docker-image "$worker_image" --name "$cluster"

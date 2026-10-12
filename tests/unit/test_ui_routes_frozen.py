@@ -37,6 +37,8 @@ FROZEN_ROUTES = [
     ("GET", "/ui/routing/models"),
     ("GET", "/ui/routing/tiers"),
     ("GET", "/ui/settings"),
+    # hades #169: the ordered first-run steps.
+    ("GET", "/ui/setup"),
     ("GET", "/ui/sign-in"),
     ("GET", "/ui/tasks"),
     ("GET", "/ui/tasks/{task_id}"),
@@ -49,6 +51,8 @@ FROZEN_ROUTES = [
     # hades #489: the card's note and phase actions.
     ("POST", "/ui/board/{task_id}/actions"),
     ("POST", "/ui/board/{task_id}/notes"),
+    # hades #576 (U9): a device token exchanged once for a UI session.
+    ("POST", "/ui/device-sign-in"),
     ("POST", "/ui/jobs"),
     ("POST", "/ui/jobs/{job_id}/run-now"),
     ("POST", "/ui/jobs/{job_id}/toggle"),

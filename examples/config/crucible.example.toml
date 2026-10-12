@@ -9,6 +9,9 @@ render_timezone = "UTC"            # operators set their own zone in private con
 artifact_root = "/var/lib/crucible/artifacts"
 # Process-local cap on simultaneous database-polling SSE log tails.
 max_sse_log_tails = 20
+# The image this service runs from, with its digest, for the Admin About block. Empty
+# shows "not reported". Example form: "<registry>/<repository>:<tag>@sha256:<digest>".
+image = ""
 
 [database]
 url = "postgresql+psycopg://crucible:CHANGE_ME@postgres:5432/crucible"

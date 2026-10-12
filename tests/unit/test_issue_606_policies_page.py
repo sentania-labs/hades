@@ -24,6 +24,7 @@ from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 from crucible.adapters.api.deps import unit_of_work
+from crucible.adapters.ui import render
 from crucible.adapters.ui import router as ui_router
 from crucible.adapters.ui.actions import handlers
 from crucible.adapters.ui.pages import policies as policies_page
@@ -164,12 +165,13 @@ def _form_fields(html: str) -> dict[str, str]:
     return found
 
 
-def test_the_page_is_registered_without_a_navigation_link() -> None:
+def test_the_page_is_registered_and_linked_under_admin() -> None:
     paths = {getattr(route, "path", "") for route in ui_router.router.routes}
     assert "/ui/policies" in paths
     assert "policy-publish" in handlers
-    render = Path(policies_page.__file__).parents[1] / "render.py"
-    assert '"/ui/policies"' not in render.read_text()
+    # hades #576 U5: the navigation task linked it under Admin.
+    admin = dict(render.NAV_GROUPS)["Admin"]
+    assert ("/ui/policies", "Policies") in admin
 
 
 def test_only_an_administrator_sees_the_page(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -222,10 +224,10 @@ def test_the_edit_form_has_plain_inputs_and_only_the_publish_reason(
     assert 'name="reason"' not in html
     assert "<textarea" not in html[html.index("policy-publish") :]
     assert 'name="publish_reason"' in html
-    # Phone width: the form is the shared auto-fitting grid and every table scrolls in
-    # its own wrapper, so nothing is wider than the screen.
+    # Phone width: the form is the shared auto-fitting grid and every table stacks into
+    # cards under 600 px (hades #576 U5), so nothing is wider than the screen.
     assert 'class="admin-form-grid"' in html
-    assert html.count("<table") == html.count('class="admin-table-wrap lat-table-scroll"')
+    assert html.count("<table") == html.count('class="admin-table lat-table neon-table"')
     assert "style=" not in html[html.index('<div class="admin-stack">') :]
 
 

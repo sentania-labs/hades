@@ -32,10 +32,10 @@ def test_settings_for_a_provider_that_is_off_are_not_listed() -> None:
     assert not [p for p in paths if p.startswith("kubernetes.") and p != "kubernetes.enabled"]
 
 
-def test_once_a_harness_is_ready_the_others_gaps_leave_the_to_do_list() -> None:
-    """Review of the first-run integration: Status must not read "ready" above a list of
-    what stands before a task. Other harnesses' gaps stay under Details."""
-    from crucible.adapters.ui.pages.dashboard import _readiness_sections  # noqa: PLC0415
+def test_once_a_harness_is_ready_the_others_gaps_stay_on_set_up() -> None:
+    """Review of the first-run integration, now on Set up (hades #169): a ready harness
+    reads ready, and another's gap is listed with the page that fixes it."""
+    from crucible.adapters.ui.pages.setup import _harness_rows  # noqa: PLC0415
 
     step = {"code": "credential_missing", "text": "codex has no credential.", "fix": "/ui/x"}
     codex = {"name": "codex", "state": "not_ready", "note": "", "steps": [step]}
@@ -48,17 +48,10 @@ def test_once_a_harness_is_ready_the_others_gaps_leave_the_to_do_list() -> None:
             codex,
         ],
     }
-    sections, (_summary, detail) = _readiness_sections(ready)
-    assert sections == []
-    assert ["codex", "not ready", step["text"], step["fix"]] in detail["rows"]
-    none_ready = {
-        **ready,
-        "ready": False,
-        "ready_harnesses": [],
-        "harnesses": [codex],
-    }
-    sections, _ = _readiness_sections(none_ready)
-    assert sections[0]["rows"] == [[step["text"], step["fix"]]]
+    rows = _harness_rows(ready)
+    assert rows[0][0] == "hermes" and rows[0][1]["value"] == "ready"
+    assert rows[1][0] == "codex" and rows[1][1]["value"] == "not ready"
+    assert rows[1][2] == step["text"] and rows[1][3]["href"] == step["fix"]
 
 
 def test_the_settings_page_shows_broad_egress_and_the_resolve_ttl(

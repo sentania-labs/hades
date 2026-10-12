@@ -139,7 +139,7 @@ def test_tasks_of_disabled_discarded_import_principals_are_hidden_unless_archive
 
     monkeypatch.setattr(tasks_mod, "_require", lambda *a, **k: (principal, "fixture-csrf"))
     monkeypatch.setattr(tasks_mod, "status", status_ns)
-    monkeypatch.setattr(tasks_mod, "_page", fake_page)
+    monkeypatch.setattr(tasks_mod, "work_page", fake_page)
 
     def _get_archived_false() -> Any:
         return tasks_mod.tasks_page(
@@ -383,7 +383,7 @@ def test_recently_updated_excludes_archived_before_limit(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(tasks_mod, "_require", lambda *a, **k: (principal, "fixture-csrf"))
     monkeypatch.setattr(tasks_mod, "status", SimpleNamespace(tasks=fake_status))
-    monkeypatch.setattr(tasks_mod, "_page", fake_page)
+    monkeypatch.setattr(tasks_mod, "work_page", fake_page)
 
     tasks_mod.tasks_page(
         Request(

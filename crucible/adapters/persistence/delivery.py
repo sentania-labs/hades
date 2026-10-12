@@ -587,6 +587,14 @@ class CICertifications:
 
 
 class CIDecisions:
+    def list_for_certifications(self, ids: list[str]) -> Sequence[CIDecision]:
+        if not ids:
+            return []
+        rows = self._s.scalars(
+            select(CIDecisionRow).where(CIDecisionRow.ci_certification_id.in_(ids))
+        ).all()
+        return [self._to_entity(row) for row in rows]
+
     def __init__(self, session: Session) -> None:
         self._s = session
 

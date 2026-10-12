@@ -1,10 +1,13 @@
 # Object names and namespaces. Empty keeps the kustomize base's layout: objects named
-# `crucible-*` in `crucible` and `crucible-workers`. The names also reach the settings the
+# `hades-*` in `hades` and `hades-workers` (hades #609 step 2). A deployment installed
+# with the earlier `crucible` defaults keeps its names by setting all three to them
+# (`crucible`, `crucible`, `crucible-workers`; docs/deployment.md, "Upgrading from
+# crucible names"). The names also reach the settings the
 # application reads (KUBERNETES__NAMESPACE, WORKERS_NAMESPACE, SERVICE_ACCOUNT,
 # CACHE_CLAIM and CREDENTIAL_SECRETS), so an override renames the deployment, not only
 # its metadata. `helm --namespace` holds only Helm's release record: the chart creates
-# its own namespaces, so set namespaceOverride instead. Hades's BuildKit keeps
-# `crucible-buildkit` whatever these say, because the provider names it as a constant.
+# its own namespaces, so set namespaceOverride instead. Hades's BuildKit has its own
+# namespace, buildkit.namespace below.
 # At most 43 characters: `<name>-postgres` must leave room for its StatefulSet's
 # revision hash inside a 63-character label.
 nameOverride: ""
@@ -24,7 +27,7 @@ workerImage:
 postgres:
   bundled: true
   image: postgres:16@sha256:f1c3376c26f2609ab9f29f71f824103fe2fcd8ee0346485cb6122a4f93df6f94
-  databaseSecretName: crucible-database
+  databaseSecretName: hades-database
   # The bundled server's role and database. The DSN in the database Secret's `url` names
   # the same two.
   user: crucible
@@ -46,7 +49,7 @@ storage:
   # ReadWriteOnce, in the workers namespace.
   referenceCacheStorageClass: ""
   referenceCacheSize: 20Gi
-  # ReadWriteOnce, in `crucible-buildkit`; rendered only when buildkit.enabled.
+  # ReadWriteOnce, in buildkit.namespace; rendered only when buildkit.enabled.
   buildkitCacheStorageClass: ""
   buildkitCacheSize: 50Gi
 # Hades's rootless BuildKit (hades #475): a namespace that enforces the `privileged`
@@ -54,6 +57,12 @@ storage:
 # default, because a new privileged namespace is the cluster operator's call.
 buildkit:
   enabled: false
+  # Its namespace, Service, Deployment, claim prefix and Pod label, and the
+  # KUBERNETES__BUILDKIT_NAMESPACE setting the provider reads. Rendered into the settings
+  # whether or not BuildKit is enabled here, so a BuildKit installed some other way is
+  # still found. With `enabled`, it must not be the service's or the workers' namespace:
+  # the chart refuses to render a second, privileged copy of either.
+  namespace: hades-buildkit
 # Facts about the cluster the provider's NetworkPolicies and Pods depend on (26).
 cluster:
   # The cluster DNS Service address: `kubectl -n kube-system get service kube-dns`.
@@ -91,11 +100,11 @@ workerQuota:
   limitsCpu: "6"
   limitsMemory: 12Gi
 secrets:
-  githubApp: crucible-github-app
+  githubApp: hades-github-app
   # Empty names use githubApp; overrides mount app.pem and webhook.secret respectively.
   githubAppPrivateKey: ""
   githubAppWebhook: ""
-  firstRunToken: crucible-first-run-admin
+  firstRunToken: hades-first-run-admin
 # The Kubernetes attempt provider (26): each attempt's workspace claim, how many attempts
 # run at once, and how long each role may take.
 provider:

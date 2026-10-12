@@ -17,9 +17,10 @@ CHART = ROOT / "charts/hades"
 VALUE_REFERENCE = re.compile(r"\.Values\.([A-Za-z0-9_.]+)")
 # The name helpers render the kustomize base's names when no override is set.
 DEFAULT_NAMES = {
-    '{{ include "hades.name" . }}': "crucible",
-    '{{ include "hades.namespace" . }}': "crucible",
-    '{{ include "hades.workersNamespace" . }}': "crucible-workers",
+    '{{ include "hades.name" . }}': "hades",
+    '{{ include "hades.namespace" . }}': "hades",
+    '{{ include "hades.workersNamespace" . }}': "hades-workers",
+    "{{ .Values.buildkit.namespace }}": "hades-buildkit",
 }
 
 
@@ -185,11 +186,11 @@ def test_migration_name_normalization_preserves_image_drift(tmp_path: Path) -> N
     job: dict[str, Any] = {
         "apiVersion": "batch/v1",
         "kind": "Job",
-        "metadata": {"name": "crucible-migrate", "namespace": "crucible"},
+        "metadata": {"name": "hades-migrate", "namespace": "hades"},
         "spec": {"template": {"spec": {"containers": [{"name": "migrate", "image": "svc:v1"}]}}},
     }
     source.write_text(yaml.safe_dump(job))
-    job["metadata"]["name"] = "crucible-migrate-2"
+    job["metadata"]["name"] = "hades-migrate-2"
     chart.write_text(yaml.safe_dump(job))
     assert objects(source) == objects(chart)
     chart.write_text(chart.read_text().replace("svc:v1", "svc:v2"))
