@@ -70,7 +70,6 @@ def k8s_provider(k8s_api: FakeKubernetesApi) -> KubernetesProvider:
         KubernetesConfig(
             poll_interval_seconds=0,
             launch_timeout_seconds=5,
-            workspace_ephemeral_class="lab-ssd",
             extra_image_allowlist=("ghcr.io/sentania-labs/crucible-worker:*",),
         ),
         k8s_api,  # type: ignore[arg-type]

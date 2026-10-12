@@ -40,7 +40,6 @@ async def test_an_already_known_job_without_egress_state_adopts_and_refreshes() 
     config = KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         resolve_ttl_seconds=0,
     )

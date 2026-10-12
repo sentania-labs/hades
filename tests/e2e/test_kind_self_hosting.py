@@ -277,7 +277,6 @@ def _repository(name: str) -> str:
 def _provider(client: CreateRecordingClient, image: str) -> KubernetesProvider:
     return KubernetesProvider(
         KubernetesConfig(
-            workspace_ephemeral_class="standard",
             workspace_ephemeral_size="4Gi",
             cache_claim="hades-reference-cache",
             poll_interval_seconds=0.5,

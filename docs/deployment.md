@@ -62,7 +62,7 @@ Spec 26's checklist, made concrete. Each row is either a placeholder in
 |---|---|---|
 | 1 | Nothing: the three namespaces (`hades`, `hades-workers`, `hades-buildkit`), their Pod Security admission labels and the default-deny NetworkPolicy are in the base and are applied by this Application | - |
 | 2 | A CNI that enforces egress NetworkPolicy, on which the worker DNS and local endpoint rules match | verified by the readiness canary, shown on the status page; on Cilium with kube-proxy replacement, see "Cilium and an in-cluster LiteLLM" below |
-| 3 | A `ReadWriteOnce` storage class for PostgreSQL, the reference cache and optional generic ephemeral Pod scratch | `REPLACE_ME_STORAGE_CLASS_RWO` |
+| 3 | A `ReadWriteOnce` storage class for PostgreSQL and the reference cache | `REPLACE_ME_STORAGE_CLASS_RWO` |
 | 3a | A `ReadWriteOnce` claim for Hades's own BuildKit layer cache (hades #475, "Hades's image builder" below). The base requests 50 GiB; size it in the overlay the way `storage.yaml` sizes the others. The node pulls `moby/buildkit:<version>-rootless` from Docker Hub (images/pins.env `BUILDKIT_ROOTLESS_IMAGE`); a cluster without that route mirrors it | `base/buildkit/buildkit.yaml` |
 | 3b | A `ReadWriteMany` storage class for the artifact root | `REPLACE_ME_STORAGE_CLASS_RWX` |
 | 4 | A pod PID limit configured on every node that can run a `hades-workers` Pod (the kubelet's `podPidsLimit`; Kubernetes has no per-pod PID field, issue 60) | reported on the status page when the canary can see it; the provider refuses to launch without a confirmed one (95: on a runtime that isolates the pod's cgroup from the container, the canary cannot see it at all, and lab-admin attests to it with `kubernetes.pod_pid_limit_override` instead) |
@@ -116,7 +116,7 @@ reproducibility check runs inside Hades.
 | `REPLACE_ME_LAB_DOMAIN` | `overlays/lab/ingress.yaml` | the domain the API host sits under; the host becomes `crucible.<domain>` |
 | `REPLACE_ME_INGRESS_CLASS` | `overlays/lab/ingress.yaml` | the cluster's ingress class name |
 | `REPLACE_ME_CERT_ISSUER_ANNOTATION` and `REPLACE_ME_CERT_ISSUER_NAME` | `overlays/lab/ingress.yaml` | the annotation the cluster's certificate issuer watches, and the issuer's name. Delete the annotation entirely if certificates are provisioned some other way; the TLS Secret is `hades-tls` either way |
-| `REPLACE_ME_STORAGE_CLASS_RWO` | `overlays/lab/storage.yaml`, `overlays/lab/settings.yaml` | a `ReadWriteOnce` class for manifest-owned claims and, when selected, generic ephemeral Pod scratch |
+| `REPLACE_ME_STORAGE_CLASS_RWO` | `overlays/lab/storage.yaml` | a `ReadWriteOnce` class for manifest-owned claims |
 | `REPLACE_ME_STORAGE_CLASS_RWX` | `overlays/lab/storage.yaml` | a `ReadWriteMany` class, for the artifact root the api serves and the supervisor writes |
 | `REPLACE_ME_CLUSTER_DNS_IP` | `overlays/lab/settings.yaml` | `kubectl -n kube-system get service kube-dns -o jsonpath='{.spec.clusterIP}'` |
 | `REPLACE_ME_RENDER_TIMEZONE` | `overlays/lab/settings.yaml` | the operator's IANA zone. Stored time is UTC; this is only how it is rendered (01) |
@@ -257,11 +257,6 @@ default policy the sizing rule is:
 
 ```
 count/jobs.batch    = 5N + 2      (5 Jobs per attempt + 2 publisher headroom)
-persistentvolumeclaims = 4N       (no attempt claim, ADR 0033: a named workspaceEphemeral
-                                  class makes one Pod-owned claim per running role Pod,
-                                  an empty class none; 4N covers every role Pod an
-                                  attempt may have alive at once beside the reference
-                                  cache claim)
 requests.cpu        = N           (2 CPU limit x 0.5 fraction = 1 CPU per attempt)
 limits.cpu          = 2N          (2 CPU limit per attempt)
 requests.memory     = 4N GiB      (4 GiB per attempt)
@@ -629,7 +624,7 @@ what they replace in the overlay:
 | `cluster.localEndpoint.namespace`, `.podLabels`, `.port`, `.cidrs` | the `REPLACE_ME_LOCAL_ENDPOINT_*` placeholders (see "Cilium and an in-cluster LiteLLM") |
 | `cluster.podPidLimitOverride` | `kubernetes.pod_pid_limit_override` (checklist item 4); 0 leaves it out |
 | `cluster.imagePullSecret` | `REPLACE_ME_IMAGE_PULL_SECRET`: the setting the provider gives every attempt Pod, and `imagePullSecrets` on the api, supervisor and migration Pods. Empty when the packages are public. It, `postgres.databaseSecretName` and the `secrets` names take any Secret name, periods included |
-| `provider.workspaceEphemeral`, `provider.maxConcurrency`, `provider.*TimeoutSeconds` | the attempt provider: each Pod's bounded scratch (`emptyDir` for an empty class, otherwise a generic ephemeral volume), how many attempts run at once, and the launch, prepare, collector and verifier timeouts. `roomRunner` is only the rooms |
+| `provider.workspaceEphemeral.size`, `provider.maxConcurrency`, `provider.*TimeoutSeconds` | the attempt provider: each Pod's bounded `emptyDir` scratch, how many attempts run at once, and the launch, prepare, collector and verifier timeouts. `roomRunner` is only the rooms |
 | `storage.artifactsStorageClass`, `storage.referenceCacheStorageClass`, `storage.buildkitCacheStorageClass`, `postgres.storageClass` | one class per claim: `REPLACE_ME_STORAGE_CLASS_RWX` for the artifact root, a `ReadWriteOnce` class for the others. An empty per-claim class falls back to `storage.storageClass`, and an empty one of those to the cluster's default |
 | `postgres.user`, `postgres.database` | the bundled server's role and database; the DSN in the database Secret names the same two |
 | `buildkit.enabled`, `buildkit.namespace` | Hades's BuildKit ("Hades's image builder" above). Off by default: it creates `buildkit.namespace` (`hades-buildkit`), a namespace at the `privileged` Pod Security level, which is the cluster operator's decision. The namespace, its Service and Deployment and its Pods' `app.kubernetes.io/name` label all carry that one name, whatever `nameOverride` says, and it reaches the provider as `KUBERNETES__BUILDKIT_NAMESPACE` whether or not this chart renders BuildKit; its NetworkPolicy admits the workers namespace the values name |

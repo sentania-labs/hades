@@ -89,8 +89,7 @@ hades #370 the record says:
   end time or termination detail is recorded, no retry is consumed, and the
   refusal (the 403 body or the `FailedCreate` event's message) is the
   `detail` of the `harness_launch_deferred` event verbatim. A later tick
-  launches it again (hades #423 for the claim and the Jobs; #370 for the
-  rest). Deleting the orphan claims that filled the quota is hades #394.
+  launches it again (hades #423 for the Jobs; #370 for the rest).
 - **a correction names its resume source.** When a correction's preparer
   fails, the detail and the wake say what it was resuming from, the remote
   work branch (`crucible/<id>`) or the preceding attempt's sealed bundle

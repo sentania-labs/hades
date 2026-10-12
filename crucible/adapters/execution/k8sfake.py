@@ -73,11 +73,13 @@ from crucible.adapters.execution.scripts import (
     COLLECT_MARKER,
     DELIVER_MARKER,
     MERGE_MAIN_MARKER,
+    PREPARED_HEAD_MARKER,
     PUBLISH_BUNDLE_LEAF,
     PUBLISH_LEAF,
     PUBLISH_LEAF_MARKER,
     RESUME_DELIVERY_MARKER,
     REVIEW_DIFF_DIR,
+    STARTED_FROM_MARKER,
 )
 from crucible.domain.acceptance_checks import verifier_checks
 from crucible.domain.time import parse_rfc3339
@@ -1022,6 +1024,11 @@ class FakeKubernetesApi:
         if not self.claims_suppress_head:
             claim["output/prepared-head.txt"] = (synthetic_head_sha(attempt_id) + "\n").encode()
         claim["output/started-from.txt"] = b"main\n"
+        if PREPARED_HEAD_MARKER in script and not self.claims_suppress_head:
+            self.logs[obj.name] = [
+                PREPARED_HEAD_MARKER + synthetic_head_sha(attempt_id),
+                STARTED_FROM_MARKER + "main",
+            ]
         claim["repo/.git/HEAD"] = b"ref: refs/heads/crucible\n"
         self._finish(obj, 0)
 

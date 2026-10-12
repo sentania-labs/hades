@@ -367,6 +367,10 @@ CLONE_URL={_quote(url)}
 {credential}{_cache_refresh(cache_dir)}"""
 
 
+PREPARED_HEAD_MARKER = "crucible-prepared-head="
+STARTED_FROM_MARKER = "crucible-started-from="
+
+
 def preparer_script(
     *,
     url: str,
@@ -626,6 +630,8 @@ mkdir -p "$OUT"
 {GIT} rev-parse HEAD > "$OUT/prepared-head.txt"
 printf '%s\n' "$STARTED" > "$OUT/started-from.txt"
 printf '%s\n' "$POLICY_FROM_SHA" > "$OUT/prepared-policy-from.txt"
+printf '{PREPARED_HEAD_MARKER}%s\n' "$({GIT} rev-parse HEAD)"
+printf '{STARTED_FROM_MARKER}%s\n' "$STARTED"
 """
 
 

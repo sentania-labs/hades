@@ -631,7 +631,6 @@ async def test_every_git_role_pod_is_selected_by_a_policy_that_allows_the_git_ho
         config=KubernetesConfig(
             poll_interval_seconds=0,
             launch_timeout_seconds=5,
-            workspace_ephemeral_class="lab-ssd",
             cache_claim="crucible-reference-cache",
         )
     )
@@ -687,7 +686,6 @@ async def test_a_pod_resolves_its_hosts_to_the_addresses_its_policy_was_written_
         config=KubernetesConfig(
             poll_interval_seconds=0,
             launch_timeout_seconds=5,
-            workspace_ephemeral_class="lab-ssd",
             cache_claim="crucible-reference-cache",
         ),
         resolver=rotating,

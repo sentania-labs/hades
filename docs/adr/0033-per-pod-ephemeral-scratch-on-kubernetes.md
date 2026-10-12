@@ -16,10 +16,8 @@ read it. Collection must finish while the worker Pod and its checkout still exis
 
 ## Decision
 
-1. Every Kubernetes role Pod gets a `ws` scratch volume of its own. With no class it is
-   an `emptyDir` with `sizeLimit`. With a configured class it is a generic ephemeral
-   volume with the same requested size. `provider.workspaceEphemeral` is the chart's
-   one workspace setting and contains `class` and `size`.
+1. Every Kubernetes role Pod gets a size-limited `emptyDir` named `ws` as scratch.
+   `provider.workspaceEphemeral.size` is its one deploy-time setting.
 2. No attempt-scoped PersistentVolumeClaim is created. The artifact and reference-cache
    claims are unchanged. No Pod inherits another Pod's files.
 3. Checkout preparation is an init container of the worker Pod, `workspace-prepare`.
@@ -89,10 +87,8 @@ read it. Collection must finish while the worker Pod and its checkout still exis
 
 ## Consequences
 
-The cluster no longer needs ReadWriteMany storage for attempt workspaces and attempt
-count no longer consumes persistent claim quota. Generic ephemeral storage can still
-consume storage capacity selected by its class. `emptyDir` consumes node ephemeral
-storage. Operators size either form with the same `size` value.
+The cluster no longer needs storage or claim quota for attempt workspaces. `emptyDir`
+consumes node ephemeral storage, bounded by the configured `size` value.
 
 Collection survives normal exits and supervised timeouts because it runs before the
 worker Pod is removed. Collection now needs the supervisor: a collector that is never

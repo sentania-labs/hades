@@ -137,7 +137,6 @@ def _config(*, broad_egress: bool) -> KubernetesConfig:
     return KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         broad_egress=broad_egress,
     )

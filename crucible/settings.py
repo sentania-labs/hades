@@ -113,7 +113,6 @@ class KubernetesSettings(BaseModel):
     kubeconfig_context: str | None = None
     api_timeout_seconds: float = 30.0
     service_account: str = "hades-worker"
-    workspace_ephemeral_class: str = ""
     workspace_ephemeral_size: str = "20Gi"
     image_pull_secret: str | None = None
     # The cluster-side PersistentVolumeClaim holding the git reference cache the

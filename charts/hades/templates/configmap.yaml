@@ -54,10 +54,6 @@ CRUCIBLE_KUBERNETES__CACHE_CLAIM: {{ printf "%s-reference-cache" $name | quote }
 CRUCIBLE_KUBERNETES__BUILDKIT_NAMESPACE: {{ .Values.buildkit.namespace | quote }}
 CRUCIBLE_KUBERNETES__USE_REFERENCE_CACHE: "true"
 CRUCIBLE_KUBERNETES__WORKSPACE_EPHEMERAL_SIZE: {{ .Values.provider.workspaceEphemeral.size | quote }}
-# A named class selects a generic ephemeral volume; empty selects emptyDir.
-{{- if .Values.provider.workspaceEphemeral.class }}
-CRUCIBLE_KUBERNETES__WORKSPACE_EPHEMERAL_CLASS: {{ .Values.provider.workspaceEphemeral.class | quote }}
-{{- end }}
 # The pull Secret every attempt Pod names, in the workers namespace.
 {{- if .Values.cluster.imagePullSecret }}
 CRUCIBLE_KUBERNETES__IMAGE_PULL_SECRET: {{ .Values.cluster.imagePullSecret | quote }}

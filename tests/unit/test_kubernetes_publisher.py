@@ -80,7 +80,6 @@ def _setup(
         config=KubernetesConfig(
             poll_interval_seconds=0,
             launch_timeout_seconds=5,
-            workspace_ephemeral_class="lab-ssd",
             probe_image=IMAGE,
         ),
         **api_kwargs,

@@ -15,12 +15,10 @@ every provider implements; this document is the Kubernetes provider's
 mechanics, in the same order as 08's Docker section, plus what the cluster
 must guarantee before a worker runs there.
 
-ADR 0033 changes the workspace mechanics. Every role Pod has a `ws` volume that is
-removed with that Pod. It is a size-limited `emptyDir` by default, or a generic
-ephemeral volume when `kubernetes.workspace_ephemeral_class` is set. Both use
-`kubernetes.workspace_ephemeral_size`. The artifact and reference-cache claims remain
-persistent. No attempt PVC is created and no Pod mounts or inherits another Pod's
-files.
+ADR 0033 changes the workspace mechanics. Every role Pod has a size-limited `emptyDir`
+named `ws`, removed with that Pod. `kubernetes.workspace_ephemeral_size` is its only
+deploy-time setting. The artifact and reference-cache claims remain persistent. No
+attempt PVC is created and no Pod mounts or inherits another Pod's files.
 
 The worker Pod contains `workspace-prepare` as an init container, the agent as
 `crucible`, and the collector as `collector`. The init container clones into that Pod's
@@ -89,7 +87,7 @@ per attempt by the supervisor through the Kubernetes API.
 The supervisor's ServiceAccount is bound to a Role in `crucible-workers`
 that permits create, get, list, watch, patch, and delete on Jobs, and create, get,
 list, watch, and delete on Pods and
-ConfigMaps, Secrets, and PersistentVolumeClaims, plus `pods/log` and
+ConfigMaps and Secrets, plus `pods/log` and
 `pods/exec` for log tail and the login flow, and nothing in any other
 namespace. It has no cluster-scoped permissions.
 
@@ -99,7 +97,7 @@ carries and what a unit test holds it to (C9):
 | Resource | Verbs |
 |---|---|
 | `pods`, `configmaps` | create, get, list, watch, delete |
-| `secrets`, `persistentvolumeclaims` | create, get, list, watch, **patch**, delete |
+| `secrets` | create, get, list, watch, **patch**, delete |
 | `pods/log` | get |
 | `pods/exec` | create, get |
 | `resourcequotas`, `events` | get, list |
@@ -276,7 +274,7 @@ terminationGracePeriodSeconds: <policy grace>
 The mount paths are the ones `crucible/ports/execution.py` defines and the
 identity bundle names (06): a worker is told its checkout is at
 `/crucible/repo` and its report directory at `/crucible/report`, so those are
-where they are mounted. Only the preparer gets the whole claim, at
+where they are mounted. Only the preparer gets the whole scratch volume, at
 `/crucible/work`, the way the Docker preparer gets the whole workspace (08).
 (Corrected 2026-09-21 during C8a; the draft named one `/crucible/workspace`
 mount, which would have contradicted the bundle every worker reads.)
@@ -621,7 +619,7 @@ values it last proved. (Added 2026-09-23 for crucible#91.)
 **Readiness.** If the cluster's CNI does not enforce egress NetworkPolicy, the
 provider refuses to launch: readiness of the namespace is probed by two canary
 pods, one after the other, and the result is recorded and shown on the admin
-status page (25). The gate is consulted in `prepare`, before the claim, the
+status page (25). The gate is consulted in `prepare`, before the identity ConfigMap, the
 per-attempt credential Secret or the preparer Job (which has GitHub egress)
 exist, and again in `launch`; a credential probe consults it before it creates
 anything too. (Made concrete 2026-09-25, issue 59.)
@@ -801,7 +799,7 @@ the namespace. A deployment therefore names one exact, pullable reference in
   and per-attempt Secrets under every cleanup policy, then release the lease. Deleting
   the Pod deletes its scratch. `release_workspace` is a compatibility cleanup with no
   retained Kubernetes workspace to release.
-- An attempt that ended before its worker launched has no workspace claim to leak.
+- An attempt that ended before its worker launched has no workspace volume to leak.
   Cleanup removes any labelled objects and Secrets left by preparation or launch.
 - `reconcile`: list Jobs by label; a Job with no live attempt row is
   orphaned and deleted; a live attempt with no Job is `lost`. A Job still

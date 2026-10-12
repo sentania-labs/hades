@@ -495,26 +495,9 @@ DRAIN_SCRIPT = "kill -TERM -1 2>/dev/null; kill -TERM 1 2>/dev/null; exit 0"
 KILL_SCRIPT = "kill -KILL -1 2>/dev/null; kill -TERM 1 2>/dev/null; exit 0"
 
 
-def workspace_volume(*, size: str, storage_class: str = "") -> dict[str, Any]:
-    """One Pod's bounded scratch, never an attempt-scoped claim.
-
-    An explicitly configured class uses a generic ephemeral volume. Otherwise the
-    kubelet supplies a size-limited ``emptyDir`` that is removed with the Pod.
-    """
-    if not storage_class:
-        return {"name": "ws", "emptyDir": {"sizeLimit": size}}
-    return {
-        "name": "ws",
-        "ephemeral": {
-            "volumeClaimTemplate": {
-                "spec": {
-                    "accessModes": ["ReadWriteOnce"],
-                    "resources": {"requests": {"storage": size}},
-                    "storageClassName": storage_class,
-                }
-            }
-        },
-    }
+def workspace_volume(*, size: str) -> dict[str, Any]:
+    """One Pod's bounded ``emptyDir`` scratch, removed with the Pod."""
+    return {"name": "ws", "emptyDir": {"sizeLimit": size}}
 
 
 # ----- declared test services (hades #558, #85) -----------------------------
