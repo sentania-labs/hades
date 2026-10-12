@@ -1085,7 +1085,10 @@ async def test_a_launched_attempt_records_limits_read_from_its_pod() -> None:
     evidence = next(a for a in outputs.artifacts if a.name == "report/kubernetes-launch.json")
     document = json.loads(evidence.content)
     assert document["limits_source"] == "pod"
-    assert document["limits"] == provider._limits(launch).as_dict()
+    assert document["limits"] == {
+        **provider._limits(launch).as_dict(),
+        "ephemeral_storage": str(22 * 1024**3),
+    }
 
 
 async def test_reconcile_does_not_adopt_a_finished_job_with_no_pod() -> None:

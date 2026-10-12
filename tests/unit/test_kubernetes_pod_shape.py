@@ -100,12 +100,16 @@ async def test_the_limits_come_from_policy_and_the_grace_period_with_them(
     resources = pod["containers"][0]["resources"]
     assert resources["limits"]["cpu"] == "2000m"
     assert resources["limits"]["memory"] == str(4 * 1024**3)
-    assert resources["limits"]["ephemeral-storage"] == "2Gi"
+    assert resources["limits"]["ephemeral-storage"] == str(22 * 1024**3)
     # CPU requests default to half the limit (issue 93), so a small cluster schedules a
     # Burstable pod instead of demanding the whole limit up front. Memory still requests
     # equal to its limit by default: a worker promised the policy's memory is not the
     # first thing evicted, which would show up as a `lost` attempt nobody caused (16).
-    assert resources["requests"] == {"cpu": "1000m", "memory": str(4 * 1024**3)}
+    assert resources["requests"] == {
+        "cpu": "1000m",
+        "memory": str(4 * 1024**3),
+        "ephemeral-storage": str(22 * 1024**3),
+    }
     assert pod["terminationGracePeriodSeconds"] == 30
 
 
@@ -139,9 +143,13 @@ async def test_the_request_fractions_are_configurable_per_policy() -> None:
     assert resources["limits"] == {
         "cpu": "4000m",
         "memory": str(8 * 1024**3),
-        "ephemeral-storage": "2Gi",
+        "ephemeral-storage": str(22 * 1024**3),
     }
-    assert resources["requests"] == {"cpu": "1000m", "memory": str(4 * 1024**3)}
+    assert resources["requests"] == {
+        "cpu": "1000m",
+        "memory": str(4 * 1024**3),
+        "ephemeral-storage": str(22 * 1024**3),
+    }
     init = pod["initContainers"][0]
     assert init["resources"]["requests"] == {"cpu": "1000m", "memory": str(4 * 1024**3)}
 

@@ -19,6 +19,10 @@ ADR 0033 changes the workspace mechanics. Every role Pod has a size-limited `emp
 named `ws`, removed with that Pod. `kubernetes.workspace_ephemeral_size` is its only
 deploy-time setting. The artifact and reference-cache claims remain persistent. No
 attempt PVC is created and no Pod mounts or inherits another Pod's files.
+The main container requests and limits ephemeral storage equal to the workspace size
+plus the policy allowance for logs and writable layers (20Gi + 2Gi by default).
+The workspace is counted once per Pod, including during checkout initialization;
+collector and init containers keep their own policy limits.
 
 The worker Pod contains `workspace-prepare` as an init container, the agent as
 `crucible`, and the collector as `collector`. The init container clones into that Pod's

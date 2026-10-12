@@ -18,6 +18,9 @@ read it. Collection must finish while the worker Pod and its checkout still exis
 
 1. Every Kubernetes role Pod gets a size-limited `emptyDir` named `ws` as scratch.
    `provider.workspaceEphemeral.size` is its one deploy-time setting.
+   Each Pod reserves and limits that capacity in addition to the policy ephemeral
+   storage allowance for logs and writable layers. The shared workspace is charged
+   once on the main container, not again on its init containers or collector.
 2. No attempt-scoped PersistentVolumeClaim is created. The artifact and reference-cache
    claims are unchanged. No Pod inherits another Pod's files.
 3. Checkout preparation is an init container of the worker Pod, `workspace-prepare`.

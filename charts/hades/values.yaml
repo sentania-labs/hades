@@ -106,7 +106,8 @@ secrets:
   firstRunToken: hades-first-run-admin
 # The Kubernetes attempt provider (26): per-Pod scratch, concurrency and role timeouts.
 provider:
-  # Every role Pod gets its own size-limited emptyDir.
+  # Every role Pod gets its own size-limited emptyDir. Its main container requests
+  # and limits this size plus the policy ephemeral storage allowance (default 2Gi).
   workspaceEphemeral:
     size: 20Gi
   maxConcurrency: 3

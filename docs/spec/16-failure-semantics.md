@@ -250,6 +250,10 @@ the cancel (hades #189, 2026-09-28).
 
 ## Cleanup policy (per policy document, 05b)
 
+Pods request and limit the workspace capacity plus the policy ephemeral storage
+allowance, so a full workspace does not consume the allowance for logs and writable
+layers. Node disk pressure can still evict a Pod.
+
 ADR 0033 removes retained workspaces from the Kubernetes provider. Its scratch belongs
 to one Pod and is deleted with that Pod, so `workspace_on_success` and
 `workspace_on_failure`, `keep`, `keep_diff_only`, `attempt_cleaned_up` workspace events

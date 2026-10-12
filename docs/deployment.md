@@ -631,6 +631,12 @@ what they replace in the overlay:
 | `workerQuota.*` | the `hades-workers` ResourceQuota ("ResourceQuota sizing" above) |
 | `extraSettings` | any other `CRUCIBLE_*` setting, as a string, merged into the settings ConfigMap last, so a key here replaces the chart's own value for it (for example `CRUCIBLE_SUPERVISOR__HOLDER`) |
 
+Each role Pod's main container reserves node ephemeral storage equal to
+`provider.workspaceEphemeral.size` plus the policy allowance for logs and writable
+layers: 22Gi by default. Additional containers keep their own policy allowances but
+share the workspace reservation. Size node capacity for concurrent role Pods;
+insufficient allocatable storage leaves Pods Pending.
+
 Helm merges a map value into the chart's default, so a `cluster.dnsPodLabels` or
 `cluster.localEndpoint.podLabels` that should lose the default's key sets that key to
 `null`.
