@@ -115,6 +115,7 @@ async def setup_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         principal,
         csrf,
         active="/ui/setup",
+        data_page="setup",
         heading="Set up",
         intro=(
             f"{remaining} of {len(steps)} first-run steps to do. Do them in order; each "

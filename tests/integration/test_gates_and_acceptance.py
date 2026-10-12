@@ -257,10 +257,14 @@ async def test_a_secret_in_the_diff_is_never_stored(
     attempt_id = latest_attempt(client, task_id)
     rows = client.get(f"/v1/attempts/{attempt_id}/gates").json()["items"]
     detail = next(r["detail"] for r in rows if r["gate"] == GateName.NO_SECRETS)
-    assert "github_token" in detail and "ghp_" not in detail
+    # FDY-0618: the detail shows the value's first four and last three characters and its
+    # length, never the value (the fake's, built here as it builds it).
+    value = "gh" + "p_" + "A" * 36
+    assert "rule github_token" in detail and "ghp_...AAA (40 chars)" in detail
+    assert value not in detail
     for artifact in client.get(f"/v1/attempts/{attempt_id}/artifacts").json()["items"]:
         content = client.get(f"/v1/artifacts/{artifact['id']}/content").text
-        assert "ghp_" not in content
+        assert value not in content
 
 
 async def test_correction_loop_from_pre_pr_gates_failed(

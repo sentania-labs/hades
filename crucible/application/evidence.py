@@ -29,7 +29,14 @@ from crucible.domain.entities import Artifact, Attempt, EvidenceRecord, Task
 from crucible.domain.events import PRINCIPAL_CRUCIBLE, EventKind
 from crucible.domain.gates import injected_name
 from crucible.domain.ids import new_id
-from crucible.domain.secrets import find_secrets, match_text, redact
+from crucible.domain.secret_findings import (
+    TRANSCRIPT_WINDOW_ARTIFACT,
+    TRANSCRIPT_WINDOW_TYPE,
+    is_transcript,
+    transcript_command,
+    window_document,
+)
+from crucible.domain.secrets import SecretMatch, find_secrets, match_lines, redact
 from crucible.ports.artifacts import ArtifactStore, SecretInArtifactError
 from crucible.ports.clock import Clock
 from crucible.ports.execution import (
@@ -182,65 +189,135 @@ def claim_facts(task: Task, outputs: CollectedOutputs) -> ClaimFacts:
     )
 
 
+def _finding(match: SecretMatch, where: str | None = None) -> dict[str, Any]:
+    """One match as the scanner_result row keeps it (FDY-0618): input, line, rule, the
+    abbreviated value and the redacted text around it, never the value."""
+    finding: dict[str, Any] = {
+        "where": where or match.path,
+        "pattern": match.pattern,
+        "excerpt": match.excerpt,
+    }
+    if match.line is not None:
+        finding["line"] = match.line
+    if match.context:
+        finding["context"] = match.context
+    if match.advisory:
+        finding["advisory"] = True
+    return finding
+
+
 def _scanner_findings(
     outputs: CollectedOutputs, claim: dict[str, Any] | None
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """The secret scanner over the diff, every commit message, and the report (11).
 
-    A finding names where and which pattern, never the value."""
-    findings: list[dict[str, str]] = []
+    A finding names where, which line and which pattern, never the value. A value the
+    repository declares as a fixture makes its match advisory (FDY-0618)."""
+    declared = outputs.secret_declarations
+    fixture = declared.is_fixture if declared is not None else None
+    findings: list[dict[str, Any]] = []
     if claim is not None:
         findings.extend(
-            {
-                "where": f"report.{m.path}" if m.path else "report",
-                "pattern": m.pattern,
-                "excerpt": m.excerpt,
-            }
-            for m in find_secrets(claim)
+            _finding(m, f"report.{m.path}" if m.path else "report")
+            for m in find_secrets(claim, fixture=fixture)
         )
     elif outputs.report_raw:
         # A report that did not parse is still the worker's text, and its parse error
         # goes to the reviewer (ADR 0024).
-        hit = match_text(outputs.report_raw, path="report")
-        if hit:
-            findings.append({"where": hit.path, "pattern": hit.pattern, "excerpt": hit.excerpt})
+        findings.extend(
+            _finding(hit)
+            for hit in match_lines(outputs.report_raw, path="report", fixture=fixture, limit=None)
+        )
     if outputs.blocked_md:
-        hit = match_text(outputs.blocked_md, path="report/blocked.md")
-        if hit:
-            findings.append({"where": hit.path, "pattern": hit.pattern, "excerpt": hit.excerpt})
+        findings.extend(
+            _finding(hit)
+            for hit in match_lines(
+                outputs.blocked_md, path="report/blocked.md", fixture=fixture, limit=None
+            )
+        )
     if outputs.diff_text is not None:
         # The content, not the path list: a credential committed into a file is what
         # this gate exists to catch (11).
-        hit = match_text(outputs.diff_text, path="diff")
-        if hit:
-            findings.append({"where": hit.path, "pattern": hit.pattern, "excerpt": hit.excerpt})
+        findings.extend(
+            _finding(hit)
+            for hit in match_lines(outputs.diff_text, path="diff", fixture=fixture, limit=None)
+        )
     if outputs.diff_findings is not None:
         # hades #398: the adapter streamed the whole diff and every blob the worker
-        # added or changed through the scanner; each match names its path.
-        findings.extend(
-            {"where": m.path, "pattern": m.pattern, "excerpt": m.excerpt}
-            for m in outputs.diff_findings
-        )
+        # added or changed through the scanner; each match names its path and line.
+        findings.extend(_finding(m) for m in outputs.diff_findings)
     for path in outputs.diff_paths:
-        hit = match_text(path, path=f"diff-path:{path}")
-        if hit:
-            findings.append({"where": hit.path, "pattern": hit.pattern, "excerpt": hit.excerpt})
+        findings.extend(
+            _finding(hit)
+            for hit in match_lines(path, path=f"diff-path:{path}", fixture=fixture, limit=None)
+        )
     if outputs.bundle is not None:
         for index, message in enumerate(outputs.bundle.commit_messages):
-            hit = match_text(message, path=f"commit[{index}].message")
-            if hit:
-                findings.append({"where": hit.path, "pattern": hit.pattern, "excerpt": hit.excerpt})
+            findings.extend(
+                _finding(hit)
+                for hit in match_lines(
+                    message, path=f"commit[{index}].message", fixture=fixture, limit=None
+                )
+            )
     for artifact in outputs.artifacts:
         # The review diff is a presentation copy of the authoritative collected patch.
         # Scanning it again would judge deleted and context lines (#488).
         if artifact.name == REVIEW_DIFF_NAME:
             continue
-        hit = match_text(
-            artifact.content.decode("utf-8", "replace"), path=f"artifact:{artifact.name}"
+        content = artifact.content.decode("utf-8", "replace")
+        matches = match_lines(
+            content, path=f"artifact:{artifact.name}", fixture=fixture, limit=None
         )
-        if hit:
-            findings.append({"where": hit.path, "pattern": hit.pattern, "excerpt": hit.excerpt})
+        if not matches:
+            continue
+        lines = content.splitlines() if is_transcript(artifact.name) else []
+        for match in matches:
+            finding = _finding(match)
+            if lines and match.line is not None:
+                # FDY-0618: which command printed it, and the redacted lines around it,
+                # kept as an artifact of the attempt.
+                command = transcript_command(lines, match.line)
+                if command:
+                    finding["command"] = command
+                finding["window"] = TRANSCRIPT_WINDOW_ARTIFACT
+            findings.append(finding)
     return findings
+
+
+def _transcript_windows(outputs: CollectedOutputs, findings: list[dict[str, Any]]) -> bytes | None:
+    """The redacted transcript lines around each transcript match (FDY-0618)."""
+    parts: list[str] = []
+    for artifact in outputs.artifacts:
+        where = f"artifact:{artifact.name}"
+        matched = [f for f in findings if f.get("where") == where and f.get("window")]
+        if not matched:
+            continue
+        lines = artifact.content.decode("utf-8", "replace").splitlines()
+        parts.append(window_document(artifact.name, matched, lines))
+    return "\n".join(parts).encode("utf-8") if parts else None
+
+
+def _refused(
+    findings: list[dict[str, Any]], where: str, pattern: str, *, judged: str | None = None
+) -> None:
+    """The artifact store refused bytes the scanner already judged: the content
+    findings (at `where`, or under `judged` for a document built from the report) say
+    where and whether it blocks, so the refusal is not a second, blocking, finding.
+    Bytes the content scan found nothing in are a blocking finding."""
+    prefix = judged or where
+    if not any(
+        f.get("where") == where or str(f.get("where", "")).startswith(prefix) for f in findings
+    ):
+        findings.append({"where": where, "pattern": pattern})
+
+
+def _withholds(findings: list[dict[str, Any]]) -> bool:
+    """Whether the worker's report is kept out of every row (14): any blocking match, or
+    any match in the report itself, advisory or not. An advisory match elsewhere (a
+    transcript that printed a declared fixture) does not withhold it (FDY-0618)."""
+    return any(
+        not f.get("advisory") or str(f.get("where", "")).startswith("report") for f in findings
+    )
 
 
 def _scrubbed(error: dict[str, Any]) -> dict[str, Any]:
@@ -366,7 +443,7 @@ def record_collection_evidence(
     )
     claim_artifact_id: str | None = None
     report = completed.document if completed is not None else claim
-    if claim is not None and not findings:
+    if claim is not None and not _withholds(findings):
         try:
             artifact = store_artifact(
                 uow,
@@ -380,7 +457,7 @@ def record_collection_evidence(
             )
             claim_artifact_id = artifact.id
         except SecretInArtifactError as exc:
-            findings.append({"where": "report/completion-claim.json", "pattern": exc.pattern})
+            _refused(findings, "report/completion-claim.json", exc.pattern, judged="report")
     if record is not None and not record.get("redacted"):
         # hades #498: the record Hades composed, beside the worker's claim. Its worker
         # text is the claim's, already scanned above; the store scans it again.
@@ -412,14 +489,14 @@ def record_collection_evidence(
                 artifact_id=artifact.id,
             )
         except SecretInArtifactError as exc:
-            findings.append({"where": "report/completion-record.json", "pattern": exc.pattern})
+            _refused(findings, "report/completion-record.json", exc.pattern, judged="report")
     if claim is not None and report is not None:
         # The head and commit count the worker itself wrote, if any: commits_present
         # compares them with the collected branch (hades #187).
         refs = claim.get("refs", {}) if isinstance(claim.get("refs"), dict) else {}
         # A report the scanner matched is never copied into a row: 14 says no table ever
         # holds a secret, and the gate that reads this one has already failed.
-        redacted = bool(findings)
+        redacted = _withholds(findings)
         payload: dict[str, Any] = {
             "role": ROLE_COMPLETION_CLAIM,
             "parsed_ok": claim_parsed_ok,
@@ -467,10 +544,10 @@ def record_collection_evidence(
             attempt=attempt,
             kind=EvidenceKind.ARTIFACT_PRESENT,
             source=EvidenceSource.WORKER,
-            payload={"role": ROLE_WORKER_CLAIM, "asserted": {} if findings else claim},
+            payload={"role": ROLE_WORKER_CLAIM, "asserted": {} if _withholds(findings) else claim},
         )
     elif unparsed_errors is not None:
-        redacted = bool(findings)
+        redacted = _withholds(findings)
         _add(
             uow,
             clock,
@@ -575,7 +652,13 @@ def record_collection_evidence(
             )
             artifact_id = stored.id
         except SecretInArtifactError as exc:
-            findings.append({"where": f"artifact:{collected.name}", "pattern": exc.pattern})
+            # The review diff is a copy of the patch the diff findings judged.
+            _refused(
+                findings,
+                f"artifact:{collected.name}",
+                exc.pattern,
+                judged="diff" if role == ROLE_REVIEW_DIFF else None,
+            )
         _add(
             uow,
             clock,
@@ -608,7 +691,7 @@ def record_collection_evidence(
                     content_type=collected_log.content_type,
                 ).id
             except SecretInArtifactError as exc:
-                findings.append({"where": f"artifact:{collected_log.name}", "pattern": exc.pattern})
+                _refused(findings, f"artifact:{collected_log.name}", exc.pattern)
         _add(
             uow,
             clock,
@@ -669,6 +752,41 @@ def record_collection_evidence(
             attempt_id=attempt.id,
             payload={"reason": rejection.get("reason"), "path": rejection.get("path")},
         )
+    windows = _transcript_windows(outputs, findings)
+    if windows is not None:
+        # FDY-0618: the transcript itself is refused by the store, so the redacted lines
+        # around each match are what a person reads to see which command printed it.
+        window_id: str | None = None
+        try:
+            window_id = store_artifact(
+                uow,
+                clock,
+                store,
+                attempt=attempt,
+                name=TRANSCRIPT_WINDOW_ARTIFACT,
+                artifact_type=TRANSCRIPT_WINDOW_TYPE,
+                content=windows,
+                content_type="text/plain",
+            ).id
+        except SecretInArtifactError:
+            # Redaction is best effort; a window the store still refuses is not kept
+            # and no finding points at it.
+            for finding in findings:
+                finding.pop("window", None)
+        if window_id is not None:
+            _add(
+                uow,
+                clock,
+                attempt=attempt,
+                kind=EvidenceKind.ARTIFACT_PRESENT,
+                source=EvidenceSource.CRUCIBLE,
+                payload={
+                    "role": TRANSCRIPT_WINDOW_TYPE,
+                    "path": TRANSCRIPT_WINDOW_ARTIFACT,
+                    "size": len(windows),
+                },
+                artifact_id=window_id,
+            )
     _add(
         uow,
         clock,

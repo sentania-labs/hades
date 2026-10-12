@@ -27,6 +27,7 @@ def retention_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         principal,
         csrf,
         active="/ui/retention",
+        data_page="retention",
         heading="Retention and cleanup",
         intro=f"What the cleanup sweep removed. Last run: {summary['last_run'] or 'never'}.",
         sections=[

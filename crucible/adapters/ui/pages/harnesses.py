@@ -300,6 +300,7 @@ async def harness_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         principal,
         csrf,
         active="/ui/harnesses",
+        data_page="harnesses",
         heading="Harnesses",
         intro="Whether each harness can run a task, and a test that proves it.",
         sections=sections,

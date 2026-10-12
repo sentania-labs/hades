@@ -45,6 +45,7 @@ from crucible.domain.entities import (
 from crucible.domain.events import EventKind
 from crucible.domain.ids import new_id
 from crucible.domain.lifecycle import TaskState
+from crucible.domain.secret_findings import no_secrets_correction
 from crucible.ports.clock import Clock
 from crucible.ports.harness import CredentialSource, HarnessGate
 from crucible.ports.repository import UnitOfWork
@@ -186,6 +187,53 @@ def _previous(uow: UnitOfWork, task: Task, of_version: int) -> TaskContractV1:
     return TaskContractV1.model_validate(stored.document)
 
 
+def no_secrets_guidance(uow: UnitOfWork, task: Task) -> str:
+    """FDY-0618: when the task's latest attempt failed `no_secrets`, the correction Hades
+    composes from that attempt's scanner findings: what produced each match, its rule,
+    and how to avoid it. Empty otherwise."""
+    work = latest_work_attempt(uow, task)
+    if work is None:
+        return ""
+    attempt, _execution = work
+    if not any(
+        row.gate == "no_secrets" and row.result == "fail"
+        for row in uow.gate_results.list_for_attempt(attempt.id)
+    ):
+        return ""
+    scanner = next(
+        (
+            row
+            for row in reversed(uow.evidence.list_for_attempt(attempt.id))
+            if row.kind == "scanner_result" and row.verified
+        ),
+        None,
+    )
+    findings = scanner.payload.get("findings") if scanner is not None else None
+    return no_secrets_correction(
+        [f for f in findings if isinstance(f, dict)] if isinstance(findings, list) else []
+    )
+
+
+def _with_no_secrets_guidance(
+    uow: UnitOfWork, task: Task, contract: TaskContractV1
+) -> tuple[TaskContractV1, bool]:
+    """The correction with Hades' no_secrets guidance after the principal's words, when
+    the attempt it corrects failed that gate and the words do not carry it already."""
+    correction = contract.correction
+    if correction is None:
+        return contract, False
+    guidance = no_secrets_guidance(uow, task)
+    if not guidance or guidance in correction.instructions:
+        return contract, False
+    instructions = f"{correction.instructions.rstrip()}\n\n{guidance}"
+    return (
+        contract.model_copy(
+            update={"correction": correction.model_copy(update={"instructions": instructions})}
+        ),
+        True,
+    )
+
+
 def correction_document(
     document: dict[str, Any],
     *,
@@ -313,6 +361,10 @@ def attach_correction(
             )
     if problems:
         raise ContractValidationError("correction failed validation", errors=problems)
+    # The principal's own words stay theirs in the handoff and the decision.
+    requested = contract.correction
+    words = requested.instructions
+    contract, guided = _with_no_secrets_guidance(uow, task, contract)
     stored = _store_version(uow, clock, task, contract)
     task.contract_version = stored.version
     task.head_sha = None
@@ -326,10 +378,11 @@ def attach_correction(
         payload={
             "contract_version": stored.version,
             "contract_sha256": stored.sha256,
-            "of_version": contract.correction.of_version,
-            "reason": contract.correction.reason,
-            "addresses": [a.model_dump(mode="json") for a in contract.correction.addresses],
-            "request_internal_review": contract.correction.request_internal_review,
+            "of_version": requested.of_version,
+            "reason": requested.reason,
+            "addresses": [a.model_dump(mode="json") for a in requested.addresses],
+            "request_internal_review": requested.request_internal_review,
+            **({"no_secrets_guidance": True} if guided else {}),
         },
     )
     if contract.execution_request.pinned_harness:
@@ -342,7 +395,7 @@ def attach_correction(
             action=HandoffAction.REROUTE,
             direction=HandoffDirection.FOUNDRY_TO_HADES,
             principal=principal.name,
-            words=contract.correction.instructions,
+            words=words,
             detail={
                 "harness": contract.execution_request.pinned_harness.value,
                 "model": contract.execution_request.pinned_model,
@@ -390,7 +443,7 @@ def attach_correction(
                     escalation_id=escalation.id,
                     principal_id=principal.id,
                     kind="correction",
-                    verbatim=contract.correction.instructions,
+                    verbatim=words,
                     resolves=escalation.question,
                     created_at=clock.now(),
                 )

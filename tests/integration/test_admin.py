@@ -122,7 +122,7 @@ FAKE_LOGIN_SCRIPTS: dict[str, str] = {
     "claude_code": (
         "#!/bin/bash\n"
         'echo "Visit https://example.invalid/device to authorize, then enter the code here"\n'
-        'printf "Paste the code: "\n'
+        'printf "Paste code here if prompted > "\n'
         "read -t 30 -r code\n"
         'echo "token: TOKEN_PLACEHOLDER"\n'
         "exit 0\n"
@@ -137,7 +137,7 @@ FAKE_LOGIN_SCRIPTS: dict[str, str] = {
     "agy": (
         "#!/bin/bash\n"
         'echo "Sign in at https://example.invalid/oauth and copy the code shown"\n'
-        'printf "Enter the code: "\n'
+        'printf "Or, paste the authorization code here and press Enter: "\n'
         "read -t 30 -r code\n"
         'echo "Signed in."\n'
         "exit 0\n"

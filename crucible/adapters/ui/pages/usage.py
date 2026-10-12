@@ -25,6 +25,7 @@ def usage_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         principal,
         csrf,
         active="/ui/usage",
+        data_page="usage",
         heading="Usage",
         intro="Recorded token use and recent quality evidence.",
         sections=[*_tokens_sections(document), *_quality_sections(document)],

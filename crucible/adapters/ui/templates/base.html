@@ -30,7 +30,7 @@
     {% if group.collapsed %}</details>{% else %}</div>{% endif %}
     {% endfor %}
   </nav>{% endif %}
-  <main class="admin-main">
+  <main class="admin-main" data-page="{{ data_page }}">
     {% if supervisor_warning %}<div class="lat-banner lat-banner--bad admin-flash" role="alert"><b>The supervisor is not healthy.</b> No task is launched, observed or cancelled until it recovers; the API and this page still work. {{ supervisor_warning }}. <a href="/ui/settings#about">About</a></div>{% endif %}
     {% if message %}<div class="lat-banner lat-banner--{{ message_kind }} admin-flash">{{ message }}</div>{% endif %}
     {% if service_strip %}<nav class="shell-service-strip" aria-label="Service">{% for item in service_strip %}<a class="shell-service-item" href="{{ item.href }}"><span>{{ item.label }}</span> <span class="lat-badge lat-badge--{{ item.tone }}">{{ item.value }}</span></a>{% endfor %}</nav>{% endif %}
