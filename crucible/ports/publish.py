@@ -38,6 +38,12 @@ class PublishRequest:
     bundle_sha256: str
     image: str
     policy: Mapping[str, object] = field(default_factory=dict)
+    # ADR 0032: the sealed bundle as its `work_bundle` artifact (the path in the artifact
+    # store). The Kubernetes publisher reads only this; the Docker one prefers it.
+    bundle_artifact: str = ""
+    # The attempt's workspace (`k8s://...` on Kubernetes), which names the provider whose
+    # publisher runs the push, as for a merge-main run.
+    workspace_path: str = ""
     author_name: str = "crucible-worker"
     author_email: str = "crucible-worker@users.noreply.github.com"
     owned_remote_heads: tuple[str, ...] = ()

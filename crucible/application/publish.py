@@ -28,11 +28,13 @@ from pathlib import Path
 from typing import Any
 
 from crucible.application.decisions import open_escalation
+from crucible.application.evidence import work_bundle_artifact
 from crucible.application.transitions import move_task, record_event
 from crucible.application.wakes import create_wake
 from crucible.contracts.evidence import EvidenceKind
 from crucible.contracts.wake import WakeReason
 from crucible.domain.entities import (
+    Artifact,
     Attempt,
     EscalationState,
     Event,
@@ -255,6 +257,10 @@ class PublishPlan:
     bundle_path: str
     bundle_sha256: str
     policy: dict[str, Any] = field(default_factory=dict)
+    # ADR 0032: the bundle's `work_bundle` artifact (its path in the artifact store) and
+    # the attempt's workspace, which names the provider whose publisher runs the push.
+    bundle_artifact: str = ""
+    workspace_path: str = ""
     title: str = DEFAULT_TITLE
     body: str = ""
     existing_pr_number: int | None = None
@@ -398,6 +404,19 @@ def collected_bundle_sha256(uow: UnitOfWork, attempt: Attempt) -> str:
     return hashlib.sha256(bundle_path.read_bytes()).hexdigest() if bundle_path.is_file() else ""
 
 
+def collected_bundle_artifact(uow: UnitOfWork, attempt: Attempt) -> Artifact | None:
+    """ADR 0032: the attempt's stored `work_bundle`, the one its seal names, if any."""
+    bundle_evidence = next(
+        (
+            row
+            for row in reversed(uow.evidence.list_for_attempt(attempt.id))
+            if row.kind == EvidenceKind.BUNDLE_HEAD.value and row.verified
+        ),
+        None,
+    )
+    return work_bundle_artifact(uow, bundle_evidence) if bundle_evidence else None
+
+
 def build_plan(uow: UnitOfWork, task: Task, work: tuple[Attempt, Execution]) -> PublishPlan:
     """Read everything the publication needs and render the body. Pure of I/O beyond
     the database: the GitHub calls and the container come later."""
@@ -480,6 +499,7 @@ def build_plan(uow: UnitOfWork, task: Task, work: tuple[Attempt, Execution]) -> 
     publishing = uow.events.latest_for_task_kind(task.id, EventKind.TASK_PUBLISHING.value)
     publishing_payload = publishing.payload if publishing else {}
     bundle_sha256 = collected_bundle_sha256(uow, attempt)
+    bundle_artifact = collected_bundle_artifact(uow, attempt)
     retry_limit = publishing_payload.get("publish_retry_max")
     if retry_limit is None:
         retry_limit = policy.get("limits", {}).get("publish_retry_max", 3)
@@ -513,6 +533,8 @@ def build_plan(uow: UnitOfWork, task: Task, work: tuple[Attempt, Execution]) -> 
         image=attempt.image_digest or execution.image,
         bundle_path=f"{attempt.workspace_path}/output/work_branch.bundle",
         bundle_sha256=bundle_sha256,
+        bundle_artifact=bundle_artifact.path if bundle_artifact else "",
+        workspace_path=attempt.workspace_path or "",
         policy=policy,
         title=title,
         body=body,
@@ -538,6 +560,7 @@ def record_publish_started(uow: UnitOfWork, clock: Clock, plan: PublishPlan) -> 
             "head_sha": plan.head_sha,
             "bundle": plan.bundle_path,
             "bundle_sha256": plan.bundle_sha256,
+            "bundle_artifact": plan.bundle_artifact,
             "repository": plan.repository_name,
             "work_branch": plan.work_branch,
             "base_ref": plan.base_ref,

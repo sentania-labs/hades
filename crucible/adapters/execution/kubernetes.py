@@ -38,7 +38,7 @@ import tarfile
 import tempfile
 import time
 import weakref
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -103,6 +103,7 @@ from crucible.domain.secrets import redact
 from crucible.domain.test_services import DeclaredService, declared_services, services_env
 from crucible.domain.time import parse_rfc3339
 from crucible.domain.verification import named_paths
+from crucible.ports.artifacts import ArtifactStore
 from crucible.ports.execution import (
     IDENTITY_MOUNT,
     OUTPUT_MOUNT,
@@ -769,6 +770,7 @@ class KubernetesProvider:
         settings_source: SettingsSource | None = None,
         timeouts_source: TimeoutsSource | None = None,
         credential_dead: Callable[[], bool] | None = None,
+        artifact_store: ArtifactStore | None = None,
     ) -> None:
         self.config = config
         # The runtime settings (the `kubernetes.egress` admin setting and the enabled
@@ -776,6 +778,9 @@ class KubernetesProvider:
         self._settings_source = settings_source
         self._timeouts_source = timeouts_source
         self._credential_dead = credential_dead or (lambda: False)
+        # ADR 0032: where a sealed work bundle is read from, for a correction's preparer
+        # and the publisher. Neither mounts another attempt's claim.
+        self.artifact_store = artifact_store
         self._file_role_timeout = config.role_timeout_seconds
         self._file_api_retry = config.api_retry_seconds
         self._settings_read_at: float | None = None
@@ -1852,28 +1857,13 @@ class KubernetesProvider:
         adapter = self.harnesses.require(spec.harness)
         cache_mounts: list[Mount] = []
         cache_volumes: list[dict[str, Any]] = []
-        resume_mounts: list[Mount] = []
-        resume_volumes: list[dict[str, Any]] = []
         resume_bundle = None
+        resume_content: bytes | None = None
         if spec.resume_bundle_attempt_id:
-            resume_bundle = f"{scripts.BUNDLE_MOUNT}/work_branch.bundle"
-            resume_mounts.append(
-                Mount(
-                    "resume-bundle",
-                    resume_bundle,
-                    read_only=True,
-                    sub_path="output/work_branch.bundle",
-                )
-            )
-            resume_volumes.append(
-                {
-                    "name": "resume-bundle",
-                    "persistentVolumeClaim": {
-                        "claimName": k8sspec.object_name("ws", spec.resume_bundle_attempt_id),
-                        "readOnly": True,
-                    },
-                }
-            )
+            # ADR 0032: the sealed bundle comes from the artifact store and goes into
+            # this attempt's own workspace over exec; the previous claim is never mounted.
+            resume_bundle = f"{WORK_MOUNT}/{scripts.RESUME_BUNDLE_LEAF}"
+            resume_content = await self._resume_bundle_content(spec)
         cache_name: str | None = None
         gate: _CacheGate | None = None
         if self.config.use_reference_cache and self.config.cache_claim:
@@ -1943,21 +1933,27 @@ class KubernetesProvider:
                     resume_bundle_head=spec.resume_bundle_head,
                     resume_bundle_sha256=spec.resume_bundle_sha256,
                     resume_bundle_ancestor=spec.resume_bundle_ancestor,
+                    resume_bundle_wait=(
+                        self.config.role_timeout_seconds if resume_content is not None else 0
+                    ),
                     checkout_token="file" if token else None,
                     credential_host=self.config.credential_host,
                 ),
                 mounts=[
                     Mount("ws", WORK_MOUNT),
                     *cache_mounts,
-                    *resume_mounts,
                     *token_mounts,
                 ],
                 volumes=[
                     self._claim_volume(spec.attempt_id),
                     *cache_volumes,
-                    *resume_volumes,
                     *token_volumes,
                 ],
+                on_running=(
+                    None
+                    if resume_content is None or resume_bundle is None
+                    else self._deliverer(resume_bundle, resume_content, k8sspec.ROLE_PREPARER)
+                ),
                 limits=limits,
                 timeout=self.config.prepare_timeout_seconds,
                 plan=self._checkout_plan(spec, k8sspec.ROLE_PREPARER, token is not None),
@@ -1999,6 +1995,62 @@ class KubernetesProvider:
             .decode("utf-8", "replace")
             .strip(),
         )
+
+    async def _resume_bundle_content(self, spec: LaunchSpec) -> bytes:
+        """ADR 0032: the sealed bundle a correction resumes from, read from the artifact
+        store. A correction with no stored bundle, or one whose blob is gone, cannot
+        resume, and says so before any Pod is created; the preparer script checks the
+        seal and the head itself, as it always has."""
+        source = f"the sealed bundle of attempt {spec.resume_bundle_attempt_id}"
+        if not spec.resume_bundle_artifact or self.artifact_store is None:
+            raise self._prepare_failed(
+                4, f"previous attempt bundle is gone: {source} has no stored work bundle", source
+            )
+        store = self.artifact_store
+        path = spec.resume_bundle_artifact
+        try:
+            return await asyncio.to_thread(store.get, path)
+        except OSError as exc:
+            raise self._prepare_failed(
+                4, f"previous attempt bundle is gone: the artifact store has no {path}", source
+            ) from exc
+
+    def _deliverer(
+        self, target: str, content: bytes, role: str
+    ) -> Callable[[str], Awaitable[None]]:
+        """ADR 0032: the hook that writes `content` to `target` inside a running Pod over
+        exec stdin, the one way bytes go into a Pod (k8sapi). The Pod's script waits for
+        the file; a delivery that fails leaves it waiting until its own bound, and the
+        script then refuses as for a bundle that is gone."""
+
+        async def deliver(pod: str) -> None:
+            await self._deliver(pod, target, content, role)
+
+        return deliver
+
+    async def _deliver(self, pod: str, target: str, content: bytes, role: str) -> bool:
+        try:
+            result: ExecResult = await self._call(
+                self.client.pod_exec,
+                pod,
+                ["sh", "-c", scripts.DELIVER_SCRIPT, "deliver", target, str(len(content))],
+                container=k8sspec.CONTAINER_NAME,
+                timeout=self.config.role_timeout_seconds,
+                limit=64 * 1024,
+                stdin=content,
+            )
+        except KubernetesApiError as exc:
+            log.warning("%s: the bundle could not be delivered", role, extra={"error": str(exc)})
+            return False
+        if result.exit_code != 0:
+            log.warning(
+                "%s: the bundle delivery exited %s",
+                role,
+                result.exit_code,
+                extra={"error": result.stderr.decode("utf-8", "replace")[-500:]},
+            )
+            return False
+        return True
 
     def _prepare_failed(
         self, exit_code: int, detail: str, resume_source: str | None, log: str = ""
@@ -5043,6 +5095,7 @@ class KubernetesProvider:
         stall_seconds: int = 0,
         keep_log: list[str] | None = None,
         services: Sequence[DeclaredService] = (),
+        on_running: Callable[[str], Awaitable[None]] | None = None,
     ) -> int:
         """Run one single-purpose Job to completion and delete it. With `cancelled`, a
         cancel ends the wait (hades #189): the Job and its policy are deleted on the way
@@ -5061,7 +5114,11 @@ class KubernetesProvider:
         With `keep_log` (hades #370), a Job that exits non-zero, stalls or times out has
         its Pod's whole log, uncut, appended before the Job is deleted, so the caller
         keeps it as evidence; the role's error carries only the bounded tail. A timed-out
-        Pod's last output is added to the timeout reason too."""
+        Pod's last output is added to the timeout reason too.
+
+        With `on_running` (ADR 0032), the named Pod is handed to it once, when it is
+        first seen Running, so bytes can go into the Pod over exec (a work bundle from
+        the artifact store) and come back out the same way before it ends."""
         key = (role, spec.attempt_id)
         name = k8sspec.object_name(OBJECT_PREFIX.get(role, role), spec.attempt_id)
         collection = role in COLLECTION_ROLES
@@ -5145,6 +5202,7 @@ class KubernetesProvider:
                 cancelled=cancelled,
                 wait_for_quota=wait_for_quota,
                 stall_seconds=stall_seconds,
+                on_running=on_running,
             )
             refusal = self._job_refusals.pop(name, None)
             stall = self._job_stalls.pop(name, None)
@@ -5507,6 +5565,7 @@ class KubernetesProvider:
         start_timeout: int | None = None,
         wait_for_quota: bool = False,
         stall_seconds: int = 0,
+        on_running: Callable[[str], Awaitable[None]] | None = None,
     ) -> int | None:
         """Wait for a Job's Pod to terminate and return the container's exit code. A
         cancel raises LaunchCancelledError (hades #189).
@@ -5554,6 +5613,10 @@ class KubernetesProvider:
                     running = True
                     deadline = time.monotonic() + timeout
                     progress_at = time.monotonic()
+                    if on_running is not None:
+                        await on_running(str((pod.get("metadata") or {}).get("name") or ""))
+                        progress_at = time.monotonic()
+                        continue
                 elif not running and time.monotonic() - started > start_wait:
                     self._job_refusals[name] = (
                         f"the {name} Pod did not start within {start_wait}s: "

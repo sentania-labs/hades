@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -483,7 +484,7 @@ def _execution(execution_id: str, role: ExecutionRole, provider: str = "kubernet
     )
 
 
-def _bundle_head(attempt_id: str) -> EvidenceRecord:
+def _bundle_head(attempt_id: str, *, stored: bool = True) -> EvidenceRecord:
     return EvidenceRecord(
         id=1,
         attempt_id=attempt_id,
@@ -493,6 +494,8 @@ def _bundle_head(attempt_id: str) -> EvidenceRecord:
         payload={"bundle_verified": True, "bundle_sha256": "c" * 64, "head_sha": "b" * 40},
         observed_at=NOW,
         source="crucible",
+        # ADR 0032: the stored bundle a correction resumes from on either provider.
+        artifact_id="bundle" if stored else None,
     )
 
 
@@ -501,8 +504,12 @@ def _uow(
     attempts: list[Attempt],
     *,
     released: list[str] = (),  # type: ignore[assignment]
+    stored: bool = True,
 ) -> Any:
     uow: Any = MagicMock()
+    uow.artifacts.get.side_effect = lambda artifact_id: SimpleNamespace(
+        id=artifact_id, type="work_bundle", attempt_id=SEALED, sha256="c" * 64, path="blobs/c"
+    )
     uow.executions.list_for_task.return_value = executions
     uow.executions.get.side_effect = lambda execution_id, **_: next(
         (row for row in executions if row.id == execution_id), None
@@ -514,7 +521,7 @@ def _uow(
     uow.events.latest_for_task_kind.return_value = None
     uow.events.list_for_task.return_value = []
     uow.evidence.list_for_attempt.side_effect = lambda attempt_id: (
-        [_bundle_head(attempt_id)] if attempt_id == SEALED else []
+        [_bundle_head(attempt_id, stored=stored)] if attempt_id == SEALED else []
     )
     uow.retention.list_recent.return_value = [
         RetentionAction(
@@ -586,16 +593,20 @@ def test_a_correction_after_a_failed_prepare_resumes_from_the_sealed_bundle(
 
 def test_the_sealed_bundle_is_what_the_check_reads_not_the_failed_prepare() -> None:
     executions, attempts = _after_a_failed_prepare(same_execution=False)
-    # Released by retention: the sealed bundle really is gone, and the answer says so.
-    uow = _uow(executions, attempts, released=[SEALED])
+    # A bundle collected before ADR 0032 stored it, on a released claim: it really is
+    # gone, and the answer says so.
+    uow = _uow(executions, attempts, released=[SEALED], stored=False)
     problem = _unpublished_bundle_problem(uow, _task(), "kubernetes")
     assert problem == {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
+    # A stored bundle outlives its workspace (ADR 0032).
+    uow = _uow(executions, attempts, released=[SEALED])
+    assert _unpublished_bundle_problem(uow, _task(), "kubernetes") is None
     # A release recorded against the attempt that never prepared is no loss at all.
     uow = _uow(executions, attempts, released=[FAILED_PREPARE])
     assert _unpublished_bundle_problem(uow, _task(), "kubernetes") is None
-    # The provider that holds the sealed bundle is the one the correction must use.
+    # An unstored bundle stays with the provider that holds it.
     executions, attempts = _after_a_failed_prepare(same_execution=False)
-    uow = _uow(executions, attempts)
+    uow = _uow(executions, attempts, stored=False)
     problem = _unpublished_bundle_problem(uow, _task(), "docker")
     assert problem == {
         "path": "execution_request.provider",

@@ -223,10 +223,16 @@ def test_probe_blocked_task_passes_unpublished_bundle_check() -> None:
     bundle_row = SimpleNamespace(
         kind="bundle_head",
         verified=True,
+        attempt_id="sealed-1",
+        artifact_id="bundle",
         payload={"bundle_verified": True, "bundle_sha256": "abc123"},
     )
 
     uow = MagicMock()
+    # ADR 0032: the sealed bundle is stored; a Kubernetes correction reads it from there.
+    uow.artifacts.get.return_value = SimpleNamespace(
+        id="bundle", type="work_bundle", attempt_id="sealed-1", sha256="abc123", path="blobs/a"
+    )
     uow.tasks.get.return_value = SimpleNamespace(
         id="task-1", state=TaskState.BLOCKED, head_sha="def456"
     )

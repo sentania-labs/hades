@@ -439,6 +439,8 @@ class DeliveryCoordinator:
             owned_remote_heads=plan.owned_remote_heads,
             bundle_path=plan.bundle_path,
             bundle_sha256=plan.bundle_sha256,
+            bundle_artifact=plan.bundle_artifact,
+            workspace_path=plan.workspace_path,
             image=self.config.publisher_image or plan.image,
             policy=plan.policy,
             author_name=str(plan.policy.get("git", {}).get("author_name", "crucible-worker")),

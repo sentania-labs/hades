@@ -111,7 +111,15 @@ class DockerPublisher:
         await self._ensure_network()
         root = self._root(request.attempt_id)
         await asyncio.to_thread(shutil.rmtree, root, True)
-        await asyncio.to_thread(self._stage, root, request.bundle_path, request.bundle_sha256)
+        # ADR 0032: the stored `work_bundle` artifact, which lives under the artifact root
+        # this host shares; a bundle collected before it was stored is still read from the
+        # attempt's workspace directory, which is not a claim and is never ephemeral here.
+        source = (
+            str(Path(self._provider.config.artifact_root) / request.bundle_artifact)
+            if request.bundle_artifact
+            else request.bundle_path
+        )
+        await asyncio.to_thread(self._stage, root, source, request.bundle_sha256)
         script = scripts.publisher_script(
             clone_url=request.repository_url,
             work_branch=request.work_branch,

@@ -148,13 +148,17 @@ class LaunchSpec:
     # retain it even if an administrator changes the setting later.
     credential_mode: str | None = None
     # An unpublished correction starts from the preceding attempt's sealed bundle.
-    # The provider mounts this one file into the preparer; the worker never sees the
-    # preceding workspace.
+    # The provider gives the preparer this one file, from the artifact store (ADR 0032);
+    # the worker never sees the preceding workspace. The path is the workspace copy, read
+    # only by the Docker provider for a bundle collected before bundles were stored.
     resume_bundle_path: str | None = None
     resume_bundle_attempt_id: str | None = None
     resume_bundle_head: str | None = None
     resume_bundle_sha256: str | None = None
     resume_bundle_ancestor: str | None = None
+    # ADR 0032: the sealed bundle's `work_bundle` artifact, as its path in the artifact
+    # store. Every provider resumes from it; nothing mounts the previous attempt's claim.
+    resume_bundle_artifact: str | None = None
     # hades #489: the operator's notes on the task, newest first, each `author`,
     # `created_at`, `text` and `verbatim`; rendered at the top of IDENTITY.md (06).
     operator_notes: tuple[dict[str, Any], ...] = ()
@@ -292,6 +296,9 @@ class BranchBundle:
     # Paths touched only by commits after the preparer's trusted head. Branch-wide
     # paths include earlier attempts and cannot establish correction coverage (#498).
     attempt_commit_paths: tuple[str, ...] = ()
+    # ADR 0032: the bundle's own bytes, which collection stores as the attempt's
+    # `work_bundle` artifact. Empty when the collector produced no bundle file.
+    content: bytes = field(default=b"", repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)

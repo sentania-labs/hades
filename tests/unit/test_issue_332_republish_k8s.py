@@ -10,6 +10,7 @@ local file. Regression test for issue 332.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -22,6 +23,7 @@ from crucible.contracts.evidence import EvidenceKind
 from crucible.domain.entities import (
     AcceptanceResult,
     AcceptanceVerdict,
+    Artifact,
     Attempt,
     Event,
     EvidenceRecord,
@@ -105,6 +107,7 @@ class _MockUow:
         self._events: list[Event] = []
         self._acceptances: list[AcceptanceResult] = []
         self._evidence: list[EvidenceRecord] = []
+        self._artifacts: dict[str, Artifact] = {}
 
     def commit(self) -> None:
         pass
@@ -132,6 +135,10 @@ class _MockUow:
     @property
     def evidence(self) -> Any:
         return _EvidenceRepo(self._evidence)
+
+    @property
+    def artifacts(self) -> Any:
+        return SimpleNamespace(get=self._artifacts.get)
 
 
 # ---------------------------------------------------------------------------
@@ -237,8 +244,23 @@ def _add_k8s_task(
             observed_at=datetime(2026, 1, 2, tzinfo=UTC),
             source="collector",
             verified=True,
-            payload={"bundle_sha256": bundle_sha256},
+            payload={"bundle_sha256": bundle_sha256, "bundle_artifact_id": "bundle-artifact"},
+            artifact_id="bundle-artifact",
         )
+    )
+    # ADR 0032: the stored bundle is what a Kubernetes publisher reads.
+    uow._artifacts["bundle-artifact"] = Artifact(
+        id="bundle-artifact",
+        attempt_id=_ATTEMPT_ID,
+        task_id=_TASK_ID,
+        type="work_bundle",
+        filename="output/work_branch.bundle",
+        path=f"blobs/{bundle_sha256}",
+        size=1,
+        sha256=bundle_sha256,
+        content_type="application/x-git-bundle",
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+        created_by="crucible",
     )
     uow._acceptances.append(
         AcceptanceResult(

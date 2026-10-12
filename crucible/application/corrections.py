@@ -16,6 +16,7 @@ from crucible.application.errors import (
     NotFoundError,
     TransitionNotAllowedError,
 )
+from crucible.application.evidence import work_bundle_artifact
 from crucible.application.handoffs import HandoffAction, HandoffDirection, record_handoff
 from crucible.application.harnesses import HarnessRegistry
 from crucible.application.review import latest_work_attempt
@@ -132,8 +133,6 @@ def _unpublished_bundle_problem(
         if source_execution is None:
             return {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
         execution = source_execution
-    if execution.provider != provider:
-        return {"path": "execution_request.provider", "message": PREVIOUS_BUNDLE_OTHER_PROVIDER}
     evidence = next(
         (
             row
@@ -145,12 +144,20 @@ def _unpublished_bundle_problem(
         ),
         None,
     )
+    # ADR 0032: a bundle stored in the artifact store is read from there by whichever
+    # provider runs the correction, so neither the provider nor the workspace matters.
+    if evidence is not None and work_bundle_artifact(uow, evidence) is not None:
+        return None
+    if execution.provider != provider:
+        return {"path": "execution_request.provider", "message": PREVIOUS_BUNDLE_OTHER_PROVIDER}
     released = any(
         action.kind == "workspace" and action.subject == attempt.id
         for action in uow.retention.list_recent(10_000)
     )
+    # A bundle collected before bundles were stored: a Docker workspace directory may
+    # still hold it, but no correction mounts a Kubernetes claim for it any more.
     path = f"{attempt.workspace_path}/output/work_branch.bundle"
-    local_missing = "://" not in path and not Path(path).is_file()
+    local_missing = path.startswith("k8s://") or ("://" not in path and not Path(path).is_file())
     if evidence is None or released or local_missing:
         return {"path": "correction", "message": PREVIOUS_BUNDLE_GONE}
     return None

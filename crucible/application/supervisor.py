@@ -50,7 +50,12 @@ from crucible.application.decisions import (
 )
 from crucible.application.delivery_tick import DeliveryConfig, DeliveryCoordinator
 from crucible.application.errors import ApplicationError, NotFoundError
-from crucible.application.evidence import claim_facts, record_collection_evidence, store_artifact
+from crucible.application.evidence import (
+    claim_facts,
+    record_collection_evidence,
+    store_artifact,
+    work_bundle_artifact,
+)
 from crucible.application.gates import evaluate_and_advance, gate_input
 from crucible.application.handoffs import HandoffAction, HandoffDirection, record_handoff
 from crucible.application.harnesses import (
@@ -2332,11 +2337,16 @@ class Supervisor:
                         None,
                     )
                     if bundle is not None:
+                        # ADR 0032: the stored bundle is what every provider resumes
+                        # from; the workspace path is kept only for a Docker bundle
+                        # collected before bundles were stored.
+                        stored = work_bundle_artifact(route_uow, bundle)
                         resume_bundle = {
                             "path": f"{previous_attempt.workspace_path}/output/work_branch.bundle",
                             "attempt_id": previous_attempt.id,
                             "head": str(bundle.payload.get("head_sha") or ""),
                             "sha256": str(bundle.payload.get("bundle_sha256") or ""),
+                            "artifact": stored.path if stored is not None else "",
                         }
             # Keep this read inside the managed unit of work.  A SQLAlchemy session can
             # reopen after close(), which used to leak one connection per launch here
@@ -2418,6 +2428,7 @@ class Supervisor:
             resume_bundle_attempt_id=resume_bundle.get("attempt_id"),
             resume_bundle_head=resume_bundle.get("head"),
             resume_bundle_sha256=resume_bundle.get("sha256"),
+            resume_bundle_artifact=resume_bundle.get("artifact") or None,
             resume_bundle_ancestor=(
                 str(published.payload["head_sha"]) if published and resume_bundle else None
             ),

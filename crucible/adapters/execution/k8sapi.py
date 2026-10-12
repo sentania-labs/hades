@@ -568,6 +568,8 @@ _CHANNEL_STDIN = 0
 _CHANNEL_STDOUT = 1
 _CHANNEL_STDERR = 2
 _CHANNEL_ERROR = 3
+# The most stdin one client frame carries (ADR 0032).
+_STDIN_FRAME_BYTES = 1024 * 1024
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
@@ -610,7 +612,11 @@ def _exec_over_websocket(
             if sock is None:
                 raise KubernetesUnavailableError(0, "the exec upgrade carried no socket", path=path)
             if stdin is not None:
-                sock.sendall(_client_frame(bytes([_CHANNEL_STDIN]) + stdin))
+                # ADR 0032: a bundle is far larger than a login code, and an API server
+                # bounds one WebSocket frame, so stdin goes in frames of a bounded size.
+                for offset in range(0, max(len(stdin), 1), _STDIN_FRAME_BYTES):
+                    chunk = stdin[offset : offset + _STDIN_FRAME_BYTES]
+                    sock.sendall(_client_frame(bytes([_CHANNEL_STDIN]) + chunk))
             # The socket can also reset or time out after the upgrade, while the frames
             # are read: that is the same unavailable API server, not a failed command.
             return _read_exec_channels(sock, limit=limit, stdout=stdout)
@@ -630,7 +636,11 @@ def _client_frame(payload: bytes) -> bytes:
     else:
         header = bytes([0x82, 0x80 | 127]) + length.to_bytes(8, "big")
     mask = secrets.token_bytes(4)
-    masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+    if not length:
+        return header + mask
+    # One XOR over the whole frame as integers: a byte loop is too slow for a bundle.
+    key = (mask * (length // 4 + 1))[:length]
+    masked = (int.from_bytes(payload, "big") ^ int.from_bytes(key, "big")).to_bytes(length, "big")
     return header + mask + masked
 
 

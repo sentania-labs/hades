@@ -37,17 +37,22 @@ from crucible.ports.execution import (
 __all__ = [
     "ACTIVITY_SCRIPT",
     "ACTIVITY_WALK_SECONDS",
+    "BUNDLE_DELIVERY_MARKER",
     "BUNDLE_MOUNT",
     "BUNDLE_VERIFY_SCRIPT",
+    "COLLECT_SCRIPT",
     "COMMIT_HOOK_DIR",
+    "DELIVER_SCRIPT",
     "MANIFEST",
     "PUBLISH_BUNDLE_LEAF",
     "PUBLISH_LEAF",
     "PUBLISH_LEAF_MARKER",
     "REPO_MOUNT",
+    "RESUME_BUNDLE_LEAF",
     "VERIFY_MOUNT",
     "collector_script",
     "commit_msg_hook",
+    "delivered_publisher_script",
     "encode_check_id",
     "gate_probe_checkout_script",
     "gate_probe_script",
@@ -368,6 +373,7 @@ def preparer_script(
     resume_bundle_head: str | None = None,
     resume_bundle_sha256: str | None = None,
     resume_bundle_ancestor: str | None = None,
+    resume_bundle_wait: int = 0,
     checkout_token: str | None = None,
     credential_host: str = "github.com",
 ) -> str:
@@ -388,6 +394,10 @@ def preparer_script(
     the checkout is positioned, and again on every exit. From a tmpfs (`stdin`) the
     token file goes with them; a Secret volume (`file`) is read-only and goes with the
     Pod.
+
+    `resume_bundle_wait` (ADR 0032, Kubernetes) is how long the script waits for the
+    provider to deliver the sealed bundle from the artifact store into this Pod over
+    exec before it checks it; a bundle that never arrives is a bundle that is gone.
     """
     cache_dir = f"{CACHE_MOUNT}/{cache_name}.git" if cache_name else ""
     refresh = ""
@@ -416,7 +426,15 @@ fi
             if harness_excludes
             else "      __crucible_no_harness_state__) continue ;;"
         )
-        bundle_resume = f"""
+        wait = ""
+        if resume_bundle_wait > 0:
+            wait = f"""
+{RESUME_DELIVERY_MARKER}
+WAITED=0
+while [ ! -f {_quote(resume_bundle)} ] && [ "$WAITED" -lt {int(resume_bundle_wait)} ]; do
+  sleep 1; WAITED=$((WAITED + 1))
+done"""
+        bundle_resume = f"""{wait}
 if [ ! -f {_quote(resume_bundle)} ] || [ -L {_quote(resume_bundle)} ]; then
   printf 'previous attempt bundle is gone\\n' >&2
   exit 4
@@ -1164,10 +1182,76 @@ def _quote(value: str) -> str:
 BUNDLE_MOUNT = "/crucible/bundle"
 PUBLISH_MOUNT = "/crucible/publish"
 
-# The two leaves of a Kubernetes workspace claim the publisher mounts as subPaths: the
-# bundle, where the collector writes it, and the directory its outcome files go to.
+# Where the collector writes the bundle on a Kubernetes workspace claim, which the leaf
+# script below still checks for a merge-main run, and the claim leaf a merge-main run's
+# outcome files go to. A push reads neither (ADR 0032).
 PUBLISH_BUNDLE_LEAF = "output/work_branch.bundle"
 PUBLISH_LEAF = "publish"
+# ADR 0032: where a correction's preparer on Kubernetes receives the sealed bundle of
+# the attempt it resumes, inside its own workspace claim, delivered from the artifact
+# store over exec.
+RESUME_BUNDLE_LEAF = "resume/work_branch.bundle"
+RESUME_DELIVERY_MARKER = "# crucible: the resume bundle arrives over exec"
+# The line that names a publisher Pod whose bundle arrives over exec and whose outcome
+# leaves the same way (ADR 0032), so a reader of a Job (or the fake cluster) can tell it.
+BUNDLE_DELIVERY_MARKER = "# crucible: the bundle arrives over exec"
+DELIVER_MARKER = "# crucible: deliver a file over exec"
+COLLECT_MARKER = "# crucible: collect the publisher outcome over exec"
+# ADR 0032: write exactly `$2` bytes of stdin to `$1`, through a partial file renamed
+# into place, so a script waiting for `$1` never reads half a bundle. The v4 exec
+# protocol cannot close stdin, so the byte count is what ends the read.
+DELIVER_SCRIPT = f"""set -eu
+{DELIVER_MARKER}
+umask 022
+mkdir -p "$(dirname "$1")"
+head -c "$2" > "$1.part"
+if [ "$(wc -c < "$1.part")" -ne "$2" ]; then
+  rm -f "$1.part"; echo "the delivery was short" >&2; exit 9
+fi
+mv "$1.part" "$1"
+"""
+# ADR 0032: wait up to `$2` seconds for the publisher script to finish, then hand its
+# outcome directory (`$1`) back as a tar on stdout and tell the Pod it may end.
+COLLECT_SCRIPT = f"""set -u
+{COLLECT_MARKER}
+W=0
+while [ ! -f "$1/.finished" ] && [ "$W" -lt "$2" ]; do sleep 1; W=$((W + 1)); done
+[ -f "$1/.finished" ] || exit 9
+tar cf - -C "$1" --exclude=./.finished --exclude=./.collected .
+touch "$1/.collected"
+"""
+
+
+def delivered_publisher_script(body: str, *, wait_seconds: int, read_seconds: int) -> str:
+    """ADR 0032: the publisher on Kubernetes, around `body` (`publisher_script`).
+
+    The Pod mounts no claim. It waits for the provider to deliver the bundle from the
+    artifact store into its own memory-backed `BUNDLE_MOUNT` over exec, runs the
+    publisher script unchanged (which checks the seal before any remote), writes the
+    exit beside the outcome files in its memory-backed `PUBLISH_MOUNT`, and waits for
+    the provider to read them back over exec before it ends with that exit."""
+    return f"""set -u
+{BUNDLE_DELIVERY_MARKER}
+OUT={_quote(PUBLISH_MOUNT)}
+BUNDLE={_quote(BUNDLE_MOUNT)}/work_branch.bundle
+WAITED=0
+while [ ! -f "$BUNDLE" ] && [ "$WAITED" -lt {int(wait_seconds)} ]; do
+  sleep 1; WAITED=$((WAITED + 1))
+done
+sh -c {_quote(body)}
+CODE=$?
+mkdir -p "$OUT"
+printf '%s\n' "$CODE" > "$OUT/exit.txt" 2>/dev/null || true
+touch "$OUT/.finished"
+WAITED=0
+while [ ! -f "$OUT/.collected" ] && [ "$WAITED" -lt {int(read_seconds)} ]; do
+  sleep 1; WAITED=$((WAITED + 1))
+done
+sleep 2
+exit "$CODE"
+"""
+
+
 # The line that names the claim-leaf script, so a reader of a Job (or the fake cluster)
 # can tell it from the preparer's checkout script, which runs in the same role.
 PUBLISH_LEAF_MARKER = "# crucible: prepare the publish leaf"

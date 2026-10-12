@@ -3,8 +3,9 @@
 What would be a serious defect to lose, each asserted against the objects the provider
 actually sends to the (fake) API server: the token reaches the push through a Secret
 volume and nowhere else, the Secret is gone when the push is, the NetworkPolicy selects
-the publisher's Pod and opens only the git host, the bundle is the one leaf of the claim
-the Pod sees, and the outcome follows the same rules as the Docker publisher's.
+the publisher's Pod and opens only the git host, the bundle comes from the artifact store
+over exec and the Pod mounts no workspace claim (ADR 0032), and the outcome follows the
+same rules as the Docker publisher's.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from crucible.adapters.execution.k8spublisher import (
 )
 from crucible.adapters.execution.kubernetes import KubernetesConfig, KubernetesProvider
 from crucible.adapters.execution.publisher import BUNDLE_SEAL_REFUSED
+from crucible.adapters.storage.disk import DiskArtifactStore
 from crucible.ports.execution import WORK_MOUNT, ProviderError
 from crucible.ports.github import InstallationToken
 from crucible.ports.publish import (
@@ -49,6 +51,25 @@ from tests.unit.kubernetes_fixtures import ATTEMPT, IMAGE, TASK, build
 HEAD = "a" * 40
 BUNDLE = b"a verified branch bundle"
 DIGEST_IMAGE = "ghcr.io/sentania-labs/crucible-worker@sha256:" + "d" * 64
+BUNDLE_ARTIFACT = DiskArtifactStore.relative(hashlib.sha256(BUNDLE).hexdigest())
+
+
+class MemoryStore:
+    """The artifact store as the publisher reads it (ADR 0032): blobs by path."""
+
+    def __init__(self) -> None:
+        self.blobs: dict[str, bytes] = {}
+
+    def put(self, content: bytes) -> Any:
+        raise NotImplementedError
+
+    def get(self, path: str) -> bytes:
+        if path not in self.blobs:
+            raise FileNotFoundError(path)
+        return self.blobs[path]
+
+    def exists(self, path: str) -> bool:
+        return path in self.blobs
 
 
 def _setup(
@@ -75,8 +96,13 @@ def _setup(
                 storage_class="lab-ssd",
             ),
         )
-        if bundle is not None:
-            api.claims[name][BUNDLE_LEAF] = bundle
+        # Where the collector left it: a merge-main run's leaf check still reads it, and
+        # a push must not (ADR 0032).
+        api.claims[name][BUNDLE_LEAF] = b"the copy on the claim, never pushed"
+    store = MemoryStore()
+    if bundle is not None:
+        store.blobs[BUNDLE_ARTIFACT] = bundle
+    provider.artifact_store = store
     return api, provider, KubernetesPublisher(provider, KubernetesPublisherConfig())
 
 
@@ -89,8 +115,10 @@ def _request(**overrides: Any) -> PublishRequest:
         "work_branch": "crucible/EX-0001",
         "base_ref": "main",
         "expected_head": HEAD,
-        "bundle_path": f"k8s://hades-workers/ws-{ATTEMPT.lower()}/output/work_branch.bundle",
+        "bundle_path": "",
         "bundle_sha256": hashlib.sha256(BUNDLE).hexdigest(),
+        "bundle_artifact": BUNDLE_ARTIFACT,
+        "workspace_path": f"k8s://hades-workers/ws-{ATTEMPT.lower()}",
         "image": DIGEST_IMAGE,
         "policy": {"resources": {"cpus": 1, "memory": "512MiB"}},
     }
@@ -174,19 +202,16 @@ async def test_a_push_is_one_job_and_the_token_reaches_it_only_through_a_secret_
         "mountPath": scripts.TOKEN_MOUNT,
         "readOnly": True,
     }
-    # The bundle is the one leaf of the claim the Pod sees, read-only; the outcome leaf
-    # is its own; nothing mounts the checkout, the report or the claim's root.
-    assert mounts[f"{scripts.BUNDLE_MOUNT}/work_branch.bundle"] == {
-        "name": "ws",
-        "mountPath": f"{scripts.BUNDLE_MOUNT}/work_branch.bundle",
-        "readOnly": True,
-        "subPath": BUNDLE_LEAF,
-    }
-    assert mounts[scripts.PUBLISH_MOUNT]["subPath"] == "publish"
-    claim_mounts = sorted(
-        m.get("subPath", "") for m in container["volumeMounts"] if m["name"] == "ws"
-    )
-    assert claim_mounts == [BUNDLE_LEAF, "publish"]
+    # ADR 0032: no workspace claim is mounted at all. The bundle and the outcome are
+    # the Pod's own memory-backed volumes; the bundle arrived over exec, from the store.
+    assert not [v for v in pod["volumes"] if "persistentVolumeClaim" in v]
+    assert mounts[scripts.BUNDLE_MOUNT]["name"] == "bundle"
+    assert mounts[scripts.PUBLISH_MOUNT]["name"] == "outcome"
+    assert volumes["bundle"]["emptyDir"]["medium"] == "Memory"
+    assert volumes["outcome"]["emptyDir"]["medium"] == "Memory"
+    pod_name = f"{job_name(ATTEMPT)}-abc12"
+    assert api.pod_files[pod_name] == {f"{scripts.BUNDLE_MOUNT}/work_branch.bundle": BUNDLE}
+    assert api.exec_stdin[pod_name] == [BUNDLE]
     # The script reads the token file and never takes it from stdin or removes it.
     script = container["command"][-1]
     assert 'cat > "$TOKDIR/token"' not in script
@@ -214,7 +239,7 @@ async def test_the_secret_job_pod_and_policy_are_gone_when_the_push_is() -> None
     assert order.index(("secrets", token_secret_name(ATTEMPT))) > order.index(
         ("jobs", job_name(ATTEMPT))
     )
-    # The workspace claim, which holds the bundle, is not the publisher's to remove.
+    # The workspace claim is not the publisher's to remove.
     assert k8sspec.object_name("ws", ATTEMPT) in api.object_names("persistentvolumeclaims")
 
 
@@ -269,48 +294,59 @@ async def test_a_job_that_cannot_be_created_still_removes_the_secret(
 
 
 async def test_a_bundle_that_no_longer_matches_its_seal_is_refused_before_any_remote() -> None:
+    """ADR 0032: the stored blob is hashed against the seal on Crucible's side, before
+    anything that holds a token exists."""
     api, _provider, publisher = _setup(bundle=b"a bundle somebody changed")
     outcome = await publisher.push(_request(), _token(installation_token_value()))
     assert not outcome.pushed
-    assert (outcome.step, outcome.exit_code) == ("bundle-seal", BUNDLE_SEAL_REFUSED)
+    assert outcome.step == "bundle-seal"
     assert "sealed sha256" in outcome.detail
+    assert api.pushes == []
+    assert _created(api, "secrets") == []
+    assert _created(api, "jobs") == []
+
+
+async def test_a_delivered_bundle_is_checked_against_its_seal_inside_the_pod() -> None:
+    """The script hashes what arrived before any remote, as it did off the claim."""
+    api, _provider, publisher = _setup(bundle=b"a bundle somebody changed")
+    seal = hashlib.sha256(b"a bundle somebody changed").hexdigest()
+    outcome = await publisher.push(_request(bundle_sha256=seal), _token(installation_token_value()))
+    assert outcome.pushed  # the store's blob is the sealed one; now break the delivery
+    api, _provider, publisher = _setup()
+    api.drop_deliveries = True
+    outcome = await publisher.push(_request(), _token(installation_token_value()))
+    assert not outcome.pushed
+    assert (outcome.step, outcome.exit_code) == ("bundle-seal", BUNDLE_SEAL_REFUSED)
     assert api.pushes == []
     assert not api.secret_exists(token_secret_name(ATTEMPT))
 
 
-@pytest.mark.parametrize(
-    "bundle_path",
-    [
-        # Another attempt's claim, another namespace, another leaf, a local path.
-        "k8s://hades-workers/ws-01otherattempt00000000000/output/work_branch.bundle",
-        f"k8s://elsewhere/ws-{ATTEMPT.lower()}/output/work_branch.bundle",
-        f"k8s://hades-workers/ws-{ATTEMPT.lower()}/repo/.git/objects/pack/x.pack",
-        f"/var/lib/crucible/artifacts/workspaces/{ATTEMPT}/output/work_branch.bundle",
-    ],
-)
-async def test_a_bundle_path_that_is_not_this_attempts_collected_bundle_creates_nothing(
-    bundle_path: str,
-) -> None:
-    api, _provider, publisher = _setup()
-    before = len(api.created)
-    outcome = await publisher.push(
-        _request(bundle_path=bundle_path), _token(installation_token_value())
-    )
-    assert not outcome.pushed and outcome.step == "bundle-seal"
-    assert len(api.created) == before
-
-
-async def test_an_unsealed_bundle_or_a_missing_claim_is_refused_before_a_token_is_placed() -> None:
+async def test_an_unsealed_or_unstored_bundle_is_refused_before_a_token_is_placed() -> None:
     api, _provider, publisher = _setup()
     outcome = await publisher.push(_request(bundle_sha256=""), _token(installation_token_value()))
     assert (outcome.pushed, outcome.step) == (False, "bundle-seal")
     assert _created(api, "secrets") == []
 
-    api, _provider, publisher = _setup(claim=False)
+    api, _provider, publisher = _setup()
+    outcome = await publisher.push(_request(bundle_artifact=""), _token(installation_token_value()))
+    assert (outcome.pushed, outcome.step) == (False, "bundle-seal")
+    assert "artifact store" in outcome.detail
+    assert _created(api, "secrets") == []
+
+    api, _provider, publisher = _setup(bundle=None)
     outcome = await publisher.push(_request(), _token(installation_token_value()))
     assert (outcome.pushed, outcome.step) == (False, "bundle-seal")
     assert "is gone" in outcome.detail
     assert _created(api, "secrets") == []
+
+
+async def test_a_push_needs_no_workspace_claim() -> None:
+    """ADR 0032: the claim may be gone; the stored bundle is all a push reads."""
+    api, _provider, publisher = _setup(claim=False)
+    outcome = await publisher.push(_request(), _token(installation_token_value()))
+    assert outcome.pushed, outcome
+    roles = [body["metadata"]["labels"][k8sspec.LABEL_ROLE] for body in _created(api, "jobs")]
+    assert roles == [k8sspec.ROLE_PUBLISHER]
 
 
 async def test_a_namespace_without_egress_enforcement_gets_no_token() -> None:
@@ -365,7 +401,7 @@ class _Recording:
         self.paths: list[str] = []
 
     async def push(self, request: PublishRequest, token: InstallationToken) -> PublishOutcome:
-        self.paths.append(request.bundle_path)
+        self.paths.append(request.workspace_path)
         return PublishOutcome(pushed=True, head_sha=request.expected_head, step="done")
 
     async def merge_main(
@@ -378,14 +414,14 @@ class _Recording:
         return len(attempt_ids)
 
 
-async def test_with_both_providers_the_bundle_path_picks_the_publisher() -> None:
+async def test_with_both_providers_the_workspace_path_picks_the_publisher() -> None:
     docker, kubernetes = _Recording(), _Recording()
     both = ByWorkspacePublisher(docker, kubernetes)
     token = _token(installation_token_value())
     await both.push(_request(), token)
-    await both.push(_request(bundle_path="/var/lib/crucible/x/output/work_branch.bundle"), token)
-    assert kubernetes.paths == [_request().bundle_path]
-    assert docker.paths == ["/var/lib/crucible/x/output/work_branch.bundle"]
+    await both.push(_request(workspace_path="/var/lib/crucible/x"), token)
+    assert kubernetes.paths == [_request().workspace_path]
+    assert docker.paths == ["/var/lib/crucible/x"]
     assert await both.cleanup(["a"]) == 2
     # hades #411: a merge of main runs where the attempt's workspace is, too.
     await both.merge_main(_merge_request(), token)
@@ -440,11 +476,17 @@ def test_the_script_checks_the_seal_before_it_contacts_any_remote() -> None:
 
 
 async def test_a_push_whose_outcome_cannot_be_read_back_still_reports_the_push() -> None:
-    """The script exits 0 only after its push; a reader Pod that cannot be created then
+    """The script exits 0 only after its push; an outcome that cannot be read back then
     must not turn a branch already on the remote into a failed publication. The
     supervisor's own remote-head check is what confirms it."""
     api, _provider, publisher = _setup()
-    api.on_push = lambda _push: api.refuse_create.add("pods")
+    collect = api._collect
+
+    def unreadable(obj: Any) -> Any:
+        collect(obj)  # the push happens and the Pod ends; its answer never arrives
+        raise KubernetesApiError(503, "the exec stream broke")
+
+    api._collect = unreadable  # type: ignore[method-assign]
     outcome = await publisher.push(_request(), _token(installation_token_value()))
     assert (outcome.pushed, outcome.head_sha, outcome.step, outcome.exit_code) == (
         True,
@@ -586,10 +628,10 @@ def test_the_leaf_script_refuses_a_publish_leaf_the_worker_uid_cannot_write(
     assert "not owned and writable as output is" in result.stderr
 
 
-async def test_the_publish_leaf_is_made_by_the_worker_uid_before_the_publisher_pod() -> None:
+async def test_the_publish_leaf_is_made_by_the_worker_uid_before_a_merge_main_pod() -> None:
     api, _provider, publisher = _setup()
-    outcome = await publisher.push(_request(), _token(installation_token_value()))
-    assert outcome.pushed, outcome
+    outcome = await publisher.merge_main(_merge_request(), _token(installation_token_value()))
+    assert outcome.merged, outcome
     jobs = _created(api, "jobs")
     roles = [body["metadata"]["labels"][k8sspec.LABEL_ROLE] for body in jobs]
     assert roles == [k8sspec.ROLE_PREPARER, k8sspec.ROLE_PUBLISHER]
@@ -609,8 +651,8 @@ async def test_the_publish_leaf_is_made_by_the_worker_uid_before_the_publisher_p
 async def test_a_publish_leaf_that_cannot_be_made_is_refused_by_name_before_a_token() -> None:
     api, _provider, publisher = _setup()
     api.publish_leaf_unwritable = True
-    outcome = await publisher.push(_request(), _token(installation_token_value()))
-    assert not outcome.pushed
+    outcome = await publisher.merge_main(_merge_request(), _token(installation_token_value()))
+    assert not outcome.merged
     assert outcome.step == "publish-leaf"
     assert "publish/ leaf of the workspace claim" in outcome.detail
     assert f"ws-{ATTEMPT.lower()}" in outcome.detail
@@ -618,20 +660,7 @@ async def test_a_publish_leaf_that_cannot_be_made_is_refused_by_name_before_a_to
     assert k8sspec.ROLE_PUBLISHER not in [
         body["metadata"]["labels"][k8sspec.LABEL_ROLE] for body in _created(api, "jobs")
     ]
-    assert api.pushes == []
-
-
-async def test_a_missing_bundle_is_refused_before_a_subpath_is_mounted() -> None:
-    """The bundle is mounted as a single-file subPath; a missing one would have the
-    kubelet make a directory there. The leaf Job finds it missing first."""
-    api, _provider, publisher = _setup(bundle=None)
-    outcome = await publisher.push(_request(), _token(installation_token_value()))
-    assert not outcome.pushed and outcome.step == "bundle-seal"
-    assert f"no branch bundle at {BUNDLE_LEAF}" in outcome.detail
-    assert _created(api, "secrets") == []
-    assert k8sspec.ROLE_PUBLISHER not in [
-        body["metadata"]["labels"][k8sspec.LABEL_ROLE] for body in _created(api, "jobs")
-    ]
+    assert api.merges == []
 
 
 # ----- hades #411: merge-main in a publisher Job -----------------------------------
