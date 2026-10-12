@@ -78,6 +78,9 @@ read it. Collection must finish while the worker Pod and its checkout still exis
 7. If the worker Pod disappears before collection, its scratch disappears too. OOM,
    eviction and node loss therefore follow the existing lost-attempt classification
    and retry rule. A missing Pod is never reconstructed from another Pod's files.
+   The first observed worker Pod UID is stored as a Job annotation and restored by
+   reconciliation. A replacement Pod from the same Job has a different UID and cannot
+   be mistaken for the attempt after a supervisor restart.
 
 ## Consequences
 

@@ -757,6 +757,37 @@ async def test_reconcile_recovers_the_image_after_provider_restart() -> None:
     assert provider._launched[launch.attempt_id].image_digest == handle.image_digest
 
 
+async def test_reconcile_uses_the_job_marker_and_refuses_a_replacement_worker_pod() -> None:
+    """A restarted provider keeps an out-of-band Pod deletion on the lost path."""
+    api, _registry, provider, launch, workspace = await prepared()
+    api.script(launch.attempt_id, "hang")
+    handle = await provider.launch(workspace, launch)
+    assert (await provider.observe(handle)).state is ObservationState.RUNNING
+    original = api.get("pods", f"{handle.ref}-abc12")
+    marker = api.get("jobs", handle.ref)["metadata"]["annotations"][
+        kubernetes_module.ANNOTATION_WORKER_POD_UID
+    ]
+    assert marker == original["metadata"]["uid"]
+
+    api.delete("pods", str(original["metadata"]["name"]), grace_period_seconds=0)
+    api.create(
+        "pods",
+        {
+            "metadata": {
+                "name": f"{handle.ref}-replacement",
+                "labels": dict(original["metadata"]["labels"]),
+            },
+            "spec": dict(original["spec"]),
+        },
+    )
+    provider._launched.clear()
+
+    [adopted] = await provider.reconcile()
+    observation = await provider.observe(adopted)
+    assert observation.state is ObservationState.LOST
+    assert provider._launched[launch.attempt_id].pod_uid == marker
+
+
 async def test_collection_waits_for_the_reader_pod_to_finish_deleting() -> None:
     api, _registry, provider, launch, workspace = await prepared()
     handle = await provider.launch(workspace, launch)

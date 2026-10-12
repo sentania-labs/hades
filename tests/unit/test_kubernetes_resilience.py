@@ -180,16 +180,16 @@ async def test_a_collector_wait_the_api_server_never_answered_is_collected_again
     real = time.monotonic
     calls = 0
 
-    async def unanswered(job_name: str) -> Any:
+    async def unanswered(job_name: str, *, pod_uid: str | None = None) -> Any:
         nonlocal calls
         calls += 1
         if calls <= 2:
-            return await looks(job_name)
+            return await looks(job_name, pod_uid=pod_uid)
         if job_name.startswith("worker-"):
             # The outage outlasts the whole wait: the clock jumps past its deadline.
             monkeypatch.setattr(time, "monotonic", lambda: real() + 10**6)
             raise KubernetesUnavailableError(503, "the API server is down")
-        return await looks(job_name)
+        return await looks(job_name, pod_uid=pod_uid)
 
     provider._pod_of = unanswered  # type: ignore[method-assign]
     with pytest.raises(CollectionUnavailableError, match="did not answer"):

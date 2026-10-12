@@ -244,6 +244,10 @@ TimeoutsSource = Callable[[], Mapping[str, Any] | None]
 # Where `prepare` records which ConfigMap key is which bundle file, so `launch` projects
 # every file back to the relative path the bundle hash covers.
 ANNOTATION_IDENTITY_PATHS = "crucible.io/identity-paths"
+# The identity of the one worker Pod whose ephemeral scratch is the attempt's. This is
+# cluster state, not process memory, so reconciliation cannot adopt a replacement Pod
+# after the original was deleted out of band.
+ANNOTATION_WORKER_POD_UID = "crucible.io/worker-pod-uid"
 
 # What a role Job's exit is when Crucible never got one: the API call failed, or the
 # wait ran out and the Job was deleted. Distinct from any code a container can exit
@@ -629,6 +633,10 @@ class _Launched:
     network_policy: str | None = None
     credential: _CredentialCopy | None = None
     pod_name: str | None = None
+    # Persisted on the Job once a worker Pod is first observed. A Job controller may
+    # create another Pod after an out-of-band deletion; that replacement must not be
+    # mistaken for the attempt whose Pod, and ephemeral scratch, were lost.
+    pod_uid: str | None = None
     node: str | None = None
     launched_at: float = 0.0
     # What Crucible itself did to the Pod, so a Pod that is gone because Crucible
@@ -2369,7 +2377,9 @@ class KubernetesProvider:
                     return
             launched.checkout_policy = None
 
-    async def _deliver_resume_to_worker(self, job_name: str, content: bytes) -> None:
+    async def _deliver_resume_to_worker(
+        self, job_name: str, attempt_id: str, content: bytes
+    ) -> None:
         """ADR 0032, 0033: write the sealed bundle into the worker Pod's init container,
         which waits for it as the standalone preparer did. A delivery that cannot be
         made is logged; the init container then refuses as for a bundle that is gone,
@@ -2379,7 +2389,7 @@ class KubernetesProvider:
         while True:
             pod: dict[str, Any] | None = None
             with contextlib.suppress(KubernetesApiError):
-                pod = await self._pod_of(job_name)
+                pod = await self._worker_pod_of(job_name, self._launched.get(attempt_id))
             if pod is not None:
                 status = pod.get("status") or {}
                 name = str((pod.get("metadata") or {}).get("name") or "")
@@ -2521,8 +2531,6 @@ class KubernetesProvider:
             with contextlib.suppress(Exception):
                 await self._await_job_pods_gone(job_name)
             raise LaunchWaitError(f"the namespace quota has no room for the worker: {refusal}")
-        if resume_content is not None:
-            await self._deliver_resume_to_worker(job_name, resume_content)
         self._launched[spec.attempt_id] = _Launched(
             job_name=job_name,
             spec=spec,
@@ -2541,6 +2549,8 @@ class KubernetesProvider:
             checkout_token=checkout_token,
             checkout_policy=checkout_policy,
         )
+        if resume_content is not None:
+            await self._deliver_resume_to_worker(job_name, spec.attempt_id, resume_content)
         if checkout_token:
             try:
                 # The supervisor revokes the installation token as launch returns.
@@ -2549,7 +2559,7 @@ class KubernetesProvider:
                 deadline = time.monotonic() + self.config.prepare_timeout_seconds
                 while time.monotonic() < deadline:
                     await _stop_if_cancelled(cancelled, "while the worker checkout ran")
-                    pod = await self._pod_of(job_name)
+                    pod = await self._worker_pod_of(job_name, self._launched.get(spec.attempt_id))
                     status = (pod or {}).get("status") or {}
                     failed = _terminated_init(status)
                     if failed is not None:
@@ -2608,7 +2618,7 @@ class KubernetesProvider:
                 raise ProviderError(f"reading the Job failed: {exc}") from exc
             job = {}
         try:
-            pod = await self._pod_of(h.ref)
+            pod = await self._worker_pod_of(h.ref, launched)
         except KubernetesApiError as exc:
             # Nothing is decided from a failed look. The supervisor logs this and asks
             # again on the next tick, which is what an attempt whose state could not be
@@ -2640,8 +2650,7 @@ class KubernetesProvider:
         status = pod.get("status") or {}
         phase = str(status.get("phase", ""))
         if launched is not None and not launched.pod_name:
-            launched.pod_name = str((pod.get("metadata") or {}).get("name") or "")
-            launched.node = str((pod.get("spec") or {}).get("nodeName") or "") or None
+            await self._remember_worker_pod(h.ref, launched, pod)
         if launched is not None and launched.limits_source != "pod":
             _observe_limits(launched, pod)
         if launched is not None:
@@ -2965,7 +2974,7 @@ class KubernetesProvider:
                 )
         if not job:
             return Observation(ObservationState.LOST, detail="the namespace has no such Job")
-        if launched is not None and launched.pod_name:
+        if launched is not None and (launched.pod_name or launched.pod_uid):
             # 26: this attempt had a Pod and it is gone now, unlike the case below
             # where one was never created.
             return Observation(ObservationState.LOST, detail="the Job's Pod disappeared")
@@ -3012,7 +3021,7 @@ class KubernetesProvider:
 
     async def logs(self, h: Handle, since: LogOffset) -> list[LogChunk]:
         try:
-            pod = await self._pod_of(h.ref)
+            pod = await self._worker_pod_of(h.ref, self._launched.get(h.attempt_id))
         except KubernetesApiError:
             return []
         if pod is None:
@@ -3059,7 +3068,7 @@ class KubernetesProvider:
         walk sees nothing. The live worker is asked instead, over exec, never through a
         log. Any failure to ask is None: the stall clock is neither reset nor pushed."""
         try:
-            pod = await self._pod_of(h.ref)
+            pod = await self._worker_pod_of(h.ref, self._launched.get(h.attempt_id))
         except KubernetesApiError:
             return None
         if pod is None or str((pod.get("status") or {}).get("phase", "")) != "Running":
@@ -3152,7 +3161,7 @@ class KubernetesProvider:
             )
         bundle_ok = False
         if collector_exit == 0:
-            pod = await self._pod_of(h.ref)
+            pod = await self._worker_pod_of(h.ref, self._launched.get(h.attempt_id))
             if pod is None:
                 raise CollectionUnavailableError("the worker Pod disappeared before bundle check")
             pod_name = str((pod.get("metadata") or {}).get("name") or "")
@@ -3218,7 +3227,7 @@ class KubernetesProvider:
                 changed_blobs=changed_blobs,
             )
             metrics = _report_metrics(adapter, root / "output" / "report", observation)
-        pod = await self._pod_of(h.ref)
+        pod = await self._worker_pod_of(h.ref, self._launched.get(h.attempt_id))
         if pod is not None:
             with contextlib.suppress(KubernetesApiError):
                 await self._call(
@@ -3341,7 +3350,7 @@ class KubernetesProvider:
         address only the agent's process namespace; cleanup removes the Pod later."""
         launched = self._launched.get(h.attempt_id)
         try:
-            pod = await self._pod_of(h.ref)
+            pod = await self._worker_pod_of(h.ref, launched)
         except KubernetesApiError as exc:
             raise ProviderError(f"terminate could not read the Pod of {h.ref}: {exc}") from exc
         if launched is not None:
@@ -3449,7 +3458,10 @@ class KubernetesProvider:
                 # it, not to any attempt the supervisor could adopt.
                 continue
             try:
-                pod = await self._pod_of(name)
+                marker = str(
+                    (metadata.get("annotations") or {}).get(ANNOTATION_WORKER_POD_UID) or ""
+                )
+                pod = await self._pod_of(name, pod_uid=marker or None)
             except KubernetesApiError:
                 continue
             # A Job's `status.active` lags its Pod, so the Pod is what says whether a
@@ -3498,6 +3510,7 @@ class KubernetesProvider:
                     # a missing object is already the goal.
                     checkout_token=True,
                     checkout_policy=k8sspec.object_name(CHECKOUT_POLICY_PREFIX, attempt_id),
+                    pod_uid=marker or None,
                 )
             launched = self._launched[attempt_id]
             if launched.egress_plan is None and launched.network_policy is None:
@@ -3510,9 +3523,9 @@ class KubernetesProvider:
                     pod_spec = live_spec if live_spec.get("containers") else template_spec
                 await self._adopt_egress(launched, attempt_id, pod_spec)
             if pod is not None and not launched.pod_name:
+                await self._remember_worker_pod(name, launched, pod)
                 # So a Pod that vanishes between this reconcile and the first `observe`
                 # reads as lost, not as one the Job controller never created (103).
-                launched.pod_name = str((pod.get("metadata") or {}).get("name") or "")
                 # `observe` restores the node only alongside the Pod name, so it is
                 # restored here too or the launch evidence records no node.
                 launched.node = str((pod.get("spec") or {}).get("nodeName") or "") or None
@@ -5930,7 +5943,7 @@ class KubernetesProvider:
             deadline = time.monotonic() + self.config.api_retry_seconds
             while True:
                 try:
-                    pod = await self._pod_of(job_name)
+                    pod = await self._worker_pod_of(job_name, self._launched.get(spec.attempt_id))
                     break
                 except KubernetesUnavailableError as exc:
                     if time.monotonic() >= deadline:
@@ -6349,7 +6362,7 @@ class KubernetesProvider:
             if exc.status != 409:
                 raise
 
-    async def _pod_of(self, job_name: str) -> dict[str, Any] | None:
+    async def _pod_of(self, job_name: str, *, pod_uid: str | None = None) -> dict[str, Any] | None:
         """The Pod of a Job, or None when the namespace genuinely has none.
 
         It does not swallow a transport failure. A 503 from the API server, a reset
@@ -6362,6 +6375,15 @@ class KubernetesProvider:
         )
         live = [row for row in rows if not (row.get("metadata") or {}).get("deletionTimestamp")]
         candidates = live or rows
+        if pod_uid is not None:
+            return next(
+                (
+                    row
+                    for row in candidates
+                    if str((row.get("metadata") or {}).get("uid") or "") == pod_uid
+                ),
+                None,
+            )
         return (
             max(
                 candidates,
@@ -6370,6 +6392,36 @@ class KubernetesProvider:
             if candidates
             else None
         )
+
+    async def _worker_pod_of(
+        self, job_name: str, launched: _Launched | None
+    ) -> dict[str, Any] | None:
+        """Return only the Pod incarnation this attempt first observed."""
+        pod = await self._pod_of(job_name, pod_uid=launched.pod_uid if launched else None)
+        if pod is not None and launched is not None and launched.pod_uid is None:
+            await self._remember_worker_pod(job_name, launched, pod)
+        return pod
+
+    async def _remember_worker_pod(
+        self, job_name: str, launched: _Launched, pod: Mapping[str, Any]
+    ) -> None:
+        metadata = pod.get("metadata") or {}
+        uid = str(metadata.get("uid") or "")
+        name = str(metadata.get("name") or "")
+        if not uid or not name:
+            raise ProviderError(f"the worker Pod of {job_name} has no durable identity")
+        if launched.pod_uid is not None and launched.pod_uid != uid:
+            return
+        if launched.pod_uid is None:
+            await self._call(
+                self.client.patch,
+                "jobs",
+                job_name,
+                {"metadata": {"annotations": {ANNOTATION_WORKER_POD_UID: uid}}},
+            )
+            launched.pod_uid = uid
+        launched.pod_name = name
+        launched.node = str((pod.get("spec") or {}).get("nodeName") or "") or None
 
     async def _clear_collection_pods(self, attempt_id: str) -> None:
         """Finish earlier cleanup before any collection step touches the workspace.

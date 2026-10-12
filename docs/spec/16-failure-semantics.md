@@ -287,7 +287,7 @@ A cleanup pass runs each reconcile tick. Every deletion is an event and a
 `RetentionAction` row naming the policy version that authorized it.
 Nothing that a gate consumed is deleted before the task is terminal.
 
-An attempt that ended before its worker launched (`started_at` null: an
+For a retained-workspace provider, an attempt that ended before its worker launched (`started_at` null: an
 `environment` exit at prepare or launch, a `killed` cancel during launch, a
 `quota_exhausted` refusal at reserve, an `infrastructure` start failure)
 never records `logs_drained`, which the cleanup pass waits for. Its
@@ -301,9 +301,13 @@ released by the step below; collection is the only thing that records a
 bundle head, so no attempt that never launched is one today. The provider
 retention sweep does not hold back such an attempt's objects either, so a
 claim leaked before this rule existed drains on its own; a claim with the
-retention label is honoured (hades #394).
+retention label is honoured (hades #394). Kubernetes is different under ADR 0033:
+there is no claim, retained workspace, workspace retention action, or
+`attempt_cleaned_up` workspace event. Its labelled objects are removed and each Pod's
+scratch disappears with that Pod.
 
-A workspace a cleanup policy kept (`keep`, `keep_diff_only`) is released by
+On providers with retained workspaces, a workspace a cleanup policy kept (`keep`,
+`keep_diff_only`) is released by
 the retention step, one `RetentionAction` of kind `workspace` per attempt,
 once its task is terminal (closed, rejected, cancelled) or the task's work
 was published, or once `completed_workspaces_days` have passed since
@@ -318,8 +322,9 @@ pending by the preparer's pod-gone wait, or failed at prepare), the newest
 earlier attempt that has one stays (hades #503), and a correction request
 finds that attempt's sealed bundle rather than answering
 `previous_attempt_bundle_gone`. Before the lab findings of 2026-09-29
-nothing released a kept workspace, and on Kubernetes the kept claims filled
-the namespace's claim quota.
+nothing released a kept workspace, and the Kubernetes claims then in use filled the
+namespace's claim quota. ADR 0033 removed those Kubernetes claims and this policy now
+describes the Docker host-path workspace only.
 
 ## Retention (initial defaults, configurable per policy)
 

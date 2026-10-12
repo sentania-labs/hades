@@ -535,9 +535,9 @@ async def test_rows_5_7_11_23_supervisor_restart_and_full_gate_lifecycle(
             "image_resolved",
             "attempt_logs_drained",
             "verification_completed",
-            "attempt_cleaned_up",
         ):
             assert kind in event_kinds(client, task_id)
+        assert "attempt_cleaned_up" not in event_kinds(client, task_id)
 
         timeout_origin = _origin("supervisor-timeout", "hang")
         register(ctx, "supervisor-timeout", timeout_origin)

@@ -430,7 +430,7 @@ class FakeKubernetesApi:
             raise KubernetesApiError(409, f"{kind}/{name} already exists")
         stored: dict[str, Any] = json.loads(json.dumps(dict(body)))
         stored.setdefault("metadata", {})["resourceVersion"] = str(self._next_rv())
-        if kind == "jobs" or (
+        if kind in ("jobs", "pods") or (
             kind == "configmaps"
             and (stored.get("metadata") or {}).get("labels", {}).get(LABEL_ROLE) == ROLE_LOGIN_LOCK
         ):
@@ -816,6 +816,8 @@ class FakeKubernetesApi:
             "metadata": {"name": pod_name, "namespace": self.namespace, "labels": labels},
             "spec": {**dict(template.get("spec") or {}), "nodeName": self.node_name},
         }
+        self._uids += 1
+        pod["metadata"]["uid"] = f"uid-{self._uids}"
         self.objects[("pods", pod_name)] = _Object("pods", pod_name, pod)
         # The Job controller counts the Pod it created, which is how `launch` knows the
         # quota admitted it without listing Pods (hades #423).
