@@ -434,6 +434,8 @@ def test_github_adapter_sends_squash_and_expected_sha_with_the_app_token() -> No
     transport = Mock(spec=RestTransport)
     transport.request.return_value = (200, {"merged": True, "sha": MERGE}, {})
     transport.get.return_value = {
+        "title": "Fix behavior",
+        "body": "Verified evidence",
         "number": 7,
         "html_url": "https://github.invalid/org/repo/pull/7",
         "head": {"sha": HEAD},
@@ -454,13 +456,19 @@ def test_github_adapter_sends_squash_and_expected_sha_with_the_app_token() -> No
         "PUT",
         "/repos/org/repo/pulls/7/merge",
         bearer=token.reveal(),
-        body={"merge_method": "squash", "sha": HEAD},
+        body={
+            "merge_method": "squash",
+            "sha": HEAD,
+            "commit_title": "Fix behavior",
+            "commit_message": "Verified evidence",
+        },
     )
 
 
 @pytest.mark.parametrize("status", [200, 403, 405, 409, 412])
 def test_github_adapter_preserves_refusal_cause(status: int) -> None:
     transport = Mock(spec=RestTransport)
+    transport.get.return_value = {"title": "Fix behavior", "body": "Verified evidence"}
     transport.request.return_value = (
         status,
         {"merged": False, "message": "precondition failed"},
@@ -474,4 +482,6 @@ def test_github_adapter_preserves_refusal_cause(status: int) -> None:
             number=7,
             expected_head_sha=HEAD,
         )
-    transport.get.assert_not_called()
+    transport.get.assert_called_once_with(
+        "/repos/org/repo/pulls/7", bearer=FakeGitHub().installation_token().reveal()
+    )

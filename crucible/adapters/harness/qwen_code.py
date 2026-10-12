@@ -35,6 +35,16 @@ NAME = "qwen_code"
 # request to the remaining window. RoutingModel.context_length overrides this.
 DEFAULT_CONTEXT_LENGTH = DEFAULT_QWEN_CONTEXT_LENGTH
 
+# The image wrapper owns user settings. System settings override those and work
+# even when the optional gateway credential is absent.
+ATTRIBUTION_PRELUDE = """set -eu
+QWEN_CODE_SYSTEM_SETTINGS_PATH=$(mktemp)
+export QWEN_CODE_SYSTEM_SETTINGS_PATH
+printf '%s\\n' '{"general":{"gitCoAuthor":{"commit":false,"pr":false}}}' \\
+  > "$QWEN_CODE_SYSTEM_SETTINGS_PATH"
+exec "$@"
+"""
+
 
 def context_length(settings: Mapping[str, Any]) -> int:
     value = settings.get("context_length")
@@ -139,6 +149,10 @@ class QwenCodeAdapter:
         assert credential is not None
         return AdapterLaunch(
             argv=(
+                "/bin/sh",
+                "-c",
+                ATTRIBUTION_PRELUDE,
+                "crucible-qwen-attribution",
                 "/usr/local/bin/crucible-qwen-code",
                 "--yolo",
                 "--auth-type",

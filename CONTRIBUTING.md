@@ -4,6 +4,8 @@ The project is Hades (the package, CLIs and images still say `crucible`).
 
 ## Delivery pipeline
 
+Main carries one author, the Hades App, to keep GitHub's author filter accurate; harness and model attribution stays in `attempt_routed`, linked from worker commits by `Crucible-Attempt`.
+
 1. Branch from `main`. Nothing lands on `main` without a pull request.
 2. Lint and test with the same definitions CI uses: `make lint` (ruff
    format and check, mypy --strict, import-linter, and the image manifest

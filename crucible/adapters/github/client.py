@@ -8,6 +8,7 @@ the configured external-review trigger under the App's identity.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -139,12 +140,28 @@ class RestGitHubClient:
         number: int,
         expected_head_sha: str,
     ) -> MergeResult:
+        # Use the PR title and Hades-composed body, never GitHub's default squash
+        # text, which derives co-authors from the branch commits.
+        pull_path = f"/repos/{repository}/pulls/{number}"
+        pull = self._http.get(pull_path, bearer=token.reveal())
+        title = pull.get("title") if isinstance(pull, dict) else None
+        if not isinstance(title, str) or not title.strip():
+            raise GitHubError(502, "pull request response has no title", path=pull_path)
+        body = pull.get("body") or ""
+        if not isinstance(body, str):
+            raise GitHubError(502, "pull request response has invalid body", path=pull_path)
+        commit_message = re.sub(r"(?im)^[ \t]*co-authored-by[ \t]*:[^\n]*(?:\n|$)", "", body)
         path = f"/repos/{repository}/pulls/{number}/merge"
         status, payload, _ = self._http.request(
             "PUT",
             path,
             bearer=token.reveal(),
-            body={"merge_method": "squash", "sha": expected_head_sha},
+            body={
+                "merge_method": "squash",
+                "sha": expected_head_sha,
+                "commit_title": title,
+                "commit_message": commit_message,
+            },
         )
         if status >= 400:
             message = payload.get("message") if isinstance(payload, dict) else None

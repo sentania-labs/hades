@@ -173,6 +173,8 @@ set -eu
 KEY={_quote(trailer)}
 VALUE={_quote(value)}
 [ -n "${{1:-}}" ] || exit 0
+# Hades records harness attribution; GitHub must see no co-author lines.
+sed -i '/^[[:blank:]]*co-authored-by[[:blank:]]*:/Id' "$1"
 exec git interpret-trailers --in-place --no-divider --if-exists doNothing \\
   --if-missing add --trailer "$KEY: $VALUE" "$1"
 """

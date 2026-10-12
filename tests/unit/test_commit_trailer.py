@@ -79,13 +79,15 @@ def _trailers(repo: Path, rev: str = "HEAD") -> list[str]:
 
 
 def _git_only_path(tmp_path: Path) -> dict[str, str]:
-    """An environment whose PATH holds git and nothing else: the hook can reach no curl,
-    no ssh and no other program, so whatever it does, it does with git alone."""
+    """Only git and the co-author line filter; no curl or ssh."""
     bin_dir = tmp_path / "git-only"
     bin_dir.mkdir()
     git = shutil.which("git")
     assert git is not None
     (bin_dir / "git").symlink_to(git)
+    sed = shutil.which("sed")
+    assert sed is not None
+    (bin_dir / "sed").symlink_to(sed)
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["PATH"] = str(bin_dir)
     # Nothing it could use to reach a network either way.
@@ -100,7 +102,7 @@ def test_the_bundle_carries_an_executable_read_only_commit_msg_hook(tmp_path: Pa
     assert text.startswith("#!/bin/sh\n")
     assert "KEY='Crucible-Attempt'" in text
     assert "VALUE='HT-0007'" in text
-    # The only program it runs is git's own trailer editor, on the message file.
+    # Git's trailer editor still adds the attempt after the co-author filter.
     commands = [
         line
         for line in text.splitlines()

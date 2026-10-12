@@ -57,3 +57,51 @@ so a `ci-decision` `rerun` re-runs the failed jobs through the App
 reads the installation's granted permissions on every rerun decision; an installation
 that still holds Actions read keeps the `ci_rerun_needed` hand-off to the operator (23).
 No other permission changes.
+
+## Amendment: one author on main (FDY-0630, 2026-10-11)
+
+Hades requests each squash with an explicit `commit_title` from the PR title and
+`commit_message` from the PR body Hades composed. It removes case-insensitive
+`Co-Authored-By:` lines before sending the message, including when an older branch
+already contains them. An empty body is sent as an explicit empty message. GitHub
+must not generate the squash body from branch authors or their commit messages.
+The App installation remains the caller and the Hades App is main's sole author.
+The expected head SHA and merge-result verification remain in force.
+
+The worker `commit-msg` hook removes those lines before adding `Crucible-Attempt`.
+It preserves other trailers and remains idempotent on amend. This is a backstop
+for harness settings, not a new publication gate: `--no-verify` can bypass a Git
+hook, and the explicit squash message still protects main. No accepted bundle,
+correction resume point, or existing commit is rewritten.
+
+Harness audit against the pinned adapters:
+
+- Claude Code 2.1.280: the owned `settings.json` sets `attribution.commit` and
+  `attribution.pr` to empty strings. These are the documented replacement for
+  deprecated `includeCoAuthoredBy`; see the [Claude Code attribution reference](https://code.claude.com/docs/en/settings-reference#attribution).
+  Use the object form, compatible with this pinned version, rather than the newer
+  boolean form. The hook covers a harness that ignores the setting.
+- Codex 0.156.0: the adapter's owned template injects no attribution. This release
+  resolves attribution through the backend's `commit_attribution_enabled`, not a
+  local `commit_attribution` setting; see its [policy implementation](https://github.com/openai/codex/blob/rust-v0.156.0/codex-rs/ext/git-attribution/src/policy.rs).
+  There is no equivalent local setting to disable in this adapter. The common
+  hook strips any backend-enabled co-author line.
+- Qwen Code 0.25.0: `general.gitCoAuthor.commit` and `.pr` default to true; both
+  are set false through `QWEN_CODE_SYSTEM_SETTINGS_PATH`, documented in the
+  [Qwen configuration reference](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/settings/).
+  The adapter creates the settings file in the worker's temporary directory
+  before executing the existing wrapper. This works with or without a gateway
+  credential and leaves the image-owned user settings intact. The disposable
+  worker removes the temporary file at teardown.
+- Hermes 0.19.0: no co-author default or equivalent setting was found in the
+  adapter or the installed terminal/configuration code. Its launch ignores user
+  configuration and rules and disables plugins through safe mode. The hook is
+  the backstop for model-written trailers.
+- AGY 1.2.8: no co-author default or equivalent setting was found in the adapter
+  or the installed CLI's attribution strings. It has no owned settings template
+  adding an author. The hook is the backstop for model-written trailers.
+
+`attempt_routed` still records the selected harness and model. The existing
+`Crucible-Attempt` trailer links the worker commit to Hades' task history; it does
+not encode the model itself. Publication and CONTRIBUTING document this split
+so removing GitHub co-authors does not remove the execution record.

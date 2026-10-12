@@ -51,6 +51,8 @@ delivery half of the task lifecycle (09).
 
 ## Publication (task state `publishing`)
 
+Main carries one author, the Hades App, to keep GitHub's author filter accurate; harness and model attribution stays in `attempt_routed`, linked from worker commits by `Crucible-Attempt`.
+
 Runs only after: pre-PR gates passed for the collected head, the internal
 review is recorded, and Foundry's `AcceptanceResult` for that head is
 `accepted` (policy `publish_requires_acceptance`).
