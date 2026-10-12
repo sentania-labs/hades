@@ -49,6 +49,7 @@ from crucible.adapters.execution.k8sregistry import RegistryError
 from crucible.adapters.execution.k8sspec import (
     CONTAINER_NAME,
     DRAIN_SCRIPT,
+    KILL_SCRIPT,
     LABEL_ATTEMPT,
     LABEL_CANARY,
     LABEL_ROLE,
@@ -615,6 +616,13 @@ class FakeKubernetesApi:
         stdout_to: IO[bytes] | None = None,
     ) -> ExecResult:
         self._outage("pod_exec", "pods")
+        obj = self.objects.get(("pods", name))
+        if obj is not None:
+            labels = (obj.body.get("metadata") or {}).get("labels") or {}
+            if labels.get(LABEL_ROLE) == ROLE_VERIFIER and (obj.body.get("status") or {}).get(
+                "phase"
+            ) in ("Succeeded", "Failed"):
+                raise KubernetesApiError(400, "cannot exec into a terminated verifier")
         result = self._exec(name, command, stdin)
         if stdout_to is None:
             return result
@@ -670,13 +678,18 @@ class FakeKubernetesApi:
             return self._activity(name, claim)
         if "git bundle verify" in script:
             return ExecResult(b"", b"", 0)
+        if "bundle create - HEAD" in script:
+            return ExecResult(claim.get("output/work_branch.bundle", b""), b"", 0)
         if "touch /crucible/work/.collection-read" in script:
             claim[".collection-read"] = b""
+            return ExecResult(b"", b"", 0)
+        if script == "touch /crucible/work/.verify-read":
+            self._finish(obj, 0)
             return ExecResult(b"", b"", 0)
         mode = re.match(r"^printf '%s\\n' (quota|normal) > /crucible/work/\.collect-mode$", script)
         if mode is not None:
             return self._collect_in_worker(obj, mode.group(1))
-        if script == DRAIN_SCRIPT:
+        if script in (DRAIN_SCRIPT, KILL_SCRIPT):
             labels = (obj.body.get("metadata") or {}).get("labels") or {}
             attempt_id = str(labels.get(LABEL_ATTEMPT, ""))
             worker = self.workers.get(attempt_id)
@@ -684,10 +697,10 @@ class FakeKubernetesApi:
                 worker.behavior = "environment"
                 worker.remaining = 0
                 self._advance(obj)
-                worker.exit_code = 143
+                worker.exit_code = 143 if script == DRAIN_SCRIPT else 137
                 statuses = (obj.body.get("status") or {}).get("containerStatuses") or []
                 if statuses:
-                    statuses[0]["state"]["terminated"]["exitCode"] = 143
+                    statuses[0]["state"]["terminated"]["exitCode"] = worker.exit_code
             return ExecResult(b"", b"", 0)
         if "tar cf -" in script:
             if f"output/{CHANGED_BLOBS_DIR}" in script and "--exclude" not in script:
@@ -714,7 +727,9 @@ class FakeKubernetesApi:
         else:
             self.pod_files.setdefault(obj.name, {})[target] = content
         labels = (obj.body.get("metadata") or {}).get("labels") or {}
-        if _command_of(obj).find(RESUME_DELIVERY_MARKER) >= 0:
+        if labels.get(LABEL_ROLE) == ROLE_VERIFIER:
+            self._act_verifier(obj, str(labels.get(LABEL_ATTEMPT, "")))
+        elif _command_of(obj).find(RESUME_DELIVERY_MARKER) >= 0:
             self._act_preparer(obj, str(labels.get(LABEL_ATTEMPT, "")), delivered=True)
         elif labels.get(LABEL_ROLE) == ROLE_WORKER and _waits_for_resume(obj):
             # ADR 0033: the worker's own checkout had the bundle it waited for; the
@@ -1087,6 +1102,8 @@ class FakeKubernetesApi:
     def _act_verifier(self, obj: _Object, attempt_id: str) -> None:
         from crucible.adapters.execution.scripts import encode_check_id  # noqa: PLC0415
 
+        if ".verify-ready" in _command_of(obj) and not self.pod_files.get(obj.name):
+            return
         behavior, _ = self._behavior(attempt_id, obj)
         claim = self._claim_of(obj)
         spec = self._spec_of(attempt_id)
@@ -1097,7 +1114,8 @@ class FakeKubernetesApi:
             safe = encode_check_id(str(check.get("id")))
             claim[f"verify/{safe}.exit"] = f"{expect + 1 if failed else expect}\n".encode()
             claim[f"verify/{safe}.log"] = f"fake verifier re-ran {check.get('command')!r}".encode()
-        self._finish(obj, 0)
+        if ".verify-ready" not in _command_of(obj):
+            self._finish(obj, 0)
 
     def _act_cleaner(self, obj: _Object, attempt_id: str) -> None:
         claim = self._claim_of(obj)

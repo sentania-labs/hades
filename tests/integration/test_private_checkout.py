@@ -315,6 +315,7 @@ def test_the_form_the_api_and_the_04_path_accept_and_refuse_alike(
 # ----- the supervisor ---------------------------------------------------------------
 
 
+@pytest.mark.parametrize("provider_name", ["fake", "kubernetes"])
 async def test_the_supervisor_hands_a_fresh_token_to_prepare_and_revokes_it(
     ctx: AppContext,
     client: TestClient,
@@ -322,12 +323,23 @@ async def test_the_supervisor_hands_a_fresh_token_to_prepare_and_revokes_it(
     stubs: Any,
     app_key: tuple[str, str],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_name: str,
 ) -> None:
     github = _github(stubs, app_key, tmp_path)
     _make_private(ctx, github)
     minted_at_registration = len(stubs.stubs.mints)
     supervisor = make_supervisor(ctx, provider, github=github)
     task_id = submit_and_start(client, "crucible-worker:fake-succeed")
+    monkeypatch.setattr(provider, "name", provider_name)
+    original_launch = provider.launch
+
+    async def launch_with_checkout(ws: Any, spec: Any, **kwargs: Any) -> Any:
+        token = provider.checkout_tokens[spec.attempt_id].token
+        assert bool(token.reveal()) is (provider_name == "kubernetes")
+        return await original_launch(ws, spec, **kwargs)
+
+    monkeypatch.setattr(provider, "launch", launch_with_checkout)
     for _ in range(3):
         await supervisor.tick()
     task = client.get(f"/v1/tasks/{task_id}").json()
@@ -335,7 +347,7 @@ async def test_the_supervisor_hands_a_fresh_token_to_prepare_and_revokes_it(
     seen = provider.checkout_tokens[attempt_id]
     assert seen.had_value and seen.repository == TIER
     assert seen.permissions == {"contents": "read", "metadata": "read"}
-    assert seen.token.reveal() == "", "the token outlived prepare in this process"
+    assert seen.token.reveal() == "", "the token outlived launch in this process"
     assert stubs.stubs.mints[minted_at_registration:] == [
         {
             "installation": 7,

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
+import subprocess
+import tarfile
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -15,7 +19,14 @@ from crucible.adapters.execution.kubernetes import (
     KubernetesConfig,
     KubernetesProvider,
 )
-from crucible.ports.execution import WORK_MOUNT, ObservationState
+from crucible.ports.execution import (
+    OUTPUT_MOUNT,
+    PACKAGE_CACHE_MOUNT,
+    REPO_MOUNT,
+    VERIFY_MOUNT,
+    WORK_MOUNT,
+    ObservationState,
+)
 from crucible.ports.github import InstallationToken
 from crucible.ports.harness import MountMode
 from tests.unit.kubernetes_fixtures import build, fake_resolver, pod_of, spec
@@ -23,6 +34,46 @@ from tests.unit.kubernetes_fixtures import build, fake_resolver, pod_of, spec
 PREVIOUS = "01PREVIOUSATTEMPT000000000"
 HEAD = "a" * 40
 BUNDLE = b"# v2 git bundle\nsealed bytes of the previous attempt\n"
+
+
+async def test_worker_init_creates_every_scratch_subpath(tmp_path: Path) -> None:
+    """Run the rendered init, without kubelet creating root-owned missing leaves."""
+    origin = tmp_path / "origin"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(origin)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(origin),
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
+    api, _registry, provider = build()
+    launch = replace(spec(), repository_url=str(origin))
+    workspace = await provider.prepare(launch)
+    await provider.launch(workspace, launch)
+    pod = pod_of(api, "worker-")
+    command = _inits(pod)[k8sspec.WORKER_PREPARE_CONTAINER]["command"][-1]
+    scratch = tmp_path / "scratch"
+    command = command.replace(WORK_MOUNT, str(scratch)).replace(
+        "/tmp/gitconfig", str(tmp_path / "gitconfig")
+    )
+    result = subprocess.run(["sh", "-c", command], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    for container in pod["containers"]:
+        for mount in container["volumeMounts"]:
+            if mount["name"] == "ws" and mount.get("subPath"):
+                leaf = scratch / mount["subPath"]
+                assert leaf.is_dir(), (container["name"], mount["subPath"])
+                assert leaf.stat().st_uid == (scratch / "repo").stat().st_uid
 
 
 async def _worker(*, behavior: str = "success") -> tuple[Any, Any, Any, Any, Any]:
@@ -64,6 +115,124 @@ async def test_agent_and_collector_share_the_worker_pods_scratch() -> None:
     assert WORK_MOUNT not in agent_paths
 
 
+async def test_verifier_reads_its_own_scratch_before_its_container_exits() -> None:
+    api, provider, launch, workspace, handle = await _worker()
+    await provider.observe(handle)
+    outputs = await provider.collect(handle, workspace, launch)
+    assert outputs.verifications and all(row.ran for row in outputs.verifications)
+    pod = pod_of(api, "verifier-")
+    mounts = {row["mountPath"]: row for row in pod["containers"][0]["volumeMounts"]}
+    for path, leaf in (
+        (REPO_MOUNT, "repo"),
+        (VERIFY_MOUNT, "verify"),
+        (PACKAGE_CACHE_MOUNT, "pkg-cache"),
+    ):
+        assert mounts[path]["name"] == "ws"
+        assert mounts[path]["subPath"] == leaf
+    assert pod["initContainers"][0]["name"] == "scratch-prepare"
+
+
+async def test_verifier_handshake_runs_with_a_real_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fake records commands; real git and shells prove their handoff protocol."""
+    api, _registry, provider = build()
+    launch = spec()
+    launch = replace(
+        launch,
+        contract={
+            **launch.contract,
+            "required_verification": [
+                {"id": "fails", "command": "exit 7", "expect_exit": 0},
+                {"id": "runs-next", "command": "git rev-list --count HEAD", "expect_exit": 0},
+            ],
+        },
+    )
+    workspace = await provider.prepare(launch)
+    handle = await provider.launch(workspace, launch)
+    commands: list[str] = []
+    original = api.pod_exec
+
+    def record(name: str, command: Any, **kwargs: Any) -> Any:
+        commands.append(command[2])
+        return original(name, command, **kwargs)
+
+    monkeypatch.setattr(api, "pod_exec", record)
+    await provider.observe(handle)
+    await provider.collect(handle, workspace, launch)
+    pod = pod_of(api, "verifier-")
+    origin = tmp_path / "collected" / "tree"
+    origin.mkdir(parents=True)
+    git = ["git", "-C", str(origin)]
+    subprocess.run([*git, "init", "-q", "-b", "main"], check=True)
+    for message in ("base", "worker change"):
+        subprocess.run(
+            [
+                *git,
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                message,
+            ],
+            check=True,
+        )
+    export = next(command for command in commands if "bundle create - HEAD" in command)
+    export = export.replace(OUTPUT_MOUNT, str(origin.parent))
+    bundle = subprocess.run(["sh", "-c", export], capture_output=True, check=True).stdout
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    (bundle_dir / "work_branch.bundle").write_bytes(bundle)
+    scratch = tmp_path / "scratch"
+
+    def local(command: str) -> str:
+        for before, after in (
+            (scripts.BUNDLE_MOUNT, str(bundle_dir)),
+            (WORK_MOUNT, str(scratch)),
+            (REPO_MOUNT, str(scratch / "repo")),
+            (VERIFY_MOUNT, str(scratch / "verify")),
+            (PACKAGE_CACHE_MOUNT, str(scratch / "pkg-cache")),
+            ("/home/worker", str(tmp_path / "home")),
+        ):
+            command = command.replace(before, after)
+        return command
+
+    subprocess.run(["sh", "-c", local(pod["initContainers"][0]["command"][-1])], check=True)
+    process = subprocess.Popen(
+        ["sh", "-c", local(pod["containers"][0]["command"][-1])],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        read = next(command for command in commands if ".verify-ready" in command)
+        result = subprocess.run(
+            ["sh", "-c", local(read)], capture_output=True, timeout=10, check=True
+        )
+        assert process.poll() is None, "the verifier exited before readback was acknowledged"
+        acknowledge = next(command for command in commands if command.endswith("/.verify-read"))
+        subprocess.run(["sh", "-c", local(acknowledge)], check=True)
+        stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, (stdout, stderr)
+        with tarfile.open(fileobj=io.BytesIO(result.stdout)) as archive:
+
+            def content(name: str) -> bytes:
+                stream = archive.extractfile(f"verify/{name}")
+                assert stream is not None
+                return stream.read()
+
+            assert content("fails.exit") == b"7\n"
+            assert content("runs-next.exit") == b"0\n"
+            assert content("runs-next.log") == b"2\n"
+        assert (scratch / ".verify-read").exists()
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+
+
 async def test_collection_runs_in_the_worker_pod_after_an_agent_timeout() -> None:
     api, provider, launch, workspace, handle = await _worker(behavior="hang")
     assert (await provider.observe(handle)).state is ObservationState.RUNNING
@@ -74,6 +243,17 @@ async def test_collection_runs_in_the_worker_pod_after_an_agent_timeout() -> Non
     assert api.collect_modes == [(launch.attempt_id, "normal")]
     assert collected.bundle is not None
     # The worker Pod was never deleted to end the agent: the scratch outlived it.
+    assert not [name for kind, name in api.deleted if kind == "pods" and "worker" in name]
+
+
+async def test_collection_survives_a_kill_after_the_timeout_grace() -> None:
+    api, provider, launch, workspace, handle = await _worker(behavior="hang")
+    assert (await provider.observe(handle)).state is ObservationState.RUNNING
+    await provider.terminate(handle, "kill")
+    assert (await provider.observe(handle)).state is ObservationState.EXITED
+    outputs = await provider.collect(handle, workspace, launch)
+    assert outputs.bundle is not None
+    assert api.collect_modes == [(launch.attempt_id, "normal")]
     assert not [name for kind, name in api.deleted if kind == "pods" and "worker" in name]
 
 
@@ -265,6 +445,7 @@ async def test_a_restarted_supervisor_still_mounts_the_checkout_token() -> None:
         resolver=fake_resolver,
     )
     handle = await restarted.launch(workspace, launch)
+    assert not api.secret_exists(name), "launch returned before private checkout cleanup"
     pod = pod_of(api, "worker-")
     prepare = _inits(pod)[k8sspec.WORKER_PREPARE_CONTAINER]
     assert "CRUCIBLE_TOKEN_FILE" in prepare["command"][-1]

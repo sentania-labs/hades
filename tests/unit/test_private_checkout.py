@@ -589,7 +589,6 @@ async def test_kubernetes_retries_a_token_secret_it_could_not_delete_after_the_c
     api, _registry, provider = kf.build(config=_k8s_config())
     launch = kf.spec()
     ws = await provider.prepare(launch, checkout_token=_token())
-    handle = await provider.launch(ws, launch)
     original = api.delete
     refused: list[bool] = []
 
@@ -601,7 +600,7 @@ async def test_kubernetes_retries_a_token_secret_it_could_not_delete_after_the_c
         original(kind, name, **kw)
 
     api.delete = refuse_one_look  # type: ignore[method-assign]
-    await provider.observe(handle)
+    handle = await provider.launch(ws, launch)
     assert refused, "the deletion was never attempted"
     assert api.secret_exists(SECRET_NAME)
     await provider.observe(handle)

@@ -204,7 +204,11 @@ It is a test fixture: wired only when `test_fixtures` is on (18).
 Same contract. Role Pods run in a worker namespace. The worker Pod contains a
 checkout-preparer init container, the agent and the collector, which the provider
 releases once it has classified the agent's exit; verifier and publisher
-remain separate Jobs. Every Pod has its own ephemeral scratch and no Pod inherits files
+remain separate Jobs. The verifier receives a self-contained bundle from the
+collector's independent clone and holds its own results until exec readback completes;
+the sealed publication and correction bundle remains unchanged. Init containers create
+scratch subPaths as the worker uid, including the report directory. Every Pod has its
+own ephemeral scratch and no Pod inherits files
 from another Pod. Identity is a
 ConfigMap or projected volume, the harness credential as a per-attempt
 Secret seeded from the harness's dedicated Secret, the GitHub App key on

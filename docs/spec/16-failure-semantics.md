@@ -262,6 +262,13 @@ in the worker Pod and starts only when the provider has classified the agent's e
 a quota checkpoint there is committed as `wip` or refused exactly as the Docker
 collector does it.
 
+On a supervised Kubernetes timeout, drain signals the agent with TERM. After the grace
+window, kill ends its remaining child processes with KILL and the launch wrapper
+exits. The running Pod and collector survive both operations; cleanup deletes the Pod
+after collection. The verifier similarly stays alive until its results have been read
+over exec, bounded by its existing role timeout, so a completed check does not become
+an endless retry of exec into a container that already exited.
+
 | Setting | Options | Default |
 |---|---|---|
 | `workspace_on_success` | delete, keep, keep_diff_only | keep_diff_only |

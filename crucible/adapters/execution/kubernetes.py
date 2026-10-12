@@ -32,6 +32,7 @@ import ipaddress
 import json
 import logging
 import os
+import shlex
 import shutil
 import socket
 import tarfile
@@ -2540,6 +2541,33 @@ class KubernetesProvider:
             checkout_token=checkout_token,
             checkout_policy=checkout_policy,
         )
+        if checkout_token:
+            try:
+                # The supervisor revokes the installation token as launch returns.
+                # A Running Pod has completed its checkout init; waiting here keeps a
+                # private clone from using a token already revoked after prepare.
+                deadline = time.monotonic() + self.config.prepare_timeout_seconds
+                while time.monotonic() < deadline:
+                    await _stop_if_cancelled(cancelled, "while the worker checkout ran")
+                    pod = await self._pod_of(job_name)
+                    status = (pod or {}).get("status") or {}
+                    failed = _terminated_init(status)
+                    if failed is not None:
+                        raise ProviderError("the worker checkout init failed before launch")
+                    if status.get("phase") in ("Running", "Succeeded"):
+                        await self._close_checkout_egress(
+                            self._launched[spec.attempt_id], spec.attempt_id
+                        )
+                        break
+                    if status.get("phase") == "Failed":
+                        raise ProviderError("the worker Pod failed during checkout")
+                    await asyncio.sleep(self.config.poll_interval_seconds)
+                else:
+                    raise ProviderError("the worker checkout did not finish before its timeout")
+            except BaseException:
+                await asyncio.shield(self._delete_attempt_objects(spec.attempt_id))
+                self._launched.pop(spec.attempt_id, None)
+                raise
         return Handle(
             provider=self.name,
             ref=job_name,
@@ -3148,16 +3176,31 @@ class KubernetesProvider:
             else None
         )
         interrupted = observation.never_started or quota_checkpoint or interruption is not None
-        bundle_file = await self._read_files(
-            spec, ["output/work_branch.bundle"], limits, collection=True
-        )
-        bundle_content = bundle_file.get("output/work_branch.bundle")
+        verification_bundle = b""
+        if not interrupted and bundle_ok and verifier_checks(spec.contract):
+            # The sealed publication bundle is incremental. An empty verifier repo
+            # has none of its prerequisites, so export the collector's independent
+            # clone as a self-contained verification input. Publication and correction
+            # still use the original sealed work_branch.bundle, unchanged.
+            async with self._reader(spec, limits) as pod_name:
+                exported = await self._call(
+                    self.client.pod_exec,
+                    pod_name,
+                    [
+                        "sh",
+                        "-c",
+                        scripts.GIT_ENV
+                        + "\n"
+                        + f"{scripts.GIT} -C {OUTPUT_MOUNT}/tree bundle create - HEAD",
+                    ],
+                    container=k8sspec.ROLE_COLLECTOR,
+                    timeout=self.config.collector_timeout_seconds,
+                    limit=OUTPUT_READ_LIMIT,
+                )
+            _check_read_back(exported, OUTPUT_READ_LIMIT, "verification bundle")
+            verification_bundle = exported.stdout
         verifications = (
-            ()
-            if interrupted
-            else await self._run_verifier(
-                spec, limits, bundle_content if isinstance(bundle_content, bytes) else b""
-            )
+            () if interrupted else await self._run_verifier(spec, limits, verification_bundle)
         )
         with tempfile.TemporaryDirectory(prefix="crucible-k8s-") as scratch:
             root = Path(scratch)
@@ -3292,11 +3335,10 @@ class KubernetesProvider:
         )
 
     async def terminate(self, h: Handle, mode: Literal["drain", "kill"]) -> None:
-        """26: drain deletes the Pod with the policy grace period, kill with grace zero.
+        """Signal the agent over exec, preserving the collector and its scratch.
 
-        Deleting a Pod is the only signal Kubernetes offers. What Crucible did is
-        remembered, so a Pod that is gone because Crucible deleted it is reported as an
-        exit and never as a loss (16)."""
+        The supervisor requests kill after its drain grace expires. Both operations
+        address only the agent's process namespace; cleanup removes the Pod later."""
         launched = self._launched.get(h.attempt_id)
         try:
             pod = await self._pod_of(h.ref)
@@ -3315,7 +3357,7 @@ class KubernetesProvider:
         ).grace_seconds
         name = str((pod.get("metadata") or {}).get("name") or "")
         try:
-            if mode == "drain":
+            if mode == "drain" or str((pod.get("status") or {}).get("phase")) == "Running":
                 # End only the agent container. The collector sidecar owns the same
                 # scratch and must remain alive long enough to package the final tree.
                 # PID 1 may be a shell that defers a signal while its child runs, so
@@ -3323,7 +3365,7 @@ class KubernetesProvider:
                 await self._call(
                     self.client.pod_exec,
                     name,
-                    ["sh", "-c", k8sspec.DRAIN_SCRIPT],
+                    ["sh", "-c", k8sspec.DRAIN_SCRIPT if mode == "drain" else k8sspec.KILL_SCRIPT],
                     container=k8sspec.CONTAINER_NAME,
                     timeout=max(1, grace),
                     limit=1024,
@@ -4516,7 +4558,10 @@ class KubernetesProvider:
             "command": [
                 "sh",
                 "-c",
-                scripts.preparer_script(
+                # Kubelet creates a missing subPath as root. The report must be
+                # created by this non-root init, just like the checkout and caches.
+                f"mkdir -p {WORK_MOUNT}/report || exit 1\n"
+                + scripts.preparer_script(
                     url=url,
                     base_ref=str(repository.get("base_ref", "main")),
                     work_branch=work_branch,
@@ -4550,6 +4595,16 @@ class KubernetesProvider:
             "resources": common_resources,
             "volumeMounts": prep_mounts,
         }
+        if spec.role == "probe":
+            # An administrative credential probe has no repository. Its former
+            # preparer Pod's directories disappeared with that Pod's scratch.
+            preparer["command"] = [
+                "sh",
+                "-c",
+                f"set -eu; mkdir -p {WORK_MOUNT}/repo {WORK_MOUNT}/report {WORK_MOUNT}/output "
+                f"{WORK_MOUNT}/{PACKAGE_CACHE_LEAF}; "
+                f"mkdir -m 0700 -p {WORK_MOUNT}/{k8sspec.CREDENTIAL_LEAF}",
+            ]
         init_containers: list[dict[str, Any]] = [preparer]
         volumes.extend(prep_volumes)
         if copy is not None:
@@ -5499,7 +5554,6 @@ class KubernetesProvider:
         keep_log: list[str] | None = None,
         services: Sequence[DeclaredService] = (),
         on_running: Callable[[str], Awaitable[None]] | None = None,
-        on_finished: Callable[[str], Awaitable[None]] | None = None,
     ) -> int:
         """Run one single-purpose Job to completion and delete it. With `cancelled`, a
         cancel ends the wait (hades #189): the Job and its policy are deleted on the way
@@ -5608,10 +5662,6 @@ class KubernetesProvider:
                 stall_seconds=stall_seconds,
                 on_running=on_running,
             )
-            if code is not None and on_finished is not None:
-                pod = await self._pod_of(name)
-                if pod is not None:
-                    await on_finished(str((pod.get("metadata") or {}).get("name") or ""))
             refusal = self._job_refusals.pop(name, None)
             stall = self._job_stalls.pop(name, None)
             if stall is not None:
@@ -5736,22 +5786,38 @@ class KubernetesProvider:
         launched = self._launched.get(spec.attempt_id)
         services = self._services(spec)
         archive: list[bytes] = []
+        bundle_path = f"{scripts.BUNDLE_MOUNT}/work_branch.bundle"
 
         async def receive(pod: str) -> None:
+            await self._deliverer(bundle_path, bundle, k8sspec.ROLE_VERIFIER)(pod)
             result = await self._call(
                 self.client.pod_exec,
                 pod,
-                ["sh", "-c", f"tar cf - -C {WORK_MOUNT} verify"],
+                [
+                    "sh",
+                    "-c",
+                    f"while [ ! -f {WORK_MOUNT}/.verify-ready ]; do sleep 1; done\n"
+                    f"tar cf - -C {WORK_MOUNT} verify",
+                ],
                 container=k8sspec.CONTAINER_NAME,
-                timeout=self.config.role_timeout_seconds,
+                timeout=self.config.verifier_timeout_seconds,
                 limit=self.config.report_size_cap_bytes,
             )
+            _check_read_back(result, self.config.report_size_cap_bytes, "verifier evidence")
             if result.exit_code == 0:
                 archive.append(result.stdout)
+                # A separate acknowledgement lets the read's exec stream close and
+                # report its status before PID 1 exits and kills any exec processes.
+                with contextlib.suppress(KubernetesApiError):
+                    await self._call(
+                        self.client.pod_exec,
+                        pod,
+                        ["sh", "-c", f"touch {WORK_MOUNT}/.verify-read"],
+                        container=k8sspec.CONTAINER_NAME,
+                        timeout=self.config.role_timeout_seconds,
+                        limit=1024,
+                    )
 
-        bundle_path = f"{scripts.BUNDLE_MOUNT}/work_branch.bundle"
-        repository = spec.contract.get("repository", {})
-        work_branch = str(repository.get("work_branch") or f"crucible/{spec.external_id}")
         prepare = (
             "set -eu\n"
             f"B={bundle_path}\n"
@@ -5759,16 +5825,44 @@ class KubernetesProvider:
             f"mkdir -p {REPO_MOUNT} {VERIFY_MOUNT} {PACKAGE_CACHE_MOUNT}\n"
             f"git -C {REPO_MOUNT} init --quiet\n"
             f'git -C {REPO_MOUNT} fetch --quiet "$B" '
-            f"refs/heads/{work_branch}:refs/heads/crucible-verify\n"
+            "HEAD:refs/heads/crucible-verify\n"
             f"git -C {REPO_MOUNT} checkout --quiet crucible-verify\n"
         )
+        # Exec requires a live container. Keep this Pod alive after the checks until
+        # the provider has read its evidence; the role deadline bounds both halves.
+        body = prepare + "set +e\n" + scripts.verifier_script(checks)
+        script = (
+            f"sh -c {shlex.quote(body)}\n"
+            "code=$?\n"
+            f"touch {WORK_MOUNT}/.verify-ready\n"
+            f"while [ ! -f {WORK_MOUNT}/.verify-read ]; do sleep 1; done\n"
+            'exit "$code"\n'
+        )
+        initializer = k8sspec.pod_spec(
+            PodRequest(
+                role=k8sspec.ROLE_VERIFIER,
+                image=launched.image_digest if launched else spec.image,
+                command=[
+                    "sh",
+                    "-c",
+                    f"mkdir -p {WORK_MOUNT}/repo {WORK_MOUNT}/verify "
+                    f"{WORK_MOUNT}/{PACKAGE_CACHE_LEAF}",
+                ],
+                limits=limits,
+                mounts=[Mount("ws", WORK_MOUNT)],
+            )
+        )["containers"][0]
+        initializer["name"] = "scratch-prepare"
         code = await self._run_role_job(
             spec,
             role=k8sspec.ROLE_VERIFIER,
             image=launched.image_digest if launched else spec.image,
-            script=prepare + scripts.verifier_script(checks),
+            script=script,
             mounts=[
                 Mount("ws", WORK_MOUNT),
+                Mount("ws", REPO_MOUNT, sub_path="repo"),
+                Mount("ws", VERIFY_MOUNT, sub_path="verify"),
+                Mount("ws", PACKAGE_CACHE_MOUNT, sub_path=PACKAGE_CACHE_LEAF),
                 Mount("bundle", scripts.BUNDLE_MOUNT),
             ],
             volumes=[
@@ -5789,8 +5883,8 @@ class KubernetesProvider:
             timeout=self.config.verifier_timeout_seconds,
             plan=self._egress_plan(spec, k8sspec.ROLE_VERIFIER),
             services=services,
-            on_running=self._deliverer(bundle_path, bundle, k8sspec.ROLE_VERIFIER),
-            on_finished=receive,
+            init_containers=[initializer],
+            on_running=receive,
         )
         self._raise_if_unavailable(k8sspec.ROLE_VERIFIER, spec.attempt_id, code)
         # None means "the verifier could not be re-run": the caller marks every command

@@ -490,6 +490,9 @@ def base_mounts() -> list[Mount]:
 # The collector beside it keeps running.
 WORKER_PREPARE_CONTAINER = "workspace-prepare"
 DRAIN_SCRIPT = "kill -TERM -1 2>/dev/null; kill -TERM 1 2>/dev/null; exit 0"
+# PID 1 is the launch wrapper. Killing its remaining children releases its wait and
+# preserves the separate collector container's process namespace and scratch.
+KILL_SCRIPT = "kill -KILL -1 2>/dev/null; kill -TERM 1 2>/dev/null; exit 0"
 
 
 def workspace_volume(*, size: str, storage_class: str = "") -> dict[str, Any]:

@@ -41,6 +41,11 @@ read it. Collection must finish while the worker Pod and its checkout still exis
      mounted is read from the cluster at launch, not from process memory, so a
      supervisor restarted between prepare and launch still mounts it. It is deleted
      together with the checkout policy, and by `discard` and `cleanup` otherwise.
+     This amends ADR 0019's revocation point for Kubernetes: the Supervisor holds the
+     token through launch, and launch waits for the private checkout init to finish
+     before returning. The token is revoked and emptied on every launch completion,
+     failure or cancellation. Docker still revokes immediately after prepare. Neither
+     agent nor collector mounts the checkout token.
 4. The collector is a second container in the worker Pod. It is the in-Pod form of the
    collector role, not a phase of the agent's entrypoint, so the role split is kept:
    the agent's container never runs Crucible's collection code. The collector waits
@@ -57,6 +62,15 @@ read it. Collection must finish while the worker Pod and its checkout still exis
    from the reference cache or receive the sealed bundle from the artifact store. The
    publisher remains the separate Job defined by ADR 0032 and receives its bundle from
    the artifact store.
+   The verifier receives a self-contained verification bundle exported from the
+   collector's independent clone, since the sealed publication bundle is incremental
+   and an empty repository has none of its prerequisites. This transient input is
+   bounded to 256 MiB and does not replace or modify the sealed artifact used by
+   publication and correction. Its own init container creates the repo, results and
+   package-cache subPaths as the worker uid. After checks finish, the verifier signals
+   readiness and waits for the provider to read its results over exec before exiting.
+   Delivery, checks and readback share the verifier deadline. Reading a terminated
+   container is impossible even while its Pod and scratch still exist.
 6. Kubernetes ignores `keep` and `keep_diff_only` workspace policies. Pod deletion is
    workspace deletion. There is no cleaner role, retained claim, pre-launch claim
    cleanup, workspace retention event, or terminating claim name to collide with.
@@ -76,6 +90,15 @@ Collection survives normal exits and supervised timeouts because it runs before 
 worker Pod is removed. Collection now needs the supervisor: a collector that is never
 released (a supervisor down past the Job's deadline) ends with its Pod, and the attempt
 is retried as lost.
+
+Drain sends TERM to the agent's process namespace. After the supervisor's grace window,
+kill sends KILL to the agent's remaining child processes; the launch wrapper reaps its
+child and exits. Neither operation removes a running Pod, so the collector can finish
+after an agent that ignored TERM. Cleanup removes the Pod after collection. An
+administrative credential probe has no repository: its worker init creates empty
+scratch directories instead of attempting a clone. Every scratch subPath, including
+the worker's report directory, is created by an init container as the worker uid rather
+than left for kubelet to create as root.
 
 Between the end of the init containers and the provider's next look at the Pod, the
 agent can reach the git destinations through the checkout policy. It holds no git

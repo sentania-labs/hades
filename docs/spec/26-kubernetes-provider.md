@@ -35,15 +35,26 @@ that init container and no other container. Whether the Secret is mounted is rea
 the cluster at launch, so a supervisor restarted between prepare and launch still mounts
 it. The provider deletes both once the Pod has left `Pending`, which a Pod does only
 after its init containers have run; `cleanup` deletes them on every other path. The
+Supervisor holds a private checkout token until launch returns, and launch waits for
+the checkout init to complete before returning. Failed and cancelled launches revoke
+it too; Docker's revocation after prepare is unchanged (ADR 0019 amended by 0033). The
 worker's own policy stays exactly its allowlist. The agent's container is ended by
-signalling its processes (drain) or by deleting the Pod (kill), and the collector waits
+signalling its processes (TERM for drain, KILL after the supervisor's grace window),
+preserving the running Pod for collection. The collector waits
 for the provider: once `collect` has seen the agent's exit and classified it, it writes
 `quota` or `normal` to `.collect-mode` in the scratch, so a quota checkpoint (16) is
 packaged or refused as one. The collector finishes while the checkout still exists and
 stays available for bounded read-back. The worker Job's `activeDeadlineSeconds` is the
 contract's timeout plus the drain grace plus the collector timeout. The verifier and publisher are
 separate Jobs; they clone from the reference cache or receive the sealed bundle from
-the artifact store. References below to an attempt workspace claim, reader Pod,
+the artifact store. The verifier receives a self-contained bundle from the collector's
+independent clone, bounded to 256 MiB: the incremental publication bundle alone cannot
+populate an empty repository. The sealed publication and correction artifact is
+unchanged. A verifier init creates its repo, results and cache subPaths as the worker
+uid. The verifier stays alive after checks until the provider reads its results over
+exec; both exchange directions share the role deadline. The worker init likewise
+creates its report directory, and credential probes create empty directories without
+cloning a repository. References below to an attempt workspace claim, reader Pod,
 cleaner Job, retention label, claim-name retry, or keeping a Kubernetes workspace are
 superseded by this paragraph.
 
