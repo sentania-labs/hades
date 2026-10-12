@@ -399,13 +399,18 @@ async def test_rows_5_7_11_23_supervisor_restart_and_full_gate_lifecycle(
     """The shared app and Supervisor lifecycle, backed by a real Job and PVC."""
     clock = SystemClock()
     harnesses = application_harnesses(test_fixtures=True)
+    store = DiskArtifactStore(artifact_root / "kind-store")
+    # ADR 0032: the publisher and a correction's preparer read the stored bundle from the
+    # store collection writes, as `wiring.kubernetes_provider` gives the provider in a
+    # deployment.
+    provider.artifact_store = store
     ctx = AppContext(
         uow_factory=SqlUnitOfWorkFactory(engine),
         clock=clock,
         providers=[provider],
         database_url=migrated,
         engine=engine,
-        artifact_store=DiskArtifactStore(artifact_root / "kind-store"),
+        artifact_store=store,
         harnesses=harnesses,
     )
     tokens: dict[str, str] = {}
@@ -2163,13 +2168,18 @@ def _kind_app(
     `(warn, fail)`, and the tier's image promoted."""
     clock = SystemClock()
     harnesses = application_harnesses(test_fixtures=True)
+    store = DiskArtifactStore(artifact_root / "kind-store")
+    # ADR 0032: the publisher and a correction's preparer read the stored bundle from the
+    # store collection writes, as `wiring.kubernetes_provider` gives the provider in a
+    # deployment.
+    provider.artifact_store = store
     ctx = AppContext(
         uow_factory=SqlUnitOfWorkFactory(engine),
         clock=clock,
         providers=[provider],
         database_url=migrated,
         engine=engine,
-        artifact_store=DiskArtifactStore(artifact_root / "kind-store"),
+        artifact_store=store,
         harnesses=harnesses,
         lease_ttl_seconds=15,
     )
