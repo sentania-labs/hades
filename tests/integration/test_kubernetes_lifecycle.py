@@ -88,13 +88,17 @@ def k8s_ctx(
     k8s_provider: KubernetesProvider,
     tmp_path: Path,
 ) -> AppContext:
+    store = DiskArtifactStore(tmp_path / "artifacts")
+    # ADR 0032: the publisher reads the stored bundle from the store collection writes,
+    # as `wiring.kubernetes_provider` gives the provider in a deployment.
+    k8s_provider.artifact_store = store
     return AppContext(
         uow_factory=SqlUnitOfWorkFactory(engine),
         clock=clock,
         providers=[k8s_provider],
         database_url=migrated,
         engine=engine,
-        artifact_store=DiskArtifactStore(tmp_path / "artifacts"),
+        artifact_store=store,
         harnesses=default_registry(test_fixtures=True),
     )
 

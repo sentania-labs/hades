@@ -21,6 +21,9 @@ from crucible.contracts.evidence import (
     ROLE_REVIEW_DIFF,
     ROLE_RUN_EVIDENCE,
     ROLE_WORKER_CLAIM,
+    WORK_BUNDLE_CONTENT_TYPE,
+    WORK_BUNDLE_NAME,
+    WORK_BUNDLE_TYPE,
     EvidenceKind,
     EvidenceSource,
 )
@@ -157,6 +160,45 @@ def store_artifact(
         },
     )
     return artifact
+
+
+def _store_work_bundle(
+    uow: UnitOfWork,
+    clock: Clock,
+    store: ArtifactStore,
+    attempt: Attempt,
+    bundle: BranchBundle,
+    findings: list[dict[str, str]],
+) -> Artifact | None:
+    """ADR 0032: store the branch bundle as the attempt's `work_bundle` artifact.
+
+    The bytes are the ones the seal was computed from, and the store's digest is checked
+    against that seal: a stored blob whose sha256 is not the recorded seal is never
+    named as the bundle. The store's scanner runs over it as over any artifact, and a
+    match is a scanner finding, as for the other artifacts."""
+    if not bundle.content or not bundle.sha256:
+        return None
+    try:
+        stored = store_artifact(
+            uow,
+            clock,
+            store,
+            attempt=attempt,
+            name=WORK_BUNDLE_NAME,
+            artifact_type=WORK_BUNDLE_TYPE,
+            content=bundle.content,
+            content_type=WORK_BUNDLE_CONTENT_TYPE,
+        )
+    except SecretInArtifactError as exc:
+        findings.append({"where": f"artifact:{WORK_BUNDLE_NAME}", "pattern": exc.pattern})
+        return None
+    if stored.sha256 != bundle.sha256:
+        log.error(
+            "the stored work bundle does not match its seal",
+            extra={"attempt_id": attempt.id, "artifact_id": stored.id},
+        )
+        return None
+    return stored
 
 
 def claim_facts(task: Task, outputs: CollectedOutputs) -> ClaimFacts:
@@ -395,6 +437,10 @@ def _scanned_inputs(outputs: CollectedOutputs, claim: dict[str, Any] | None) -> 
     if outputs.bundle is not None:
         scanned.extend(f"commit[{i}].message" for i in range(len(outputs.bundle.commit_messages)))
     scanned.extend(f"artifact:{a.name}" for a in outputs.artifacts)
+    if outputs.bundle is not None and outputs.bundle.content and outputs.bundle.sha256:
+        # ADR 0032: the bundle is stored, and so scanned, as the `work_bundle` artifact
+        # (`_store_work_bundle`), though it is collected apart from `outputs.artifacts`.
+        scanned.append(f"artifact:{WORK_BUNDLE_NAME}")
     return scanned
 
 
@@ -592,6 +638,7 @@ def record_collection_evidence(
         # The worker's own refs, when it wrote a mapping; `refs: null` or text is no head.
         claimed_refs = claim.get("refs") if claim else None
         claimed = claimed_refs.get("head_sha") if isinstance(claimed_refs, dict) else None
+        bundle_artifact = _store_work_bundle(uow, clock, store, attempt, bundle, findings)
         _add(
             uow,
             clock,
@@ -605,12 +652,17 @@ def record_collection_evidence(
                 "commits": bundle.commits,
                 "bundle_verified": bundle.verified,
                 "bundle_sha256": bundle.sha256,
+                # ADR 0032: the stored bundle every consumer reads, whose sha256 is
+                # the seal above. None when nothing was stored (no bundle file, or the
+                # scanner refused it).
+                "bundle_artifact_id": bundle_artifact.id if bundle_artifact else None,
                 "commit_paths": list(bundle.commit_paths),
                 "commit_messages": list(bundle.commit_messages),
                 "claimed_head_sha": claimed,
                 "commit_policy": _commit_policy_payload(bundle),
                 **_commit_changes_payload(bundle),
             },
+            artifact_id=bundle_artifact.id if bundle_artifact else None,
         )
     if outputs.diff_paths or outputs.bundle is not None:
         diff_payload: dict[str, Any] = {"paths": list(outputs.diff_paths)}
@@ -725,7 +777,7 @@ def record_collection_evidence(
                 "ran": run.ran,
             },
         )
-    # ADR 0024: detect false claims — worker reported exit 0, re-run exited nonzero.
+    # ADR 0024: detect false claims: worker reported exit 0, re-run exited nonzero.
     _emit_false_claims(uow, clock, attempt, claim, outputs.verifications, task)
     if outputs.workspace_state is not None:
         _add(
@@ -819,3 +871,23 @@ def record_collection_evidence(
         },
     )
     return head_sha
+
+
+def work_bundle_artifact(uow: UnitOfWork, bundle_head: EvidenceRecord) -> Artifact | None:
+    """ADR 0032: the stored bundle a `bundle_head` row names, when its digest is the
+    row's seal. None for a row collected before the bundle was stored, or one whose
+    artifact row is gone or does not match: there is then no bundle to read."""
+    artifact_id = getattr(bundle_head, "artifact_id", None) or bundle_head.payload.get(
+        "bundle_artifact_id"
+    )
+    if not artifact_id:
+        return None
+    artifact = uow.artifacts.get(str(artifact_id))
+    if (
+        artifact is None
+        or artifact.type != WORK_BUNDLE_TYPE
+        or artifact.attempt_id != bundle_head.attempt_id
+        or artifact.sha256 != str(bundle_head.payload.get("bundle_sha256") or "")
+    ):
+        return None
+    return artifact

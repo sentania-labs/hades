@@ -4,6 +4,9 @@ Status: accepted. FDY-0133, 2026-09-28, on the operator's go for that batch afte
 found that nothing had ever been published from a Kubernetes deployment (practice task
 HT-0007 sat in `publishing` with no publisher and no log line). Extends ADR 0007 and 23
 "Publication" to the Kubernetes provider (26); changes nothing about the Docker one.
+Point 5 and point 8 are replaced by ADR 0032 (2026-10-12): the bundle is read from the
+artifact store and delivered into the publisher Pod over exec, the Pod mounts no claim,
+and the attempt's workspace path picks the publisher.
 
 ## Context
 

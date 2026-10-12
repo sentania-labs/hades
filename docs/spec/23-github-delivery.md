@@ -66,10 +66,15 @@ review is recorded, and Foundry's `AcceptanceResult` for that head is
    reaches every model endpoint a harness needs, so the publisher gets its
    own network, its own proxy, and its own allowlist, generated beside the
    workers' one. Mounts: an empty working directory (rw, tmpfs), the branch
-   bundle artifact alone (ro), an output dir (rw). The bundle is copied out
-   of the collector's output into a directory of its own first, so the
-   container holding a credential sees one file and not the diff, the
-   report copy, and the collected tree beside it.
+   bundle artifact alone (ro), an output dir (rw). The bundle lives in the
+   artifact store: collection stores it as the attempt's `work_bundle`
+   artifact, scanned like any artifact, and the `bundle_head` evidence row
+   names that artifact next to its seal (ADR 0032). The publisher copies the
+   stored blob into a directory of its own first, after checking its sha256
+   against the seal, so the container holding a credential sees one file and
+   not the diff, the report copy, and the collected tree. (A Docker attempt
+   collected before ADR 0032 has no stored bundle; its bundle is copied out of
+   the collector's output in its workspace directory instead.)
 
    **The token is handed over on stdin, never copied in.** The container is
    created with stdin open, started, and attached to through the Docker API
@@ -90,12 +95,14 @@ review is recorded, and Foundry's `AcceptanceResult` for that head is
    `publish-token-<attempt>`, created for this push, mounted read-only
    (mode 0400) at the same path as a Secret volume, which the kubelet keeps
    in memory, and deleted as soon as the Job's Pod is gone, on every path.
-   The bundle is mounted as one file, read-only, straight off the attempt's
-   workspace claim where the collector left it
-   (`output/work_branch.bundle`); a bundle path that is not that leaf of
-   that attempt's claim is refused before anything is created. The Pod
-   writes its outcome to the claim's `publish/` leaf, which Crucible reads
-   back through the reader Pod over exec, never through a log. Its egress
+   The Pod mounts no workspace claim (ADR 0032). Crucible reads the stored
+   `work_bundle` artifact from the artifact store and refuses at
+   `bundle-seal`, before any Secret exists, when there is none or its sha256
+   is not the seal; once the Pod is Running, the provider writes the bundle
+   over the `pods/exec` stdin channel into a memory-backed volume of the
+   Pod's own. The Pod writes its outcome to a second memory-backed volume,
+   which Crucible reads back from the Pod over exec before it ends, never
+   through a log. Its egress
    is its own NetworkPolicy (`github.com`, `api.github.com`, and
    `github.credential_host` when that is another host), resolved and pinned
    into the Pod's `hostAliases` (hades #191). A workers namespace whose

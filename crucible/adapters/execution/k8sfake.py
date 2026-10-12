@@ -66,11 +66,15 @@ from crucible.adapters.execution.k8sspec import (
 )
 from crucible.adapters.execution.scripts import (
     ACTIVITY_MARKER,
+    BUNDLE_DELIVERY_MARKER,
     CHANGED_BLOBS_DIR,
+    COLLECT_MARKER,
+    DELIVER_MARKER,
     MERGE_MAIN_MARKER,
     PUBLISH_BUNDLE_LEAF,
     PUBLISH_LEAF,
     PUBLISH_LEAF_MARKER,
+    RESUME_DELIVERY_MARKER,
     REVIEW_DIFF_DIR,
 )
 from crucible.domain.acceptance_checks import verifier_checks
@@ -301,6 +305,13 @@ class FakeKubernetesApi:
     quota_refused_roles: set[str] = field(default_factory=set)
     # Every event recorded, which outlives the object it names, as on an API server.
     events: list[dict[str, Any]] = field(default_factory=list)
+    # ADR 0032: what was delivered into each Pod over exec, by Pod name and path (a
+    # publisher's bundle lands in its own memory, not on any claim), and each publisher
+    # Pod's acted-out exit and outcome files, which a collect exec hands back.
+    pod_files: dict[str, dict[str, bytes]] = field(default_factory=dict)
+    pod_outcomes: dict[str, tuple[int, dict[str, bytes]]] = field(default_factory=dict)
+    # A delivery that never arrives (a test proves the Pod then refuses by itself).
+    drop_deliveries: bool = False
     _uids: int = 0
     _rv_counter: int = 1
 
@@ -635,7 +646,11 @@ class FakeKubernetesApi:
         if run is not None:
             return self._login_exec(name, run, command[-1], stdin)
         claim = self._claim_of(obj)
-        script = command[-1]
+        script = command[2] if len(command) > 2 else command[-1]
+        if DELIVER_MARKER in script:
+            return self._delivery(obj, command[4], stdin or b"")
+        if COLLECT_MARKER in script:
+            return self._collect(obj)
         if ACTIVITY_MARKER in script:
             return self._activity(name, claim)
         if "tar cf -" in script:
@@ -650,6 +665,37 @@ class FakeKubernetesApi:
         if data is None:
             return ExecResult(b"absent\n", b"", 0)
         return ExecResult(b"ok\n" + base64.b64encode(data), b"", 0)
+
+    def _delivery(self, obj: _Object, target: str, content: bytes) -> ExecResult:
+        """ADR 0032: `scripts.DELIVER_SCRIPT`. A path under the claim's mount lands on
+        the Pod's claim, anything else in the Pod's own memory; a Pod that was waiting
+        for it then acts out the rest of its script."""
+        if self.drop_deliveries:
+            return ExecResult(b"", b"the delivery was short\n", 9)
+        work = "/crucible/work/"
+        if target.startswith(work):
+            self._claim_of(obj)[target.removeprefix(work)] = content
+        else:
+            self.pod_files.setdefault(obj.name, {})[target] = content
+        if _command_of(obj).find(RESUME_DELIVERY_MARKER) >= 0:
+            labels = (obj.body.get("metadata") or {}).get("labels") or {}
+            self._act_preparer(obj, str(labels.get(LABEL_ATTEMPT, "")), delivered=True)
+        return ExecResult(b"", b"", 0)
+
+    def _collect(self, obj: _Object) -> ExecResult:
+        """ADR 0032: `scripts.COLLECT_SCRIPT`. The publisher acts out its push with what
+        was delivered, then its outcome files come back as a tar and the Pod ends."""
+        labels = (obj.body.get("metadata") or {}).get("labels") or {}
+        self._act_publisher(obj, str(labels.get(LABEL_ATTEMPT, "")), collecting=True)
+        code, files = self.pod_outcomes.get(obj.name, (1, {}))
+        raw = io.BytesIO()
+        with tarfile.open(fileobj=raw, mode="w") as archive:
+            for name, body in sorted(files.items()):
+                info = tarfile.TarInfo(f"./{name}")
+                info.size = len(body)
+                archive.addfile(info, io.BytesIO(body))
+        self._finish(obj, code, reason="Completed" if code == 0 else "Error")
+        return ExecResult(raw.getvalue(), b"", 0)
 
     def _activity(self, name: str, claim: Mapping[str, bytes]) -> ExecResult:
         """FDY-0140: the activity probe's one line. A test scripts it per Pod through
@@ -853,10 +899,26 @@ class FakeKubernetesApi:
     def _act_cache_refresher(self, obj: _Object, attempt_id: str) -> None:
         self._finish(obj, 0)
 
-    def _act_preparer(self, obj: _Object, attempt_id: str) -> None:
+    def _act_preparer(self, obj: _Object, attempt_id: str, *, delivered: bool = False) -> None:
         behavior, _ = self._behavior(attempt_id, obj)
         claim = self._claim_of(obj)
         container = ((obj.body.get("spec") or {}).get("containers") or [{}])[0]
+        script = str((container.get("command") or [""])[-1])
+        if RESUME_DELIVERY_MARKER in script and not delivered:
+            # ADR 0032: the Pod waits for the sealed bundle to arrive over exec.
+            return
+        if RESUME_DELIVERY_MARKER in script:
+            # The preparer script's own check of the delivered bundle against its seal.
+            seal = re.search(r'"\$ACTUAL_SEAL" != \'([^\']*)\'', script)
+            bundle = claim.get("resume/work_branch.bundle")
+            if (
+                bundle is None
+                or seal is None
+                or hashlib.sha256(bundle).hexdigest() != seal.group(1)
+            ):
+                self.logs[obj.name] = ["previous attempt bundle does not match its seal"]
+                self._finish(obj, 4, reason="Error")
+                return
         if PUBLISH_LEAF_MARKER in str((container.get("command") or [""])[-1]):
             # `scripts.publish_leaf_script`: the bundle must be a file, and the leaf a
             # directory the worker uid can write. A dict claim has no empty directories.
@@ -985,23 +1047,27 @@ class FakeKubernetesApi:
                 del claim[path]
         self._finish(obj, 0)
 
-    def _act_publisher(self, obj: _Object, attempt_id: str) -> None:
+    def _act_publisher(self, obj: _Object, attempt_id: str, *, collecting: bool = False) -> None:
         """The publisher script's observable contract, acted out: the token from the
-        mounted Secret, the bundle from its single-file mount, the seal, then a push, with
-        the outcome files on the claim's `publish` leaf where the reader finds them."""
+        mounted Secret, the bundle delivered over exec (ADR 0032), the seal, then a push.
+        A push's outcome files go back through the collect exec; a merge-main run's go
+        to the claim's `publish` leaf where the reader finds them."""
         spec = obj.body.get("spec") or {}
         claim = self._claim_of(obj)
         container = (spec.get("containers") or [{}])[0]
         script = str((container.get("command") or [""])[-1])
+        delivered = BUNDLE_DELIVERY_MARKER in script
+        if delivered and not collecting:
+            # ADR 0032: the Pod waits for its bundle and for its outcome to be read.
+            return
+        if delivered:
+            # The wrapped publisher script is one quoted argument of `sh -c`.
+            script = script.replace("'\"'\"'", "'")
 
         def bound(name: str) -> str:
             found = re.search(rf"^{name}='([^']*)'$", script, re.MULTILINE)
             return found.group(1) if found else ""
 
-        bundle_leaf = ""
-        for mount in container.get("volumeMounts") or []:
-            if str(mount.get("mountPath", "")).endswith("/work_branch.bundle"):
-                bundle_leaf = str(mount.get("subPath") or "")
         secret_name = ""
         for volume in spec.get("volumes") or []:
             if volume.get("name") == "publish-token":
@@ -1010,6 +1076,9 @@ class FakeKubernetesApi:
         out: dict[str, bytes] = {}
 
         def finish(code: int) -> None:
+            if delivered:
+                self.pod_outcomes[obj.name] = (code, dict(out))
+                return
             for key in [k for k in claim if k.startswith("publish/")]:
                 del claim[key]
             for name, body in out.items():
@@ -1040,7 +1109,8 @@ class FakeKubernetesApi:
                 self.on_push(push)
             out.update({"step.txt": b"done\n", "push.txt": b"ok\n"})
             return finish(0)
-        bundle = claim.get(bundle_leaf) if bundle_leaf else None
+        # ADR 0032: the bundle is only ever what was delivered into the Pod over exec.
+        bundle = self.pod_files.get(obj.name, {}).get("/crucible/bundle/work_branch.bundle")
         out["step.txt"] = b"bundle-seal\n"
         if bundle is None:
             out["error.txt"] = b"no branch bundle where the collector left it\n"
@@ -1171,6 +1241,11 @@ class FakeKubernetesApi:
 
 
 # ----- helpers -----------------------------------------------------------
+
+
+def _command_of(obj: _Object) -> str:
+    container = ((obj.body.get("spec") or {}).get("containers") or [{}])[0]
+    return str((container.get("command") or [""])[-1])
 
 
 def _running(node: str) -> dict[str, Any]:

@@ -102,7 +102,7 @@ Per attempt the provider creates, in `crucible-workers`, all labelled
 
 | Object | Role | Lifetime |
 |---|---|---|
-| PersistentVolumeClaim `ws-<attempt>` | the workspace: `repo/`, `report/`, `output/`, and `publish/` (the publisher's outcome, made before a push) | attempt, then per cleanup policy; a kept claim is deleted by the retention step once nothing needs it (16); the claim of an attempt that never launched is deleted, unless it is a resume source (hades #394, below) |
+| PersistentVolumeClaim `ws-<attempt>` | the workspace: `repo/`, `report/`, `output/`, `resume/` (a correction's sealed bundle, delivered from the artifact store, ADR 0032), and `publish/` (a merge-main run's outcome). The collector's bundle in `output/` is copied out at collection and stored as the `work_bundle` artifact; no later Pod reads it from here, and no Pod mounts another attempt's claim | attempt, then per cleanup policy; a kept claim is deleted by the retention step once nothing needs it (16); the claim of an attempt that never launched is deleted, unless it is a resume source (hades #394, below) |
 | ConfigMap `identity-<attempt>` (or a projected volume from an object store above the ConfigMap size cap, 08) | the identity bundle, read-only | attempt |
 | Secret `cred-<attempt>` | the per-attempt copy of one harness credential directory, seeded from the harness's dedicated Secret in `crucible-workers`, `rw-narrow` where the adapter declares it (12) | attempt, deleted under every cleanup policy |
 | Secret `checkout-<attempt>` | a private repository's read-only installation token (ADR 0019), key `token`, mounted mode 0400 at `/run/crucible-token` into the refresher and the preparer Jobs and nothing else | created just before the refresher, deleted once the preparer's Pod is gone, on every path; a deletion that fails fails the prepare, and `discard`, `cleanup` and the retention sweep retry it |
@@ -112,8 +112,8 @@ Per attempt the provider creates, in `crucible-workers`, all labelled
 | Job `collect-<attempt>` | the collector, no network, repo and report read-only, output read-write (08) | until complete |
 | Job `verify-bundle-<attempt>` | `git bundle verify`, no network | until complete |
 | Job `verifier-<attempt>` | re-runs `required_verification` on an independent clone from the bundle (10, 11) | until complete |
-| Job `prepare-<attempt>` (before a push) | runs `publish_leaf_script` as the worker uid with the whole claim mounted and no network: refuses (exit 7) unless `output/work_branch.bundle` is a regular file, creates `publish/` with `output/`'s owner and mode, and refuses (exit 8) if it cannot. The publisher's subPaths therefore always exist before its Pod starts, and are never made by the kubelet | until complete, then deleted with its Pod |
-| Job `publish-<attempt>` | the publisher (23, ADR 0022): mounts `output/work_branch.bundle` off `ws-<attempt>` as one read-only file and the claim's `publish/` leaf for its outcome, checks the bundle against its seal, builds from it and pushes with an exact-tip lease after the remote ownership check (23). Its egress is its own NetworkPolicy `np-publisher-<attempt>` | until complete, then deleted with its Pod and policy |
+| Job `prepare-<attempt>` (before a merge-main run) | runs `publish_leaf_script` as the worker uid with the whole claim mounted and no network: refuses (exit 7) unless `output/work_branch.bundle` is a regular file, creates `publish/` with `output/`'s owner and mode, and refuses (exit 8) if it cannot. The merge-main run's `publish/` subPath therefore always exists before its Pod starts, and is never made by the kubelet. A push runs no such Job (ADR 0032) | until complete, then deleted with its Pod |
+| Job `publish-<attempt>` | the publisher (23, ADR 0022, ADR 0032): mounts no workspace claim. The supervisor reads the attempt's `work_bundle` artifact from the artifact store, checks it against its seal, and writes it over exec into the Pod's own memory-backed `bundle` volume once the Pod runs; the script checks it against the seal again, builds from it and pushes with an exact-tip lease after the remote ownership check (23), and its outcome files, in a second memory-backed volume, are read back over exec before the Pod ends. A merge-main run (hades #411) is the same Job with the claim's `publish/` leaf for its outcome and no bundle. Its egress is its own NetworkPolicy `np-publisher-<attempt>` | until complete, then deleted with its Pod and policy |
 | Secret `publish-token-<attempt>` | the installation token for one push, key `token`, mounted mode 0400 at `/run/crucible-token` into the publisher Job and nothing else | created just before the Job, deleted once its Pod is gone, on every path; one a crashed supervisor left is replaced by the next push of that attempt and removed by the retention sweep |
 | Job `login-<harness>-<id>` (admin flow, 25) | the harness's own login in that harness's default worker image (ADR 0018), no workspace, no credential mounted, a memory-backed home; the service reads the auth files back over exec and writes the harness Secret (ADR 0015). Labelled `crucible.role=login`, `crucible.harness`, `crucible.login` and never `crucible.attempt` | until the service has read it back, cancelled, or timed out; its own deadline and a TTL remove it if the api died |
 | NetworkPolicy `np-login-<id>` | the login Job's egress: the adapter's `login_endpoints` only | with its Job; the retention sweep removes one whose Job is gone |
@@ -176,6 +176,16 @@ attempt's sealed bundle, so the detail and the wake read "the correction
 resumes from the sealed bundle of attempt <id>, and the preparer Job could
 not build the checkout (exit 4): previous attempt bundle is gone". An
 implementing attempt names no source.
+
+A correction that resumes from a sealed bundle reads it from the artifact
+store, never from the previous attempt's claim (ADR 0032). The supervisor
+names the bundle's `work_bundle` artifact in the launch spec; the provider
+reads it before it creates the preparer Job, refuses at once with "previous
+attempt bundle is gone" when there is none, and, once the preparer's Pod
+runs, writes it over exec to `resume/work_branch.bundle` on the new
+attempt's own claim. The preparer script waits for it and checks it as it
+always has (its seal, `git bundle verify`, its head, its descent from the
+published head); a bundle that does not match its seal exits 4.
 
 ### Room runners (hades #208, 28)
 
@@ -721,7 +731,9 @@ the namespace. A deployment therefore names one exact, pullable reference in
 - `collect`: the collector Job with the workspace mounted read-only and an
   output subpath read-write; then the bundle verifier Job; outputs are read
   by the supervisor from the PVC through a short-lived reader Pod, never by
-  mounting the PVC into the Crucible pods. The reader's tar is streamed to a
+  mounting the PVC into the Crucible pods. The bundle among them is stored
+  as the attempt's `work_bundle` artifact, which the publisher and a
+  correction read from then on (ADR 0032). The reader's tar is streamed to a
   scratch file and extracted from there, so the supervisor never holds the
   collected archive (up to 256 MiB) in memory. The blobs the worker added or
   changed, which the collector exports for the secret scanner (hades #398), are
