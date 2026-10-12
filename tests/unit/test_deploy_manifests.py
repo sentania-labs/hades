@@ -48,7 +48,6 @@ SUPERVISOR_ROLE_RULES = {
     ("", "pods"): {"create", "get", "list", "watch", "delete"},
     ("", "pods/exec"): {"create", "get"},
     ("", "pods/log"): {"get"},
-    ("", "persistentvolumeclaims"): {"create", "get", "list", "watch", "patch", "delete"},
     ("", "resourcequotas"): {"get", "list"},
     ("", "events"): {"get", "list"},
     ("", "secrets"): {"create", "get", "list", "watch", "patch", "delete"},
@@ -697,9 +696,7 @@ def test_the_quota_reports_attempt_capacity_from_its_job_count(
         hard = quota["spec"]["hard"]
         assert hard["count/jobs.batch"] == jobs, target
         assert "pods" not in hard, target
-        # ADR 0033: no attempt claim, but a named workspace class makes one Pod-owned
-        # claim per running role Pod, so the claim limit stays beside the Job cap.
-        assert "persistentvolumeclaims" in hard, target
+        assert "persistentvolumeclaims" not in hard, target
         # Every quota leaves two extra Jobs of headroom above a multiple of five.
         assert int(hard["count/jobs.batch"]) % 5 == 2, target
 
@@ -707,7 +704,6 @@ def test_the_quota_reports_attempt_capacity_from_its_job_count(
 LAB_STARTUP_PLACEHOLDER_KEYS = frozenset(
     {
         "CRUCIBLE_KUBERNETES__CLUSTER_DNS_IP",
-        "CRUCIBLE_KUBERNETES__WORKSPACE_EPHEMERAL_CLASS",
         "CRUCIBLE_KUBERNETES__IMAGE_PULL_SECRET",
         "CRUCIBLE_SERVICE__RENDER_TIMEZONE",
         "CRUCIBLE_KUBERNETES__LOCAL_ENDPOINT_NAMESPACE",
@@ -735,23 +731,12 @@ RETIRED_WORKSPACE_CLAIM_KEYS = frozenset(
 def test_every_config_sizes_the_ephemeral_scratch_and_names_no_attempt_claim(
     rendered: dict[str, list[dict[str, Any]]],
 ) -> None:
-    """ADR 0033: the one workspace setting is the per-Pod ephemeral scratch. The base
-    sizes it and leaves the class empty (an `emptyDir`); kind names its provisioner's
-    class, and the lab names the operator's `ReadWriteOnce` class. The per-attempt
-    claim's size and class settings are gone, so a ConfigMap that still carries them
-    would be a setting pydantic-settings drops in silence."""
-    expected_class = {
-        "base": None,
-        "overlays/kind": "standard",
-        "overlays/lab": "REPLACE_ME_STORAGE_CLASS_RWO",
-    }
-    for target, storage_class in expected_class.items():
+    """ADR 0033: size is the one setting for each Pod's emptyDir scratch."""
+    for target in ("base", "overlays/kind", "overlays/lab"):
         settings = _named(rendered[target], "ConfigMap", "hades-settings")["data"]
         assert not RETIRED_WORKSPACE_CLAIM_KEYS & set(settings), target
         assert settings["CRUCIBLE_KUBERNETES__WORKSPACE_EPHEMERAL_SIZE"], target
-        assert settings.get("CRUCIBLE_KUBERNETES__WORKSPACE_EPHEMERAL_CLASS") == storage_class, (
-            target
-        )
+        assert "CRUCIBLE_KUBERNETES__WORKSPACE_EPHEMERAL_CLASS" not in settings, target
 
 
 def test_the_base_config_carries_no_lab_local_endpoint_address(

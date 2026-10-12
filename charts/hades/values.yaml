@@ -94,7 +94,6 @@ egress:
   allowlist: []
 workerQuota:
   jobs: "17"
-  persistentVolumeClaims: "12"
   requestsCpu: "3"
   requestsMemory: 12Gi
   limitsCpu: "6"
@@ -107,9 +106,9 @@ secrets:
   firstRunToken: hades-first-run-admin
 # The Kubernetes attempt provider (26): per-Pod scratch, concurrency and role timeouts.
 provider:
-  # Empty class uses a size-limited emptyDir. A class uses a generic ephemeral volume.
+  # Every role Pod gets its own size-limited emptyDir. Its main container requests
+  # and limits this size plus the policy ephemeral storage allowance (default 2Gi).
   workspaceEphemeral:
-    class: ""
     size: 20Gi
   maxConcurrency: 3
   launchTimeoutSeconds: 300

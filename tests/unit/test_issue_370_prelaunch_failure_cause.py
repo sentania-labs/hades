@@ -74,7 +74,6 @@ def _config(**overrides: Any) -> KubernetesConfig:
     values: dict[str, Any] = {
         "poll_interval_seconds": 0,
         "launch_timeout_seconds": 5,
-        "workspace_ephemeral_class": "lab-ssd",
         **overrides,
     }
     return KubernetesConfig(**values)

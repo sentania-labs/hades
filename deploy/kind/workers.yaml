@@ -133,9 +133,6 @@ metadata:
 spec:
   hard:
     count/jobs.batch: "17"
-    # ADR 0033: no attempt claim; with a named WORKSPACE_EPHEMERAL_CLASS each running role
-    # Pod owns one claim that goes with it, and the manifests own the reference cache.
-    persistentvolumeclaims: "24"
     requests.cpu: "6"
     requests.memory: 8Gi
 ---

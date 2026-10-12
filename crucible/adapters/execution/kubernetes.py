@@ -418,7 +418,6 @@ class KubernetesConfig:
 
     namespace: str = "hades-workers"
     service_account: str = "hades-worker"
-    workspace_ephemeral_class: str = ""
     workspace_ephemeral_size: str = "20Gi"
     image_pull_secret: str | None = None
     # A cluster-side PVC holding the reference cache the preparer clones from. Without
@@ -1450,7 +1449,7 @@ class KubernetesProvider:
         checkout_mount = Mount("ws", WORK_MOUNT)
         services = self._services(spec)
         init_mounts: list[Mount] = [checkout_mount, *token_mounts]
-        volumes: list[dict[str, Any]] = [self._claim_volume(spec.attempt_id), *token_volumes]
+        volumes: list[dict[str, Any]] = [self._workspace_volume(), *token_volumes]
         # File origins in the kind tier live on this read-only claim.
         if spec.repository_url.startswith("file:///crucible/cache/") and self.config.cache_claim:
             init_mounts.append(Mount("cache", k8sspec.CACHE_MOUNT, read_only=True))
@@ -1797,7 +1796,7 @@ class KubernetesProvider:
                     credential_host=self.config.credential_host,
                 ),
                 mounts=[Mount("ws", WORK_MOUNT), *cache_mounts, *token_mounts],
-                volumes=[self._claim_volume(spec.attempt_id), *cache_volumes, *token_volumes],
+                volumes=[self._workspace_volume(), *cache_volumes, *token_volumes],
                 limits=limits,
                 timeout=self.config.prepare_timeout_seconds,
                 plan=self._checkout_plan(spec, k8sspec.ROLE_PREPARER, token_name is not None),
@@ -2071,7 +2070,7 @@ class KubernetesProvider:
                     *token_mounts,
                 ],
                 volumes=[
-                    self._claim_volume(spec.attempt_id),
+                    self._workspace_volume(),
                     *cache_volumes,
                     *token_volumes,
                 ],
@@ -2086,6 +2085,7 @@ class KubernetesProvider:
                 cancelled=cancelled,
                 stall_seconds=self.config.preparer_stall_seconds,
                 keep_log=preparer_log,
+                log_output=preparer_log,
             )
         if exit_code != 0:
             detail = redact(self.last_error.get(k8sspec.ROLE_PREPARER, ""))
@@ -2098,14 +2098,13 @@ class KubernetesProvider:
             raise self._prepare_failed(
                 exit_code, detail, resume_source, redact("".join(preparer_log))
             )
-        prepared = await self._read_files(
-            spec,
-            ["output/prepared-head.txt", "output/started-from.txt"],
-            limits,
-            use_backoff=True,
-            collection=False,
-        )
-        head = (prepared.get("output/prepared-head.txt") or b"").decode("utf-8", "replace").strip()
+        head = ""
+        started_from = ""
+        for line in "".join(preparer_log).splitlines():
+            if line.startswith(scripts.PREPARED_HEAD_MARKER):
+                head = line.removeprefix(scripts.PREPARED_HEAD_MARKER).strip()
+            elif line.startswith(scripts.STARTED_FROM_MARKER):
+                started_from = line.removeprefix(scripts.STARTED_FROM_MARKER).strip()
         if not head:
             raise ProviderError("the preparer produced no HEAD")
         root = f"k8s://{self.config.namespace}/{k8sspec.object_name('ws', spec.attempt_id)}"
@@ -2117,9 +2116,7 @@ class KubernetesProvider:
             output_path=f"{root}/output",
             identity_sha256=identity_sha,
             work_branch=work_branch,
-            started_from=(prepared.get("output/started-from.txt") or b"")
-            .decode("utf-8", "replace")
-            .strip(),
+            started_from=started_from,
         )
 
     async def _resume_bundle_content(self, spec: LaunchSpec) -> bytes:
@@ -3061,7 +3058,7 @@ class KubernetesProvider:
             return _skip_crowded_second(payload, limit, since)
 
     async def activity(self, h: Handle, ws: Workspace) -> tuple[int, int, int] | None:
-        """FDY-0140: the workspace is a claim, not a local path, so the supervisor's own
+        """The workspace is Pod-local, not a local path, so the supervisor's own
         walk sees nothing. The live worker is asked instead, over exec, never through a
         log. Any failure to ask is None: the stall clock is neither reset nor pushed."""
         try:
@@ -3798,7 +3795,7 @@ class KubernetesProvider:
                     f"mkdir -m 0700 -p {WORK_MOUNT}/{k8sspec.CREDENTIAL_LEAF}\n"
                 ),
                 mounts=[Mount("ws", WORK_MOUNT)],
-                volumes=[self._claim_volume(probe_id)],
+                volumes=[self._workspace_volume()],
                 limits=limits,
                 timeout=self.config.prepare_timeout_seconds,
                 plan=EgressPlan(),
@@ -4441,12 +4438,8 @@ class KubernetesProvider:
 
     # ----- the pod bodies ----------------------------------------------
 
-    def _claim_volume(self, attempt_id: str, *, read_only: bool = False) -> dict[str, Any]:
-        del attempt_id, read_only
-        return k8sspec.workspace_volume(
-            size=self.config.workspace_ephemeral_size,
-            storage_class=self.config.workspace_ephemeral_class,
-        )
+    def _workspace_volume(self) -> dict[str, Any]:
+        return k8sspec.workspace_volume(size=self.config.workspace_ephemeral_size)
 
     def _identity_volume(self, spec: LaunchSpec, paths: Mapping[str, str]) -> dict[str, Any]:
         """The identity bundle, key by key.
@@ -4531,7 +4524,7 @@ class KubernetesProvider:
         ]
         volumes = [
             *k8sspec.base_volumes(limits),
-            self._claim_volume(spec.attempt_id),
+            self._workspace_volume(),
             self._identity_volume(spec, identity_paths),
         ]
         common_security = {
@@ -5900,7 +5893,7 @@ class KubernetesProvider:
                 Mount("bundle", scripts.BUNDLE_MOUNT),
             ],
             volumes=[
-                self._claim_volume(spec.attempt_id),
+                self._workspace_volume(),
                 {"name": "bundle", "emptyDir": {"medium": "Memory", "sizeLimit": "256Mi"}},
             ],
             limits=limits,
@@ -5999,7 +5992,7 @@ class KubernetesProvider:
                     mounts=[*k8sspec.base_mounts(), Mount("ws", WORK_MOUNT, read_only=True)],
                     volumes=[
                         *k8sspec.base_volumes(limits),
-                        self._claim_volume(spec.attempt_id, read_only=True),
+                        self._workspace_volume(),
                     ],
                     service_account=self.config.service_account,
                     image_pull_secret=self.config.image_pull_secret,
@@ -6040,7 +6033,7 @@ class KubernetesProvider:
         use_backoff: bool = False,
         collection: bool = True,
     ) -> dict[str, bytes]:
-        """Read named files off the workspace claim through the reader Pod.
+        """Read named files from the worker Pod's scratch over exec.
 
         The bytes come back on the exec stream and never through a Pod log: the kubelet
         writes logs to the node's disk, and a rotated credential there is exactly what
@@ -6068,7 +6061,7 @@ class KubernetesProvider:
     async def _read_workspace(
         self, spec: LaunchSpec, into: Path, limits: Limits
     ) -> dict[str, str | bool | None]:
-        """The collected output and the verifier's logs, as a tar off the claim.
+        """The collected output and verifier logs, as a tar from Pod-local scratch.
 
         `output/tree` is excluded: it is a git clone the verifier already ran against
         and nothing on the Crucible side reads it. The tar is written to a scratch file
@@ -6726,7 +6719,7 @@ class KubernetesProvider:
 
     async def _delete_attempt_objects(self, attempt_id: str) -> None:
         await self._delete_by_label(
-            ("jobs", "pods", "networkpolicies", "secrets", "configmaps", "persistentvolumeclaims"),
+            ("jobs", "pods", "networkpolicies", "secrets", "configmaps"),
             attempt_id=attempt_id,
         )
 

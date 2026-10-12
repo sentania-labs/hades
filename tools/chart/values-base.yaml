@@ -56,7 +56,6 @@ egress:
   allowlist: []
 workerQuota:
   jobs: "17"
-  persistentVolumeClaims: "12"
   requestsCpu: "3"
   requestsMemory: 12Gi
   limitsCpu: "6"
@@ -68,7 +67,6 @@ secrets:
   firstRunToken: hades-first-run-admin
 provider:
   workspaceEphemeral:
-    class: ""
     size: 20Gi
   maxConcurrency: 3
   launchTimeoutSeconds: 300

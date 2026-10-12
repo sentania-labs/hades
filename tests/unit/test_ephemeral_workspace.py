@@ -38,6 +38,49 @@ HEAD = "a" * 40
 BUNDLE = b"# v2 git bundle\nsealed bytes of the previous attempt\n"
 
 
+@pytest.mark.parametrize("size,overhead", [("20Gi", "2Gi"), ("500M", "256Mi"), ("1.5Gi", "3G")])
+async def test_role_pods_reserve_workspace_capacity_and_policy_overhead(
+    size: str,
+    overhead: str,
+) -> None:
+    api, _registry, provider = build(
+        config=KubernetesConfig(
+            workspace_ephemeral_size=size, poll_interval_seconds=0, launch_timeout_seconds=5
+        )
+    )
+    launch = spec()
+    launch = replace(launch, policy={**launch.policy, "resources": {"ephemeral_storage": overhead}})
+    workspace = await provider.prepare(launch)
+    handle = await provider.launch(workspace, launch)
+    await provider.observe(handle)
+    await provider.collect(handle, workspace, launch)
+    workspace_bytes = k8sspec.quantity(size)
+    overhead_bytes = k8sspec.quantity(overhead)
+    assert workspace_bytes is not None and overhead_bytes is not None
+    for prefix in ("prepare-", "worker-", "verifier-"):
+        pod = pod_of(api, prefix)
+        resources = pod["containers"][0]["resources"]
+        for kind in ("requests", "limits"):
+            assert k8sspec.quantity(resources[kind]["ephemeral-storage"]) == (
+                workspace_bytes + overhead_bytes
+            )
+        for container in [*pod["containers"][1:], *pod.get("initContainers", [])]:
+            assert container["resources"]["limits"]["ephemeral-storage"] == overhead
+        assert next(v for v in pod["volumes"] if v["name"] == "ws") == {
+            "name": "ws",
+            "emptyDir": {"sizeLimit": size},
+        }
+
+
+def test_a_pod_without_workspace_keeps_the_policy_storage_limit() -> None:
+    limits = k8sspec.limits_from_policy({})
+    pod = k8sspec.pod_spec(
+        k8sspec.PodRequest(role="canary", image="test", command=["true"], limits=limits)
+    )
+    assert pod["containers"][0]["resources"]["limits"]["ephemeral-storage"] == "2Gi"
+    assert "ephemeral-storage" not in pod["containers"][0]["resources"]["requests"]
+
+
 async def test_worker_init_creates_every_scratch_subpath(tmp_path: Path) -> None:
     """Run the rendered init, without kubelet creating root-owned missing leaves."""
     origin = tmp_path / "origin"

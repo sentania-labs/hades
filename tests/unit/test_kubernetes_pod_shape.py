@@ -100,12 +100,16 @@ async def test_the_limits_come_from_policy_and_the_grace_period_with_them(
     resources = pod["containers"][0]["resources"]
     assert resources["limits"]["cpu"] == "2000m"
     assert resources["limits"]["memory"] == str(4 * 1024**3)
-    assert resources["limits"]["ephemeral-storage"] == "2Gi"
+    assert resources["limits"]["ephemeral-storage"] == str(22 * 1024**3)
     # CPU requests default to half the limit (issue 93), so a small cluster schedules a
     # Burstable pod instead of demanding the whole limit up front. Memory still requests
     # equal to its limit by default: a worker promised the policy's memory is not the
     # first thing evicted, which would show up as a `lost` attempt nobody caused (16).
-    assert resources["requests"] == {"cpu": "1000m", "memory": str(4 * 1024**3)}
+    assert resources["requests"] == {
+        "cpu": "1000m",
+        "memory": str(4 * 1024**3),
+        "ephemeral-storage": str(22 * 1024**3),
+    }
     assert pod["terminationGracePeriodSeconds"] == 30
 
 
@@ -139,9 +143,13 @@ async def test_the_request_fractions_are_configurable_per_policy() -> None:
     assert resources["limits"] == {
         "cpu": "4000m",
         "memory": str(8 * 1024**3),
-        "ephemeral-storage": "2Gi",
+        "ephemeral-storage": str(22 * 1024**3),
     }
-    assert resources["requests"] == {"cpu": "1000m", "memory": str(4 * 1024**3)}
+    assert resources["requests"] == {
+        "cpu": "1000m",
+        "memory": str(4 * 1024**3),
+        "ephemeral-storage": str(22 * 1024**3),
+    }
     init = pod["initContainers"][0]
     assert init["resources"]["requests"] == {"cpu": "1000m", "memory": str(4 * 1024**3)}
 
@@ -197,15 +205,7 @@ async def test_the_worker_mount_layout(ran: Any) -> None:
     volumes = {v["name"]: v for v in pod["volumes"]}
     assert volumes["ws"] == {
         "name": "ws",
-        "ephemeral": {
-            "volumeClaimTemplate": {
-                "spec": {
-                    "accessModes": ["ReadWriteOnce"],
-                    "resources": {"requests": {"storage": "20Gi"}},
-                    "storageClassName": "lab-ssd",
-                }
-            }
-        },
+        "emptyDir": {"sizeLimit": "20Gi"},
     }
     assert volumes["identity"]["configMap"]["name"] == "identity-01attempt0000000000000000a"
     # Every bundle file is projected at its own relative path, not at a flattened key.
@@ -292,17 +292,14 @@ async def test_the_image_pull_secret_is_on_every_pod_when_one_is_configured(ran:
         assert pod_of(api, prefix)["imagePullSecrets"] == [{"name": "ghcr-pull"}]
 
 
-async def test_the_workspace_is_a_generic_ephemeral_volume_with_the_configured_class() -> None:
+async def test_the_workspace_is_a_size_limited_empty_dir() -> None:
     api, _registry, provider = build()
     launch = spec()
     workspace = await provider.prepare(launch)
     await provider.launch(workspace, launch)
     assert not any(row["kind"] == "persistentvolumeclaims" for row in api.created)
     volume = next(row for row in pod_of(api, "worker-")["volumes"] if row["name"] == "ws")
-    claim = volume["ephemeral"]["volumeClaimTemplate"]["spec"]
-    assert claim["accessModes"] == ["ReadWriteOnce"]
-    assert claim["storageClassName"] == "lab-ssd"
-    assert claim["resources"]["requests"]["storage"] == "20Gi"
+    assert volume == {"name": "ws", "emptyDir": {"sizeLimit": "20Gi"}}
 
 
 async def test_a_bundle_above_the_configmap_cap_is_refused_rather_than_truncated() -> None:

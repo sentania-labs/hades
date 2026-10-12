@@ -18,18 +18,11 @@
 #
 # Sizing rule for any worker count N with the default policy:
 #   count/jobs.batch   = 5N + 2     (5 Jobs per attempt + 2 for the publisher)
-#   persistentvolumeclaims = 4N     (ADR 0033: an attempt creates no claim of its own.
-#                                   A named WORKSPACE_EPHEMERAL_CLASS makes one claim
-#                                   per running role Pod, owned by that Pod and gone
-#                                   with it; an empty class makes none. 4N leaves room
-#                                   for every role Pod an attempt may have alive at
-#                                   once plus the publisher's, beside the reference
-#                                   cache claim the manifests own)
 #   requests.cpu       = N          (2 CPU limit x 0.5 fraction = 1 CPU per attempt)
 #   limits.cpu         = 2N         (2 CPU limit per attempt)
 #   requests.memory    = 4N GiB     (4 GiB per attempt)
 #   limits.memory      = 4N GiB     (4 GiB per attempt, Guaranteed-for-memory)
-# Worked example for N = 10 (the lab's default): 52 Jobs, 40 claims, 10 CPU requested,
+# Worked example for N = 10 (the lab's default): 52 Jobs, 10 CPU requested,
 # 20 CPU limit, 40 GiB memory. The quota is the deployer's overlay to set; the provider
 # advertises capacity from it, so a stale quota shows up as a smaller max_concurrency on
 # the Providers page, never as an unbounded launch.
@@ -59,7 +52,6 @@ metadata:
 spec:
   hard:
     count/jobs.batch: "17"
-    persistentvolumeclaims: "12"
     requests.cpu: "3"
     requests.memory: 12Gi
     limits.cpu: "6"

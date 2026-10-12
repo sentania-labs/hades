@@ -277,7 +277,6 @@ def kubernetes_config(
     return KubernetesConfig(
         namespace=k.workers_namespace,
         service_account=k.service_account,
-        workspace_ephemeral_class=k.workspace_ephemeral_class,
         workspace_ephemeral_size=k.workspace_ephemeral_size,
         image_pull_secret=k.image_pull_secret,
         cache_claim=k.cache_claim,

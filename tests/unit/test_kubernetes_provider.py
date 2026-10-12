@@ -183,7 +183,6 @@ async def test_the_canary_requests_a_small_fixed_size_not_the_role_pods_size() -
         config=KubernetesConfig(
             poll_interval_seconds=0,
             launch_timeout_seconds=5,
-            workspace_ephemeral_class="lab-ssd",
             image_pull_secret="ghcr-pull",
             canary_cpu_millicores=50,
             canary_memory="32Mi",
@@ -271,7 +270,6 @@ async def test_an_operator_declared_limit_covers_a_private_cgroup_namespace() ->
     config = KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         pod_pid_limit_override=512,
     )
@@ -292,7 +290,6 @@ async def test_an_operator_declared_limit_never_overrides_a_confirmed_absence() 
     config = KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         pod_pid_limit_override=512,
     )
@@ -319,7 +316,6 @@ async def test_a_non_positive_override_never_passes_the_gate() -> None:
     config = KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         pod_pid_limit_override=-1,
     )
@@ -505,9 +501,7 @@ async def test_a_pod_pending_past_the_launch_timeout_is_a_launch_failure() -> No
     api, _registry, provider, launch, workspace = await prepared()
     assert (await provider.ensure_ready()).passed
     api.pending_forever.add(launch.attempt_id)
-    provider.config = KubernetesConfig(
-        poll_interval_seconds=0, launch_timeout_seconds=0, workspace_ephemeral_class="lab-ssd"
-    )
+    provider.config = KubernetesConfig(poll_interval_seconds=0, launch_timeout_seconds=0)
     handle = await provider.launch(workspace, launch)
     observation = await provider.observe(handle)
     assert observation.state is ObservationState.EXITED and observation.exit_code == 70
@@ -1091,7 +1085,10 @@ async def test_a_launched_attempt_records_limits_read_from_its_pod() -> None:
     evidence = next(a for a in outputs.artifacts if a.name == "report/kubernetes-launch.json")
     document = json.loads(evidence.content)
     assert document["limits_source"] == "pod"
-    assert document["limits"] == provider._limits(launch).as_dict()
+    assert document["limits"] == {
+        **provider._limits(launch).as_dict(),
+        "ephemeral_storage": str(22 * 1024**3),
+    }
 
 
 async def test_reconcile_does_not_adopt_a_finished_job_with_no_pod() -> None:
@@ -1927,7 +1924,6 @@ async def test_the_preparer_mounts_the_reference_cache_read_only() -> None:
     config = KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         cache_claim="crucible-reference-cache",
     )
@@ -2026,7 +2022,6 @@ async def test_attempts_of_one_repository_prepared_together_share_one_refresh() 
     config = KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         cache_claim="crucible-reference-cache",
     )

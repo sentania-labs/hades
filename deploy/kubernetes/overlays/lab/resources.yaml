@@ -18,7 +18,6 @@ spec:
   hard:
     # 5N + 2 where N = 6 for the lab: 5 * 6 + 2 = 32 Jobs (5 per attempt + publisher headroom)
     count/jobs.batch: "32"
-    persistentvolumeclaims: "24"
     requests.cpu: "6"
     requests.memory: 24Gi
     limits.cpu: "12"

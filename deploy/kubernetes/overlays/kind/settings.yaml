@@ -1,6 +1,5 @@
 # kind's kube-dns clusterIP is the default 10.96.0.10, which the base already carries.
-# What differs is the class for each Pod's generic ephemeral scratch (ADR 0033; kind's
-# local-path provisioner), the sizes a one-node cluster can honour, and the
+# What differs is the scratch size a one-node cluster can honour and the
 # worker-side timeouts: the disposable registry and the local-path provisioner are slower
 # than a lab cluster on the first pull, and a task that is still pulling is not a stall.
 # The kind tier drives the script harness, a test fixture a real deployment never shows or
@@ -12,7 +11,6 @@ metadata:
   name: hades-settings
   namespace: hades
 data:
-  CRUCIBLE_KUBERNETES__WORKSPACE_EPHEMERAL_CLASS: standard
   CRUCIBLE_KUBERNETES__WORKSPACE_EPHEMERAL_SIZE: 256Mi
   CRUCIBLE_KUBERNETES__MAX_CONCURRENCY: "1"
   CRUCIBLE_SUPERVISOR__TICK_SECONDS: "2"

@@ -209,7 +209,8 @@ collector's independent clone and holds its own results until exec readback comp
 the sealed publication and correction bundle remains unchanged. Init containers create
 scratch subPaths as the worker uid, including the report directory. Every Pod has its
 own ephemeral scratch and no Pod inherits files
-from another Pod. Identity is a
+from another Pod. The Pod reserves the configured scratch capacity plus the policy
+ephemeral storage allowance for logs and writable layers. Identity is a
 ConfigMap or projected volume, the harness credential as a per-attempt
 Secret seeded from the harness's dedicated Secret, the GitHub App key on
 the `crucible` pods only, a pod security context mirroring the Docker

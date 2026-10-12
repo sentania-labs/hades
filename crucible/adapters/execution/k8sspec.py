@@ -456,6 +456,23 @@ def pod_spec(request: PodRequest) -> dict[str, Any]:
         spec["imagePullSecrets"] = [{"name": request.image_pull_secret}]
     if request.host_aliases:
         spec["hostAliases"] = [dict(a) for a in request.host_aliases]
+    for volume in request.volumes:
+        if volume.get("name") != "ws" or "emptyDir" not in volume:
+            continue
+        workspace = volume["emptyDir"]
+        if workspace.get("medium") == "Memory":
+            continue
+        size = quantity(workspace.get("sizeLimit"))
+        overhead = quantity(request.limits.ephemeral_storage)
+        if size is None or size <= 0 or overhead is None:
+            raise SpecError("workspace and policy ephemeral storage must be valid quantities")
+        # Disk-backed emptyDir counts against the Pod's aggregate storage limit.
+        # Reserve its capacity once, on the main container, in addition to the
+        # policy allowance for writable layers and logs. Init containers and the
+        # collector share that volume; charging it again would double the request.
+        storage = str(math.ceil(size) + math.ceil(overhead))
+        container["resources"]["limits"]["ephemeral-storage"] = storage
+        container["resources"]["requests"]["ephemeral-storage"] = storage
     return spec
 
 
@@ -495,26 +512,9 @@ DRAIN_SCRIPT = "kill -TERM -1 2>/dev/null; kill -TERM 1 2>/dev/null; exit 0"
 KILL_SCRIPT = "kill -KILL -1 2>/dev/null; kill -TERM 1 2>/dev/null; exit 0"
 
 
-def workspace_volume(*, size: str, storage_class: str = "") -> dict[str, Any]:
-    """One Pod's bounded scratch, never an attempt-scoped claim.
-
-    An explicitly configured class uses a generic ephemeral volume. Otherwise the
-    kubelet supplies a size-limited ``emptyDir`` that is removed with the Pod.
-    """
-    if not storage_class:
-        return {"name": "ws", "emptyDir": {"sizeLimit": size}}
-    return {
-        "name": "ws",
-        "ephemeral": {
-            "volumeClaimTemplate": {
-                "spec": {
-                    "accessModes": ["ReadWriteOnce"],
-                    "resources": {"requests": {"storage": size}},
-                    "storageClassName": storage_class,
-                }
-            }
-        },
-    }
+def workspace_volume(*, size: str) -> dict[str, Any]:
+    """One Pod's bounded ``emptyDir`` scratch, removed with the Pod."""
+    return {"name": "ws", "emptyDir": {"sizeLimit": size}}
 
 
 # ----- declared test services (hades #558, #85) -----------------------------

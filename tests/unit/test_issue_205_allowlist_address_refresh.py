@@ -153,7 +153,6 @@ def _config(*, overlap_seconds: float) -> KubernetesConfig:
     return KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         resolve_ttl_seconds=0.01,
         address_overlap_window_seconds=overlap_seconds,
@@ -298,7 +297,6 @@ async def test_the_names_are_looked_up_again_only_on_the_interval() -> None:
     config = KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         resolve_ttl_seconds=300.0,
     )
@@ -436,7 +434,6 @@ def _long_interval_worker() -> tuple[FakeKubernetesApi, KubernetesProvider, _Ans
     config = KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         resolve_ttl_seconds=300.0,
     )

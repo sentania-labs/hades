@@ -158,7 +158,6 @@ def _provider(
     **overrides: Any,
 ) -> KubernetesProvider:
     settings: dict[str, Any] = {
-        "workspace_ephemeral_class": "standard",
         "workspace_ephemeral_size": "64Mi",
         "cache_claim": "hades-reference-cache",
         "poll_interval_seconds": 0.25,

@@ -155,10 +155,6 @@ TYPED_SETTINGS = {
     "CRUCIBLE_KUBERNETES__DNS_NAMESPACE": ("cluster.dnsNamespace", "string"),
     "CRUCIBLE_KUBERNETES__DNS_POD_LABELS": ("cluster.dnsPodLabels", "object"),
     "CRUCIBLE_KUBERNETES__POD_PID_LIMIT_OVERRIDE": ("cluster.podPidLimitOverride", "integer"),
-    "CRUCIBLE_KUBERNETES__WORKSPACE_EPHEMERAL_CLASS": (
-        "provider.workspaceEphemeral.class",
-        "string",
-    ),
     "CRUCIBLE_KUBERNETES__IMAGE_PULL_SECRET": ("cluster.imagePullSecret", None),
     "CRUCIBLE_KUBERNETES__WORKSPACE_EPHEMERAL_SIZE": (
         "provider.workspaceEphemeral.size",
@@ -311,7 +307,6 @@ def test_the_provider_knobs_left_room_runner() -> None:
 def test_the_optional_settings_render_only_when_set() -> None:
     text = (TEMPLATES / "configmap.yaml").read_text()
     for path, key in (
-        ("provider.workspaceEphemeral.class", "WORKSPACE_EPHEMERAL_CLASS"),
         ("cluster.imagePullSecret", "IMAGE_PULL_SECRET"),
         ("cluster.podPidLimitOverride", "POD_PID_LIMIT_OVERRIDE"),
     ):

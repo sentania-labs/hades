@@ -311,11 +311,7 @@ class KubernetesPublisher:
                 # A push brings its own volumes (ADR 0032); a merge-main run writes its
                 # outcome to the attempt's claim.
                 volumes=[
-                    *(
-                        volumes
-                        if volumes is not None
-                        else [provider._claim_volume(request.attempt_id)]
-                    ),
+                    *(volumes if volumes is not None else [provider._workspace_volume()]),
                     token_volume(secret),
                 ],
                 limits=limits,
@@ -434,7 +430,7 @@ class KubernetesPublisher:
                 image=request.image,
                 script=scripts.publish_leaf_script(),
                 mounts=[Mount("ws", WORK_MOUNT)],
-                volumes=[provider._claim_volume(request.attempt_id)],
+                volumes=[provider._workspace_volume()],
                 limits=limits,
                 # How long the Job that readies the claim may run, from its Pod Running.
                 timeout=provider.config.role_timeout_seconds,

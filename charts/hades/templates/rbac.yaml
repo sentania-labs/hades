@@ -149,11 +149,6 @@ roleRef:
 # sentence. The additions are the ones the implemented provider needs and 26 now
 # records:
 #
-#   patch on persistentvolumeclaims  recorded by 26's verb table from the retained-claim
-#                                    era; ADR 0033 ended attempt claims, and the provider
-#                                    now only lists and deletes a claim labelled for an
-#                                    attempt (a generic ephemeral volume's, gone with
-#                                    its Pod) when it discards that attempt's objects
 #   patch on secrets                 the `rw-narrow` credential sync-back (12, 26)
 #   patch on networkpolicies         a running worker's NetworkPolicy follows its
 #                                    allowlisted names to a new address (hades #205,
@@ -188,7 +183,7 @@ rules:
     resources: ["pods", "configmaps"]
     verbs: ["create", "get", "list", "watch", "delete"]
   - apiGroups: [""]
-    resources: ["secrets", "persistentvolumeclaims"]
+    resources: ["secrets"]
     verbs: ["create", "get", "list", "watch", "patch", "delete"]
   - apiGroups: [""]
     resources: ["pods/log"]
