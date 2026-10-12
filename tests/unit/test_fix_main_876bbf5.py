@@ -44,7 +44,15 @@ def test_the_device_tokens_migration_is_the_single_head_above_comment_delivery()
 def test_the_check_constraint_permits_every_event_kind_the_domain_appends() -> None:
     """An event kind the CHECK refuses fails only against Postgres, as an IntegrityError
     on the first append of it; the head's list is the whole domain's."""
-    kinds = set(migration_by_slug("device_tokens_usage").module._event_kinds())
+    assert set(migration_by_slug("device_tokens_usage").module._event_kinds()) >= DEVICE_KINDS
+    script = ScriptDirectory.from_config(migrate.alembic_config("postgresql://unused/unused"))
+    (head,) = script.get_heads()
+    latest = next(
+        (r for r in script.iterate_revisions(head, "base") if hasattr(r.module, "_event_kinds")),
+        None,
+    )
+    assert latest is not None, "no migration at or below the head defines _event_kinds"
+    kinds = set(latest.module._event_kinds())
     assert kinds >= DEVICE_KINDS
     assert {kind.value for kind in EventKind} <= kinds
 
