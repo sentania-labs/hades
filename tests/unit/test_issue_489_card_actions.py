@@ -1025,7 +1025,8 @@ def test_the_card_page_renders_the_stuck_task_and_is_read_only_for_an_observer(
     assert html.count("<summary>Details</summary>") == 1
     # Newest note first on the page.
     assert html.index("Second line, kept as typed.") < html.index("Older note.")
-    assert html.index("Where it is and what it is stuck on") < html.index("Contract</h2>")
+    # hades FDY-0629: the folds keep their order, Where it is before What was asked.
+    assert html.index("Where it is") < html.index("What was asked")
 
     observer = render_card_html(stuck_fixture(), OBSERVER, monkeypatch)
     assert "Operators act here; you are reading only." in observer

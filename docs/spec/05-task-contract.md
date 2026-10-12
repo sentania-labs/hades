@@ -115,6 +115,14 @@ lifecycle:
   cleanup: "policy"
 
 correction: null                   # present only on a correction version (below)
+
+operator_needs: []                 # optional (hades FDY-0629): what the operator must supply before
+                                   # the task can go on, one plain line each. Foundry sets or clears
+                                   # it by amendment in the states amendments allow (proposed,
+                                   # sent_back, submitted, blocked, awaiting_acceptance). While the
+                                   # task is blocked or submitted and the list is not empty, the card
+                                   # opens with "Waiting on you for:" and these lines, and the board
+                                   # lists the task under Needs you.
 ```
 
 The submitting principal and receipt time are not contract fields: Crucible

@@ -479,7 +479,7 @@ def test_board_page_leads_with_the_kanban_and_keeps_the_list(
     monkeypatch.setattr(
         page,
         "board_lanes_view",
-        lambda *_args: {
+        lambda *_args, **_kwargs: {
             "lanes": [
                 {
                     "key": "inbox",
@@ -498,7 +498,8 @@ def test_board_page_leads_with_the_kanban_and_keeps_the_list(
     req.scope["query_string"] = b""
     response = page.board_page(req, ctx, fake_uow())  # type: ignore[arg-type]
     assert response.status_code == 200
-    assert b"Inbox" in response.body
+    # hades FDY-0629: the board leads with Needs you, whatever the projection's lanes.
+    assert b"Needs you" in response.body
     assert b"Task list" not in response.body
     assert b"Tokens by harness" not in response.body
 

@@ -16,6 +16,7 @@ from crucible.application.admin.board_lanes import (
     first_sentence,
     issue_link,
 )
+from crucible.application.admin.needs import needs_block
 from crucible.application.admin.stuck import task_stuck_reason
 from crucible.application.board_actions import (
     card_lane,
@@ -333,8 +334,14 @@ def board_card_view(uow: UnitOfWork, task_id: str, now: datetime) -> dict[str, A
         else None
     )
     default = None if reason is not None else default_move_for(lane, escalation)
+    # The reason the card reads is computed for every lane here, so a task held on
+    # another task's fix or a Foundry question reads the same words on every lane.
+    needs = needs_block(
+        task, document, escalation, reason or task_stuck_reason(uow, task, escalation)
+    )
     return {
         "id": task.id,
+        "needs": needs,
         "external_id": task.external_id,
         "title": task.title,
         "project": task.project,
