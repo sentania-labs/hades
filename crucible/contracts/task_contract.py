@@ -427,6 +427,22 @@ class TaskContractV1(StrictModel):
     lifecycle: Lifecycle
     correction: Correction | None
     scheduled_job: ScheduledJobMetadata | None = None
+    # hades FDY-0629: what the operator must supply before the task can go on, each item
+    # one plain line ("the ScarGuard staging credentials", "a decision on the API shape").
+    # Optional; Foundry sets or clears it by amendment in the states amendments allow.
+    # The card opens with "Waiting on you for:" and these items while the task is
+    # blocked or submitted, and the board lists it under Needs you.
+    operator_needs: list[str] = Field(default_factory=list)
+
+    @field_validator("operator_needs")
+    @classmethod
+    def _needs_are_lines(cls, value: list[str]) -> list[str]:
+        items = [item.strip() for item in value]
+        if any(not item for item in items):
+            raise ValueError("operator_needs items must not be blank")
+        if len(set(items)) != len(items):
+            raise ValueError("duplicate operator_needs item")
+        return items
 
     @field_validator("schema_version")
     @classmethod

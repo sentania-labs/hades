@@ -1,7 +1,36 @@
 {% extends "base.html" %}
+{% macro click(item) -%}
+      <form class="card-form stuck-click stuck-click--{{ item.key }}" method="post" action="{{ item.action }}">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="return_to" value="{{ return_to }}">
+        {% for name, value in item.hidden.items() %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+        {% if item.note %}<label><span class="lat-label">{{ item.note }}</span>
+          <textarea class="lat-textarea" name="{{ item.note_name }}" rows="{{ 3 if item.required else 1 }}"{% if item.required %} required{% endif %}></textarea></label>{% endif %}
+        <button class="lat-btn {% if item.primary %}lat-btn--primary{% else %}lat-btn--ghost{% endif %}" type="submit" data-action="{{ item.key }}"{% if item.confirm %} data-confirm="true"{% endif %}>{{ item.label }}</button>
+      </form>
+{%- endmacro %}
 {% block content %}
 <style>
-  .card-stuck--mine { box-shadow: 0 0 0 1px rgba(180,107,255,.55), 0 0 18px rgba(180,107,255,.45); }
+  .needs-you { margin: 0 0 16px; padding: 16px 18px; border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 14px; background: var(--surface); }
+  .needs-you--decision, .needs-you--evidence { box-shadow: 0 0 0 1px rgba(180,107,255,.55), 0 0 18px rgba(180,107,255,.45); }
+  .needs-you h2 { margin: 0 0 6px; font: 600 12px/1.3 var(--font-display); letter-spacing: .08em; text-transform: uppercase; color: var(--ink-subtle); }
+  .needs-label { margin: 0 0 8px; font: 600 22px/1.3 var(--font-display); color: var(--ink); }
+  .needs-now, .needs-next { margin: 0 0 4px; font-size: 16px; line-height: 1.5; color: var(--ink); }
+  .needs-next { color: var(--ink-muted); }
+  .needs-question { margin: 0 0 10px; padding: 10px 14px; border-left: 3px solid var(--cyan); background: var(--surface-sunken); color: var(--ink); font-size: 16px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .needs-options, .needs-items { margin: 0 0 12px; padding-left: 22px; font-size: 16px; line-height: 1.6; color: var(--ink); }
+  .needs-form { display: grid; gap: 8px; max-width: 720px; }
+  .needs-form .lat-textarea { width: 100%; box-sizing: border-box; }
+  .needs-form button { justify-self: start; }
+  .needs-clicks { display: grid; gap: 10px; }
+  .needs-readonly { margin: 0; color: var(--ink-subtle); }
+  .card-fold { margin: 0 0 10px; border: 1px solid var(--line-soft); border-radius: 14px; background: var(--surface); }
+  .card-fold > summary { padding: 12px 18px; cursor: pointer; font: 600 15px/1.3 var(--font-display); color: var(--accent-ink); list-style: none; }
+  .card-fold > summary::-webkit-details-marker { display: none; }
+  .card-fold > summary::after { content: " +"; }
+  .card-fold[open] > summary::after { content: " -"; }
+  .card-fold > .card-fold-body { padding: 0 18px 16px; }
+  .card-fold .lat-card { border: 0; padding: 0; }
   .stuck-sentence { font-family: var(--font-display); font-size: 17px; line-height: 1.45; color: var(--ink); margin: 0 0 8px; }
   .stuck-owner { margin: 0 0 10px; color: var(--ink-muted); }
   .stuck-tag { display: inline-block; margin-right: 6px; padding: 2px 9px; border: 1px solid var(--line); border-radius: 999px; font-size: 12px; color: var(--ink-muted); }
@@ -14,34 +43,65 @@
   .stuck-details ul, .stuck-details p { color: var(--ink-muted); overflow-wrap: anywhere; }
   .stuck-raw { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; color: var(--ink-muted); }
 </style>
+<section class="needs-you needs-you--{{ needs.kind }}" aria-label="What needs you" data-needs="{{ needs.kind }}" id="needs-you">
+  <h2>What needs you</h2>
+  <p class="needs-label">{{ needs.label }}</p>
+  {% if needs.kind == "nothing" %}
+  <p class="needs-now">{{ safe_value("now", needs.now) }}</p>
+  <p class="needs-next">{{ safe_value("next", needs.next) }}</p>
+  {% elif needs.kind == "decision" %}
+  <blockquote class="needs-question">{{ safe_value("question", needs.question) }}</blockquote>
+  {% if needs.options %}<ol class="needs-options">{% for option in needs.options %}<li>{{ safe_value("option", option) }}</li>{% endfor %}</ol>{% endif %}
+  {% if can_act and answer_form %}
+  <form class="card-form needs-form" method="post" action="{{ answer_form.action }}" id="answer">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="return_to" value="{{ return_to }}">
+    {% for name, value in answer_form.hidden.items() %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+    <label><span class="lat-label">Your answer</span>
+      <textarea class="lat-textarea" name="{{ answer_form.field }}" rows="3" required></textarea></label>
+    <button class="lat-btn lat-btn--primary" type="submit" data-action="answer">Send</button>
+  </form>
+  {% elif can_act and proposal_actions %}
+  <div class="needs-clicks">{% for item in proposal_actions %}{{ click(item) }}{% endfor %}</div>
+  {% elif not can_act %}
+  <p class="needs-readonly">Operators answer here; you are reading only.</p>
+  {% endif %}
+  {% else %}
+  <ul class="needs-items">{% for item in needs["items"] %}<li>{{ safe_value("item", item) }}</li>{% endfor %}</ul>
+  <p class="needs-next">Once you have supplied it, tell Foundry in the thread below or answer here and the work goes on.</p>
+  {% if can_act %}
+  <form class="card-form needs-form" method="post" action="/ui/board/{{ card.id }}/notes" id="supplied">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="return_to" value="{{ return_to }}">
+    <label><span class="lat-label">What you supplied, or where it is</span>
+      <textarea class="lat-textarea" name="note" rows="2" required></textarea></label>
+    <button class="lat-btn lat-btn--primary" type="submit" data-action="note">Send</button>
+  </form>
+  {% endif %}
+  {% endif %}
+</section>
 <div class="card-head">
   <span class="board-card-id">{{ safe_value("external id", card.external_id) }}</span>
   <h1>{{ safe_value("title", card.title) }}</h1>
-  <span class="card-lane card-lane--{{ card.lane.key }}">{{ card.lane.name }}</span>
-  <span class="admin-hint">{{ safe_value("project", card.project) }} · {{ safe_value("state", card.state_words) }} · contract v{{ card.contract_version }}</span>
+  <span class="admin-hint">{{ safe_value("project", card.project) }}</span>
 </div>
 <div class="card-links">
   <a href="{{ card.links.board }}">Back to the board</a>
-  <a href="{{ card.links.task }}">Full task page</a>
   {% for issue in card.contract.issues %}{% if issue.url %}<a href="{{ issue.url }}" rel="noopener noreferrer" target="_blank">Issue {{ safe_value("issue", issue.label) }}</a>{% else %}<span>Issue {{ safe_value("issue", issue.label) }}</span>{% endif %}{% endfor %}
-  {% if card.pull_request %}<a href="{{ card.pull_request.url }}" rel="noopener noreferrer" target="_blank">PR #{{ card.pull_request.number }} ({{ card.pull_request.state }})</a>{% else %}<span class="admin-empty">No pull request yet</span>{% endif %}
+  {% if card.pull_request %}<a href="{{ card.pull_request.url }}" rel="noopener noreferrer" target="_blank">Pull request #{{ card.pull_request.number }}</a>{% else %}<span class="admin-empty">No pull request yet</span>{% endif %}
 </div>
-<div class="card-grid">
-  <section class="lat-card card-stuck card-wide{% if card.reason and card.reason.owner == 'you' %} card-stuck--mine{% endif %}" aria-label="Where it is and what it is stuck on">
-    <h2>Where it is and what it is stuck on</h2>
+<div class="card-folds" id="fold">
+  <details class="card-fold" data-fold="where">
+    <summary>Where it is</summary>
+    <div class="card-fold-body">
+  <section class="lat-card card-stuck{% if card.reason and card.reason.owner == 'you' %} card-stuck--mine{% endif %}" aria-label="Where it is and what it is stuck on">
+    <span class="card-lane card-lane--{{ card.lane.key }}">{{ card.lane.name }}</span>
+    <span class="admin-hint">{{ safe_value("state", card.state_words) }} · contract v{{ card.contract_version }}</span>
     {% if card.reason %}
     <p class="stuck-sentence" data-reason="{{ card.reason.key }}">{{ safe_value("reason", card.reason.sentence) }}</p>
     <p class="stuck-owner"><span class="stuck-tag stuck-tag--{{ card.reason.owner }}">Whose move: {{ card.reason.owner_words }}</span> {{ card.reason.owner_line }}</p>
     {% if card.reason.quote %}<blockquote class="stuck-quote">{{ safe_value("question", card.reason.quote) }}</blockquote>{% endif %}
-    {% if can_act and reason_actions %}<div class="stuck-clicks">{% for item in reason_actions %}
-      <form class="card-form stuck-click stuck-click--{{ item.key }}" method="post" action="{{ item.action }}">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <input type="hidden" name="return_to" value="{{ return_to }}">
-        {% for name, value in item.hidden.items() %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
-        {% if item.note %}<label><span class="lat-label">{{ item.note }}</span>
-          <textarea class="lat-textarea" name="{{ item.note_name }}" rows="{{ 3 if item.required else 1 }}"{% if item.required %} required{% endif %}></textarea></label>{% endif %}
-        <button class="lat-btn {% if item.primary %}lat-btn--primary{% else %}lat-btn--ghost{% endif %}" type="submit" data-action="{{ item.key }}"{% if item.confirm %} data-confirm="true"{% endif %}>{{ item.label }}</button>
-      </form>{% endfor %}</div>{% endif %}
+    {% if can_act and reason_actions %}<div class="stuck-clicks">{% for item in reason_actions %}{{ click(item) }}{% endfor %}</div>{% endif %}
     <details class="stuck-details"><summary>Details</summary>
       <p>{{ safe_value("headline", card.stuck.headline) }}</p>
       <ul>{% for line in card.stuck.lines %}<li>{{ safe_value("line", line) }}</li>{% endfor %}</ul>
@@ -54,9 +114,13 @@
     {% if card.escalation %}<p class="admin-hint">Escalation {{ card.escalation.id }} opened {{ card.escalation.opened_at }}{% if card.escalation.reason %}, reason {{ card.escalation.reason }}{% endif %}.</p>{% endif %}
     {% endif %}
   </section>
+    </div>
+  </details>
 
+  <details class="card-fold" data-fold="head">
+    <summary>Branch and checks</summary>
+    <div class="card-fold-body">
   <section class="lat-card" aria-label="Head and CI">
-    <h2>Head and CI</h2>
     <dl class="card-facts">
       <div><dt>Collected head</dt><dd>{{ card.head.sha or "none yet" }}</dd></div>
       <div><dt>Pushed head</dt><dd>{% if card.pull_request %}{{ card.pull_request.head_sha }} on {{ safe_value("branch", card.pull_request.work_branch) }}{% else %}not pushed{% endif %}</dd></div>
@@ -67,18 +131,26 @@
       {% endif %}
     </dl>
   </section>
+    </div>
+  </details>
 
+  <details class="card-fold" data-fold="cost">
+    <summary>Cost so far</summary>
+    <div class="card-fold-body">
   <section class="lat-card" aria-label="Cost so far">
-    <h2>Cost so far</h2>
     <ul class="card-cost">
       <li><b>{{ card.cost.attempts }}</b><span>attempts</span></li>
       <li><b>{{ card.cost.worker_minutes }}</b><span>worker minutes</span></li>
       <li><b>{{ card.cost.codex_rounds }}</b><span>Codex rounds</span></li>
     </ul>
   </section>
+    </div>
+  </details>
 
-  <section class="lat-card card-wide" aria-label="Contract">
-    <h2>Contract</h2>
+  <details class="card-fold" data-fold="contract">
+    <summary>What was asked</summary>
+    <div class="card-fold-body">
+  <section class="lat-card" aria-label="Contract">
     <p class="card-prose">{{ safe_value("objective", card.contract.objective) }}</p>
     <dl class="card-facts">
       <div><dt>Scope</dt><dd>Change only {{ card.contract.scope.allowed_paths | join(", ") or "nothing named" }}. Never touch {{ card.contract.scope.prohibited_paths | join(", ") or "nothing named" }}. Add dependencies: {{ "yes" if card.contract.scope.may_add_dependencies else "no" }}. Change CI: {{ "yes" if card.contract.scope.may_modify_ci else "no" }}. Network: {{ card.contract.scope.network }}.{% for action in card.contract.scope.prohibited_actions %} Do not {{ safe_value("action", action) }}.{% endfor %}</dd></div>
@@ -86,20 +158,32 @@
       <div><dt>Required checks</dt><dd><ul class="card-list">{% for check in card.contract.checks %}<li><code>{{ safe_value("check", check) }}</code></li>{% else %}<li class="admin-empty">none</li>{% endfor %}</ul></dd></div>
       <div><dt>Dispatch tier</dt><dd>{{ card.contract.tier }}{% if card.contract.rationale %} · {{ safe_value("rationale", card.contract.rationale) }}{% endif %}</dd></div>
       <div><dt>Expected deliverable</dt><dd>{{ card.contract.deliverables | join("; ") }}{% if card.contract.repository.name %} in {{ safe_value("repository", card.contract.repository.name) }} from {{ safe_value("base", card.contract.repository.base_ref) }}{% endif %}</dd></div>
+      {% if needs["items"] %}<div><dt>Needed from you</dt><dd><ul class="card-list">{% for item in needs["items"] %}<li>{{ safe_value("item", item) }}</li>{% endfor %}</ul></dd></div>{% endif %}
     </dl>
   </section>
+    </div>
+  </details>
 
+  <details class="card-fold" data-fold="attempts">
+    <summary>Attempts</summary>
+    <div class="card-fold-body">
   <section class="lat-card" aria-label="Attempt timeline">
-    <h2>Attempt timeline</h2>
     {% if card.timeline %}<ol class="card-timeline">{% for row in card.timeline %}<li>
       <span><b>{{ row.role }} attempt {{ row.number }}</b> · {{ safe_value("harness", row.harness) }} / {{ safe_value("model", row.model) }} · {{ row.exit_class }}</span>
       <span class="card-when">{{ row.started_at or "not started" }} to {{ row.ended_at or "now" }}</span>
       <span>{{ safe_value("line", row.line) }}</span>
     </li>{% endfor %}</ol>{% else %}<p class="admin-empty">No attempt yet.</p>{% endif %}
   </section>
-
+  <section class="lat-card" aria-label="Correction history">
+    <h2>Corrections</h2>
+    {% if card.corrections %}<ol class="card-timeline">{% for row in card.corrections %}<li>
+      <span><b>Version {{ row.version }}</b> corrects {{ row.of_version }} · {{ row.reason }} · resume from {{ row.resume_from }}</span>
+      <span class="card-when">{{ row.submitted_at }}</span>
+      <span>{{ safe_value("instructions", row.instructions) }}</span>
+    </li>{% endfor %}</ol>{% else %}<p class="admin-empty">No correction yet.</p>{% endif %}
+  </section>
   {% if egress %}<section class="lat-card" aria-label="Egress">
-    <h2>Egress</h2>
+    <h2>Network checks</h2>
     <span class="admin-hint">Each allowlisted host, tried from inside the worker before the harness started. An unreachable host is the egress path, not the worker.</span>
     <table class="card-defaults"><thead><tr><th>Attempt</th><th>Host</th><th>Result</th><th>Latency</th><th>Detail</th><th>Recorded</th></tr></thead><tbody>
     {% for r in egress %}<tr>
@@ -112,23 +196,22 @@
     </tr>{% endfor %}
     </tbody></table>
   </section>{% endif %}
+    </div>
+  </details>
 
-  <section class="lat-card" aria-label="Correction history">
-    <h2>Correction history</h2>
-    {% if card.corrections %}<ol class="card-timeline">{% for row in card.corrections %}<li>
-      <span><b>Version {{ row.version }}</b> corrects {{ row.of_version }} · {{ row.reason }} · resume from {{ row.resume_from }}</span>
-      <span class="card-when">{{ row.submitted_at }}</span>
-      <span>{{ safe_value("instructions", row.instructions) }}</span>
-    </li>{% endfor %}</ol>{% else %}<p class="admin-empty">No correction yet.</p>{% endif %}
-  </section>
-
-  <div class="card-conversation card-wide">
-  <section class="lat-card card-thread" aria-label="Thread" id="notes">
+  <details class="card-fold" data-fold="thread" id="notes">
+    <summary>Thread and notes</summary>
+    <div class="card-fold-body">
+  <section class="lat-card card-thread" aria-label="Thread">
     {% include "room_panel.html" %}
   </section>
+    </div>
+  </details>
 
-  <aside class="lat-card card-actions-panel" aria-label="Actions" id="actions">
-    <h2>Actions</h2>
+  <details class="card-fold" data-fold="actions" id="actions">
+    <summary>Other actions</summary>
+    <div class="card-fold-body">
+  <aside class="lat-card card-actions-panel" aria-label="Actions">
     <p class="admin-hint">Clicks live here, beside the thread, never in it.</p>
     {% if can_act %}
     <form class="card-form" method="post" action="/ui/board/{{ card.id }}/notes">
@@ -152,7 +235,7 @@
         {% if item.hint %}<span class="admin-hint">{{ item.hint }}</span>{% endif %}
       </form>
     </li>{% endfor %}</ul>
-    {% else %}<p class="admin-empty">No action applies to a task in {{ card.state_words }}.</p>{% endif %}
+    {% else %}<p class="admin-empty">No other action applies to a task in {{ card.state_words }}.</p>{% endif %}
     {% if card.default_move %}<form class="card-form" method="post" action="/ui/board/{{ card.id }}/actions">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="return_to" value="{{ return_to }}">
@@ -168,11 +251,17 @@
       </tbody></table>
     </div>
   </aside>
-  </div>
-  <section class="lat-card card-wide card-history" aria-label="History">
-    <h2>History</h2>
+    </div>
+  </details>
+
+  <details class="card-fold" data-fold="history">
+    <summary>History</summary>
+    <div class="card-fold-body">
+  <section class="lat-card card-history" aria-label="History">
     {% for decision in card_history %}<article><p class="card-prose">{{ decision.verbatim }}</p><span>{{ decision.channel }} · <time>{{ decision.time }}</time></span></article>{% else %}<p class="admin-empty">No decisions touch this card yet.</p>{% endfor %}
   </section>
+    </div>
+  </details>
 </div>
 <script src="/ui/static/board.js" defer></script>
 {% endblock %}

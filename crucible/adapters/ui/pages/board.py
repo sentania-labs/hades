@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, cast
 from urllib.parse import quote
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -22,6 +24,7 @@ from crucible.application.task_notes import OPERATOR_ROLES, add_note
 from crucible.domain.egress_probe import host_words
 from crucible.domain.entities import Principal, Role
 from crucible.domain.lifecycle import TaskState
+from crucible.domain.needs_you import BOARD_LANES, DECISION, LANE_DONE, LANE_NEEDS_YOU
 from crucible.domain.waivers import ACCEPT_NO_CI, WAIVABLE_STATES, WAIVE_EXTERNAL_REVIEW
 
 router = ThreadedAPIRouter(prefix="/ui", include_in_schema=False)
@@ -298,6 +301,52 @@ def _quality_sections(document: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+ALL_LANES = frozenset(
+    {"inbox", "waiting_on_me", "stuck", "in_progress", "holding_pen", "wins", "graveyard"}
+)
+
+
+def start_of_today(now: datetime, timezone: str) -> datetime:
+    """Local midnight in the operator's zone, as an instant."""
+    try:
+        zone = ZoneInfo(timezone)
+    except ZoneInfoNotFoundError:
+        zone = ZoneInfo("America/Chicago")
+    local = now.astimezone(zone)
+    return local.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def needs_lanes(document: dict[str, Any]) -> list[dict[str, Any]]:
+    """hades FDY-0629: the board's four lanes, Needs you first, from the cards' `needs`
+    (the same mapping the card page opens with). Needs you holds only the cards with an
+    open decision or an operator evidence need; Done today holds the work that ended
+    today, which the projection has already bounded to today."""
+    cards = [card for lane in document["lanes"] for card in lane["cards"]]
+    by_lane: dict[str, list[dict[str, Any]]] = {key: [] for key, _n, _m in BOARD_LANES}
+    for card in cards:
+        needs = card.get("needs") or {}
+        by_lane[needs.get("board_lane") or LANE_DONE].append(card)
+    lanes = []
+    for key, name, meaning in BOARD_LANES:
+        ordered = sorted(by_lane[key], key=lambda card: card["age"]["entered_at"])
+        if key == LANE_DONE:
+            ordered.reverse()
+        lanes.append(
+            {
+                "key": key,
+                "name": name,
+                "meaning": meaning,
+                "count": len(ordered),
+                "cards": ordered,
+                "empty": {
+                    LANE_NEEDS_YOU: "Nothing needs you.",
+                    LANE_DONE: "Nothing finished today.",
+                }.get(key, "No cards."),
+            }
+        )
+    return lanes
+
+
 @router.get("/board", response_class=HTMLResponse)
 def board_page(request: Request, ctx: Ctx, uow: UoW, lane: str | None = None) -> Response:
     found = _require(request, ctx, uow)
@@ -308,31 +357,34 @@ def board_page(request: Request, ctx: Ctx, uow: UoW, lane: str | None = None) ->
         return JSONResponse(
             board_resource(uow, ctx.clock.now(), principal, cards_for=frozenset({lane}))
         )
+    now = ctx.clock.now()
+    since = start_of_today(now, _timezone(request))
     render_principal = cast("Principal | None", principal)
     if render_principal is None:  # Compatibility for projection-only unit fixtures.
-        document = board_lanes_view(uow, ctx.clock.now())
-        document["needs_me"] = 0
+        document = board_lanes_view(uow, now, finished_since=since)
     else:
         document = board_resource(
-            uow,
-            ctx.clock.now(),
-            render_principal,
-            cards_for=frozenset({"inbox", "waiting_on_me", "stuck", "in_progress", "holding_pen"}),
+            uow, now, render_principal, cards_for=ALL_LANES, finished_since=since
         )
+    lanes = needs_lanes(document)
     return templates.TemplateResponse(
         request=request,
         name="board.html",
         context={
             **_base(request, principal, csrf, title="Board", active="/ui/board"),
             "title": "Board",
-            "lanes": document["lanes"],
-            "needs_me": document["needs_me"],
+            "lanes": lanes,
+            "needs_me": lanes[0]["count"],
         },
     )
 
 
 def _timezone(request: Request) -> str:
-    settings = getattr(getattr(request.app.state, "ctx", None), "settings", None)
+    try:
+        app = request.app
+    except (KeyError, AttributeError):  # A projection-only fixture request has no app.
+        return "America/Chicago"
+    settings = getattr(getattr(app.state, "ctx", None), "settings", None)
     return str(settings.service.render_timezone) if settings is not None else "America/Chicago"
 
 
@@ -421,6 +473,11 @@ PROPOSAL_ANSWERS = (
 )
 
 CARD_CLICK_REASON = "answered with one click on the card page"
+
+# hades FDY-0629: the proposal answers the What needs you section offers, and the
+# decision kind the card's answer form records through the decisions handler.
+PROPOSAL_KEYS = frozenset({"approve", "decline", "send_back", "reject"})
+ESCALATION_ANSWER = "escalation_answer"
 
 # hades #607: the words field beside a stuck card's clicks. Answer is the operator's
 # reply and needs words; the others take an optional note.
@@ -536,6 +593,23 @@ def board_card_page(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Respo
         [d for d in view.decisions if d.get("kind") in (WAIVE_EXTERNAL_REVIEW, ACCEPT_NO_CI)],
         timezone,
     )
+    # hades FDY-0629: what the operator must do opens the card. A decision on an open
+    # escalation takes its answer through the decisions handler; a proposal takes the
+    # proposal answers; the rest of the actions fold away below.
+    needs = card["needs"]
+    proposal_actions: list[dict[str, Any]] = []
+    if needs["kind"] == DECISION and needs["proposal"]:
+        proposal_actions = [item for item in actions if item["key"] in PROPOSAL_KEYS]
+        actions = [item for item in actions if item["key"] not in PROPOSAL_KEYS]
+    answer_form = (
+        {
+            "action": f"/ui/tasks/{quote(task_id)}/decisions",
+            "hidden": {"kind": ESCALATION_ANSWER},
+            "field": "verbatim",
+        }
+        if needs["kind"] == DECISION and not needs["proposal"]
+        else None
+    )
     return templates.TemplateResponse(
         request=request,
         name="card.html",
@@ -558,6 +632,9 @@ def board_card_page(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Respo
                 handoffs=view.handoffs,
             ),
             "card": card,
+            "needs": needs,
+            "answer_form": answer_form,
+            "proposal_actions": proposal_actions,
             "can_act": principal.role in OPERATOR_ROLES,
             "actions": actions,
             "reason_actions": reason_actions,

@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from crucible.application.admin.board import age_words
+from crucible.application.admin.needs import needs_block
 from crucible.application.admin.stuck import (
     STUCK_EVENT_KINDS,
     ci_cause_for_event,
@@ -244,11 +245,18 @@ def _states_for_lane(key: str) -> tuple[TaskState, ...]:
 
 
 def board_lanes_view(
-    uow: UnitOfWork, now: datetime, *, cards_for: frozenset[str] | None = None
+    uow: UnitOfWork,
+    now: datetime,
+    *,
+    cards_for: frozenset[str] | None = None,
+    finished_since: datetime | None = None,
 ) -> dict[str, Any]:
     """Build the board with a fixed number of repository reads as task count grows.
 
     `cards_for` names the lanes whose cards are built; every lane still has its count.
+    `finished_since` (hades FDY-0629) bounds the Wins and Graveyard cards to tasks that
+    entered those lanes at or after it, read from the tasks updated since then, so the
+    Done today lane costs today's finished tasks and no more.
     A collapsed lane that is not selected is counted from `count_by_state` and its
     contracts, attempts, pull requests, escalations, and events are never read, so the
     terminal lanes do not slow the live board as they grow. The document's `records`
@@ -287,7 +295,16 @@ def board_lanes_view(
     lane_counts = Counter(lane_by_task.values())
     for key in {key for key, _name, _meaning in LANES} - listed - {"waiting_on_scott"}:
         lane_counts[key] = sum(counts.get(state, 0) for state in _states_for_lane(key))
-    built = [task for task in tasks if lane_by_task[task.id] in selected]
+    built = [
+        task
+        for task in tasks
+        if lane_by_task[task.id] in selected
+        and (
+            finished_since is None
+            or LANE_BY_STATE[task.state] not in COLLAPSED_LANES
+            or task.updated_at >= finished_since
+        )
+    ]
     task_ids = {task.id for task in built}
     contracts, _comments, _dispositions = board_batch_records(
         uow, {task.id: task.contract_version for task in built}, []
@@ -359,29 +376,40 @@ def board_lanes_view(
         )
         fields = _contract_fields(contracts.get(task.id, {}))
         reason = _recorded_reason(task, events) if lane_key == "graveyard" else None
-        stuck = (
-            stuck_reason(
-                stuck_facts(
-                    task,
-                    escalation,
-                    {
-                        kind: event
-                        for kind in STUCK_EVENT_KINDS
-                        if (event := events.get((task.id, kind))) is not None
-                    },
-                    other_tasks=live_external,
-                    ci_cause=ci_cause_for_event(ci_events.get(task.id), ci_decisions),
-                )
+        reason_for_needs = stuck_reason(
+            stuck_facts(
+                task,
+                escalation,
+                {
+                    kind: event
+                    for kind in STUCK_EVENT_KINDS
+                    if (event := events.get((task.id, kind))) is not None
+                },
+                other_tasks=live_external,
+                ci_cause=ci_cause_for_event(ci_events.get(task.id), ci_decisions),
             )
+        )
+        stuck = (
+            reason_for_needs
             if lane_key in REASON_LANES or task.state is _S.AWAITING_INTERNAL_REVIEW
             else None
         )
+        if (
+            finished_since is not None
+            and lane_key in COLLAPSED_LANES
+            and (entered_at < finished_since)
+        ):
+            continue
         waiting_on = findings or _waiting_words(task, lane_key, escalation, events)
         if stuck is not None and lane_key == "stuck":
             waiting_on = stuck.as_dict()["owner_words"]
+        # hades FDY-0629: what the operator must do, from the one mapping the card page
+        # reads, so the Needs you lane and the card never disagree.
+        needs = needs_block(task, contracts.get(task.id, {}), escalation, reason_for_needs)
         cards[lane_key].append(
             {
                 "id": task.id,
+                "needs": needs,
                 "external_id": task.external_id,
                 "project": task.project,
                 "title": task.title,

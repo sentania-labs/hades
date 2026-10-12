@@ -54,6 +54,35 @@ Accept that this repository has no CI). The waivers post to the same
 records what the waiver resolves, with the operator and the time. Recorded waivers are
 listed under Operator waivers in the panel.
 
+## The card and the board lead with what needs you (hades FDY-0629)
+
+Every card (`/ui/tasks/{id}`, the same page as `/ui/board/{id}`) opens with a What needs
+you section above the title block, in exactly one of three states, decided by one
+mapping in `crucible/domain/needs_you.py` (unit tests in
+`tests/unit/test_card_needs_you.py`):
+
+| State | Opens with | When |
+|---|---|---|
+| Nothing from you | one plain sentence of what is happening now and one of what happens next, from a table of phrases keyed by the task's state, its stuck reason and its current correction (a running correction for Codex findings reads "The worker is fixing 3 review findings. Next: Codex re-reviews, then merge.") | no decision or evidence is asked of the operator |
+| Your decision: | the open escalation's question as the worker wrote it, the options it listed as bullet or numbered lines, and an answer form (one text field, Send) that posts `kind=escalation_answer` to `POST /ui/tasks/{id}/decisions`, which takes the board's Answer move: a worker's question gets a correction carrying the answer, any other escalation an `escalation_answer` decision | an open escalation addressed to the operator (`decision`, `design`, `design_question`, `decision_question`); a proposal waiting for approval opens the same way with the Approve, Send back and Decline clicks instead of the form |
+| Waiting on you for: | the contract's `operator_needs` lines | the list is not empty and the task is blocked or submitted |
+
+No state name, gate name, hash, command or id appears above the fold. Everything the
+card showed before (where it is and what it is stuck on, the head and CI, the cost, the
+contract, the attempts and corrections, the egress probe, the thread and notes, the other
+actions, the history) sits below it in collapsed sections, closed by default, under plain
+headings. The supervisor health banner is unchanged (hades #634 is separate).
+
+`/ui/board` has four lanes, in this order, from the same mapping: Needs you (only the
+cards in the decision or evidence state, each with its one-line ask and an Answer or
+Open link to the card), Working (nothing needed: a worker, Hades or Foundry is on it,
+including work stopped on something Foundry owns), Waiting on review or CI (nothing
+needed), and Done today (work that reached a terminal state today, newest first; older
+finished work is on All tasks). The count at the top is the Needs you lane's. The
+projection builds the Wins and Graveyard cards only for tasks updated since local
+midnight (`finished_since`), so Done today costs today's tasks and no more. The JSON
+resource `GET /v1/board` keeps its seven lanes.
+
 ## Stuck cards say who acts (hades #607)
 
 Every reason a task waits maps to one plain sentence and an owner in

@@ -15,6 +15,7 @@ from starlette.requests import Request
 
 from crucible.adapters.ui.pages import proposals as proposals_page
 from crucible.adapters.ui.pages import workers as ui_workers
+from crucible.adapters.ui.pages.board import needs_lanes
 from crucible.adapters.ui.pages.work import work_page
 from crucible.adapters.ui.render import templates
 from crucible.application.admin.stuck import (
@@ -323,6 +324,9 @@ def test_the_board_page_shows_both_groups_and_glows_only_mine(
 ) -> None:
     uow, _mine, _foundrys = _two_stuck_tasks()
     document = board_resource(uow, BOARD_NOW, _operator())
+    # hades FDY-0629: the board's lanes come from the card's What needs you mapping; the
+    # operator's question is in Needs you, Foundry's blocker in Working.
+    lanes = needs_lanes(document)
     html = templates.get_template("board.html").render(
         request=Request({"type": "http", "method": "GET", "path": "/ui/board", "headers": []}),
         title="Board",
@@ -330,17 +334,16 @@ def test_the_board_page_shows_both_groups_and_glows_only_mine(
         nav=(),
         principal=None,
         csrf="tok",
-        lanes=document["lanes"],
-        needs_me=document["needs_me"],
+        lanes=lanes,
+        needs_me=lanes[0]["count"],
     )
-    stuck = html[html.index('data-lane="stuck"') : html.index('data-lane="in_progress"')]
-    assert stuck.index("Waiting on me") < stuck.index("Waiting on Foundry")
-    assert stuck.count("board-card--mine") == 1
-    assert GATE_PROVES_NOTHING.split(",")[0] in stuck
-    assert "Waiting on Foundry. Nothing for you to do." in stuck
-    foundry_part = stuck[stuck.index('data-group="waiting_on_foundry"') :]
-    assert "lat-btn--primary" not in foundry_part
-    assert "<b>1</b> need me" in html
+    needs = html[html.index('data-lane="needs_you"') : html.index('data-lane="working"')]
+    working = html[html.index('data-lane="working"') : html.index('data-lane="waiting"')]
+    assert needs.count("board-card--mine") == 1 and "board-card--mine" not in working
+    assert "Your decision:" in needs
+    assert "could not prove anything" in working
+    assert "lat-btn--primary" not in working
+    assert "<b>1</b> needs you" in html
 
 
 # ----- AC2: the card shows the sentence, the owner and only the clicks that apply ----

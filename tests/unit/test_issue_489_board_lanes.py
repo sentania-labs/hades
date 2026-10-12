@@ -271,7 +271,7 @@ def test_query_render_time_and_html_size_bounds(monkeypatch: Any) -> None:
     lanes[2]["count"] = len(live)
 
     monkeypatch.setattr(page, "_require", lambda *_args: (None, "csrf"))
-    monkeypatch.setattr(page, "board_lanes_view", lambda *_args: {"lanes": lanes})
+    monkeypatch.setattr(page, "board_lanes_view", lambda *_args, **_kwargs: {"lanes": lanes})
     ctx = SimpleNamespace(clock=SimpleNamespace(now=lambda: NOW))
     req = request("/ui/board")
     req.scope["query_string"] = b""
@@ -279,6 +279,12 @@ def test_query_render_time_and_html_size_bounds(monkeypatch: Any) -> None:
     assert response.status_code == 200
     assert len(response.body) < 150_000
     html = bytes(response.body).decode()
-    assert html.index("Waiting on Scott") < html.index("Stuck") < html.index("In progress")
+    # hades FDY-0629: Needs you first, then Working, Waiting on review or CI, Done today.
+    assert (
+        html.index("Needs you")
+        < html.index("Working")
+        < html.index("Waiting on review or CI")
+        < html.index("Done today")
+    )
     assert "Tokens by harness" not in html and "Quality totals" not in html
-    assert '<details class="board-lane" data-lane="wins">' in html
+    assert '<section class="board-lane" data-lane="needs_you">' in html

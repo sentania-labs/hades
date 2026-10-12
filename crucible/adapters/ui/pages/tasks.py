@@ -9,7 +9,12 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from crucible.adapters.api.deps import Ctx, UoW
 from crucible.adapters.threaded_router import ThreadedAPIRouter
-from crucible.adapters.ui.pages.board import WAIVER_FORMS, board_card_page, egress_rows
+from crucible.adapters.ui.pages.board import (
+    ESCALATION_ANSWER,
+    WAIVER_FORMS,
+    board_card_page,
+    egress_rows,
+)
 from crucible.adapters.ui.pages.proposals import (
     action_forms,
     batch_section,
@@ -25,6 +30,7 @@ from crucible.application.admin import (
     status,
 )
 from crucible.application.artifacts import read_artifact
+from crucible.application.board_actions import CorrectionDeps, apply_move
 from crucible.application.decisions import record_decision
 from crucible.application.errors import (
     ApplicationError,
@@ -612,7 +618,10 @@ def artifact_content(request: Request, artifact_id: str, ctx: Ctx, uow: UoW) -> 
 @router.post("/tasks/{task_id}/decisions")
 async def task_decision(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> Response:
     """ADR 0025: the operator's waiver, recorded through the same decision service the
-    API's `POST /v1/tasks/{id}/decisions` uses, so it is audited the same way."""
+    API's `POST /v1/tasks/{id}/decisions` uses, so it is audited the same way. hades
+    FDY-0629: the card's answer to an open escalation (`escalation_answer`) comes here
+    too and takes the board's Answer move, so a worker's question gets a correction
+    with the answer and any other escalation an `escalation_answer` decision."""
     found = _require(request, ctx, uow)
     if isinstance(found, RedirectResponse):
         return found
@@ -621,8 +630,31 @@ async def task_decision(request: Request, task_id: str, ctx: Ctx, uow: UoW) -> R
     form["return_to"] = f"/ui/tasks/{task_id}"
     try:
         _csrf(form, csrf)
-        _admin(principal)
         kind = form.get("kind", "")
+        if kind == ESCALATION_ANSWER:
+            answer = (form.get("verbatim") or "").strip()
+            if not answer:
+                raise ConflictError("the answer needs your words")
+            result = apply_move(
+                uow,
+                ctx.clock,
+                principal=principal,
+                task_id=task_id,
+                move="answer",
+                note_text=answer,
+                deps=CorrectionDeps(
+                    harnesses=getattr(ctx, "harnesses", None),
+                    harness_gates=dict(getattr(ctx, "harness_gates", {}) or {}),
+                    credential_sources=dict(getattr(ctx, "credential_sources", {}) or {}),
+                    secret_providers=getattr(ctx, "secret_providers", frozenset()),
+                    wired_providers=frozenset(
+                        provider.name for provider in getattr(ctx, "providers", []) or []
+                    ),
+                ),
+            )
+            uow.commit()
+            return _redirect(form, f"Sent. {result.message}")
+        _admin(principal)
         if kind not in (WAIVE_EXTERNAL_REVIEW, ACCEPT_NO_CI):
             raise ConflictError(f"the task page records only waivers, not {kind!r}")
         # One click is enough (hades #576): with no typed reason the decision records

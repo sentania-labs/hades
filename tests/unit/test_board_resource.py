@@ -109,12 +109,12 @@ def test_first_run_sign_in_renders_the_smoke_landing_and_empty_board(
         board = client.get("/ui/board")
         assert board.status_code == 200
         assert b'data-page="board"' in board.content
-        assert board.text.count('class="board-lane"') == 7
-        # hades #607: the empty Stuck lane shows its two owner groups, not "No cards."
-        assert board.text.count("No cards.") == 4
-        assert "Nothing stuck waits on you." in board.text
-        assert "Nothing stuck waits on Foundry." in board.text
-        assert 'class="board-card"' not in board.text
+        # hades FDY-0629: four lanes, Needs you first, each empty in its own words.
+        assert board.text.count('class="board-lane"') == 4
+        assert board.text.count("No cards.") == 2
+        assert "Nothing needs you." in board.text
+        assert "Nothing finished today." in board.text
+        assert '<article class="board-card' not in board.text
 
 
 def test_board_document_has_approved_lanes_counts_and_local_times() -> None:

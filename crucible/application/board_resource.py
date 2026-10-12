@@ -78,13 +78,14 @@ def board_resource(
     principal: Principal,
     *,
     cards_for: frozenset[str] | None = None,
+    finished_since: datetime | None = None,
 ) -> dict[str, Any]:
     selected = (
         frozenset(PROJECTION_KEYS.get(key, key) for key in cards_for)
         if cards_for is not None
         else None
     )
-    document = board_lanes_view(uow, now, cards_for=selected)
+    document = board_lanes_view(uow, now, cards_for=selected, finished_since=finished_since)
     records = document.pop("records")
     can_act = principal.role in {Role.OPERATOR, Role.ADMIN}
     for lane in document["lanes"]:
