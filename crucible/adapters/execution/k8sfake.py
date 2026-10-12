@@ -54,7 +54,6 @@ from crucible.adapters.execution.k8sspec import (
     ROLE_BUNDLE,
     ROLE_CACHE_REFRESHER,
     ROLE_CANARY,
-    ROLE_CLEANER,
     ROLE_COLLECTOR,
     ROLE_LOGIN,
     ROLE_LOGIN_LOCK,
@@ -504,10 +503,20 @@ class FakeKubernetesApi:
                 return
         self.deleted.append((kind, name))
         del self.objects[(kind, name)]
+        if kind == "pods":
+            self.claims.pop(f"pod:{name}", None)
+            labels = (obj.body.get("metadata") or {}).get("labels") or {}
+            attempt_id = str(labels.get(LABEL_ATTEMPT, ""))
+            if attempt_id:
+                self.claims.pop(f"ws-{attempt_id.lower()}", None)
         if kind == "jobs" and propagation != "Orphan":
             for key, other in list(self.objects.items()):
                 labels = (other.body.get("metadata") or {}).get("labels") or {}
                 if key[0] == "pods" and labels.get("job-name") == name:
+                    self.claims.pop(f"pod:{key[1]}", None)
+                    attempt_id = str(labels.get(LABEL_ATTEMPT, ""))
+                    if attempt_id:
+                        self.claims.pop(f"ws-{attempt_id.lower()}", None)
                     del self.objects[key]
         if kind == "persistentvolumeclaims":
             self.claims.pop(name, None)
@@ -653,6 +662,24 @@ class FakeKubernetesApi:
             return self._collect(obj)
         if ACTIVITY_MARKER in script:
             return self._activity(name, claim)
+        if "git bundle verify" in script:
+            return ExecResult(b"", b"", 0)
+        if "touch /crucible/work/.collection-read" in script:
+            claim[".collection-read"] = b""
+            return ExecResult(b"", b"", 0)
+        if script == "kill -TERM 1":
+            labels = (obj.body.get("metadata") or {}).get("labels") or {}
+            attempt_id = str(labels.get(LABEL_ATTEMPT, ""))
+            worker = self.workers.get(attempt_id)
+            if worker is not None:
+                worker.behavior = "environment"
+                worker.remaining = 0
+                self._advance(obj)
+                worker.exit_code = 143
+                statuses = (obj.body.get("status") or {}).get("containerStatuses") or []
+                if statuses:
+                    statuses[0]["state"]["terminated"]["exitCode"] = 143
+            return ExecResult(b"", b"", 0)
         if "tar cf -" in script:
             if f"output/{CHANGED_BLOBS_DIR}" in script and "--exclude" not in script:
                 return ExecResult(_changed_blobs_tar(claim), b"", 0)
@@ -717,6 +744,17 @@ class FakeKubernetesApi:
             claim = (volume.get("persistentVolumeClaim") or {}).get("claimName")
             if claim:
                 return self.claims.setdefault(str(claim), {})
+        if any(
+            volume.get("name") == "ws"
+            for volume in (obj.body.get("spec") or {}).get("volumes") or []
+        ):
+            data = self.claims.setdefault(f"pod:{obj.name}", {})
+            attempt_id = str(
+                ((obj.body.get("metadata") or {}).get("labels") or {}).get(LABEL_ATTEMPT, "")
+            )
+            if attempt_id:
+                self.claims.setdefault(f"ws-{attempt_id.lower()}", data)
+            return data
         return {}
 
     def _start_job(self, job: Mapping[str, Any]) -> None:
@@ -786,7 +824,6 @@ class FakeKubernetesApi:
             ROLE_COLLECTOR: self._act_collector,
             ROLE_BUNDLE: self._act_bundle,
             ROLE_VERIFIER: self._act_verifier,
-            ROLE_CLEANER: self._act_cleaner,
             ROLE_CANARY: self._act_canary,
             ROLE_WORKER: self._act_worker,
             ROLE_LOGIN: self._act_login,
@@ -1237,7 +1274,20 @@ class FakeKubernetesApi:
             self.logs[obj.name].append(
                 f'{_stamp(2)} {{"type":"turn.failed","error":{{"code":"usage_limit_reached"}}}}'
             )
-        self._finish(obj, code, reason=reason)
+        self._act_collector(obj, attempt_id)
+        claim = self._claim_of(obj)
+        claim[".collector-exit"] = b"0\n"
+        claim[".collection-ready"] = b""
+        obj.body["status"] = {
+            "phase": "Running",
+            "containerStatuses": [
+                {
+                    "name": CONTAINER_NAME,
+                    "state": {"terminated": {"exitCode": code, "reason": reason}},
+                },
+                {"name": ROLE_COLLECTOR, "state": {"running": {}}},
+            ],
+        }
 
 
 # ----- helpers -----------------------------------------------------------

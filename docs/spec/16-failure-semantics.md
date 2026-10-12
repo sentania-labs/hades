@@ -251,6 +251,14 @@ the cancel (hades #189, 2026-09-28).
 
 ## Cleanup policy (per policy document, 05b)
 
+ADR 0033 removes retained workspaces from the Kubernetes provider. Its scratch belongs
+to one Pod and is deleted with that Pod, so `workspace_on_success` and
+`workspace_on_failure`, `keep`, `keep_diff_only`, `attempt_cleaned_up` workspace events
+and `completed_workspaces_days` do not apply there. The Docker provider keeps its
+host-path cleanup behavior. If a Kubernetes worker Pod is lost through OOM, eviction or
+node loss before collection finishes, the attempt follows the existing `lost` path and
+is retried when policy permits; no later Pod can recover its scratch.
+
 | Setting | Options | Default |
 |---|---|---|
 | `workspace_on_success` | delete, keep, keep_diff_only | keep_diff_only |

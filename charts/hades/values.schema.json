@@ -93,8 +93,8 @@
     },
     "provider": {
       "type": "object", "additionalProperties": false,
-      "required": ["workspaceStorageClass", "workspaceSize", "maxConcurrency", "launchTimeoutSeconds", "prepareTimeoutSeconds", "collectorTimeoutSeconds", "verifierTimeoutSeconds"],
-      "properties": {"workspaceStorageClass": {"$ref": "#/$defs/storageClass"}, "workspaceSize": {"$ref": "#/$defs/quantity"}, "maxConcurrency": {"type": "integer", "minimum": 1}, "launchTimeoutSeconds": {"type": "integer", "minimum": 1}, "prepareTimeoutSeconds": {"type": "integer", "minimum": 1}, "collectorTimeoutSeconds": {"type": "integer", "minimum": 1}, "verifierTimeoutSeconds": {"type": "integer", "minimum": 1}}
+      "required": ["workspaceEphemeral", "maxConcurrency", "launchTimeoutSeconds", "prepareTimeoutSeconds", "collectorTimeoutSeconds", "verifierTimeoutSeconds"],
+      "properties": {"workspaceEphemeral": {"type": "object", "additionalProperties": false, "required": ["class", "size"], "properties": {"class": {"$ref": "#/$defs/storageClass"}, "size": {"$ref": "#/$defs/quantity"}}}, "maxConcurrency": {"type": "integer", "minimum": 1}, "launchTimeoutSeconds": {"type": "integer", "minimum": 1}, "prepareTimeoutSeconds": {"type": "integer", "minimum": 1}, "collectorTimeoutSeconds": {"type": "integer", "minimum": 1}, "verifierTimeoutSeconds": {"type": "integer", "minimum": 1}}
     },
     "roomRunner": {
       "type": "object", "additionalProperties": false,

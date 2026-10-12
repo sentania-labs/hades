@@ -276,13 +276,12 @@ async def test_a_correction_preparer_resumes_from_the_stored_bundle_without_the_
     pod = pod_of(api, "prepare")
     previous_claim = k8sspec.object_name("ws", PREVIOUS)
     assert previous_claim not in _claims(pod)
-    assert _claims(pod) == [k8sspec.object_name("ws", launch.attempt_id)]
+    assert _claims(pod) == []
     script = pod["containers"][0]["command"][-1]
     assert scripts.RESUME_DELIVERY_MARKER in script
     # The bundle arrived over exec into the new attempt's own workspace, and the
     # script's own seal check still ran over it.
-    claim = api.claims[k8sspec.object_name("ws", launch.attempt_id)]
-    assert claim[scripts.RESUME_BUNDLE_LEAF] == BUNDLE
+    assert BUNDLE in [content for writes in api.exec_stdin.values() for content in writes]
     assert f"'{SEAL}'" in script
     # No Pod of the attempt mounted the previous attempt's claim.
     for row in api.created:

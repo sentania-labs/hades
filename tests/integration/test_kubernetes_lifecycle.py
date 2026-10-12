@@ -70,7 +70,7 @@ def k8s_provider(k8s_api: FakeKubernetesApi) -> KubernetesProvider:
         KubernetesConfig(
             poll_interval_seconds=0,
             launch_timeout_seconds=5,
-            storage_class="lab-ssd",
+            workspace_ephemeral_class="lab-ssd",
             extra_image_allowlist=("ghcr.io/sentania-labs/crucible-worker:*",),
         ),
         k8s_api,  # type: ignore[arg-type]
@@ -248,10 +248,9 @@ async def test_the_run_leaves_nothing_of_the_attempt_in_the_namespace(
     assert k8s_api.object_names("jobs") == []
     assert k8s_api.object_names("pods") == []
     assert k8s_api.object_names("networkpolicies") == []
-    # 12, 16: the per-attempt Secret goes under every policy, and this one kept the
-    # workspace claim (keep_diff_only).
+    # 12, 16, 33: secrets and Pod-owned scratch are gone under every cleanup policy.
     assert k8s_api.object_names("secrets") == []
-    assert k8s_api.object_names("persistentvolumeclaims")
+    assert k8s_api.object_names("persistentvolumeclaims") == []
 
 
 async def test_the_launch_evidence_of_26_is_stored_as_an_artifact(
@@ -348,12 +347,10 @@ async def test_a_cancel_drains_the_pod_and_the_attempt_is_killed(
         if view["state"] == "cancelled":
             break
     assert view["state"] == "cancelled"
-    # 26: a drain deletes the Pod with the policy grace period; a Pod that ignored it
-    # is deleted again with grace zero. Neither is ever reported as a loss (16).
+    # 26, 33: drain signals the agent while the collector sidecar keeps the Pod and its
+    # scratch alive. Cleanup removes the Pod only after collection. It is not a loss.
     assert [a["exit_class"] for e in view["executions"] for a in e["attempts"]] == ["killed"]
-    assert ("pods", f"worker-{view['executions'][0]['attempts'][0]['id'].lower()}-abc12") in (
-        k8s_api.deleted
-    )
+    assert k8s_api.object_names("pods") == []
 
 
 # ----- reconcile across a restart (10, 16, 26) -----------------------------
@@ -485,7 +482,8 @@ async def _accepted(client: TestClient, supervisor: Supervisor, task_id: str) ->
     """Run through automatic gate acceptance and available publication I/O."""
     await run_to_settled(supervisor, client, task_id, max_ticks=20)
     view = client.get(f"/v1/tasks/{task_id}").json()
-    assert view["acceptance_results"][0]["verdict"] == "accepted"
+    assert view["acceptance_results"], (view["state"], view["executions"])
+    assert view["acceptance_results"][0]["verdict"] == "accepted", view
 
 
 def _publisher_objects(api: FakeKubernetesApi) -> list[str]:

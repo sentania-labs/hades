@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from crucible.adapters.execution import k8sspec, kubernetes
+from crucible.adapters.execution import k8sspec
 from crucible.adapters.execution.k8sapi import KubernetesUnavailableError
 from crucible.adapters.execution.kubernetes import (
     CollectionUnavailableError,
@@ -82,27 +82,25 @@ async def test_a_wrapped_transport_error_at_prepare_retries_under_the_budget(
     )
     error = KubernetesUnavailableError(0, "the API server connection failed")
     error.__cause__ = cause
-    api.fail_next("create", 2, kind="persistentvolumeclaims", error=error)
+    api.fail_next("create", 2, kind="configmaps", error=error)
 
     workspace = await provider.prepare(spec())
 
-    assert workspace.started_from
-    assert api.create_attempts.count("persistentvolumeclaims") == 3
+    assert workspace.checkout_path.endswith("/repo")
+    assert api.create_attempts.count("configmaps") == 3
     assert sleeps == [1, 2]
 
 
-async def test_a_reader_pod_that_the_api_server_hiccups_on_still_comes_up() -> None:
-    """`_await_running` asks again after a failed look, as `_await_job` does, where it
-    used to give up on the first error and fail the collection."""
+async def test_a_worker_pod_read_survives_api_server_hiccups() -> None:
     api, _registry, provider = build()
     launch = spec()
     workspace = await provider.prepare(launch)
     handle = await provider.launch(workspace, launch)
     await _run_to_exit(provider, handle)
-    api.fail_next("get", 3, kind="pods")
+    api.fail_next("list_objects", 3, kind="pods")
     outputs = await provider.collect(handle, workspace, launch)
     assert outputs.report is not None
-    assert api.outages[-1][2] == 0, "the reader's looks never met the outage"
+    assert api.outages[-1][2] == 0, "the worker Pod looks never met the outage"
 
 
 async def test_a_canary_the_api_server_could_not_run_does_not_refuse_the_launch() -> None:
@@ -140,7 +138,7 @@ async def test_a_copy_that_could_not_be_read_back_is_kept_and_collected_again() 
     handle = await provider.launch(workspace, launch)
     api.claims[CLAIM]["credential/auth.json"] = _auth("2026-09-21T00:00:00Z")
     await _run_to_exit(provider, handle)
-    api.fail_next("create", 1, kind="pods")
+    api.fail_next("pod_exec", 1)
     with pytest.raises(CollectionUnavailableError, match="could not be read back"):
         await provider.collect(handle, workspace, launch)
     assert api.claims[CLAIM]["credential/auth.json"] == _auth("2026-09-21T00:00:00Z")
@@ -151,7 +149,7 @@ async def test_a_copy_that_could_not_be_read_back_is_kept_and_collected_again() 
     assert sync is not None and sync.removed
     assert [(f.name, f.synced) for f in sync.files] == [("auth.json", True)]
     assert api.harness_secret("hades-harness-codex")["auth.json"] == _auth("2026-09-21T00:00:00Z")
-    assert "credential/auth.json" not in api.claims[CLAIM]
+    assert "credential/auth.json" in api.claims[CLAIM]
 
 
 async def test_a_collector_the_api_server_could_not_create_is_collected_again() -> None:
@@ -180,9 +178,14 @@ async def test_a_collector_wait_the_api_server_never_answered_is_collected_again
     await _run_to_exit(provider, handle)
     looks = provider._pod_of
     real = time.monotonic
+    calls = 0
 
     async def unanswered(job_name: str) -> Any:
-        if job_name.startswith(kubernetes.OBJECT_PREFIX[k8sspec.ROLE_COLLECTOR]):
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            return await looks(job_name)
+        if job_name.startswith("worker-"):
             # The outage outlasts the whole wait: the clock jumps past its deadline.
             monkeypatch.setattr(time, "monotonic", lambda: real() + 10**6)
             raise KubernetesUnavailableError(503, "the API server is down")
@@ -212,7 +215,7 @@ async def test_a_worker_the_quota_refused_is_a_wait_naming_the_quota() -> None:
     assert not [name for kind, name in api.objects if kind == "jobs" and name.startswith("worker")]
 
 
-async def test_a_collector_the_quota_refused_is_a_wait_not_a_verdict() -> None:
+async def test_collection_needs_no_new_collector_pod_quota() -> None:
     api, _registry, provider = build(
         config=KubernetesConfig(poll_interval_seconds=0, launch_timeout_seconds=3600)
     )
@@ -222,8 +225,8 @@ async def test_a_collector_the_quota_refused_is_a_wait_not_a_verdict() -> None:
     await _run_to_exit(provider, handle)
     api.quota_refused_roles.add(k8sspec.ROLE_COLLECTOR)
     started = time.monotonic()
-    with pytest.raises(CollectionUnavailableError, match="exceeded quota"):
-        await provider.collect(handle, workspace, launch)
+    outputs = await provider.collect(handle, workspace, launch)
+    assert outputs.report is not None
     assert time.monotonic() - started < 30
 
 
@@ -294,7 +297,7 @@ async def test_a_role_pod_that_never_starts_is_ended_by_the_launch_timeout() -> 
     del workspace
 
 
-async def test_a_role_jobs_deadline_leaves_room_for_the_pull() -> None:
+async def test_the_bundle_check_runs_without_a_second_role_job() -> None:
     api, _registry, provider = build()
     provider.apply_timeouts({"role_timeout_seconds": 45})
     launch = spec()
@@ -302,13 +305,9 @@ async def test_a_role_jobs_deadline_leaves_room_for_the_pull() -> None:
     handle = await provider.launch(workspace, launch)
     await _run_to_exit(provider, handle)
     await provider.collect(handle, workspace, launch)
-    bundle = next(
-        row["body"]
-        for row in api.created
-        if row["kind"] == "jobs" and row["name"].startswith("verify-bundle-")
+    assert not any(
+        row["kind"] == "jobs" and row["name"].startswith("verify-bundle-") for row in api.created
     )
-    deadline = bundle["spec"]["activeDeadlineSeconds"]
-    assert deadline == 45 + provider.config.launch_timeout_seconds
 
 
 def test_the_saved_timeout_wins_and_a_bad_one_is_refused() -> None:
@@ -343,10 +342,10 @@ def test_a_good_role_timeout_document_is_kept() -> None:
     assert parse_role_timeouts({"role_timeout_seconds": 600}) == {"role_timeout_seconds": 600}
 
 
-# ----- a kept claim can be released ----------------------------------------
+# ----- release remains idempotent without retained scratch ----------------
 
 
-async def test_releasing_a_kept_claim_deletes_it_and_what_is_labelled_with_it() -> None:
+async def test_releasing_an_ephemeral_workspace_is_an_idempotent_noop() -> None:
     api, _registry, provider = build()
     launch = spec()
     workspace = await provider.prepare(launch)
@@ -356,7 +355,7 @@ async def test_releasing_a_kept_claim_deletes_it_and_what_is_labelled_with_it() 
     from crucible.ports.execution import CleanupPolicy  # noqa: PLC0415
 
     await provider.cleanup(workspace, CleanupPolicy.KEEP, launch)
-    assert CLAIM in api.claims
+    assert CLAIM not in api.claims
     await provider.release_workspace(workspace, launch)
     assert CLAIM not in api.claims
     assert not api.object_names("configmaps")
@@ -411,18 +410,13 @@ async def test_an_exec_the_api_server_broke_keeps_the_copy_too() -> None:
     assert api.harness_secret("hades-harness-codex")["auth.json"] == _auth("2026-09-21T00:00:00Z")
 
 
-async def test_a_collection_run_again_records_the_first_sync_not_an_absent_file() -> None:
-    """The copy was read back, written back and removed, then the collector could not be
-    created: the retried collection reports the sync that happened."""
+async def test_in_pod_collection_records_a_credential_sync_without_new_quota() -> None:
+    """Credential writeback and collection use the worker Pod that already exists."""
     api, provider, launch, workspace = await _codex()
     handle = await provider.launch(workspace, launch)
     api.claims[CLAIM]["credential/auth.json"] = _auth("2026-09-21T00:00:00Z")
     await _run_to_exit(provider, handle)
     api.quota_refused_roles.add(k8sspec.ROLE_COLLECTOR)
-    with pytest.raises(CollectionUnavailableError):
-        await provider.collect(handle, workspace, launch)
-    assert "credential/auth.json" not in api.claims[CLAIM]
-    api.quota_refused_roles.clear()
     outputs = await provider.collect(handle, workspace, launch)
     sync = outputs.credential_sync
     assert sync is not None and sync.removed
@@ -431,9 +425,8 @@ async def test_a_collection_run_again_records_the_first_sync_not_an_absent_file(
     ]
 
 
-async def test_a_quota_refusal_the_last_try_met_does_not_end_the_next_one() -> None:
-    """Role Job names repeat and an event outlives its Job: only this Job's events, by
-    uid, count, so a retry after the namespace has room is not refused by the old one."""
+async def test_a_stale_collector_quota_event_cannot_end_in_pod_collection() -> None:
+    """The collector is a worker sidecar, so no collector Job quota event applies."""
     api, _registry, provider = build(
         config=KubernetesConfig(poll_interval_seconds=0, launch_timeout_seconds=3600)
     )
@@ -442,10 +435,6 @@ async def test_a_quota_refusal_the_last_try_met_does_not_end_the_next_one() -> N
     handle = await provider.launch(workspace, launch)
     await _run_to_exit(provider, handle)
     api.quota_refused_roles.add(k8sspec.ROLE_COLLECTOR)
-    with pytest.raises(CollectionUnavailableError, match="exceeded quota"):
-        await provider.collect(handle, workspace, launch)
-    assert api.events, "the refusal left an event behind"
-    api.quota_refused_roles.clear()
     outputs = await provider.collect(handle, workspace, launch)
     assert outputs.report is not None
 

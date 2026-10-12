@@ -4501,7 +4501,12 @@ class Supervisor:
                     continue
                 finally:
                     self._workspaces.pop(attempt.id, None)
-                await self._db(partial(self._mark_cleaned, attempt.id, choice))
+                marker = (
+                    self._mark_cleaned_ephemeral
+                    if provider_name == "kubernetes"
+                    else self._mark_cleaned
+                )
+                await self._db(partial(marker, attempt.id, choice))
                 self._workspace_fingerprints.pop(attempt.id, None)
                 self._handles.pop(attempt.id, None)
                 cleaned += 1
@@ -4532,7 +4537,12 @@ class Supervisor:
             except ProviderError:
                 log.exception("cleanup failed; the next tick tries again")
                 continue
-            await self._db(partial(self._mark_cleaned, attempt.id, choice))
+            marker = (
+                self._mark_cleaned_ephemeral
+                if provider_name == "kubernetes"
+                else self._mark_cleaned
+            )
+            await self._db(partial(marker, attempt.id, choice))
             self._collect_pending_ticks.pop(attempt.id, None)
             self._collect_failing_since.pop(attempt.id, None)
             self._collect_retry_at.pop(attempt.id, None)
@@ -4563,6 +4573,18 @@ class Supervisor:
                 attempt_id=attempt_id,
                 payload={"workspace": choice},
             )
+            uow.commit()
+
+    def _mark_cleaned_ephemeral(self, attempt_id: str, choice: str) -> None:
+        """Mark object cleanup without inventing a retained Kubernetes workspace."""
+        del choice
+        with self._fenced() as uow:
+            attempt = uow.attempts.get(attempt_id, for_update=True)
+            if attempt is None or attempt.cleaned_up_at is not None:
+                return
+            attempt.cleaned_up_at = self._clock.now()
+            uow.attempts.save(attempt)
+            self._release_checkout_leases(uow, attempt)
             uow.commit()
 
     async def _retention_step(self) -> int:
@@ -4652,6 +4674,8 @@ class Supervisor:
                     break
                 execution = uow.executions.get(attempt.execution_id)
                 if execution is None:
+                    continue
+                if execution.provider == "kubernetes":
                     continue
                 task = uow.tasks.get(attempt.task_id)
                 section, name, version = self._retention_for(uow, task)

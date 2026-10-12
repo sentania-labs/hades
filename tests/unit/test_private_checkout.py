@@ -414,7 +414,7 @@ def _k8s_config(**overrides: Any) -> KubernetesConfig:
     return KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        storage_class="lab-ssd",
+        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         cache_claim="crucible-reference-cache",
         **overrides,
@@ -482,14 +482,10 @@ async def test_kubernetes_mounts_the_token_secret_into_the_git_pods_only() -> No
         assert _secret_value() not in json.dumps(row["body"]), f"{row['name']} carries it"
 
 
-@pytest.mark.parametrize("break_it", ["preparer-fails", "no-head"])
-async def test_kubernetes_deletes_the_token_secret_when_the_prepare_fails(break_it: str) -> None:
+async def test_kubernetes_deletes_the_token_secret_when_the_prepare_fails() -> None:
     api, _registry, provider = kf.build(config=_k8s_config())
     launch = kf.spec()
-    if break_it == "preparer-fails":
-        api.script(launch.attempt_id, "prepare-fails")
-    else:
-        api.claims_suppress_head = True
+    api.script(launch.attempt_id, "prepare-fails")
     with pytest.raises(ProviderError):
         await provider.prepare(launch, checkout_token=_token())
     assert kf.created(api, "secrets", "checkout-"), "the Secret was never made"
@@ -570,7 +566,7 @@ async def test_kubernetes_deletes_the_token_secret_when_prepare_is_cancelled() -
         assert api.secret_exists(SECRET_NAME), "the Secret should exist while the step runs"
         raise asyncio.CancelledError
 
-    provider._run_preparer = cancelled  # type: ignore[method-assign]
+    provider._run_role_job = cancelled  # type: ignore[method-assign]
     with pytest.raises(asyncio.CancelledError):
         await provider.prepare(kf.spec(), checkout_token=_token())
     assert not api.secret_exists(SECRET_NAME)

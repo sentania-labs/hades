@@ -350,16 +350,18 @@ async def test_prepare_refreshes_settings_before_rendering_its_policy() -> None:
         resolver=fake_resolver,
         settings_source=source,
     )
-    await provider.prepare(spec())
-    [preparer] = [
+    launch = spec()
+    workspace = await provider.prepare(launch)
+    await provider.launch(workspace, launch)
+    [worker] = [
         row["body"]
         for row in api.created
         if row["kind"] == "networkpolicies"
         and row["body"]["spec"]["podSelector"]["matchLabels"][k8sspec.LABEL_ROLE]
-        == k8sspec.ROLE_PREPARER
+        == k8sspec.ROLE_WORKER
     ]
     peers = [
-        d for rule in preparer["spec"]["egress"] for d in rule.get("to") or [] if "ipBlock" not in d
+        d for rule in worker["spec"]["egress"] for d in rule.get("to") or [] if "ipBlock" not in d
     ]
     assert {
         "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "cilium-dns-relay"}},

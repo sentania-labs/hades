@@ -201,9 +201,10 @@ It is a test fixture: wired only when `test_fixtures` is on (18).
 
 ## Kubernetes provider (C8, specified in 26)
 
-Same contract. One Job per role per attempt in a worker namespace (preparer,
-worker, collector, bundle verifier, verifier, publisher, and the admin login
-flow), a per-attempt PersistentVolumeClaim as the workspace, identity as a
+Same contract. Role Pods run in a worker namespace. The worker Pod contains a
+checkout-preparer init container, the agent and the collector; verifier and publisher
+remain separate Jobs. Every Pod has its own ephemeral scratch and no Pod inherits files
+from another Pod. Identity is a
 ConfigMap or projected volume, the harness credential as a per-attempt
 Secret seeded from the harness's dedicated Secret, the GitHub App key on
 the `crucible` pods only, a pod security context mirroring the Docker

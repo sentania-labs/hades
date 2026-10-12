@@ -50,7 +50,7 @@ def _config(**overrides: Any) -> KubernetesConfig:
     values: dict[str, Any] = {
         "poll_interval_seconds": 0,
         "launch_timeout_seconds": 3600,
-        "storage_class": "lab-ssd",
+        "workspace_ephemeral_class": "lab-ssd",
         **overrides,
     }
     return KubernetesConfig(**values)
@@ -228,14 +228,16 @@ async def test_a_gate_probe_the_quota_refused_is_a_wait_not_a_failed_probe(
     assert not any(kind == "jobs" for kind, _ in api.objects)
 
 
-async def test_a_preparer_the_quota_refused_is_a_wait() -> None:
+async def test_a_worker_pod_the_quota_refused_is_a_wait() -> None:
     api, _registry, provider = build(config=_config())
-    api.quota_refused_roles.add(k8sspec.ROLE_PREPARER)
+    launch = spec()
+    workspace = await provider.prepare(launch)
+    api.quota_refused_roles.add(k8sspec.ROLE_WORKER)
     with pytest.raises(LaunchWaitError, match="exceeded quota"):
-        await provider.prepare(spec())
+        await provider.launch(workspace, launch)
 
 
-async def test_a_workspace_claim_the_quota_refused_is_a_wait(
+async def test_no_workspace_claim_reaches_the_quota(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     api, _registry, provider = build(config=_config())
@@ -252,8 +254,10 @@ async def test_a_workspace_claim_the_quota_refused_is_a_wait(
         return original(kind, body)
 
     monkeypatch.setattr(api, "create", refuse_claims)
-    with pytest.raises(LaunchWaitError, match="exceeded quota"):
-        await provider.prepare(spec())
+    launch = spec()
+    workspace = await provider.prepare(launch)
+    await provider.launch(workspace, launch)
+    assert "persistentvolumeclaims" not in api.create_attempts
 
 
 # ----- the supervisor holds launches to the capacity and waits on a refusal ----------

@@ -105,12 +105,12 @@ secrets:
   githubAppPrivateKey: ""
   githubAppWebhook: ""
   firstRunToken: hades-first-run-admin
-# The Kubernetes attempt provider (26): each attempt's workspace claim, how many attempts
-# run at once, and how long each role may take.
+# The Kubernetes attempt provider (26): per-Pod scratch, concurrency and role timeouts.
 provider:
-  # Empty: the cluster's default class.
-  workspaceStorageClass: ""
-  workspaceSize: 20Gi
+  # Empty class uses a size-limited emptyDir. A class uses a generic ephemeral volume.
+  workspaceEphemeral:
+    class: ""
+    size: 20Gi
   maxConcurrency: 3
   launchTimeoutSeconds: 300
   prepareTimeoutSeconds: 900

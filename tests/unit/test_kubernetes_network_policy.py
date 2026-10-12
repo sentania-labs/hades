@@ -110,7 +110,6 @@ async def test_the_collector_and_the_bundle_verifier_get_no_policy_at_all(
     assert k8sspec.ROLE_COLLECTOR not in rendered
     assert k8sspec.ROLE_BUNDLE not in rendered
     assert k8sspec.ROLE_READER not in rendered
-    assert k8sspec.ROLE_CLEANER not in rendered
 
 
 async def test_the_worker_reaches_what_the_allowlist_names_and_nothing_else(
@@ -126,14 +125,13 @@ async def test_the_worker_reaches_what_the_allowlist_names_and_nothing_else(
     assert not allows(worker, "151.101.0.223", 22)
 
 
-async def test_the_preparer_reaches_github_only(rendered: dict[str, dict[str, Any]]) -> None:
-    """26: the preparer and the publisher do the git traffic, and nothing else."""
-    preparer = rendered[k8sspec.ROLE_PREPARER]
-    assert preparer["metadata"]["annotations"][k8sspec.ANNOTATION_EGRESS] == (
-        "api.github.com,github.com"
-    )
-    assert allows(preparer, "140.82.121.4", 443)
-    assert not allows(preparer, "151.101.0.223", 443)
+async def test_the_validation_preparer_and_worker_allow_checkout(
+    rendered: dict[str, dict[str, Any]],
+) -> None:
+    """The validation Pod and the worker's init container can both reach checkout."""
+    assert allows(rendered[k8sspec.ROLE_PREPARER], "140.82.121.4", 443)
+    worker = rendered[k8sspec.ROLE_WORKER]
+    assert allows(worker, "140.82.121.4", 443)
 
 
 async def test_the_provider_never_adds_github_to_a_worker() -> None:
@@ -353,7 +351,6 @@ async def test_a_worker_reaches_the_git_remote_when_the_policy_names_it() -> Non
     # What was granted is what the annotation records: the list as written.
     hosts = worker["metadata"]["annotations"][k8sspec.ANNOTATION_EGRESS].split(",")
     assert {"github.com", "api.github.com", "pypi.org"} <= set(hosts)
-    # The preparer still does the git traffic, whether or not the policy names GitHub.
     assert allows(rendered[k8sspec.ROLE_PREPARER], "140.82.121.4", 443)
 
 
@@ -619,7 +616,7 @@ async def test_every_git_role_pod_is_selected_by_a_policy_that_allows_the_git_ho
         config=KubernetesConfig(
             poll_interval_seconds=0,
             launch_timeout_seconds=5,
-            storage_class="lab-ssd",
+            workspace_ephemeral_class="lab-ssd",
             cache_claim="crucible-reference-cache",
         )
     )
@@ -675,7 +672,7 @@ async def test_a_pod_resolves_its_hosts_to_the_addresses_its_policy_was_written_
         config=KubernetesConfig(
             poll_interval_seconds=0,
             launch_timeout_seconds=5,
-            storage_class="lab-ssd",
+            workspace_ephemeral_class="lab-ssd",
             cache_claim="crucible-reference-cache",
         ),
         resolver=rotating,

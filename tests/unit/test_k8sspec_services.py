@@ -342,7 +342,7 @@ async def test_the_launch_evidence_records_no_services_when_none_are_declared() 
     evidence = next(a for a in outputs.artifacts if a.name == "report/kubernetes-launch.json")
     assert json.loads(evidence.content)["services"] == []
     pod = pod_of(api, "worker-")
-    assert "initContainers" not in pod
+    assert [row["name"] for row in pod["initContainers"]] == ["workspace-prepare"]
 
 
 # ----- the sidecar's exit is never an init failure ------------------------------------

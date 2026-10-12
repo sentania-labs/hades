@@ -15,6 +15,23 @@ every provider implements; this document is the Kubernetes provider's
 mechanics, in the same order as 08's Docker section, plus what the cluster
 must guarantee before a worker runs there.
 
+ADR 0033 changes the workspace mechanics. Every role Pod has a `ws` volume that is
+removed with that Pod. It is a size-limited `emptyDir` by default, or a generic
+ephemeral volume when `kubernetes.workspace_ephemeral_class` is set. Both use
+`kubernetes.workspace_ephemeral_size`. The artifact and reference-cache claims remain
+persistent. No attempt PVC is created and no Pod mounts or inherits another Pod's
+files.
+
+The worker Pod contains `workspace-prepare` as an init container, the agent as
+`crucible`, and the collector as `collector`. The init container clones into that Pod's
+scratch. The agent's exit wrapper releases the collector on every normal exit and when
+it receives the supervised timeout signal. The collector finishes while the checkout
+still exists and stays available for bounded read-back. The verifier and publisher are
+separate Jobs; they clone from the reference cache or receive the sealed bundle from
+the artifact store. References below to an attempt workspace claim, reader Pod,
+cleaner Job, retention label, claim-name retry, or keeping a Kubernetes workspace are
+superseded by this paragraph.
+
 Local-origin quota checkpoints are Docker-only. A Kubernetes worker cannot
 reach an origin that is a path on the supervisor host, so the supervisor
 records that the checkpoint was skipped and reroutes from the base instead.
@@ -125,9 +142,8 @@ collector, verifier, publisher are distinct processes with distinct
 mounts), and lets Kubernetes own restarts, deadlines, and garbage
 collection. `activeDeadlineSeconds` on each Job is the policy's timeout for
 that role; Crucible still drains before the deadline and classifies the
-exit itself (16). A single-purpose role's own time (the collector, the
-verifier, the bundle verifier, the cleaner, the Job that readies a claim for
-the publisher) is counted from when its Pod is Running: pulling the image and
+exit itself (16). A single-purpose role's own time (the verifier, bundle
+verifier, and publication preparation) is counted from when its Pod is Running: pulling the image and
 waiting for a node are bounded by the launch timeout instead, and the Job's
 `activeDeadlineSeconds` is the role's time plus the launch timeout, since
 Kubernetes counts it from the Job's start. The short roles' time is the
@@ -992,9 +1008,8 @@ the status page.
    cluster name and reach the enabled local endpoint. On a CNI that translates
    service addresses first, the `kubernetes.egress` selectors are what make the
    second half true.
-3. A storage class for the workspace PVCs with `ReadWriteOnce` and a size
-   the policy's workspace cap fits, and one with `ReadWriteMany` for the
-   artifact root: the api serves what the supervisor wrote and they are
+3. Per-Pod attempt scratch configured by `workspaceEphemeral`, and a storage
+   class with `ReadWriteMany` for the artifact root: the api serves what the supervisor wrote and they are
    separate Deployments on this topology. Object storage for artifacts would
    remove the second requirement and is a later phase.
    (Added 2026-09-22 during C9.)

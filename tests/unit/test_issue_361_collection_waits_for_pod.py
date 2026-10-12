@@ -189,13 +189,11 @@ def supervisor_for(
     return supervisor, attempt, finish
 
 
-@pytest.mark.parametrize("role", [k8sspec.ROLE_VERIFIER, k8sspec.ROLE_READER])
 async def test_finished_attempt_waits_past_fifteen_seconds_and_an_api_outage(
     monkeypatch: pytest.MonkeyPatch,
-    role: str,
 ) -> None:
     api, provider, launch, workspace, handle = await finished_worker()
-    delayed = DelayedPods(api, role=role)
+    delayed = DelayedPods(api, role=k8sspec.ROLE_VERIFIER)
     delayed.install(monkeypatch)
     state = AsyncMock(wraps=provider._workspace_state)
     monkeypatch.setattr(provider, "_workspace_state", state)
@@ -257,7 +255,7 @@ async def test_collection_resumes_on_next_tick_without_rerunning_finished_jobs(
     assert finish.call_args.args[3] is None
     assert finish.call_args.args[2].report is not None
     state.assert_awaited_once()
-    for role in ("collect", "verify-bundle", "verifier"):
+    for role in ("verifier",):
         assert (
             len(
                 [
@@ -457,12 +455,10 @@ async def test_cleanup_never_waits_on_a_collector_pod_that_ignores_delete(
     assert delayed.elapsed < 5
 
 
-async def test_a_real_read_error_is_not_replaced_by_the_lingering_reader_pod(
+async def test_a_real_read_error_is_not_replaced_while_reading_worker_scratch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    api, provider, launch, _workspace, _handle = await finished_worker()
-    delayed = DelayedPods(api, role=k8sspec.ROLE_READER, polls=1000, unavailable_at=None)
-    delayed.install(monkeypatch)
+    _api, provider, launch, _workspace, _handle = await finished_worker()
 
     class DiskFullError(OSError):
         pass
@@ -470,7 +466,6 @@ async def test_a_real_read_error_is_not_replaced_by_the_lingering_reader_pod(
     with pytest.raises(DiskFullError):
         async with provider._reader(launch, k8sspec.limits_from_policy({})):
             raise DiskFullError("no space left on device")
-    assert delayed.pending  # The reader Pod still lingers; it is only logged.
 
 
 async def test_collection_cleanup_logs_a_refused_delete_instead_of_failing(

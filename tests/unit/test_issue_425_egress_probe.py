@@ -134,7 +134,7 @@ def _config(*, broad_egress: bool) -> KubernetesConfig:
     return KubernetesConfig(
         poll_interval_seconds=0,
         launch_timeout_seconds=5,
-        storage_class="lab-ssd",
+        workspace_ephemeral_class="lab-ssd",
         image_pull_secret="ghcr-pull",
         broad_egress=broad_egress,
     )
@@ -175,9 +175,10 @@ async def test_broad_egress_still_reaches_the_git_roles() -> None:
 async def test_the_kubernetes_worker_is_wrapped_so_the_probe_runs_before_the_harness() -> None:
     _policy_body, pod = await _launched(_policy("pypi.org"))
     command = pod["containers"][0]["command"]
-    assert command[:5] == ["bash", "-o", "pipefail", "-c", LAUNCH_WRAPPER]
-    assert command[5] == "crucible-launch"
-    assert command[6:] == ["crucible-script-harness"]
+    assert command[4:9] == ["bash", "-o", "pipefail", "-c", LAUNCH_WRAPPER]
+    assert ".agent-finished" in command[2]
+    assert command[9] == "crucible-launch"
+    assert command[10:] == ["crucible-script-harness"]
 
 
 async def test_a_kubernetes_worker_with_no_network_stays_plain() -> None:
@@ -186,7 +187,9 @@ async def test_a_kubernetes_worker_with_no_network_stays_plain() -> None:
     workspace = await provider.prepare(launch)
     await provider.launch(workspace, launch)
     pod = pod_of(api, "worker-")
-    assert pod["containers"][0]["command"] == ["crucible-script-harness"]
+    command = pod["containers"][0]["command"]
+    assert command[-1] == "crucible-script-harness"
+    assert ".agent-finished" in command[2]
     assert (
         "CRUCIBLE_EGRESS_ALLOWLIST" not in _env(pod) or not _env(pod)["CRUCIBLE_EGRESS_ALLOWLIST"]
     )

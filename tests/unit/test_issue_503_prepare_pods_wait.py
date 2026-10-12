@@ -133,7 +133,7 @@ def _config(**overrides: Any) -> KubernetesConfig:
     values: dict[str, Any] = {
         "poll_interval_seconds": 0,
         "launch_timeout_seconds": 5,
-        "storage_class": "lab-ssd",
+        "workspace_ephemeral_class": "lab-ssd",
         "image_pull_secret": "ghcr-pull",
         **overrides,
     }
@@ -280,7 +280,7 @@ async def test_the_message_says_the_job_was_still_running_when_the_wait_gave_up(
     assert "Pod prepare-stuck-x1 was Running, deletion under way" in message
 
 
-async def test_a_cancel_while_the_preparer_runs_is_still_a_cancel_when_its_pods_linger(
+async def test_a_cancel_before_ephemeral_preparation_creates_no_pod(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A cancel raised while the Job ran reaches the `finally` before the Job's outcome
@@ -289,18 +289,15 @@ async def test_a_cancel_while_the_preparer_runs_is_still_a_cancel_when_its_pods_
     api, _registry, provider = build()
     clock = _fake_clock(monkeypatch)
     _linger(api, polls=None)
-    looks = 0
 
     async def cancelled() -> bool:
-        nonlocal looks
-        looks += 1
-        return looks > 2
+        return True
 
-    with pytest.raises(LaunchCancelledError, match="cancelled while"):
+    with pytest.raises(LaunchCancelledError, match="cancelled before the prepare"):
         await provider.prepare(spec(), cancelled=cancelled)
 
-    assert clock.sleeps == [2.0, 4.0, 8.0, 1.0]
-    assert api.list_objects("pods", label_selector=f"job-name={PREPARER_JOB}")
+    assert clock.sleeps == []
+    assert not api.list_objects("pods", label_selector=f"job-name={PREPARER_JOB}")
 
 
 # ----- the wait is a deployment setting -----------------------------------------------
