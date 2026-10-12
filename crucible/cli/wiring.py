@@ -353,6 +353,8 @@ def kubernetes_provider(
         harnesses=registry,
         settings_source=kubernetes_settings_source(factory) if factory is not None else None,
         timeouts_source=kubernetes_timeouts_source(factory) if factory is not None else None,
+        # ADR 0032: the publisher and a correction's preparer read the sealed bundle here.
+        artifact_store=DiskArtifactStore(settings.service.artifact_root),
     )
 
 
@@ -863,9 +865,10 @@ def build_publisher(
 ) -> Publisher | None:
     """The publisher of 23 for each provider that is wired, when GitHub is.
 
-    A Kubernetes attempt's bundle is on its workspace claim and is pushed by a Job in
-    the workers namespace; a Docker attempt's is pushed by a container on the daemon.
-    With both providers the bundle path says which one holds it. With neither, or with
+    Either provider's publisher reads the attempt's stored `work_bundle` artifact (ADR
+    0032): a Kubernetes attempt's is pushed by a Job in the workers namespace, a Docker
+    attempt's by a container on the daemon. With both providers the attempt's workspace
+    path says which one ran it. With neither, or with
     no GitHub client, there is no publisher, and the supervisor says so for every task
     that waits in `publishing` (hades FDY-0133) rather than skipping it without a word."""
     if github is None:

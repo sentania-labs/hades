@@ -83,6 +83,7 @@
 | [`0029-discard-an-import-and-rename-a-principal.md`](adr/0029-discard-an-import-and-rename-a-principal.md) | ADR 0029: Discard a verified import, skip native tasks, rename a principal. Status: accepted. |
 | [`0030-ui-sessions-server-side.md`](adr/0030-ui-sessions-server-side.md) | ADR 0030: UI sessions are server-side. Status: accepted. |
 | [`0031-rooms-hades-owns-the-transcript.md`](adr/0031-rooms-hades-owns-the-transcript.md) | ADR 0031: Rooms: Hades owns the transcript. Status: accepted. |
+| [`0032-the-work-bundle-travels-through-the-artifact-store.md`](adr/0032-the-work-bundle-travels-through-the-artifact-store.md) | ADR 0032: The work bundle travels through the artifact store. Status: accepted. |
 
 **History** -- Phase notes, the closest thing to a changelog, and spikes.
 

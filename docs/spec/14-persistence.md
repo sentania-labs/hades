@@ -30,8 +30,8 @@ the PR; a correction can be attached on the operator's word. It is not a gate.
 | `heartbeats` | id BIGSERIAL, attempt_id, ts, signal, detail |
 | `events` | seq BIGSERIAL PK, ts, kind, task_id, execution_id, attempt_id, principal, verified, payload JSONB |
 | `log_chunks` | id BIGSERIAL, attempt_id, stream, offset_start, offset_end, ts, content BYTEA |
-| `artifacts` | id, attempt_id, type, filename (logical), path (content-addressed, under artifact root), size, sha256, content_type, principal_id, created_at |
-| `evidence` | id, attempt_id, kind, observed_at, source, verified, payload JSONB, artifact_id |
+| `artifacts` | id, attempt_id, type, filename (logical), path (content-addressed, under artifact root), size, sha256, content_type, principal_id, created_at. Type `work_bundle` is the git bundle of the attempt's work branch, stored at collection; the publisher and a correction's preparer read the bundle from here, on either provider, never from a workspace claim (ADR 0032) |
+| `evidence` | id, attempt_id, kind, observed_at, source, verified, payload JSONB, artifact_id. A `bundle_head` row's `artifact_id` (and payload `bundle_artifact_id`) is the `work_bundle` artifact, whose sha256 is the row's `bundle_sha256` seal |
 | `completion_claims` | attempt_id PK, document JSONB, parsed_ok, parse_errors JSONB |
 | `gate_results` | id, attempt_id, phase (pre_pr, publication, post_pr), gate, result, evaluated_at, evidence_ids BIGINT[], detail |
 | `acceptance_results` | id, task_id, head_sha, principal_id, verdict, reasoning, superseded_at, created_at |

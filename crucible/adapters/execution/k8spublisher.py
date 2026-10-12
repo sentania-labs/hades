@@ -10,12 +10,17 @@ token into and no host directory to stage a bundle in:
   volume (memory-backed, read-only) at the path the script reads, never in an env var,
   an argument, the Job, or a log, and deleted as soon as the Job's Pod is gone, on
   every path;
-- the branch bundle read straight off the attempt's workspace claim, from where the
-  collector left it, as a single-file read-only mount: the Pod never sees the worker's
-  checkout, its `.git`, the diff or the report (08). The script hashes it against the
-  collector's seal and runs `git bundle verify` again before anything reaches a remote;
-- the script's output files written to the claim's `publish` leaf and read back through
-  the provider's reader Pod over exec, never through a Pod log (12).
+- the branch bundle read from the artifact store, where collection stored it as the
+  attempt's `work_bundle` artifact (ADR 0032), hashed against the collector's seal on
+  Crucible's side, and delivered over exec into the Pod's own memory-backed volume: the
+  Pod mounts no workspace claim and never sees the worker's checkout, its `.git`, the
+  diff or the report (08). The script hashes it against the seal again and runs
+  `git bundle verify` before anything reaches a remote;
+- the script's output files written to the Pod's own memory-backed volume and read
+  back from the Pod over exec before it ends, never through a Pod log (12).
+
+A merge-main run still writes its outcome to the claim's `publish` leaf and reads it
+back through the provider's reader Pod; it pushes no bundle.
 
 `cleanup` removes whatever a push of the named attempts left: the Job, its Pod, the
 NetworkPolicy and the token Secret.
@@ -23,14 +28,19 @@ NetworkPolicy and the token Secret.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import hashlib
+import io
 import logging
-from collections.abc import Sequence
+import tarfile
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from typing import Any
 
 from crucible.adapters.execution import k8sspec, scripts
 from crucible.adapters.execution import kubernetes as k8s
-from crucible.adapters.execution.k8sapi import KubernetesApiError
+from crucible.adapters.execution.k8sapi import ExecResult, KubernetesApiError
 from crucible.adapters.execution.k8sspec import EgressPlan, Limits, Mount, SpecError
 from crucible.adapters.execution.publisher import (
     MAX_PUBLISHER_SECONDS,
@@ -57,9 +67,14 @@ TOKEN_KEY = "token"
 # The claim leaf the script writes its outcome files to. It holds the step, the heads
 # and git's own messages, never the token (the script reads that from its mount only).
 PUBLISH_LEAF = scripts.PUBLISH_LEAF
-# The one leaf of a workspace claim a bundle may be published from: where the collector
-# writes it (`scripts.collector_script`) and where `build_plan` points.
+# Where the collector writes the bundle on the claim, which the merge-main leaf check
+# still reads. A push never does (ADR 0032).
 BUNDLE_LEAF = scripts.PUBLISH_BUNDLE_LEAF
+# ADR 0032: the Pod's own memory-backed volumes, for the delivered bundle and the
+# outcome files. The bundle one is sized for the bundle, with room to spare.
+BUNDLE_VOLUME = "bundle"
+OUTCOME_VOLUME = "outcome"
+OUTCOME_VOLUME_BYTES = 16 * 1024 * 1024
 # How much of one outcome file is read back. The outcome keeps a few kilobytes of each
 # (`OUTCOME_FILES`); this only bounds the read of a file git wrote into.
 OUTCOME_READ_LIMIT = 256 * 1024
@@ -81,16 +96,6 @@ def job_name(attempt_id: str) -> str:
 
 def policy_name(attempt_id: str) -> str:
     return k8sspec.object_name(f"np-{k8sspec.ROLE_PUBLISHER}", attempt_id)
-
-
-def bundle_leaf(bundle_path: str, *, namespace: str, attempt_id: str) -> str | None:
-    """The claim leaf of `bundle_path`, when it is this attempt's collected bundle.
-
-    `k8s://<namespace>/ws-<attempt>/output/work_branch.bundle` is the only answer: a path
-    into another attempt's claim, another namespace, or any other leaf is refused rather
-    than mounted, because the bundle is the one carrier of the worker's commits (23)."""
-    expected = f"k8s://{namespace}/{k8sspec.object_name('ws', attempt_id)}/{BUNDLE_LEAF}"
-    return BUNDLE_LEAF if bundle_path == expected else None
 
 
 class KubernetesPublisher:
@@ -115,37 +120,35 @@ class KubernetesPublisher:
         return replace(plan, endpoints=(f"{host}:{port}",))
 
     async def push(self, request: PublishRequest, token: InstallationToken) -> PublishOutcome:
-        """Run one publisher Job to completion and report what it did."""
+        """Run one publisher Job to completion and report what it did.
+
+        ADR 0032: the bundle is the attempt's `work_bundle` artifact, read here from the
+        artifact store and checked against the seal before anything that holds a token
+        exists; the Pod receives it over exec into its own memory and mounts no claim."""
         provider = self._provider
         spec = request_spec(request)
-        leaf = bundle_leaf(
-            request.bundle_path,
-            namespace=provider.config.namespace,
-            attempt_id=request.attempt_id,
-        )
-        if leaf is None:
-            return _refused(
-                "bundle-seal",
-                f"the bundle path {request.bundle_path!r} is not this attempt's collected "
-                "bundle on its workspace claim",
-            )
         if not request.bundle_sha256:
             return _refused("bundle-seal", "the branch bundle has no recorded sha256 seal")
+        if not request.bundle_artifact or provider.artifact_store is None:
+            return _refused(
+                "bundle-seal",
+                "no branch bundle was stored for this attempt in the artifact store",
+            )
         if not request.image:
             return _refused("create", "the publish request names no image")
         # The image is the attempt's own resolved digest, admitted when the attempt
         # launched, or the operator's `github.publisher_image`; the Docker publisher
         # admits it on the same terms (`_create_policy(..., resolved=request.image)`).
-        claim = k8sspec.object_name("ws", request.attempt_id)
+        store = provider.artifact_store
         try:
-            await provider._call(provider.client.get, "persistentvolumeclaims", claim)
-        except KubernetesApiError as exc:
-            if exc.status == 404:
-                return _refused(
-                    "bundle-seal",
-                    f"the workspace claim {claim!r} that holds the branch bundle is gone",
-                )
-            return _refused("container", f"the workspace claim could not be read: {exc}")
+            bundle = await asyncio.to_thread(store.get, request.bundle_artifact)
+        except OSError:
+            return _refused(
+                "bundle-seal",
+                f"the branch bundle {request.bundle_artifact!r} is gone from the artifact store",
+            )
+        if hashlib.sha256(bundle).hexdigest() != request.bundle_sha256:
+            return _refused("bundle-seal", "the branch bundle no longer matches its sealed sha256")
         try:
             probe = await provider.ensure_ready()
         except Exception as exc:
@@ -156,11 +159,8 @@ class KubernetesPublisher:
             return _refused("namespace", f"the workers namespace is not ready ({probe.detail})")
 
         limits = provider._limits(spec)
-        refusal = await self._prepare_claim(spec, request, claim, limits)
-        if refusal is not None:
-            return refusal
         timeout = int(min(request.timeout_seconds, self.config.timeout_seconds))
-        script = scripts.publisher_script(
+        body = scripts.publisher_script(
             clone_url=request.repository_url,
             work_branch=request.work_branch,
             base_ref=request.base_ref,
@@ -173,23 +173,27 @@ class KubernetesPublisher:
             owned_remote_heads=request.owned_remote_heads,
             owner=request.owner,
         )
+        script = scripts.delivered_publisher_script(
+            body, wait_seconds=provider.config.role_timeout_seconds, read_seconds=timeout
+        )
+        outcome: dict[str, bytes] = {}
         exit_code, failed = await self._run_with_token(
             spec,
             request,
             token,
             script=script,
             mounts=[
-                Mount(
-                    "ws",
-                    f"{scripts.BUNDLE_MOUNT}/work_branch.bundle",
-                    read_only=True,
-                    sub_path=leaf,
-                ),
-                Mount("ws", scripts.PUBLISH_MOUNT, sub_path=PUBLISH_LEAF),
+                Mount(BUNDLE_VOLUME, scripts.BUNDLE_MOUNT),
+                Mount(OUTCOME_VOLUME, scripts.PUBLISH_MOUNT),
                 Mount("publish-token", scripts.TOKEN_MOUNT, read_only=True),
+            ],
+            volumes=[
+                _memory_volume(BUNDLE_VOLUME, len(bundle) + OUTCOME_VOLUME_BYTES),
+                _memory_volume(OUTCOME_VOLUME, OUTCOME_VOLUME_BYTES),
             ],
             limits=limits,
             timeout=timeout,
+            on_running=self._exchange(bundle, outcome, timeout),
         )
         if failed is not None:
             return _refused("container", failed)
@@ -201,14 +205,7 @@ class KubernetesPublisher:
                 detail=f"the publisher did not finish within {timeout}s",
                 exit_code=-2,
             )
-        try:
-            files = await provider._read_files(
-                spec,
-                [f"{PUBLISH_LEAF}/{name}" for name in OUTCOME_FILES],
-                limits,
-                limit=OUTCOME_READ_LIMIT,
-            )
-        except (ProviderError, KubernetesApiError) as exc:
+        if not outcome:
             if exit_code == 0:
                 # The script exits 0 only after `git push` succeeded, so the push
                 # happened; the caller confirms the remote head before it records one.
@@ -216,25 +213,59 @@ class KubernetesPublisher:
                     pushed=True,
                     head_sha=request.expected_head,
                     step="done",
-                    detail=redact(
-                        f"the publisher exited 0; its outcome files could not be read: {exc}"
-                    ),
+                    detail="the publisher exited 0; its outcome files could not be read",
                     exit_code=0,
                 )
             return PublishOutcome(
                 pushed=False,
                 head_sha="",
                 step="outcome",
-                detail=redact(
-                    f"the publisher exited {exit_code} and its outcome could not be read: {exc}"
-                ),
+                detail=f"the publisher exited {exit_code} and its outcome could not be read",
                 exit_code=exit_code,
             )
-
         return outcome_from_files(
-            {name: _text(files.get(f"{PUBLISH_LEAF}/{name}")) for name in OUTCOME_FILES},
-            exit_code,
+            {name: _text(outcome.get(name)) for name in OUTCOME_FILES}, exit_code
         )
+
+    def _exchange(
+        self, bundle: bytes, outcome: dict[str, bytes], timeout: int
+    ) -> Callable[[str], Awaitable[None]]:
+        """ADR 0032: once the publisher Pod runs, deliver the bundle into it over exec,
+        then wait for the script to finish and read its outcome files back the same
+        way, which also tells the Pod it may end. `outcome` stays empty when they could
+        not be read; the Job's exit still stands."""
+        provider = self._provider
+
+        async def exchange(pod: str) -> None:
+            target = f"{scripts.BUNDLE_MOUNT}/work_branch.bundle"
+            if not await provider._deliver(pod, target, bundle, k8sspec.ROLE_PUBLISHER):
+                # The script waits for the bundle to its own bound, then refuses at
+                # `bundle-seal`; its outcome is still read back below.
+                pass
+            try:
+                result: ExecResult = await provider._call(
+                    provider.client.pod_exec,
+                    pod,
+                    [
+                        "sh",
+                        "-c",
+                        scripts.COLLECT_SCRIPT,
+                        "collect",
+                        scripts.PUBLISH_MOUNT,
+                        str(timeout + provider.config.role_timeout_seconds),
+                    ],
+                    container=k8sspec.CONTAINER_NAME,
+                    timeout=timeout + provider.config.role_timeout_seconds + 30,
+                    limit=OUTCOME_READ_LIMIT,
+                )
+            except KubernetesApiError as exc:
+                log.warning("the publisher outcome could not be read", extra={"error": str(exc)})
+                return
+            if result.exit_code != 0:
+                return
+            outcome.update(_untar(result.stdout))
+
+        return exchange
 
     async def _run_with_token(
         self,
@@ -246,6 +277,8 @@ class KubernetesPublisher:
         mounts: list[Mount],
         limits: Limits,
         timeout: int,
+        volumes: Sequence[Mapping[str, Any]] | None = None,
+        on_running: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[int, str | None]:
         """The token in a Secret of its own, one publisher Job that mounts it, and the
         Secret deleted on every path. The Job's exit, or why it could not run."""
@@ -275,7 +308,16 @@ class KubernetesPublisher:
                 image=request.image,
                 script=script,
                 mounts=mounts,
-                volumes=[provider._claim_volume(request.attempt_id), token_volume(secret)],
+                # A push brings its own volumes (ADR 0032); a merge-main run writes its
+                # outcome to the attempt's claim.
+                volumes=[
+                    *(
+                        volumes
+                        if volumes is not None
+                        else [provider._claim_volume(request.attempt_id)]
+                    ),
+                    token_volume(secret),
+                ],
                 limits=limits,
                 timeout=timeout,
                 plan=self._plan(),
@@ -283,6 +325,7 @@ class KubernetesPublisher:
                 tolerate_lingering_pod=True,
                 # A full namespace is a wait for a slot, not a failed publication.
                 wait_for_quota=True,
+                on_running=on_running,
             )
         except (KubernetesApiError, SpecError, ProviderError) as exc:
             return exit_code, f"the publisher Job could not run: {exc}"
@@ -468,6 +511,30 @@ class KubernetesPublisher:
         return removed
 
 
+def _memory_volume(name: str, size: int) -> dict[str, object]:
+    """ADR 0032: a volume of the publisher Pod's own, in memory, gone with the Pod."""
+    mib = max(1, -(-size // (1024 * 1024)))
+    return {"name": name, "emptyDir": {"medium": "Memory", "sizeLimit": f"{mib}Mi"}}
+
+
+def _untar(raw: bytes) -> dict[str, bytes]:
+    """The outcome files of a tar the collect script wrote, by name. Only regular files
+    at the top level count; anything else, or a tar that does not read, is nothing."""
+    files: dict[str, bytes] = {}
+    try:
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+            for member in archive.getmembers():
+                name = member.name.removeprefix("./")
+                if not member.isfile() or "/" in name or not name:
+                    continue
+                handle = archive.extractfile(member)
+                if handle is not None:
+                    files[name] = handle.read(OUTCOME_READ_LIMIT)
+    except (tarfile.TarError, OSError):
+        return {}
+    return files
+
+
 def token_volume(secret: str) -> dict[str, object]:
     """The per-push token as a Secret volume: one key, owner-read only. The kubelet keeps
     a Secret volume in memory, so the value never touches the node's disk (12, S10)."""
@@ -509,18 +576,18 @@ def _merge_refused(step: str, detail: str) -> MergeMainOutcome:
 
 
 class ByWorkspacePublisher:
-    """A deployment with both providers: each attempt's bundle is published by the
-    provider whose workspace holds it, which the bundle path names."""
+    """A deployment with both providers: each attempt is published by the provider
+    that ran it, which its workspace path names (`k8s://...` on Kubernetes)."""
 
     def __init__(self, docker: Publisher, kubernetes: Publisher) -> None:
         self._docker = docker
         self._kubernetes = kubernetes
 
-    def _for(self, bundle_path: str) -> Publisher:
-        return self._kubernetes if bundle_path.startswith("k8s://") else self._docker
+    def _for(self, workspace_path: str) -> Publisher:
+        return self._kubernetes if workspace_path.startswith("k8s://") else self._docker
 
     async def push(self, request: PublishRequest, token: InstallationToken) -> PublishOutcome:
-        return await self._for(request.bundle_path).push(request, token)
+        return await self._for(request.workspace_path).push(request, token)
 
     async def merge_main(
         self, request: MergeMainRequest, token: InstallationToken
@@ -539,7 +606,6 @@ __all__ = [
     "ByWorkspacePublisher",
     "KubernetesPublisher",
     "KubernetesPublisherConfig",
-    "bundle_leaf",
     "job_name",
     "policy_name",
     "token_secret_name",

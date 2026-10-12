@@ -231,6 +231,9 @@ def read_outputs(
     bundle_path = output / "work_branch.bundle"
     bundle = None
     if head and collector_exit == 0:
+        # ADR 0032: the bytes are read once, here, and both the seal and the stored
+        # `work_bundle` artifact come from them, so the two can never differ.
+        content = bundle_path.read_bytes() if bundle_path.is_file() else b""
         bundle = BranchBundle(
             head_sha=head,
             base_ref=str(repository.get("base_ref", "main")),
@@ -238,11 +241,8 @@ def read_outputs(
             or str(repository.get("work_branch", "")),
             commits=int(commits_text) if commits_text.isdigit() else 0,
             verified=bundle_verified,
-            sha256=(
-                hashlib.sha256(bundle_path.read_bytes()).hexdigest()
-                if bundle_path.is_file()
-                else ""
-            ),
+            sha256=hashlib.sha256(content).hexdigest() if bundle_path.is_file() else "",
+            content=content,
             commit_paths=commit_paths,
             attempt_commit_paths=read_path_list(output / "attempt-commit-paths.txt"),
             commit_messages=tuple(messages),

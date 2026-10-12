@@ -128,17 +128,49 @@ def test_a_correction_whose_previous_bundle_is_gone_is_refused_with_a_named_reas
     }
 
 
-def test_a_pre_pr_correction_cannot_change_the_bundle_provider() -> None:
-    task = SimpleNamespace(id="task", state=TaskState.PRE_PR_GATES_FAILED)
+def _bundle_uow(provider: str, *, stored: bool) -> Any:
     attempt = SimpleNamespace(id="attempt", execution_id="execution", workspace_path="k8s://ws")
-    execution = SimpleNamespace(id="execution", role="implement", provider="kubernetes")
-    uow = SimpleNamespace(
+    execution = SimpleNamespace(id="execution", role="implement", provider=provider)
+    row = SimpleNamespace(
+        kind="bundle_head",
+        verified=True,
+        attempt_id="attempt",
+        artifact_id="bundle" if stored else None,
+        payload={"bundle_verified": True, "bundle_sha256": "seal", "head_sha": "head"},
+    )
+    artifact = SimpleNamespace(
+        id="bundle", type="work_bundle", attempt_id="attempt", sha256="seal", path="blobs/x"
+    )
+    return SimpleNamespace(
         events=SimpleNamespace(latest_for_task_kind=lambda *_args: None),
         executions=_Rows([execution]),
         attempts=_Rows([attempt]),
+        evidence=SimpleNamespace(list_for_attempt=lambda _attempt_id: [row]),
+        artifacts=SimpleNamespace(get=lambda _id: artifact if stored else None),
+        retention=SimpleNamespace(list_recent=lambda _limit: []),
     )
+
+
+def test_a_pre_pr_correction_cannot_change_the_provider_of_an_unstored_bundle() -> None:
+    """A bundle collected before ADR 0032 stored it lives only in its workspace."""
+    task = SimpleNamespace(id="task", state=TaskState.PRE_PR_GATES_FAILED)
+    uow = _bundle_uow("kubernetes", stored=False)
 
     assert _unpublished_bundle_problem(uow, cast(Task, task), "docker") == {
         "path": "execution_request.provider",
         "message": PREVIOUS_BUNDLE_OTHER_PROVIDER,
     }
+    # No claim is mounted for it any more, so on Kubernetes itself it is gone.
+    assert _unpublished_bundle_problem(uow, cast(Task, task), "kubernetes") == {
+        "path": "correction",
+        "message": PREVIOUS_BUNDLE_GONE,
+    }
+
+
+def test_a_stored_bundle_resumes_on_either_provider() -> None:
+    """ADR 0032: the artifact store is read by whichever provider runs the correction,
+    so the other-provider refusal is moot for a stored bundle."""
+    task = SimpleNamespace(id="task", state=TaskState.PRE_PR_GATES_FAILED)
+    for provider in ("docker", "kubernetes"):
+        uow = _bundle_uow("kubernetes", stored=True)
+        assert _unpublished_bundle_problem(uow, cast(Task, task), provider) is None

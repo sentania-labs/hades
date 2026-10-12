@@ -666,9 +666,15 @@ class DockerProvider:
         # and the container's uid owns it end to end (S9 Test E).
         mounts = [self._daemon_mount(spec.attempt_id, "", WORK_MOUNT, read_only=False)]
         resume_bundle = None
-        if spec.resume_bundle_path:
+        if spec.resume_bundle_artifact or spec.resume_bundle_path:
             resume_bundle = f"{scripts.BUNDLE_MOUNT}/work_branch.bundle"
-            source = Path(spec.resume_bundle_path)
+            # ADR 0032: the stored `work_bundle` artifact, under the same artifact root;
+            # a bundle collected before it was stored is read from its workspace.
+            source = (
+                Path(self.config.artifact_root) / spec.resume_bundle_artifact
+                if spec.resume_bundle_artifact
+                else Path(str(spec.resume_bundle_path))
+            )
             artifact_root = Path(self.config.artifact_root).resolve()
             try:
                 relative = str(source.resolve().relative_to(artifact_root))

@@ -55,6 +55,12 @@ REVIEW_DIFF_TYPE = "diff"
 ROLE_PREPARER_LOG = "preparer_log"
 PREPARER_LOG_NAME = "crucible/preparer.log"
 PREPARER_LOG_TYPE = "preparer_log"
+# ADR 0032: the git bundle of the attempt's work branch, stored at collection. The
+# publisher and a correction's preparer read it from the artifact store, never from the
+# attempt's workspace; the `bundle_head` row names it by id.
+WORK_BUNDLE_TYPE = "work_bundle"
+WORK_BUNDLE_NAME = "output/work_branch.bundle"
+WORK_BUNDLE_CONTENT_TYPE = "application/x-git-bundle"
 
 
 class EvidenceV1(StrictModel):

@@ -6,7 +6,7 @@ import hashlib
 from pathlib import Path
 
 from crucible.application.errors import ForbiddenError, NotFoundError, TransitionNotAllowedError
-from crucible.application.publish import collected_bundle_sha256
+from crucible.application.publish import collected_bundle_artifact, collected_bundle_sha256
 from crucible.application.review import latest_work_attempt
 from crucible.application.task_access import require_task_principal
 from crucible.application.transitions import move_task
@@ -82,9 +82,14 @@ def republish_task(
     sealed_sha256 = collected_bundle_sha256(uow, attempt) or recorded_bundle_sha256
     bundle_file = Path(expected_bundle)
     ws = str(attempt.workspace_path)
-    if bundle_file.is_file():
+    # ADR 0032: the stored `work_bundle` is what the publisher reads, and the store is
+    # content-addressed, so its digest is the bundle's. A Kubernetes attempt has no other.
+    stored = collected_bundle_artifact(uow, attempt)
+    if stored is not None:
+        current_sha256 = stored.sha256
+    elif bundle_file.is_file():
         current_sha256 = hashlib.sha256(bundle_file.read_bytes()).hexdigest()
-    elif ws.startswith("fake:///") or ws.startswith("k8s://"):
+    elif ws.startswith("fake:///"):
         current_sha256 = sealed_sha256
     else:
         current_sha256 = ""
