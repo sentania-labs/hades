@@ -81,6 +81,11 @@ read it. Collection must finish while the worker Pod and its checkout still exis
    The first observed worker Pod UID is stored as a Job annotation and restored by
    reconciliation. A replacement Pod from the same Job has a different UID and cannot
    be mistaken for the attempt after a supervisor restart.
+8. The supervisor Role adds only the verbs this lifecycle uses. `get` on ConfigMaps
+   reads the persisted identity bundle paths, and `get` plus `watch` on Pods follows
+   init-container and worker-container state without polling a claim. `patch` on Jobs
+   records the first worker Pod UID so reconciliation cannot adopt a replacement Pod
+   with different scratch. No workspace-specific RBAC is added.
 
 ## Consequences
 

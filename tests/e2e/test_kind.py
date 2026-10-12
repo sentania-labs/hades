@@ -14,6 +14,7 @@ import re
 import socket
 import subprocess
 import time
+from collections.abc import Sequence
 from dataclasses import replace
 from itertools import pairwise
 from pathlib import Path
@@ -30,6 +31,7 @@ from crucible.adapters.execution import k8sspec
 from crucible.adapters.execution import kubernetes as kubernetes_module
 from crucible.adapters.execution.fake import FakeProvider
 from crucible.adapters.execution.k8sapi import (
+    ExecResult,
     KubernetesApiError,
     KubernetesClient,
     kubeconfig_access,
@@ -2833,9 +2835,8 @@ async def test_fdy_0133_a_task_in_publishing_is_pushed_by_the_kubernetes_publish
 
 
 class OutageKubernetesClient(RecordingKubernetesClient):
-    """The real API, except that the next `outages` creates of a role's Job go to an
-    API server address that refuses the connection: the real transport failure a
-    restarting API server produces, through the real `_request` path."""
+    """The real API, except that selected calls go to an API server address that
+    refuses the connection through the real transport path."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -2855,6 +2856,20 @@ class OutageKubernetesClient(RecordingKubernetesClient):
             )
             return down.create(kind, body)
         return super().create(kind, body, **kwargs)
+
+    def pod_exec(self, name: str, command: Sequence[str], **kwargs: Any) -> ExecResult:
+        role = str(kwargs.get("container") or "")
+        if self.outages.get(role, 0) > 0:
+            self.outages[role] -= 1
+            self.refused.append(role)
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                closed = int(probe.getsockname()[1])
+            down = KubernetesClient(
+                replace(self.access, server=f"https://127.0.0.1:{closed}"), self.namespace
+            )
+            return down.pod_exec(name, command, **kwargs)
+        return super().pod_exec(name, command, **kwargs)
 
 
 def _claim_exists(api: KubernetesClient, attempt_id: str) -> bool:
@@ -3002,10 +3017,9 @@ async def test_lab_findings_an_api_server_outage_during_collect_loses_no_attempt
     registry: CraneRegistryClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The collector Job's create meets a refused connection twice (the real transport
-    error, through the real client). The attempt is not failed as environment: it is
-    collected again from the untouched claim and the task reaches review with every
-    gate passing."""
+    """Releasing the in-Pod collector meets a refused connection twice through the real
+    transport path. The attempt is not failed as environment: it is collected again
+    from the live worker Pod and reaches review with every gate passing."""
     # The retry interval only paces the tier; the rule is the same at 30 seconds.
     monkeypatch.setattr(supervisor_module, "COLLECT_RETRY_INTERVAL_SECONDS", 5)
     outage_api = OutageKubernetesClient(
@@ -3038,7 +3052,7 @@ async def test_lab_findings_an_api_server_outage_during_collect_loses_no_attempt
         )
         attempt = client.get(f"/v1/tasks/{task_id}").json()["latest_attempt"]
         print(
-            f"lab findings: collector creates refused {len(outage_api.refused)} time(s); "
+            f"lab findings: collector execs refused {len(outage_api.refused)} time(s); "
             f"task {state}, attempt exit class {attempt['exit_class']}"
         )
         assert outage_api.refused == [k8sspec.ROLE_COLLECTOR, k8sspec.ROLE_COLLECTOR]

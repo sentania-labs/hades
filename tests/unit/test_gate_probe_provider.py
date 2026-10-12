@@ -50,6 +50,12 @@ async def test_probe_job_is_uncredentialed_bounded_and_removed(
     }
     checkout = pod["initContainers"][0]
     assert "safe]\\n\\tdirectory = *" in checkout["command"][2]
+    scratch = next(volume for volume in pod["volumes"] if volume["name"] == "ws")
+    assert scratch["ephemeral"]["volumeClaimTemplate"]["spec"] == {
+        "accessModes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": provider.config.workspace_ephemeral_size}},
+        "storageClassName": provider.config.workspace_ephemeral_class,
+    }
     assert not created(api, "secrets") and not created(api, "persistentvolumeclaims")
     job = created(api, "jobs", "gate-probe")[0]
     assert job["spec"]["activeDeadlineSeconds"] == (

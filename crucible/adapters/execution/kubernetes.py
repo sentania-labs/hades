@@ -400,9 +400,9 @@ class CollectionFailedError(ProviderError):
 
 class CollectionUnavailableError(CollectionFailedError, ProviderUnavailableError):
     """Collection could not finish because the cluster could not take or answer a step
-    right now (the API server, the namespace quota, a reader Pod that did not start).
-    The claim still holds the worker's work, so the supervisor collects again later;
-    a step that already ran (the credential sync, the collector) runs or answers again."""
+    right now. The live worker Pod still holds the work in its scratch, so the supervisor
+    collects again later. A step that already ran, such as credential sync or the
+    collector, runs or answers again."""
 
 
 class LoginLockHeldError(ProviderError):
@@ -1447,13 +1447,10 @@ class KubernetesProvider:
             hosts=tuple(sorted(set(plan.hosts) | set(checkout.hosts))),
             endpoints=tuple(sorted(set(plan.endpoints) | set(checkout.endpoints))),
         )
-        checkout_mount = Mount("probe-work", WORK_MOUNT)
+        checkout_mount = Mount("ws", WORK_MOUNT)
         services = self._services(spec)
         init_mounts: list[Mount] = [checkout_mount, *token_mounts]
-        volumes: list[dict[str, Any]] = [
-            {"name": "probe-work", "emptyDir": {}},
-            *token_volumes,
-        ]
+        volumes: list[dict[str, Any]] = [self._claim_volume(spec.attempt_id), *token_volumes]
         # File origins in the kind tier live on this read-only claim.
         if spec.repository_url.startswith("file:///crucible/cache/") and self.config.cache_claim:
             init_mounts.append(Mount("cache", k8sspec.CACHE_MOUNT, read_only=True))
