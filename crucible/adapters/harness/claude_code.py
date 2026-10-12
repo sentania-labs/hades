@@ -478,12 +478,36 @@ def _tool_summary(block: dict[str, Any]) -> str:
     return base.in_flight_summary(f"tool {name}", str(detail or block.get("id")))
 
 
+def _model_usage(used: Any) -> tuple[int | None, int | None, int | None, float | None] | None:
+    """`modelUsage` summed over its models: (in, out, cache read, cost), or None."""
+    if not isinstance(used, dict) or not used:
+        return None
+    tokens_in = tokens_out = cache = None
+    cost: float | None = None
+    for entry in used.values():
+        if not isinstance(entry, dict):
+            continue
+        tokens_in = base.add(tokens_in, base.integer(entry.get("inputTokens")))
+        tokens_out = base.add(tokens_out, base.integer(entry.get("outputTokens")))
+        cache = base.add(cache, base.integer(entry.get("cacheReadInputTokens")))
+        found = base.cost_usd(entry.get("costUSD"))
+        if found is not None:
+            cost = (cost or 0.0) + found
+    return tokens_in, tokens_out, cache, cost
+
+
 def _metrics(transcript: Path) -> tuple[ReportMetrics, int]:
-    """The final `result` line carries `usage`, `total_cost_usd` and `modelUsage`; the
-    `system` init line names the model. Both are the CLI's own report (S1)."""
+    """The `result` line carries `usage`, `total_cost_usd` and `modelUsage`; the
+    `system` init line names the model. Both are the CLI's own report (S1).
+
+    hades #604: one run can end more than one turn (a background task's notification
+    starts another, 2.1.280), and each result line's `usage` is that turn's alone, while
+    `modelUsage` and `total_cost_usd` are the session's running totals. The last
+    result's `modelUsage`, summed over its models, is therefore the run; the per-turn
+    `usage` lines, summed, stand in for a figure it does not carry."""
     model: str | None = None
-    tokens_in: int | None = None
-    tokens_out: int | None = None
+    turns: tuple[int | None, int | None, int | None] = (None, None, None)
+    session: tuple[int | None, int | None, int | None, float | None] | None = None
     cost: float | None = None
     count = 0
     for event in base.json_lines(transcript):
@@ -492,10 +516,28 @@ def _metrics(transcript: Path) -> tuple[ReportMetrics, int]:
         if kind == "system" and isinstance(event.get("model"), str):
             model = str(event["model"])
         if kind == "result":
-            tokens_in, tokens_out = base.usage_totals(event.get("usage"))
-            cost = base.cost_usd(event.get("total_cost_usd"))
+            usage = event.get("usage")
+            i, o = base.usage_totals(usage)
+            turns = (
+                base.add(turns[0], i),
+                base.add(turns[1], o),
+                base.add(turns[2], base.cache_read(usage)),
+            )
+            found = base.cost_usd(event.get("total_cost_usd"))
+            cost = found if found is not None else cost
             used: Any = event.get("modelUsage")
+            session = _model_usage(used) or session
             if isinstance(used, dict) and used:
                 model = str(next(iter(used)))
+    # Field by field, so a `modelUsage` that leaves one out still has the turns' figure.
+    totals = session or (None, None, None, None)
+    tokens_in, tokens_out, cache = (
+        found if found is not None else turn for found, turn in zip(totals[:3], turns, strict=True)
+    )
+    if cost is None:
+        cost = totals[3]
     source = "harness_transcript" if count else "none"
-    return ReportMetrics(model, tokens_in, tokens_out, cost, source), count
+    return (
+        ReportMetrics(model, tokens_in, tokens_out, cost, source, tokens_cache_read=cache),
+        count,
+    )

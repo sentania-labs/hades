@@ -4,14 +4,14 @@
 apiVersion: bitnami.com/v1alpha1
 kind: SealedSecret
 metadata:
-  name: crucible-database
-  namespace: crucible
+  name: hades-database
+  namespace: hades
 spec:
   encryptedData:
     password: REPLACE_WITH_SEALED_DATABASE_PASSWORD
     url: REPLACE_WITH_SEALED_DATABASE_URL
   template:
     metadata:
-      name: crucible-database
-      namespace: crucible
+      name: hades-database
+      namespace: hades
     type: Opaque

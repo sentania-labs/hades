@@ -1,8 +1,8 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: crucible-api
-  namespace: crucible
+  name: hades-api
+  namespace: hades
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: api
@@ -22,8 +22,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: crucible-api
-  namespace: crucible
+  name: hades-api
+  namespace: hades
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: api
@@ -39,7 +39,7 @@ spec:
         app.kubernetes.io/name: crucible
         app.kubernetes.io/component: api
     spec:
-      serviceAccountName: crucible-supervisor
+      serviceAccountName: hades-supervisor
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -87,7 +87,7 @@ spec:
             - name: CRUCIBLE_DATABASE__URL
               valueFrom:
                 secretKeyRef:
-                  name: crucible-database
+                  name: hades-database
                   key: url
           resources:
             requests:
@@ -111,12 +111,12 @@ spec:
               containerPort: 8080
           envFrom:
             - configMapRef:
-                name: crucible-settings
+                name: hades-settings
           env:
             - name: CRUCIBLE_DATABASE__URL
               valueFrom:
                 secretKeyRef:
-                  name: crucible-database
+                  name: hades-database
                   key: url
           # `/v1/ready` is this process's readiness: the database answers and the schema
           # is at head. The supervisor's health is reported in the same response and on
@@ -153,7 +153,7 @@ spec:
           volumeMounts:
             - name: artifacts
               mountPath: /var/lib/crucible/artifacts
-            # 12: the App key and the webhook secret, on the `crucible` pods only. No
+            # 12: the App key and the webhook secret, on the `hades` pods only. No
             # worker, collector, verifier or publisher ever mounts this.
             - name: github
               mountPath: /var/lib/crucible/credentials/github
@@ -163,7 +163,7 @@ spec:
       volumes:
         - name: artifacts
           persistentVolumeClaim:
-            claimName: crucible-artifacts
+            claimName: hades-artifacts
         # The GitHub App Secret the service owns (ADR 0017). Optional by design, not by
         # accident (crucible#79): the service creates it when the operator connects the
         # App, so a fresh deployment has none and must still start. The key is read
@@ -172,7 +172,7 @@ spec:
         # at startup when `github.enabled` says one should be there.
         - name: github
           secret:
-            secretName: crucible-github-app
+            secretName: hades-github-app
             optional: true
             defaultMode: 0400
         - name: tmp
@@ -184,8 +184,8 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: crucible-api
-  namespace: crucible
+  name: hades-api
+  namespace: hades
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: api
@@ -198,6 +198,6 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: crucible-api
+                name: hades-api
                 port:
                   name: http

@@ -1,6 +1,6 @@
 """The GitHub App credential the service owns (ADR 0017, crucible#120, #79).
 
-Two stores behind one port. On Kubernetes the credential is the `crucible-github-app`
+Two stores behind one port. On Kubernetes the credential is the `hades-github-app`
 Secret in the service's own namespace: the service creates it the first time the
 Connect GitHub flow writes it, labels it as its own, and replaces its data whole on each
 later write. It is read through the API server on each signature rather than from the
@@ -69,7 +69,7 @@ class SecretAppCredentials:
         self,
         client: Any,
         *,
-        name: str = "crucible-github-app",
+        name: str = "hades-github-app",
         settings_app_id: int = 0,
         settings_enabled: bool = False,
     ) -> None:

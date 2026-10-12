@@ -448,7 +448,7 @@ class ManifestConversion:
 class GitHubAppCredentials(Protocol):
     """Where the App credential lives and the one writer of it (ADR 0017).
 
-    On Kubernetes that is the `crucible-github-app` Secret in the service's namespace;
+    On Kubernetes that is the `hades-github-app` Secret in the service's namespace;
     with the Docker provider it is the files beside `github.app.private_key_path`. A
     credential counts as configured when it has an App id and a key and either the
     service wrote it (the Connect GitHub flow) or `github.enabled` says a deployment

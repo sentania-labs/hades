@@ -1,5 +1,19 @@
 {% extends "base.html" %}
 {% block content %}
+<style>
+  .card-stuck--mine { box-shadow: 0 0 0 1px rgba(180,107,255,.55), 0 0 18px rgba(180,107,255,.45); }
+  .stuck-sentence { font-family: var(--font-display); font-size: 17px; line-height: 1.45; color: var(--ink); margin: 0 0 8px; }
+  .stuck-owner { margin: 0 0 10px; color: var(--ink-muted); }
+  .stuck-tag { display: inline-block; margin-right: 6px; padding: 2px 9px; border: 1px solid var(--line); border-radius: 999px; font-size: 12px; color: var(--ink-muted); }
+  .stuck-tag--you { color: var(--accent-ink); border-color: var(--accent); background: var(--accent-soft); }
+  .stuck-quote { margin: 0 0 12px; padding: 8px 12px; border-left: 3px solid var(--cyan); background: var(--surface-sunken); color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 14em; overflow-y: auto; }
+  .stuck-clicks { display: grid; gap: 10px; margin: 0 0 12px; }
+  .stuck-click { display: grid; gap: 6px; margin: 0; }
+  .stuck-click button { justify-self: start; }
+  .stuck-details summary { cursor: pointer; color: var(--ink-subtle); }
+  .stuck-details ul, .stuck-details p { color: var(--ink-muted); overflow-wrap: anywhere; }
+  .stuck-raw { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; color: var(--ink-muted); }
+</style>
 <div class="card-head">
   <span class="board-card-id">{{ safe_value("external id", card.external_id) }}</span>
   <h1>{{ safe_value("title", card.title) }}</h1>
@@ -13,11 +27,32 @@
   {% if card.pull_request %}<a href="{{ card.pull_request.url }}" rel="noopener noreferrer" target="_blank">PR #{{ card.pull_request.number }} ({{ card.pull_request.state }})</a>{% else %}<span class="admin-empty">No pull request yet</span>{% endif %}
 </div>
 <div class="card-grid">
-  <section class="lat-card card-stuck card-wide" aria-label="Where it is and what it is stuck on">
+  <section class="lat-card card-stuck card-wide{% if card.reason and card.reason.owner == 'you' %} card-stuck--mine{% endif %}" aria-label="Where it is and what it is stuck on">
     <h2>Where it is and what it is stuck on</h2>
+    {% if card.reason %}
+    <p class="stuck-sentence" data-reason="{{ card.reason.key }}">{{ safe_value("reason", card.reason.sentence) }}</p>
+    <p class="stuck-owner"><span class="stuck-tag stuck-tag--{{ card.reason.owner }}">Whose move: {{ card.reason.owner_words }}</span> {{ card.reason.owner_line }}</p>
+    {% if card.reason.quote %}<blockquote class="stuck-quote">{{ safe_value("question", card.reason.quote) }}</blockquote>{% endif %}
+    {% if can_act and reason_actions %}<div class="stuck-clicks">{% for item in reason_actions %}
+      <form class="card-form stuck-click stuck-click--{{ item.key }}" method="post" action="{{ item.action }}">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="return_to" value="{{ return_to }}">
+        {% for name, value in item.hidden.items() %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+        {% if item.note %}<label><span class="lat-label">{{ item.note }}</span>
+          <textarea class="lat-textarea" name="{{ item.note_name }}" rows="{{ 3 if item.required else 1 }}"{% if item.required %} required{% endif %}></textarea></label>{% endif %}
+        <button class="lat-btn {% if item.primary %}lat-btn--primary{% else %}lat-btn--ghost{% endif %}" type="submit" data-action="{{ item.key }}"{% if item.confirm %} data-confirm="true"{% endif %}>{{ item.label }}</button>
+      </form>{% endfor %}</div>{% endif %}
+    <details class="stuck-details"><summary>Details</summary>
+      <p>{{ safe_value("headline", card.stuck.headline) }}</p>
+      <ul>{% for line in card.stuck.lines %}<li>{{ safe_value("line", line) }}</li>{% endfor %}</ul>
+      {% if card.escalation %}<p class="admin-hint">Escalation {{ card.escalation.id }} opened {{ card.escalation.opened_at }}{% if card.escalation.reason %}, reason {{ card.escalation.reason }}{% endif %}.</p>
+      {% if not card.reason.quote %}<pre class="stuck-raw">{{ safe_value("question", card.escalation.full_question) }}</pre>{% endif %}{% endif %}
+    </details>
+    {% else %}
     <p>{{ safe_value("headline", card.stuck.headline) }}</p>
     <ul>{% for line in card.stuck.lines %}<li>{{ safe_value("line", line) }}</li>{% endfor %}</ul>
     {% if card.escalation %}<p class="admin-hint">Escalation {{ card.escalation.id }} opened {{ card.escalation.opened_at }}{% if card.escalation.reason %}, reason {{ card.escalation.reason }}{% endif %}.</p>{% endif %}
+    {% endif %}
   </section>
 
   <section class="lat-card" aria-label="Head and CI">

@@ -6,12 +6,13 @@
 {{- end -}}
 
 {{/*
-The prefix of every object name. `crucible` until the defaults move to the product
-names (hades #609 step 2); the `app.kubernetes.io/name` label stays `crucible` either
-way, so an existing Deployment's immutable selector still matches.
+The prefix of every object name: the product name, `hades` (hades #609 step 2). The
+`app.kubernetes.io/name` label stays `crucible` whatever the prefix, so a deployment
+that keeps its earlier names through the overrides still matches its Deployments'
+immutable selectors.
 */}}
 {{- define "hades.name" -}}
-{{- .Values.nameOverride | default "crucible" -}}
+{{- .Values.nameOverride | default "hades" -}}
 {{- end -}}
 {{- define "hades.namespace" -}}
 {{- .Values.namespaceOverride | default (include "hades.name" .) -}}

@@ -5,41 +5,30 @@ data-page attribute whose value uniquely identifies the page, independent of
 product names or the landing page.  The compose smoke uses the same markers
 to avoid grepping "Hades" or "Crucible" in page content.
 
-No imports beyond stdlib and the project's test fixtures so the unit run is
-lightweight; the markers are strings, not live HTTP.
+The marker list is the smoke's own, so the two cannot drift apart; the pages are
+rendered through the real templates, not fetched over HTTP.
 """
 
 from __future__ import annotations
 
+import inspect
 import re
 from typing import Any
 
 import pytest
 
-# Every path the compose smoke walks, paired with its expected data-page value.
+from tools.smoke import compose_smoke
+
+# Every path the compose smoke walks, paired with the data-page value it expects, plus
+# the board it fetches explicitly after sign-in and a login page that reuses its parent's.
 _MARKERS: list[tuple[str, str]] = [
-    ("/ui", "status"),
-    ("/ui/harnesses", "harnesses"),
-    ("/ui/credentials", "credentials"),
+    (compose_smoke.BOARD_PATH, compose_smoke.BOARD_MARKER),
+    *compose_smoke.PAGE_MARKERS.items(),
     ("/ui/credentials/hermes/login", "credentials"),
-    ("/ui/images", "images"),
-    ("/ui/routing", "routing"),
-    ("/ui/repositories", "repositories"),
-    ("/ui/tokens", "tokens"),
-    ("/ui/github", "github"),
-    ("/ui/workers", "workers"),
-    ("/ui/tasks", "tasks"),
-    ("/ui/wakes", "wakes"),
-    ("/ui/retention", "retention"),
-    ("/ui/audit", "audit"),
-    ("/ui/bootstrap", "bootstrap"),
-    ("/ui/settings", "settings"),
 ]
 
-# Pages reachable via the API but outside the compose smoke loop; we still
-# want a marker on them for completeness (set by the page module).
+# Pages outside the compose smoke loop; they still carry a marker (set by the page module).
 _EXTRA_MARKERS: list[tuple[str, str]] = [
-    ("/ui/board", "board"),
     ("/ui/usage", "usage"),
     ("/ui/catalog", "catalog"),
 ]
@@ -141,6 +130,18 @@ def _render_page(active: str, *, data_page: str = "") -> str:
 
 class TestSmokeMarkers:
     """Assert every smoke-walked page carries a stable marker."""
+
+    def test_the_smoke_walk_greps_no_product_name_or_heading(self) -> None:
+        """hades #603: the walk asserts markers and a 200, never a brand or an <h1>."""
+        source = inspect.getsource(compose_smoke.walk_first_run_ui) + inspect.getsource(
+            compose_smoke.expect_page
+        )
+        assert 'b"Hades"' not in source
+        assert "<h1>" not in source
+        assert "data-page=" in source
+        assert compose_smoke.BOARD_PATH == "/ui/board"
+        assert "/ui" not in compose_smoke.PAGE_MARKERS
+        assert len(set(compose_smoke.PAGE_MARKERS.values())) == len(compose_smoke.PAGE_MARKERS)
 
     @pytest.mark.parametrize("path,marker", _MARKERS)
     def test_smoke_pages_have_data_page(self, path: str, marker: str) -> None:

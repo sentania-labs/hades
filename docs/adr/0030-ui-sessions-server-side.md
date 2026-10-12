@@ -31,3 +31,11 @@ Possession of a UI cookie no longer discloses an API bearer token. Sessions can 
 revoked immediately by deleting their rows, at the cost of one database lookup for
 authenticated UI requests. Deployments must apply migration `0033_ui_sessions` before
 serving the updated UI.
+
+## Addendum: device sign-in (hades #576, U9)
+
+A device token is exchanged once at `POST /ui/device-sign-in` for a session of this
+kind; it is the same door, not a second session mechanism. The token authenticates
+only that request, as a bearer token does at the sign-in form, and never reaches the
+cookie. Revoking the device disables its principal, so its sessions stop being
+sessions at once.

@@ -6224,6 +6224,21 @@ class Supervisor:
                 task.updated_at = self._clock.now()
                 uow.tasks.save(task)
             self._record_wall_time(uow, attempt)
+            if parsed is None and outputs.metrics is not None:
+                # hades #604: the provider read the usage report while it collected;
+                # the report directory is not here to parse (Kubernetes).
+                self._record_harness_metrics(
+                    uow,
+                    attempt,
+                    ParsedReport(
+                        claim=None,
+                        raw=None,
+                        errors=[],
+                        blocked_md=None,
+                        report_present=False,
+                        metrics=outputs.metrics,
+                    ),
+                )
             if parsed is not None:
                 self._record_harness_metrics(uow, attempt, parsed)
                 if parsed.progress:
@@ -6387,6 +6402,8 @@ class Supervisor:
             metrics.tokens_in = reported.tokens_in
         if reported.tokens_out is not None:
             metrics.tokens_out = reported.tokens_out
+        if reported.tokens_cache_read is not None:
+            metrics.tokens_cache_read = reported.tokens_cache_read
         if reported.duration_ms is not None:
             metrics.harness_duration_ms = reported.duration_ms
         if reported.tool_calls is not None:

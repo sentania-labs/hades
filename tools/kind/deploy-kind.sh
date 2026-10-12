@@ -49,12 +49,12 @@ cleanup() {
   if [ "$status" -ne 0 ] && [ "$cluster_created" -eq 1 ]; then
     echo "--- deploy-kind: cluster state on failure ---" >&2
     KUBECONFIG="$kubeconfig" kubectl get pods -A -o wide >&2 2>/dev/null || :
-    KUBECONFIG="$kubeconfig" kubectl -n crucible describe pods >&2 2>/dev/null || :
-    KUBECONFIG="$kubeconfig" kubectl -n crucible logs deployment/crucible-api --tail=120 >&2 2>/dev/null || :
-    KUBECONFIG="$kubeconfig" kubectl -n crucible logs deployment/crucible-api --previous --tail=60 >&2 2>/dev/null || :
-    KUBECONFIG="$kubeconfig" kubectl -n crucible logs deployment/crucible-supervisor --tail=200 >&2 2>/dev/null || :
-    KUBECONFIG="$kubeconfig" kubectl -n crucible logs job/crucible-migrate --tail=40 >&2 2>/dev/null || :
-    KUBECONFIG="$kubeconfig" kubectl -n crucible-workers get pods,jobs,pvc >&2 2>/dev/null || :
+    KUBECONFIG="$kubeconfig" kubectl -n hades describe pods >&2 2>/dev/null || :
+    KUBECONFIG="$kubeconfig" kubectl -n hades logs deployment/hades-api --tail=120 >&2 2>/dev/null || :
+    KUBECONFIG="$kubeconfig" kubectl -n hades logs deployment/hades-api --previous --tail=60 >&2 2>/dev/null || :
+    KUBECONFIG="$kubeconfig" kubectl -n hades logs deployment/hades-supervisor --tail=200 >&2 2>/dev/null || :
+    KUBECONFIG="$kubeconfig" kubectl -n hades logs job/hades-migrate --tail=40 >&2 2>/dev/null || :
+    KUBECONFIG="$kubeconfig" kubectl -n hades-workers get pods,jobs,pvc >&2 2>/dev/null || :
   fi
   if [ "$cluster_created" -eq 1 ]; then
     kind delete cluster --name "$cluster" >/dev/null 2>&1 || :
@@ -287,7 +287,7 @@ generatorOptions:
   disableNameSuffixHash: true
 configMapGenerator:
   - name: crucible-registry-ca
-    namespace: crucible
+    namespace: hades
     files:
       - ca.crt
 patches:
@@ -299,8 +299,8 @@ cat > "$overlay/settings.yaml" <<EOF
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: crucible-settings
-  namespace: crucible
+  name: hades-settings
+  namespace: hades
 data:
   CRUCIBLE_KUBERNETES__IMAGE_REPOSITORIES: '["${registry_host}:5000/crucible-worker"]'
   CRUCIBLE_KUBERNETES__PROBE_IMAGE: ${worker_ref}
@@ -336,8 +336,8 @@ for component in api supervisor; do
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: crucible-${component}
-  namespace: crucible
+  name: hades-${component}
+  namespace: hades
 spec:
   template:
     spec:
@@ -361,20 +361,20 @@ echo "deploy-kind: applying deploy/kubernetes/overlays/kind at $release_image"
 # A Job's pod template is immutable, so a second apply against a live cluster would be
 # refused. Argo re-creates it through the hook annotations the Job carries; a plain
 # apply needs this. The cluster is new on the first run, so --ignore-not-found is enough.
-kubectl -n crucible delete job crucible-migrate --ignore-not-found --wait=true
+kubectl -n hades delete job hades-migrate --ignore-not-found --wait=true
 kubectl apply -k "$overlay"
 
-kubectl -n crucible wait --for=condition=Complete job/crucible-migrate --timeout=300s
-kubectl -n crucible rollout status statefulset/crucible-postgres --timeout=300s
-kubectl -n crucible rollout status deployment/crucible-api --timeout=300s
-kubectl -n crucible rollout status deployment/crucible-supervisor --timeout=300s
+kubectl -n hades wait --for=condition=Complete job/hades-migrate --timeout=300s
+kubectl -n hades rollout status statefulset/hades-postgres --timeout=300s
+kubectl -n hades rollout status deployment/hades-api --timeout=300s
+kubectl -n hades rollout status deployment/hades-supervisor --timeout=300s
 # The reference-cache claim is deliberately not waited on: kind's local-path class is
 # WaitForFirstConsumer, so it binds when the first Pod mounts it, which is the smoke's
 # origin-seed Pod. On the lab's class it binds earlier; neither is a property of the
 # manifests.
 echo "deploy-kind: the deployment is up"
-kubectl -n crucible get deploy,sts,svc,ingress,job
-kubectl -n crucible-workers get sa,role,rolebinding,networkpolicy,resourcequota,pvc
+kubectl -n hades get deploy,sts,svc,ingress,job
+kubectl -n hades-workers get sa,role,rolebinding,networkpolicy,resourcequota,pvc
 
 if [ "$first_run" = 1 ]; then
   CRUCIBLE_DEPLOY_KIND_STUB_IMAGE="$release_image" \

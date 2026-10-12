@@ -57,7 +57,7 @@
         "buildkitCacheStorageClass": {"$ref": "#/$defs/storageClass"}, "buildkitCacheSize": {"$ref": "#/$defs/quantity"}
       }
     },
-    "buildkit": {"type": "object", "additionalProperties": false, "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}}},
+    "buildkit": {"type": "object", "additionalProperties": false, "required": ["enabled", "namespace"], "properties": {"enabled": {"type": "boolean"}, "namespace": {"$ref": "#/$defs/name"}}},
     "cluster": {
       "type": "object", "additionalProperties": false,
       "required": ["dnsIp", "dnsNamespace", "dnsPodLabels", "renderTimezone", "localEndpoint", "podPidLimitOverride", "imagePullSecret"],

@@ -457,6 +457,22 @@ def build_plan(uow: UnitOfWork, task: Task, work: tuple[Attempt, Execution]) -> 
                 for v in contract.get("required_verification", [])
                 if v.get("kind") == "artifact"
             ),
+            reviewer_notes=tuple(
+                [
+                    f"{row.gate}: {row.detail}"
+                    for row in sorted(
+                        uow.gate_results.list_for_attempt(attempt.id), key=lambda row: row.gate
+                    )
+                    if not row.blocking and row.result in ("fail", "error")
+                ]
+                + [
+                    f"{row.gate}: {finding}"
+                    for row in sorted(
+                        uow.gate_results.list_for_attempt(attempt.id), key=lambda row: row.gate
+                    )
+                    for finding in row.findings
+                ]
+            ),
         )
     )
     existing = uow.pull_requests.get_for_task(task.id)

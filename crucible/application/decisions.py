@@ -53,7 +53,9 @@ def open_escalation(
 
     hades #393: `reason` is the one the worker's `blocked.md` named (missing_capability
     or ambiguous_contract) and `question` is its statement verbatim; both go on the
-    escalation and its event, and the wake summary names the reason."""
+    escalation and its event, and the wake summary names the reason. A caller asking
+    the operator to decide sets reason="decision" (or "design" for a design question);
+    absent a reason, the escalation belongs to Foundry."""
     now = clock.now()
     escalation = Escalation(
         id=new_id(),

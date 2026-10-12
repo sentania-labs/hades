@@ -1479,6 +1479,7 @@ def settle_pull_request_state(
                 attempt_id=None,
                 question=f"{summary}. {problem}; {decide}."[:2000],
                 wake_reason=WakeReason.MERGED,
+                reason="decision",
                 summary=summary[:500],
             )
             return True

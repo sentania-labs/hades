@@ -12,9 +12,10 @@ from fastapi import Depends, Header, Request
 from sqlalchemy import Engine
 
 from crucible.adapters.github.client import RestGitHubClient
+from crucible.application.admin import devices
 from crucible.application.admin.context import AdminContext
 from crucible.application.admin.login import LoginRegistry
-from crucible.application.auth import authenticate
+from crucible.application.auth import authenticate, has_device_name
 from crucible.application.credential_renewer import ReadOnlyCredentialStore
 from crucible.application.errors import ForbiddenError, UnauthorizedError
 from crucible.application.harnesses import HarnessRegistry
@@ -129,10 +130,27 @@ def unit_of_work(ctx: Annotated[AppContext, Depends(app_context)]) -> Iterator[U
         yield uow
 
 
+def note_device_use(
+    uow: UnitOfWork, clock: Clock, principal: Principal, user_agent: str | None
+) -> None:
+    """hades #576 (U9): a device token's last use and user agent, committed before the
+    handler runs so its own transaction carries nothing of it. Recording is never a
+    reason to refuse the request."""
+    if not has_device_name(principal):
+        return
+    try:
+        if devices.record_use(uow, clock, principal, user_agent=user_agent):
+            uow.commit()
+    except Exception:
+        uow.rollback()
+
+
 def current_principal(
     request: Request,
+    ctx: Annotated[AppContext, Depends(app_context)],
     uow: Annotated[UnitOfWork, Depends(unit_of_work)],
     authorization: Annotated[str | None, Header()] = None,
+    user_agent: Annotated[str | None, Header()] = None,
 ) -> Principal:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise UnauthorizedError("a bearer token is required")
@@ -140,6 +158,7 @@ def current_principal(
     if principal is None:
         raise UnauthorizedError("token not recognized")
     request.state.principal = principal
+    note_device_use(uow, ctx.clock, principal, user_agent)
     return principal
 
 

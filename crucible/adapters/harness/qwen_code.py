@@ -63,6 +63,41 @@ def _result(report_dir: Path | None) -> dict[str, Any] | None:
     return result
 
 
+def _stats_usage(stats: Any) -> tuple[int | None, int | None, int | None]:
+    """Qwen Code's session `stats`: `models.<name>.tokens` with `prompt`, `candidates`
+    and `cached`, summed over the models."""
+    models = stats.get("models") if isinstance(stats, dict) else None
+    tokens_in = tokens_out = cache = None
+    for entry in models.values() if isinstance(models, dict) else ():
+        tokens = entry.get("tokens") if isinstance(entry, dict) else None
+        if not isinstance(tokens, dict):
+            continue
+        tokens_in = base.add(tokens_in, base.integer(tokens.get("prompt")))
+        tokens_out = base.add(tokens_out, base.integer(tokens.get("candidates")))
+        cache = base.add(cache, base.integer(tokens.get("cached")))
+    return tokens_in, tokens_out, cache
+
+
+def _usage(report_dir: Path) -> tuple[int | None, int | None, int | None]:
+    """hades #604: (tokens in, tokens out, cache reads) of the whole run. Every launch
+    ends in its own result event (a relaunch after a transport error is a new session,
+    hades #490), so the run is the sum over result events. A result's `usage` is read
+    first and its `stats` when it has no usage; Qwen reports no cost."""
+    tokens_in = tokens_out = cache = None
+    for event in base.json_lines(report_dir / base.TRANSCRIPT_NAME):
+        if event.get("type") != "result":
+            continue
+        usage = event.get("usage")
+        i, o = base.usage_totals(usage)
+        c = base.cache_read(usage)
+        if i is None and o is None:
+            i, o, c = _stats_usage(event.get("stats"))
+        tokens_in = base.add(tokens_in, i)
+        tokens_out = base.add(tokens_out, o)
+        cache = base.add(cache, c)
+    return tokens_in, tokens_out, cache
+
+
 class QwenCodeAdapter:
     # credential_spec.harness stays "hermes": Kubernetes
     # seeds the existing lab-local Secret, not a second Qwen credential.
@@ -149,12 +184,13 @@ class QwenCodeAdapter:
                 model = event["model"]
             tracker.event(event)
             calls.update(tracker.ids)
-        tokens_in, tokens_out = base.usage_totals((result or {}).get("usage"))
+        tokens_in, tokens_out, cache = _usage(report_dir)
         duration = (result or {}).get("duration_ms")
         metrics = ReportMetrics(
             model=model,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
+            tokens_cache_read=cache,
             source="qwen_stream_json",
             tool_calls=len(calls),
             duration_ms=duration if isinstance(duration, int) else None,

@@ -428,7 +428,7 @@ def test_a_commit_by_another_author_is_for_the_reviewer_and_never_stops_the_task
         {
             "gate": GateName.COMMIT_POLICY,
             "detail": (
-                "1 commit(s) not authored as worker@example.test "
+                "1 commit(s) not authored as crucible-worker@users.noreply.github.com "
                 f"({'c' * 12} by someone@elsewhere.test)"
             ),
         }

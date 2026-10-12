@@ -249,11 +249,14 @@ def mint_token(principal: str) -> str:
 
 FIRST_RUN_FILE = "/var/lib/crucible/credentials/first-run-admin-token"
 TOKEN_PATTERN = re.compile(r"\bcru_[A-Z0-9]{26}\.[A-Za-z0-9_-]+\b")
-# Stable page markers; grep the data-page attribute on <main>, never a product name.
-# The board page renders directly from _base, which derives the marker from active.
-_PAGE_MARKERS: dict[str, str] = {
-    "/ui": "status",
-    "/ui/board": "board",
+# Stable page markers: the data-page attribute on <main>, never a product name or a
+# heading. Pages that render straight from _base (the board) derive theirs from the
+# active path. /ui itself is a redirect whose destination depends on the deployment's
+# first-run state, so it is not walked; the board is fetched explicitly instead.
+BOARD_PATH = "/ui/board"
+BOARD_MARKER = "board"
+PAGE_MARKERS: dict[str, str] = {
+    "/ui/setup": "setup",
     "/ui/harnesses": "harnesses",
     "/ui/credentials": "credentials",
     "/ui/images": "images",
@@ -269,6 +272,15 @@ _PAGE_MARKERS: dict[str, str] = {
     "/ui/bootstrap": "bootstrap",
     "/ui/settings": "settings",
 }
+
+
+def expect_page(opener: urllib.request.OpenerDirector, url: str, path: str, marker: str) -> None:
+    """A 200 whose main element carries the page's marker, whatever its headings say."""
+    with opener.open(url, timeout=DEFAULT_TIMEOUT) as response:
+        if response.status != 200:
+            raise SmokeError(f"the first-run UI page {path} returned HTTP {response.status}")
+        if f'data-page="{marker}"'.encode() not in response.read():
+            raise SmokeError(f"the first-run UI page {path} lacks data-page={marker!r}")
 
 
 def walk_first_run_ui(base_url: str) -> None:
@@ -300,29 +312,23 @@ def walk_first_run_ui(base_url: str) -> None:
         raise SmokeError("the first-run sign-in page has no pre-authentication CSRF nonce")
     if FIRST_RUN_FILE not in sign_in or "logs migrate" in sign_in:
         raise SmokeError("the sign-in page does not name the first-run token file")
-    # Post the sign-in form (next=/ui returns to Status).
-    sign_in_url = f"{base_url}/ui/sign-in"
-    opener.open(
-        urllib.request.Request(
-            sign_in_url,
-            data=urllib.parse.urlencode(
-                {"csrf": csrf.group(1), "token": token, "next": "/ui"}
-            ).encode(),
-            method="POST",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        ),
-        timeout=DEFAULT_TIMEOUT,
+    body = urllib.parse.urlencode({"csrf": csrf.group(1), "token": token, "next": "/ui"}).encode()
+    request_object = urllib.request.Request(
+        f"{base_url}/ui/sign-in",
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
-        for path, marker in _PAGE_MARKERS.items():
-            with opener.open(f"{base_url}{path}", timeout=DEFAULT_TIMEOUT) as response:
-                if response.status != 200:
-                    raise SmokeError(
-                        f"the first-run UI page {path} returned HTTP {response.status}"
-                    )
-                body = response.read()
-                if f'data-page="{marker}"'.encode() not in body:
-                    raise SmokeError(f"the first-run UI page {path} lacks data-page={marker!r}")
+        # Where a fresh sign-in lands is the product's choice (Set up while a first-run
+        # step is undone, the board otherwise; hades #169, #603). The smoke asks only
+        # that the sign-in succeed, then fetches the board and each page by name.
+        with opener.open(request_object, timeout=DEFAULT_TIMEOUT) as response:
+            if response.status != 200:
+                raise SmokeError(f"first-run administrator sign-in returned HTTP {response.status}")
+        expect_page(opener, f"{base_url}{BOARD_PATH}", BOARD_PATH, BOARD_MARKER)
+        for path, marker in PAGE_MARKERS.items():
+            expect_page(opener, f"{base_url}{path}", path, marker)
     except urllib.error.URLError as exc:
         raise SmokeError(f"the first-run UI walk failed: {exc}") from None
     left = compose(

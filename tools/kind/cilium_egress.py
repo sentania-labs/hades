@@ -42,7 +42,7 @@ def _main_renderer(path: str) -> Any:
 def render(args: argparse.Namespace) -> dict[str, Any]:
     common = {
         "name": f"np-proof-{args.form}",
-        "namespace": "crucible-workers",
+        "namespace": "hades-workers",
         "object_labels": LABELS,
         "attempt_id": "PROOF",
         "role": k8sspec.ROLE_WORKER,
@@ -81,7 +81,7 @@ async def canary(args: argparse.Namespace) -> dict[str, Any]:
         else ClusterEgress(dns_namespace="", dns_pod_labels=())
     )
     config = KubernetesConfig(
-        namespace="crucible-workers",
+        namespace="hades-workers",
         cluster_dns_ip=args.dns_ip,
         egress=egress,
         local_endpoint_url=args.endpoint_url,
@@ -93,7 +93,7 @@ async def canary(args: argparse.Namespace) -> dict[str, Any]:
         launch_timeout_seconds=240,
         poll_interval_seconds=1,
     )
-    client = KubernetesClient(kubeconfig_access(args.kubeconfig), "crucible-workers")
+    client = KubernetesClient(kubeconfig_access(args.kubeconfig), "hades-workers")
     # Crucible runs inside the cluster and resolves the gateway's name to its service
     # address; this process runs on the host, so that one answer is given to it.
     gateway_host = urlsplit(args.endpoint_url).hostname

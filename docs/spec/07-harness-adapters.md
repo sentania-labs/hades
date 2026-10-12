@@ -343,6 +343,33 @@ cannot choose its harness's exit code (FDY-0140). Exit 75 without it is
 `unverified`, at most 200 per attempt and 1000 characters per line, each
 line redacted before it is stored (12).
 
+### Usage per attempt (hades #604)
+
+Every harness reports what its run spent, in its own words, and the adapter reads
+tokens in, tokens out, prompt-cache reads and cost (where the harness reports one)
+into the attempt's metrics row (`attempt_metrics.tokens_in`, `tokens_out`,
+`tokens_cache_read`, `cost_units`, with `cost_source` naming the report):
+
+| Harness | Where | In, out, cache read | Cost |
+|---|---|---|---|
+| Claude Code | the stream-json `result` line | `modelUsage` summed over its models (`inputTokens`, `outputTokens`, `cacheReadInputTokens`); the per-turn `usage` lines summed for a figure it lacks | `total_cost_usd` |
+| Codex | every `turn.completed` | `usage` summed over the turns (`input_tokens`, `output_tokens`, `cached_input_tokens`) | none reported |
+| Hermes | the usage record (`hermes-usage.json`) | `input_tokens`, `output_tokens`, `cache_read_tokens` | `estimated_cost_usd` |
+| Qwen Code | every stream-json `result` event | `usage` (`input_tokens`, `output_tokens`, `cache_read_input_tokens`), else `stats.models.*.tokens` (`prompt`, `candidates`, `cached`), summed over the events | none reported |
+
+A Claude Code run can end more than one turn (a background task's notification
+starts another), and each result line's `usage` is that turn's alone while
+`modelUsage` and `total_cost_usd` are the session's running totals, so the last
+result line is the run. Each Qwen Code launch ends in its own result event (a
+relaunch after a transport error is a new session), so the run is their sum. A
+field the harness does not report stays null. The Kubernetes provider reads the
+report directory into a scratch directory that is gone by the time the supervisor
+parses, so it reads the usage there while it collects and hands it to the
+supervisor with the collected outputs. `GET /attempts/{id}` and every attempt in
+`GET /tasks/{id}` carry it as `usage`, the task carries the attempts' sum, and
+`GET /routing/history` fills `tokens_in`, `tokens_out`, `tokens_cache_read` and
+`cost_units` from the same row.
+
 ## Local model endpoints
 
 `LaunchContext` and `LaunchSpec` carry `endpoint` as `subscription` or `local`

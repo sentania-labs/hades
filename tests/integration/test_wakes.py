@@ -28,12 +28,12 @@ async def test_the_wake_row_exists_before_any_delivery(
     client: TestClient, supervisor: Supervisor
 ) -> None:
     """The row is committed with the state change; delivery is separate (17)."""
-    task_id = submit_and_start(client, "crucible-worker:fake-malformed-report")
+    task_id = submit_and_start(client, "crucible-worker:fake-secret-leak")
     await run_to_settled(supervisor, client, task_id)
     wakes = client.get("/v1/wakes").json()["items"]
     assert len(wakes) == 1
     wake = wakes[0]
-    assert wake["reason"] == "internal_review_needed"
+    assert wake["reason"] == "pre_pr_gates_failed"
     assert wake["task_id"] == task_id
     assert wake["attempts"] == 0 and wake["delivered_at"] is None
     assert wake["payload"]["links"]["task"] == f"/v1/tasks/{task_id}"
@@ -53,7 +53,7 @@ async def test_the_wake_row_exists_before_any_delivery(
 
 
 async def test_poll_and_ack(client: TestClient, supervisor: Supervisor) -> None:
-    task_id = submit_and_start(client, "crucible-worker:fake-malformed-report")
+    task_id = submit_and_start(client, "crucible-worker:fake-secret-leak")
     await run_to_settled(supervisor, client, task_id)
     wake_id = client.get("/v1/wakes").json()["items"][0]["id"]
     r = client.post(f"/v1/wakes/{wake_id}/ack", json={"note": "read it, correcting the report"})
@@ -67,7 +67,7 @@ async def test_poll_and_ack(client: TestClient, supervisor: Supervisor) -> None:
 async def test_a_wake_belongs_to_one_principal(
     client: TestClient, supervisor: Supervisor, tokens: dict[str, str]
 ) -> None:
-    task_id = submit_and_start(client, "crucible-worker:fake-malformed-report")
+    task_id = submit_and_start(client, "crucible-worker:fake-secret-leak")
     await run_to_settled(supervisor, client, task_id)
     wake_id = client.get("/v1/wakes").json()["items"][0]["id"]
     other = {"Authorization": f"Bearer {tokens['operator']}"}
@@ -81,12 +81,12 @@ async def test_webhook_delivery_signs_the_body(
 ) -> None:
     receiver = RecordingDeliverer(ok=True)
     supervisor = make_supervisor(ctx, provider, wake_deliverer=receiver)
-    task_id = submit_and_start(client, "crucible-worker:fake-malformed-report")
+    task_id = submit_and_start(client, "crucible-worker:fake-secret-leak")
     await run_to_settled(supervisor, client, task_id)
     await supervisor.tick()
     assert len(receiver.bodies) == 1
     document = json.loads(receiver.bodies[0])
-    assert document["reason"] == "internal_review_needed"
+    assert document["reason"] == "pre_pr_gates_failed"
     assert document["task"]["id"] == task_id
     wake = client.get("/v1/wakes").json()["items"][0]
     assert wake["attempts"] == 1 and wake["delivered_at"] is not None
@@ -100,7 +100,7 @@ async def test_a_failing_receiver_only_delays(
 ) -> None:
     receiver = RecordingDeliverer(ok=False)
     supervisor = make_supervisor(ctx, provider, wake_deliverer=receiver)
-    task_id = submit_and_start(client, "crucible-worker:fake-malformed-report")
+    task_id = submit_and_start(client, "crucible-worker:fake-secret-leak")
     await run_to_settled(supervisor, client, task_id)
     await supervisor.tick()
     wake = client.get("/v1/wakes").json()["items"][0]
@@ -137,7 +137,7 @@ async def test_no_webhook_configured_means_poll_only(
 ) -> None:
     receiver = RecordingDeliverer(url=None)
     supervisor = make_supervisor(ctx, provider, wake_deliverer=receiver)
-    task_id = submit_and_start(client, "crucible-worker:fake-malformed-report")
+    task_id = submit_and_start(client, "crucible-worker:fake-secret-leak")
     await run_to_settled(supervisor, client, task_id)
     await supervisor.tick()
     assert receiver.bodies == []

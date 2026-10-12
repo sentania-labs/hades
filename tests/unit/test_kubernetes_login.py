@@ -153,7 +153,7 @@ async def test_a_device_login_shows_the_url_and_code_and_stores_the_secret() -> 
     assert session.exit_code == 0
     assert session.credential_written is True
     assert not any("crucible-login.exit" in line for line in session.lines)
-    body = api.objects[("secrets", "crucible-harness-codex")].body
+    body = api.objects[("secrets", "hades-harness-codex")].body
     assert base64.b64decode(body["data"]["auth.json"]) == CODEX_AUTH
     assert body["metadata"]["labels"] == {
         k8sspec.LABEL_MANAGED_BY: "crucible",
@@ -223,7 +223,7 @@ async def test_agy_logs_in_from_the_home_directory_its_token_sits_under() -> Non
         for item in login_job(api)["spec"]["template"]["spec"]["containers"][0]["env"]
     }
     assert env["HOME"] == "/home/worker" and env["CRUCIBLE_LOGIN_DIR"] == "/home/worker"
-    stored = api.harness_secret("crucible-harness-agy")
+    stored = api.harness_secret("hades-harness-agy")
     assert stored == {"antigravity-cli_antigravity-oauth-token": token}
 
 
@@ -304,9 +304,7 @@ async def test_a_pasted_code_goes_in_over_exec_stdin_and_never_in_an_argv() -> N
     assert stdin == [b"the-pasted-code#state\n"]
     everything = json.dumps(api.created)
     assert "the-pasted-code" not in everything
-    assert api.harness_secret("crucible-harness-claude-code") == {
-        "oauth-token": b"not-a-real-value\n"
-    }
+    assert api.harness_secret("hades-harness-claude-code") == {"oauth-token": b"not-a-real-value\n"}
 
 
 # ----- what is and is not stored ------------------------------------------------------
@@ -314,7 +312,7 @@ async def test_a_pasted_code_goes_in_over_exec_stdin_and_never_in_an_argv() -> N
 
 async def test_files_that_fail_acceptance_leave_the_secret_exactly_as_it_was() -> None:
     api, provider = login_provider()
-    api.put_harness_secret("crucible-harness-codex", {"auth.json": b"the old session"})
+    api.put_harness_secret("hades-harness-codex", {"auth.json": b"the old session"})
     api.login = FakeLogin(files={"/home/worker/.codex/auth.json": b"{}"})
     session = LoginSession(harness="codex", started_at=0)
     await run_login(
@@ -323,7 +321,7 @@ async def test_files_that_fail_acceptance_leave_the_secret_exactly_as_it_was() -
     assert session.state == "failed"
     assert session.credential_written is False
     assert "were not stored" in str(session.error) and "missing keys" in str(session.error)
-    assert api.harness_secret("crucible-harness-codex") == {"auth.json": b"the old session"}
+    assert api.harness_secret("hades-harness-codex") == {"auth.json": b"the old session"}
 
 
 async def test_a_login_that_wrote_nothing_stores_nothing() -> None:
@@ -339,7 +337,7 @@ async def test_a_login_that_wrote_nothing_stores_nothing() -> None:
     await run_login(provider, "codex", session, accept=accept)
     assert seen == [{}]
     assert session.state == "failed" and session.exit_code == 1
-    assert not api.secret_exists("crucible-harness-codex")
+    assert not api.secret_exists("hades-harness-codex")
 
 
 async def test_a_nonzero_exit_with_valid_files_stores_them_and_says_so() -> None:
@@ -356,7 +354,7 @@ async def test_a_nonzero_exit_with_valid_files_stores_them_and_says_so() -> None
 
 async def test_cancel_deletes_the_job_and_leaves_the_secret_alone() -> None:
     api, provider = login_provider()
-    api.put_harness_secret("crucible-harness-codex", {"auth.json": CODEX_AUTH})
+    api.put_harness_secret("hades-harness-codex", {"auth.json": CODEX_AUTH})
     api.login = FakeLogin(never_exits=True)
     session = LoginSession(harness="codex", started_at=0)
 
@@ -366,7 +364,7 @@ async def test_cancel_deletes_the_job_and_leaves_the_secret_alone() -> None:
 
     await run_login(provider, "codex", session, during=cancel)
     assert session.state == "failed" and session.error == "login cancelled"
-    assert api.harness_secret("crucible-harness-codex") == {"auth.json": CODEX_AUTH}
+    assert api.harness_secret("hades-harness-codex") == {"auth.json": CODEX_AUTH}
     assert ("jobs", login_job(api)["metadata"]["name"]) in api.deleted
 
 
@@ -397,7 +395,7 @@ async def test_a_running_login_is_listed_and_a_probe_waits_for_it() -> None:
     attempt that raced past the supervisor's check seeds the credential as it stands,
     and the login declines to write over it (the admin tier holds that half)."""
     api, provider = login_provider()
-    api.put_harness_secret("crucible-harness-codex", {"auth.json": CODEX_AUTH})
+    api.put_harness_secret("hades-harness-codex", {"auth.json": CODEX_AUTH})
     api.login = FakeLogin(never_exits=True)
     session = LoginSession(harness="codex", started_at=0)
     seen: list[frozenset[str]] = []
@@ -421,7 +419,7 @@ async def test_a_running_login_is_listed_and_a_probe_waits_for_it() -> None:
 
 async def test_a_probe_in_flight_is_seen_as_holding_the_credential() -> None:
     api, provider = login_provider()
-    api.put_harness_secret("crucible-harness-codex", {"auth.json": CODEX_AUTH})
+    api.put_harness_secret("hades-harness-codex", {"auth.json": CODEX_AUTH})
     api.script_all("hang")
     held: list[list[str]] = []
 
@@ -451,22 +449,22 @@ def test_the_service_creates_the_secret_and_then_replaces_it_whole() -> None:
         "claude_code", {"oauth-token": b"a\n", ".claude.json": b"{}"}
     )
     assert first == {
-        "secret": "crucible-harness-claude-code",
+        "secret": "hades-harness-claude-code",
         "created": True,
         "files": [".claude.json", "oauth-token"],
     }
     second = provider.write_credential_files("claude_code", {"oauth-token": b"b\n"})
     assert second["created"] is False
-    assert api.harness_secret("crucible-harness-claude-code") == {"oauth-token": b"b\n"}
-    labels = api.objects[("secrets", "crucible-harness-claude-code")].body["metadata"]["labels"]
+    assert api.harness_secret("hades-harness-claude-code") == {"oauth-token": b"b\n"}
+    labels = api.objects[("secrets", "hades-harness-claude-code")].body["metadata"]["labels"]
     assert labels[k8sspec.LABEL_MANAGED_BY] == "crucible"
 
 
 def test_a_gitops_secret_is_taken_over_by_the_first_service_write() -> None:
     api, provider = login_provider()
-    api.put_harness_secret("crucible-harness-codex", {"auth.json": b"old", "stray": b"x"})
+    api.put_harness_secret("hades-harness-codex", {"auth.json": b"old", "stray": b"x"})
     provider.write_credential_files("codex", {"auth.json": CODEX_AUTH})
-    body = api.objects[("secrets", "crucible-harness-codex")].body
+    body = api.objects[("secrets", "hades-harness-codex")].body
     assert set(body["data"]) == {"auth.json"}
     assert body["metadata"]["labels"][k8sspec.LABEL_CREDENTIAL] == "codex"
 
@@ -480,9 +478,7 @@ def test_only_declared_auth_files_are_ever_written() -> None:
 def test_read_credential_files_maps_keys_back_to_auth_file_names() -> None:
     api, provider = login_provider()
     assert provider.read_credential_files("agy") is None
-    api.put_harness_secret(
-        "crucible-harness-agy", {"antigravity-cli_antigravity-oauth-token": b"{}"}
-    )
+    api.put_harness_secret("hades-harness-agy", {"antigravity-cli_antigravity-oauth-token": b"{}"})
     assert provider.read_credential_files("agy") == {
         "antigravity-cli/antigravity-oauth-token": b"{}"
     }
@@ -500,7 +496,7 @@ async def test_an_optional_credential_is_available_by_its_secret_without_a_mappi
 
 async def test_sync_back_marks_the_secret_as_the_services_own() -> None:
     api, provider = login_provider()
-    api.put_harness_secret("crucible-harness-codex", {"auth.json": CODEX_AUTH})
+    api.put_harness_secret("hades-harness-codex", {"auth.json": CODEX_AUTH})
     launch = spec(harness="codex", image=WORKER)
     workspace = await provider.prepare(launch)
     handle = await provider.launch(workspace, launch)
@@ -513,7 +509,7 @@ async def test_sync_back_marks_the_secret_as_the_services_own() -> None:
     outputs = await provider.collect(handle, workspace, launch)
     assert outputs.credential_sync is not None
     assert [f.synced for f in outputs.credential_sync.files] == [True]
-    labels = api.objects[("secrets", "crucible-harness-codex")].body["metadata"]["labels"]
+    labels = api.objects[("secrets", "hades-harness-codex")].body["metadata"]["labels"]
     assert labels[k8sspec.LABEL_MANAGED_BY] == "crucible"
 
 
@@ -537,7 +533,7 @@ def probe_request(harness: str = "codex") -> ProbeRequest:
 
 async def test_the_probe_runs_a_worker_on_the_secret_and_removes_everything() -> None:
     api, provider = login_provider()
-    api.put_harness_secret("crucible-harness-codex", {"auth.json": CODEX_AUTH})
+    api.put_harness_secret("hades-harness-codex", {"auth.json": CODEX_AUTH})
     result = await provider.probe_credential(probe_request())
     assert result.exit_code == 0, result
     assert result.harness_version == "0.156.0"
@@ -555,7 +551,7 @@ async def test_the_probe_runs_a_worker_on_the_secret_and_removes_everything() ->
     assert set(identity["data"]) == {"IDENTITY.md", "harness__config.toml"}
     for kind in ("jobs", "pods", "networkpolicies", "configmaps", "persistentvolumeclaims"):
         assert not [n for n in api.object_names(kind) if "probe" in n], kind
-    assert api.object_names("secrets") == ["crucible-harness-codex"]
+    assert api.object_names("secrets") == ["hades-harness-codex"]
 
 
 @pytest.mark.parametrize("keeps_pod", [False, True])
@@ -564,7 +560,7 @@ async def test_a_probe_the_job_deadline_ended_is_a_timeout(keeps_pod: bool) -> N
     is ended by the cluster first. Whether the Pod is removed (the wait sees a failed
     Job) or left terminated with 137, the probe is a timeout, not a crash."""
     api, provider = login_provider(job_deadline_fires=True, deadline_keeps_pod=keeps_pod)
-    api.put_harness_secret("crucible-harness-codex", {"auth.json": CODEX_AUTH})
+    api.put_harness_secret("hades-harness-codex", {"auth.json": CODEX_AUTH})
     api.script_all("hang")
     result = await provider.probe_credential(probe_request())
     assert result.timed_out is True, result
@@ -575,7 +571,7 @@ async def test_a_probe_the_job_deadline_ended_is_a_timeout(keeps_pod: bool) -> N
 
 async def test_a_probe_that_crashes_is_not_a_timeout() -> None:
     api, provider = login_provider()
-    api.put_harness_secret("crucible-harness-codex", {"auth.json": CODEX_AUTH})
+    api.put_harness_secret("hades-harness-codex", {"auth.json": CODEX_AUTH})
     api.script_all("crash")
     result = await provider.probe_credential(probe_request())
     assert result.timed_out is False and result.exit_code == 1, result
@@ -591,7 +587,7 @@ async def test_a_probe_with_no_secret_is_refused_and_leaves_nothing() -> None:
 
 async def test_the_supervisor_neither_sweeps_nor_adopts_a_probe_in_flight() -> None:
     api, provider = login_provider()
-    api.put_harness_secret("crucible-harness-codex", {"auth.json": CODEX_AUTH})
+    api.put_harness_secret("hades-harness-codex", {"auth.json": CODEX_AUTH})
     api.script_all("hang")
     other = login_provider()[1]
     other.client = provider.client
@@ -797,7 +793,7 @@ def test_routing_counts_a_harness_only_once_its_secret_holds_the_credential() ->
     api, provider = login_provider()
     credential = CodexAdapter().credential_spec()
     assert _secret_holds(provider, "codex", credential) is False
-    api.put_harness_secret("crucible-harness-codex", {})
+    api.put_harness_secret("hades-harness-codex", {})
     assert _secret_holds(provider, "codex", credential) is False
     provider.write_credential_files("codex", {"auth.json": CODEX_AUTH})
     assert _secret_holds(provider, "codex", credential) is True
@@ -853,7 +849,7 @@ def test_the_login_lock_is_never_swept_as_an_attempt_object() -> None:
 
 
 def test_a_delete_by_uid_sends_the_precondition(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = KubernetesClient(ClusterAccess(server="https://127.0.0.1:1"), "crucible-workers")
+    client = KubernetesClient(ClusterAccess(server="https://127.0.0.1:1"), "hades-workers")
     sent: list[Any] = []
     monkeypatch.setattr(client, "_json", lambda method, path, *, body=None, **_: sent.append(body))
     client.delete("configmaps", "login-lock-codex", uid="uid-7")
@@ -866,7 +862,7 @@ async def test_a_probe_on_a_namespace_that_failed_its_readiness_probe_seeds_noth
     """Issue 59: the probe's claim, its preparer Pod and its copy of the harness Secret
     are all made after the readiness gate, not only its worker."""
     api, provider = login_provider(egress_enforced=False)
-    api.put_harness_secret("crucible-harness-codex", {"auth.json": CODEX_AUTH})
+    api.put_harness_secret("hades-harness-codex", {"auth.json": CODEX_AUTH})
     with pytest.raises(ProviderError, match="not ready"):
         await provider.probe_credential(probe_request())
     for kind in ("jobs", "persistentvolumeclaims", "configmaps", "secrets"):

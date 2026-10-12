@@ -82,7 +82,7 @@ async def test_no_service_account_token_no_host_namespaces_no_service_links(
     api, _provider, _launch = ran
     pod = pod_of(api, prefix)
     assert pod["automountServiceAccountToken"] is False
-    assert pod["serviceAccountName"] == "crucible-worker"
+    assert pod["serviceAccountName"] == "hades-worker"
     assert pod["enableServiceLinks"] is False
     assert pod["hostNetwork"] is False
     assert pod["hostPID"] is False
@@ -122,7 +122,7 @@ async def test_the_request_fractions_are_configurable_per_policy() -> None:
     codex_image = "crucible-worker:codex-fake-succeed-2"
     api, registry, provider = build()
     registry.register(codex_image, harness="codex", version="0.153.4")
-    api.put_harness_secret("crucible-harness-codex", {"auth.json": b"{}"})
+    api.put_harness_secret("hades-harness-codex", {"auth.json": b"{}"})
     launch = spec(
         harness="codex",
         image=codex_image,
@@ -160,7 +160,7 @@ async def test_the_writable_credential_init_container_carries_its_own_restricted
     codex_image = "crucible-worker:codex-fake-succeed-2"
     api, registry, provider = build()
     registry.register(codex_image, harness="codex", version="0.153.4")
-    api.put_harness_secret("crucible-harness-codex", {"auth.json": b"{}"})
+    api.put_harness_secret("hades-harness-codex", {"auth.json": b"{}"})
     launch = spec(harness="codex", image=codex_image)
     workspace = await provider.prepare(launch)
     await provider.launch(workspace, launch)
@@ -283,7 +283,7 @@ async def test_every_object_carries_26s_four_labels_and_lives_in_the_workers_nam
         assert labels[k8sspec.LABEL_TASK] == launch.task_id
         assert labels[k8sspec.LABEL_OWNER] == launch.owner
         assert labels[k8sspec.LABEL_ROLE]
-        assert row["body"]["metadata"]["namespace"] == "crucible-workers"
+        assert row["body"]["metadata"]["namespace"] == "hades-workers"
 
 
 async def test_the_image_pull_secret_is_on_every_pod_when_one_is_configured(ran: Any) -> None:

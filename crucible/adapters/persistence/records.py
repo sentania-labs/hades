@@ -1250,6 +1250,7 @@ class AttemptMetricsRepo:
             tool_calls=row.tool_calls,
             tokens_in=row.tokens_in,
             tokens_out=row.tokens_out,
+            tokens_cache_read=row.tokens_cache_read,
             cost_units=row.cost_units,
             cost_source=row.cost_source,
             model_reported=row.model_reported,
@@ -1279,6 +1280,7 @@ class AttemptMetricsRepo:
         row.tool_calls = metrics.tool_calls
         row.tokens_in = metrics.tokens_in
         row.tokens_out = metrics.tokens_out
+        row.tokens_cache_read = metrics.tokens_cache_read
         row.cost_units = metrics.cost_units
         row.cost_source = metrics.cost_source
         row.model_reported = metrics.model_reported

@@ -1,6 +1,6 @@
 # The supervisor's only permission on the workers' side of the cluster (26). A Role, never
 # a ClusterRole: no cluster-scoped verb of any kind. Its only other grants are two narrow
-# Secret grants in `crucible` (github-app-rbac.yaml, first-run-rbac.yaml).
+# Secret grants in `hades` (github-app-rbac.yaml, first-run-rbac.yaml).
 #
 # The verb set is what `crucible/adapters/execution/k8sapi.py` can actually emit, which
 # is narrower than "everything on these kinds" and slightly wider than 26's original
@@ -31,8 +31,8 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: crucible-supervisor
-  namespace: crucible-workers
+  name: hades-supervisor
+  namespace: hades-workers
   labels:
     app.kubernetes.io/name: crucible
     app.kubernetes.io/component: supervisor

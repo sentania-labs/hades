@@ -123,12 +123,12 @@ def test_every_object_is_namespaced_to_crucible_or_is_a_namespace(
     rendered: dict[str, list[dict[str, Any]]], target: str
 ) -> None:
     """Nothing lands outside the namespaces C9 owns: the two of 26 and, since hades
-    #475, `crucible-buildkit` for Hades's own rootless BuildKit.
+    #475, `hades-buildkit` for Hades's own rootless BuildKit.
 
     The Argo Application is the exception and lives in `argocd`, because an Application
     object belongs to the GitOps controller's namespace by definition.
     """
-    allowed = {"crucible", "crucible-workers", "crucible-buildkit"}
+    allowed = {"hades", "hades-workers", "hades-buildkit"}
     for obj in rendered[target]:
         kind = obj["kind"]
         if kind in {"Namespace", "Application"}:
@@ -142,7 +142,7 @@ def test_workers_namespace_enforces_restricted_pod_security(
 ) -> None:
     """26: admission enforces the pod shape independently of Crucible's own code."""
     for target in ("base", "overlays/lab", "overlays/kind"):
-        namespace = _named(rendered[target], "Namespace", "crucible-workers")
+        namespace = _named(rendered[target], "Namespace", "hades-workers")
         labels = namespace["metadata"]["labels"]
         for label, value in PSA_LABELS.items():
             assert labels.get(label) == value, f"{target}: {label} is {labels.get(label)!r}"
@@ -158,7 +158,7 @@ def test_workers_namespace_has_the_default_deny(
         policies = [
             p
             for p in _of_kind(rendered[target], "NetworkPolicy")
-            if p["metadata"]["namespace"] == "crucible-workers"
+            if p["metadata"]["namespace"] == "hades-workers"
         ]
         assert len(policies) == 1, f"{target}: {len(policies)} NetworkPolicy objects"
         spec = policies[0]["spec"]
@@ -181,8 +181,8 @@ def test_no_cluster_scoped_permission_anywhere(
 def test_supervisor_role_verbs_are_exactly_what_26_records(
     rendered: dict[str, list[dict[str, Any]]],
 ) -> None:
-    role = _named(rendered["base"], "Role", "crucible-supervisor")
-    assert role["metadata"]["namespace"] == "crucible-workers"
+    role = _named(rendered["base"], "Role", "hades-supervisor")
+    assert role["metadata"]["namespace"] == "hades-workers"
     seen: dict[tuple[str, str], set[str]] = {}
     for rule in role["rules"]:
         for group in rule["apiGroups"]:
@@ -195,22 +195,22 @@ def test_each_rolebinding_names_only_the_control_plane_account(
     rendered: dict[str, list[dict[str, Any]]],
 ) -> None:
     """A second subject, or a Group subject, is how a Role would reach something other
-    than Crucible. The supervisor's Role in `crucible-workers` (26) and the GitHub App
-    Secret's Role in `crucible` (ADR 0017) bind the control-plane account; the first-run
+    than Crucible. The supervisor's Role in `hades-workers` (26) and the GitHub App
+    Secret's Role in `hades` (ADR 0017) bind the control-plane account; the first-run
     Secret's two (ADR 0016) are checked on their own below."""
-    subjects = [{"kind": "ServiceAccount", "name": "crucible-supervisor", "namespace": "crucible"}]
+    subjects = [{"kind": "ServiceAccount", "name": "hades-supervisor", "namespace": "hades"}]
     for target in ("base", "overlays/lab", "overlays/kind"):
         bindings = {
             (b["metadata"]["namespace"], b["metadata"]["name"]): b
             for b in _of_kind(rendered[target], "RoleBinding")
         }
         assert set(bindings) == {
-            ("crucible-workers", "crucible-supervisor"),
-            ("crucible", "crucible-github-app"),
-            *(("crucible", name) for name in FIRST_RUN_GRANTS),
+            ("hades-workers", "hades-supervisor"),
+            ("hades", "hades-github-app"),
+            *(("hades", name) for name in FIRST_RUN_GRANTS),
         }, target
         for (namespace, name), binding in bindings.items():
-            if namespace == "crucible" and name in FIRST_RUN_GRANTS:
+            if namespace == "hades" and name in FIRST_RUN_GRANTS:
                 continue  # the migrate account's and the api's first-run grants, below
             assert binding["roleRef"] == {
                 "apiGroup": "rbac.authorization.k8s.io",
@@ -224,14 +224,14 @@ def test_the_control_plane_reaches_only_the_github_app_secret_in_its_own_namespa
     rendered: dict[str, list[dict[str, Any]]],
 ) -> None:
     """ADR 0017: `get` and `patch` name the one Secret; `create` cannot be narrowed by
-    name, and nothing lists, watches, replaces or deletes a Secret in `crucible`."""
-    role = _named(rendered["base"], "Role", "crucible-github-app")
-    assert role["metadata"]["namespace"] == "crucible"
+    name, and nothing lists, watches, replaces or deletes a Secret in `hades`."""
+    role = _named(rendered["base"], "Role", "hades-github-app")
+    assert role["metadata"]["namespace"] == "hades"
     assert role["rules"] == [
         {
             "apiGroups": [""],
             "resources": ["secrets"],
-            "resourceNames": ["crucible-github-app"],
+            "resourceNames": ["hades-github-app"],
             "verbs": ["get", "patch"],
         },
         {"apiGroups": [""], "resources": ["secrets"], "verbs": ["create"]},
@@ -241,9 +241,9 @@ def test_the_control_plane_reaches_only_the_github_app_secret_in_its_own_namespa
         for r in _of_kind(rendered["base"], "Role")
     }
     assert roles == {
-        ("crucible-workers", "crucible-supervisor"),
-        ("crucible", "crucible-github-app"),
-        *(("crucible", name) for name in FIRST_RUN_GRANTS),
+        ("hades-workers", "hades-supervisor"),
+        ("hades", "hades-github-app"),
+        *(("hades", name) for name in FIRST_RUN_GRANTS),
     }
 
 
@@ -256,8 +256,8 @@ def test_gitops_delivers_no_github_app_secret(
     for target in TARGETS:
         for obj in rendered[target]:
             if obj["kind"] in {"Secret", "SealedSecret", "ExternalSecret"}:
-                assert obj["metadata"]["name"] != "crucible-github-app", target
-    for name in ("crucible-api", "crucible-supervisor"):
+                assert obj["metadata"]["name"] != "hades-github-app", target
+    for name in ("hades-api", "hades-supervisor"):
         deployment = _named(rendered["base"], "Deployment", name)
         volumes = deployment["spec"]["template"]["spec"]["volumes"]
         github = next(v for v in volumes if v["name"] == "github")
@@ -268,8 +268,8 @@ def test_gitops_delivers_no_github_app_secret(
 # Secret (Kubernetes cannot narrow `create` by name) and patch that one, and the api's
 # account may delete that one. Nothing in Crucible may read it.
 FIRST_RUN_GRANTS = {
-    "crucible-first-run-admin-writer": (
-        "crucible-migrate",
+    "hades-first-run-admin-writer": (
+        "hades-migrate",
         [
             {"apiGroups": [""], "resources": ["secrets"], "verbs": ["create"]},
             {
@@ -280,8 +280,8 @@ FIRST_RUN_GRANTS = {
             },
         ],
     ),
-    "crucible-first-run-admin-remover": (
-        "crucible-supervisor",
+    "hades-first-run-admin-remover": (
+        "hades-supervisor",
         [
             {
                 "apiGroups": [""],
@@ -301,14 +301,12 @@ def test_the_first_run_secret_grants_are_exactly_adr_0016s(
         roles = {
             r["metadata"]["name"]: r
             for r in _of_kind(rendered[target], "Role")
-            if r["metadata"]["namespace"] == "crucible"
-            and r["metadata"]["name"] != "crucible-github-app"
+            if r["metadata"]["namespace"] == "hades" and r["metadata"]["name"] != "hades-github-app"
         }
         bindings = {
             b["metadata"]["name"]: b
             for b in _of_kind(rendered[target], "RoleBinding")
-            if b["metadata"]["namespace"] == "crucible"
-            and b["metadata"]["name"] != "crucible-github-app"
+            if b["metadata"]["namespace"] == "hades" and b["metadata"]["name"] != "hades-github-app"
         }
         assert set(roles) == set(FIRST_RUN_GRANTS) == set(bindings), target
         for name, (account, rules) in FIRST_RUN_GRANTS.items():
@@ -319,10 +317,10 @@ def test_the_first_run_secret_grants_are_exactly_adr_0016s(
                 "name": name,
             }
             assert bindings[name]["subjects"] == [
-                {"kind": "ServiceAccount", "name": account, "namespace": "crucible"}
+                {"kind": "ServiceAccount", "name": account, "namespace": "hades"}
             ], f"{target}: {name}"
-        job = _named(rendered[target], "Job", "crucible-migrate")
-        assert job["spec"]["template"]["spec"]["serviceAccountName"] == "crucible-migrate"
+        job = _named(rendered[target], "Job", "hades-migrate")
+        assert job["spec"]["template"]["spec"]["serviceAccountName"] == "hades-migrate"
 
 
 def test_the_kind_tier_applies_the_deployed_rbac_files() -> None:
@@ -339,13 +337,13 @@ def test_the_kind_tier_applies_the_deployed_rbac_files() -> None:
 def test_the_worker_account_is_bound_to_nothing(
     rendered: dict[str, list[dict[str, Any]]],
 ) -> None:
-    """26: `crucible-worker` is a no-permission account, and a token it never mounts."""
-    account = _named(rendered["base"], "ServiceAccount", "crucible-worker")
-    assert account["metadata"]["namespace"] == "crucible-workers"
+    """26: `hades-worker` is a no-permission account, and a token it never mounts."""
+    account = _named(rendered["base"], "ServiceAccount", "hades-worker")
+    assert account["metadata"]["namespace"] == "hades-workers"
     assert account["automountServiceAccountToken"] is False
     for binding in _of_kind(rendered["base"], "RoleBinding"):
         names = {s.get("name") for s in binding["subjects"]}
-        assert "crucible-worker" not in names
+        assert "hades-worker" not in names
 
 
 def test_no_docker_socket_and_no_host_path_anywhere(
@@ -375,7 +373,7 @@ def _containers(spec: dict[str, Any]) -> list[dict[str, Any]]:
 # Its documented shape (seccomp and AppArmor unconfined, setuid newuidmap for the subuid
 # range) is what its own namespace admits at `privileged`; the test below asserts that
 # shape and that nothing else in the base shares it.
-ROOTLESS_BUILDKIT = "Deployment/crucible-buildkit"
+ROOTLESS_BUILDKIT = "Deployment/hades-buildkit"
 
 
 def test_no_pod_is_privileged_or_shares_a_host_namespace(
@@ -401,8 +399,8 @@ def test_the_buildkit_namespace_admits_only_the_documented_rootless_shape(
     rendered: dict[str, list[dict[str, Any]]],
 ) -> None:
     """hades #475: rootless BuildKit's documented Pod (seccomp and AppArmor unconfined)
-    is outside Baseline, so it lives alone in `crucible-buildkit` at `privileged`, with
-    `crucible` still `restricted`; its NetworkPolicy admits the workers namespace on
+    is outside Baseline, so it lives alone in `hades-buildkit` at `privileged`, with
+    `hades` still `restricted`; its NetworkPolicy admits the workers namespace on
     1234 and nothing else; and no other Pod anywhere is unconfined."""
     pins = dict(
         line.split("=", 1)
@@ -411,16 +409,16 @@ def test_the_buildkit_namespace_admits_only_the_documented_rootless_shape(
     )
     for target in ("base", "overlays/lab", "overlays/kind"):
         objects = rendered[target]
-        labels = _named(objects, "Namespace", "crucible-buildkit")["metadata"]["labels"]
+        labels = _named(objects, "Namespace", "hades-buildkit")["metadata"]["labels"]
         assert labels.get("pod-security.kubernetes.io/enforce") == "privileged", target
         assert labels.get("pod-security.kubernetes.io/warn") == "baseline", target
         assert labels.get("pod-security.kubernetes.io/audit") == "baseline", target
-        control = _named(objects, "Namespace", "crucible")["metadata"]["labels"]
+        control = _named(objects, "Namespace", "hades")["metadata"]["labels"]
         for label, value in PSA_LABELS.items():
-            assert control.get(label) == value, f"{target}: crucible {label}"
+            assert control.get(label) == value, f"{target}: hades {label}"
 
-        deployment = _named(objects, "Deployment", "crucible-buildkit")
-        assert deployment["metadata"]["namespace"] == "crucible-buildkit", target
+        deployment = _named(objects, "Deployment", "hades-buildkit")
+        assert deployment["metadata"]["namespace"] == "hades-buildkit", target
         spec = deployment["spec"]["template"]["spec"]
         assert spec["securityContext"]["seccompProfile"] == {"type": "Unconfined"}, target
         assert spec["securityContext"]["runAsUser"] == 1000, target
@@ -445,30 +443,26 @@ def test_the_buildkit_namespace_admits_only_the_documented_rootless_shape(
         policies = [
             p
             for p in _of_kind(objects, "NetworkPolicy")
-            if p["metadata"]["namespace"] == "crucible-buildkit"
+            if p["metadata"]["namespace"] == "hades-buildkit"
         ]
         assert len(policies) == 1, f"{target}: {len(policies)} NetworkPolicy objects"
         policy = policies[0]["spec"]
         assert policy["podSelector"] == {
-            "matchLabels": {"app.kubernetes.io/name": "crucible-buildkit"}
+            "matchLabels": {"app.kubernetes.io/name": "hades-buildkit"}
         }, target
         assert policy["policyTypes"] == ["Ingress"], target
         (rule,) = policy["ingress"]
         assert rule["from"] == [
-            {
-                "namespaceSelector": {
-                    "matchLabels": {"kubernetes.io/metadata.name": "crucible-workers"}
-                }
-            }
+            {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "hades-workers"}}}
         ], target
         assert rule["ports"] == [{"protocol": "TCP", "port": 1234}], target
 
-        service = _named(objects, "Service", "crucible-buildkit")
-        assert service["metadata"]["namespace"] == "crucible-buildkit", target
-        assert service["spec"]["selector"] == {"app.kubernetes.io/name": "crucible-buildkit"}
+        service = _named(objects, "Service", "hades-buildkit")
+        assert service["metadata"]["namespace"] == "hades-buildkit", target
+        assert service["spec"]["selector"] == {"app.kubernetes.io/name": "hades-buildkit"}
         assert [p["port"] for p in service["spec"]["ports"]] == [1234], target
-        claim = _named(objects, "PersistentVolumeClaim", "crucible-buildkit-cache")
-        assert claim["metadata"]["namespace"] == "crucible-buildkit", target
+        claim = _named(objects, "PersistentVolumeClaim", "hades-buildkit-cache")
+        assert claim["metadata"]["namespace"] == "hades-buildkit", target
 
 
 def test_api_and_supervisor_pods_set_fsgroup_change_policy_on_root_mismatch(
@@ -476,7 +470,7 @@ def test_api_and_supervisor_pods_set_fsgroup_change_policy_on_root_mismatch(
 ) -> None:
     """94: api and supervisor pods set fsGroupChangePolicy: OnRootMismatch."""
     for target in ("base", "overlays/lab", "overlays/kind"):
-        for name in ("crucible-api", "crucible-supervisor"):
+        for name in ("hades-api", "hades-supervisor"):
             deployment = _named(rendered[target], "Deployment", name)
             spec = deployment["spec"]["template"]["spec"]
             security = spec.get("securityContext") or {}
@@ -611,8 +605,8 @@ def test_the_rendered_crucible_containers_run_the_example_or_the_placeholder_pin
 def test_the_app_key_is_mounted_on_the_control_plane_and_nowhere_else(
     rendered: dict[str, list[dict[str, Any]]],
 ) -> None:
-    """12: the GitHub App key and the webhook secret are a Secret on the `crucible` pods
-    only. Nothing in `crucible-workers` may name it, and the base ships no workload
+    """12: the GitHub App key and the webhook secret are a Secret on the `hades` pods
+    only. Nothing in `hades-workers` may name it, and the base ships no workload
     there at all."""
     for target in TARGETS:
         for obj in rendered[target]:
@@ -622,8 +616,8 @@ def test_the_app_key_is_mounted_on_the_control_plane_and_nowhere_else(
             spec = obj["spec"]["template"]["spec"] if obj["kind"] != "Pod" else obj["spec"]
             for volume in spec.get("volumes") or []:
                 secret = (volume.get("secret") or {}).get("secretName")
-                if secret == "crucible-github-app":
-                    assert namespace == "crucible", f"{target}: {obj['metadata']['name']}"
+                if secret == "hades-github-app":
+                    assert namespace == "hades", f"{target}: {obj['metadata']['name']}"
 
 
 def test_no_secret_value_is_committed(
@@ -637,7 +631,7 @@ def test_no_secret_value_is_committed(
         for value in obj["spec"]["encryptedData"].values():
             assert str(value).startswith("REPLACE_WITH_SEALED_"), obj["metadata"]["name"]
     plain = _of_kind(rendered["overlays/kind"], "Secret")
-    assert {s["metadata"]["name"] for s in plain} == {"crucible-database"}
+    assert {s["metadata"]["name"] for s in plain} == {"hades-database"}
 
 
 def test_gitops_delivers_no_harness_credential_secret(
@@ -650,7 +644,7 @@ def test_gitops_delivers_no_harness_credential_secret(
         for obj in rendered[target]:
             if obj["kind"] in {"Secret", "SealedSecret", "ExternalSecret"}:
                 name = str(obj["metadata"]["name"])
-                assert not name.startswith("crucible-harness-"), f"{target}: {name}"
+                assert not name.startswith("hades-harness-"), f"{target}: {name}"
     shapes = DEPLOY / "secret-shapes"
     assert (shapes / "service-owned-harnesses.yaml").is_file()
     for kustomization in DEPLOY.rglob("kustomization.yaml"):
@@ -664,7 +658,7 @@ def test_the_argo_application_does_not_sync_automatically(
 ) -> None:
     """C9: the first sync is a person looking at what is about to be created, because an
     unsealed placeholder is exactly what that look is for."""
-    application = _named(rendered["argocd"], "Application", "crucible")
+    application = _named(rendered["argocd"], "Application", "hades")
     policy = application["spec"].get("syncPolicy") or {}
     assert "automated" not in policy
     assert application["spec"]["source"]["path"] == "deploy/kubernetes/overlays/lab"
@@ -676,9 +670,9 @@ def test_the_ingress_names_no_real_host_and_creates_no_record(
     """Operator rule 10 and 26 item 8: the route is provisioned and reported, and the
     public DNS record is the operator's alone. The base host is `.invalid`, which RFC
     2606 reserves, and the lab overlay's is a placeholder."""
-    base = _named(rendered["base"], "Ingress", "crucible-api")
+    base = _named(rendered["base"], "Ingress", "hades-api")
     assert [r["host"] for r in base["spec"]["rules"]] == ["crucible.invalid"]
-    lab = _named(rendered["overlays/lab"], "Ingress", "crucible-api")
+    lab = _named(rendered["overlays/lab"], "Ingress", "hades-api")
     assert [r["host"] for r in lab["spec"]["rules"]] == ["crucible.REPLACE_ME_LAB_DOMAIN"]
 
 
@@ -688,7 +682,7 @@ def test_the_supervisor_runs_exactly_one_replica(
     """01, 26: one active supervisor, lease-guarded. Two would both be refused by the
     lease, so this is about not making the log say so every tick."""
     for target in ("base", "overlays/lab", "overlays/kind"):
-        supervisor = _named(rendered[target], "Deployment", "crucible-supervisor")
+        supervisor = _named(rendered[target], "Deployment", "hades-supervisor")
         assert supervisor["spec"]["replicas"] == 1
         assert supervisor["spec"]["strategy"]["type"] == "Recreate"
 
@@ -699,7 +693,7 @@ def test_the_quota_reports_attempt_capacity_from_its_job_count(
     """An attempt uses five Jobs, so the raw quota must be converted before display."""
     expected = {"base": "17", "overlays/lab": "32", "overlays/kind": "17"}
     for target, jobs in expected.items():
-        quota = _named(rendered[target], "ResourceQuota", "crucible-workers")
+        quota = _named(rendered[target], "ResourceQuota", "hades-workers")
         hard = quota["spec"]["hard"]
         assert hard["count/jobs.batch"] == jobs, target
         assert "pods" not in hard, target
@@ -726,7 +720,7 @@ def test_the_lab_config_has_no_unresolved_probe_image(
     rendered: dict[str, list[dict[str, Any]]],
 ) -> None:
     """Only cluster facts may remain unresolved in a setting wiring reads at startup."""
-    settings = _named(rendered["overlays/lab"], "ConfigMap", "crucible-settings")["data"]
+    settings = _named(rendered["overlays/lab"], "ConfigMap", "hades-settings")["data"]
     assert settings["CRUCIBLE_KUBERNETES__PROBE_IMAGE"] == ""
     unresolved = {key: value for key, value in settings.items() if "REPLACE_ME_" in str(value)}
     assert set(unresolved) <= LAB_STARTUP_PLACEHOLDER_KEYS
@@ -737,7 +731,7 @@ def test_the_base_config_carries_no_lab_local_endpoint_address(
 ) -> None:
     """The lab gateway's address is a cluster fact; the base is inherited by kind too."""
     for target in ("base", "overlays/kind"):
-        settings = _named(rendered[target], "ConfigMap", "crucible-settings")["data"]
+        settings = _named(rendered[target], "ConfigMap", "hades-settings")["data"]
         assert settings["CRUCIBLE_KUBERNETES__LOCAL_ENDPOINT_CIDRS"] == "[]", target
         assert settings["CRUCIBLE_KUBERNETES__LOCAL_ENDPOINT_NAMESPACE"] == "", target
 
@@ -748,7 +742,7 @@ def test_every_config_omits_or_seeds_the_declared_claude_code_credential_mode(
     """Mount mode is an admin setting; deployment input is an optional seed only."""
     declared_mode = ClaudeCodeAdapter().credential_spec().minimum_mode.value
     for target in ("base", "overlays/lab", "overlays/kind"):
-        settings = _named(rendered[target], "ConfigMap", "crucible-settings")["data"]
+        settings = _named(rendered[target], "ConfigMap", "hades-settings")["data"]
         seed = settings.get("CRUCIBLE_CREDENTIALS__CLAUDE_CODE__MOUNT_MODE")
         assert seed is None or seed == declared_mode, target
 
@@ -757,8 +751,8 @@ def test_the_kind_overlay_renders_times_in_america_chicago(
     rendered: dict[str, list[dict[str, Any]]],
 ) -> None:
     """hades#148: the kind proofs are read in the lab's local zone; the base stays UTC."""
-    kind = _named(rendered["overlays/kind"], "ConfigMap", "crucible-settings")["data"]
-    base = _named(rendered["base"], "ConfigMap", "crucible-settings")["data"]
+    kind = _named(rendered["overlays/kind"], "ConfigMap", "hades-settings")["data"]
+    base = _named(rendered["base"], "ConfigMap", "hades-settings")["data"]
     assert kind["CRUCIBLE_SERVICE__RENDER_TIMEZONE"] == "America/Chicago"
     assert base["CRUCIBLE_SERVICE__RENDER_TIMEZONE"] == "UTC"
 
@@ -769,7 +763,7 @@ def test_every_config_allows_dns_by_the_resolvers_pods(
     """crucible#91: the kube-dns selector is in every rendered config, so a cluster whose
     CNI translates the DNS service address first still resolves names."""
     for target in ("base", "overlays/lab", "overlays/kind"):
-        settings = _named(rendered[target], "ConfigMap", "crucible-settings")["data"]
+        settings = _named(rendered[target], "ConfigMap", "hades-settings")["data"]
         assert settings["CRUCIBLE_KUBERNETES__DNS_NAMESPACE"] == "kube-system", target
         assert json.loads(settings["CRUCIBLE_KUBERNETES__DNS_POD_LABELS"]) == {
             "k8s-app": "kube-dns"
@@ -781,7 +775,7 @@ def test_the_lab_overlay_allows_its_in_cluster_gateway_by_selector(
 ) -> None:
     """The lab runs Cilium with kube-proxy replacement and an in-cluster LiteLLM: the
     gateway is a selector the deployer fills in, and no address rule is left to rot."""
-    settings = _named(rendered["overlays/lab"], "ConfigMap", "crucible-settings")["data"]
+    settings = _named(rendered["overlays/lab"], "ConfigMap", "hades-settings")["data"]
     assert settings["CRUCIBLE_KUBERNETES__LOCAL_ENDPOINT_CIDRS"] == "[]"
     assert settings["CRUCIBLE_KUBERNETES__LOCAL_ENDPOINT_NAMESPACE"].startswith("REPLACE_ME_")
 
@@ -790,11 +784,11 @@ def test_the_kubernetes_provider_is_on_and_docker_is_off(
     rendered: dict[str, list[dict[str, Any]]],
 ) -> None:
     for target in ("base", "overlays/lab", "overlays/kind"):
-        settings = _named(rendered[target], "ConfigMap", "crucible-settings")["data"]
+        settings = _named(rendered[target], "ConfigMap", "hades-settings")["data"]
         assert settings["CRUCIBLE_KUBERNETES__ENABLED"] == "true"
         assert settings["CRUCIBLE_DOCKER__ENABLED"] == "false"
-        assert settings["CRUCIBLE_KUBERNETES__WORKERS_NAMESPACE"] == "crucible-workers"
-        assert settings["CRUCIBLE_KUBERNETES__SERVICE_ACCOUNT"] == "crucible-worker"
+        assert settings["CRUCIBLE_KUBERNETES__WORKERS_NAMESPACE"] == "hades-workers"
+        assert settings["CRUCIBLE_KUBERNETES__SERVICE_ACCOUNT"] == "hades-worker"
 
 
 # Keys an overlay may add that are not Crucible settings at all. `SSL_CERT_FILE` is
@@ -834,7 +828,7 @@ def test_every_configmap_setting_is_one_the_application_reads(
     rendered: dict[str, list[dict[str, Any]]], target: str
 ) -> None:
     """The overlays are where the typo risk lives, so all three are walked."""
-    data = _named(rendered[target], "ConfigMap", "crucible-settings")["data"]
+    data = _named(rendered[target], "ConfigMap", "hades-settings")["data"]
     for key in data:
         if key in NON_SETTING_KEYS:
             continue

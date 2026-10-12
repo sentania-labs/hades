@@ -37,7 +37,7 @@ from tests.unit.test_issue_339_renewer_single_writer import (
     _shared_store,
 )
 
-SECRET = "crucible-harness-codex"
+SECRET = "hades-harness-codex"
 NOW = datetime(2026, 10, 4, tzinfo=UTC)
 
 

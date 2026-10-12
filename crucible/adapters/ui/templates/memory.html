@@ -6,17 +6,17 @@
     {% for item in tabs %}<a class="lat-tab{% if item.on %} is-on{% endif %}" href="{{ item.href }}"{% if item.on %} aria-current="page"{% endif %}>{{ item.label }}</a>{% endfor %}
   </nav>
   {% if tab == "memory" %}
-  <section class="lat-card" id="memory-items">
+  <section class="lat-card neon-section" id="memory-items">
     <h2>Memory items</h2>
     <p class="lat-hint">Current items, newest observed first. Edit supersedes an item with a corrected one; Forget supersedes it with no replacement. Neither deletes anything.</p>
-    {% if rows %}<div class="admin-table-wrap lat-table-scroll"><table class="admin-table lat-table"><thead><tr><th>Text</th><th>Source</th><th>When</th><th>Scope</th><th>Promoted by</th>{% if may_write %}<th></th>{% endif %}</tr></thead><tbody>
+    {% if rows %}<table class="admin-table lat-table neon-table"><thead><tr><th>Text</th><th>Source</th><th>When</th><th>Scope</th><th>Promoted by</th>{% if may_write %}<th></th>{% endif %}</tr></thead><tbody>
     {% for item in rows %}<tr>
-      <td><div class="admin-prose">{{ safe_value("text", item.text) }}</div></td>
-      <td>{{ safe_value("source", item.source) }}</td>
-      <td title="Promoted {{ item.promoted_at }}">{{ item.observed_at }}</td>
-      <td>{% if item.scope_tags %}<ul class="admin-values">{% for tag in item.scope_tags %}<li>{{ tag }}</li>{% endfor %}</ul>{% else %}<span class="admin-empty">none</span>{% endif %}</td>
-      <td>{{ item.promoted_by }}</td>
-      {% if may_write %}<td><div class="admin-actions">
+      <td data-label="Text"><div class="admin-prose">{{ safe_value("text", item.text) }}</div></td>
+      <td data-label="Source">{{ safe_value("source", item.source) }}</td>
+      <td data-label="When" title="Promoted {{ item.promoted_at }}">{{ item.observed_at }}</td>
+      <td data-label="Scope">{% if item.scope_tags %}<ul class="admin-values">{% for tag in item.scope_tags %}<li>{{ tag }}</li>{% endfor %}</ul>{% else %}<span class="admin-empty">none</span>{% endif %}</td>
+      <td data-label="Promoted by">{{ item.promoted_by }}</td>
+      {% if may_write %}<td data-label="Actions"><div class="admin-actions">
         <details class="admin-details"><summary class="lat-btn lat-btn--ghost">Edit</summary>
           <form class="admin-row-form" method="post" action="/ui/memory/{{ item.id }}/supersede">
             <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -33,21 +33,21 @@
         </form>
       </div></td>{% endif %}
     </tr>{% endfor %}
-    </tbody></table></div>{% else %}<p class="admin-empty">Nothing is remembered yet. Hades promotes through POST /v1/memory.</p>{% endif %}
+    </tbody></table>{% else %}<p class="admin-empty">Nothing is remembered yet. Hades promotes through POST /v1/memory.</p>{% endif %}
   </section>
   {% else %}
-  <section class="lat-card" id="decisions">
+  <section class="lat-card neon-section" id="decisions">
     <h2>Decisions</h2>
     <p class="lat-hint">The append-only ledger, newest first: the principal's words as said, where, when, what they apply to, and where in the transcript they sit. A line is never edited or deleted.</p>
-    {% if rows %}<div class="admin-table-wrap lat-table-scroll"><table class="admin-table lat-table"><thead><tr><th>Words</th><th>Channel</th><th>When</th><th>Applies to</th><th>Transcript</th></tr></thead><tbody>
+    {% if rows %}<table class="admin-table lat-table neon-table"><thead><tr><th>Words</th><th>Channel</th><th>When</th><th>Applies to</th><th>Transcript</th></tr></thead><tbody>
     {% for line in rows %}<tr>
-      <td><div class="admin-prose">{{ safe_value("verbatim", line.verbatim) }}</div><div class="admin-hint">{{ line.principal }}{% if line.acted_by %}; acted on by {{ line.acted_by }} {{ line.acted_at }}{% endif %}</div></td>
-      <td>{{ line.channel }}</td>
-      <td>{{ line.said_at }}</td>
-      <td>{% if line.applies_to %}<ul class="admin-values">{% for name in line.applies_to %}<li>{{ name }}</li>{% endfor %}</ul>{% else %}<span class="admin-empty">none</span>{% endif %}</td>
-      <td>{% if line.transcript %}{% if line.transcript.href %}<a href="{{ line.transcript.href }}"{% if line.transcript.external %} rel="noopener noreferrer" target="_blank"{% endif %}>{{ safe_value("transcript_ref", line.transcript.label) }}</a>{% else %}{{ safe_value("transcript_ref", line.transcript.label) }}{% endif %}{% else %}<span class="admin-empty">none</span>{% endif %}</td>
+      <td data-label="Words"><div class="admin-prose">{{ safe_value("verbatim", line.verbatim) }}</div><div class="admin-hint">{{ line.principal }}{% if line.acted_by %}; acted on by {{ line.acted_by }} {{ line.acted_at }}{% endif %}</div></td>
+      <td data-label="Channel">{{ line.channel }}</td>
+      <td data-label="When">{{ line.said_at }}</td>
+      <td data-label="Applies to">{% if line.applies_to %}<ul class="admin-values">{% for name in line.applies_to %}<li>{{ name }}</li>{% endfor %}</ul>{% else %}<span class="admin-empty">none</span>{% endif %}</td>
+      <td data-label="Transcript">{% if line.transcript %}{% if line.transcript.href %}<a href="{{ line.transcript.href }}"{% if line.transcript.external %} rel="noopener noreferrer" target="_blank"{% endif %}>{{ safe_value("transcript_ref", line.transcript.label) }}</a>{% else %}{{ safe_value("transcript_ref", line.transcript.label) }}{% endif %}{% else %}<span class="admin-empty">none</span>{% endif %}</td>
     </tr>{% endfor %}
-    </tbody></table></div>{% else %}<p class="admin-empty">No decisions in the ledger yet. Hades appends through POST /v1/decisions; a decision on a task is mirrored here.</p>{% endif %}
+    </tbody></table>{% else %}<p class="admin-empty">No decisions in the ledger yet. Hades appends through POST /v1/decisions; a decision on a task is mirrored here.</p>{% endif %}
   </section>
   {% endif %}
 </div>

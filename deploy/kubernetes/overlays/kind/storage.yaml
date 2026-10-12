@@ -6,8 +6,8 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: crucible-artifacts
-  namespace: crucible
+  name: hades-artifacts
+  namespace: hades
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: standard
@@ -18,8 +18,8 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: crucible-reference-cache
-  namespace: crucible-workers
+  name: hades-reference-cache
+  namespace: hades-workers
 spec:
   storageClassName: standard
   resources:
@@ -29,8 +29,8 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: crucible-postgres
-  namespace: crucible
+  name: hades-postgres
+  namespace: hades
 spec:
   volumeClaimTemplates:
     - metadata:
@@ -45,8 +45,8 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: crucible-buildkit-cache
-  namespace: crucible-buildkit
+  name: hades-buildkit-cache
+  namespace: hades-buildkit
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: standard

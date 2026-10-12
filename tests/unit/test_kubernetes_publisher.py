@@ -89,7 +89,7 @@ def _request(**overrides: Any) -> PublishRequest:
         "work_branch": "crucible/EX-0001",
         "base_ref": "main",
         "expected_head": HEAD,
-        "bundle_path": f"k8s://crucible-workers/ws-{ATTEMPT.lower()}/output/work_branch.bundle",
+        "bundle_path": f"k8s://hades-workers/ws-{ATTEMPT.lower()}/output/work_branch.bundle",
         "bundle_sha256": hashlib.sha256(BUNDLE).hexdigest(),
         "image": DIGEST_IMAGE,
         "policy": {"resources": {"cpus": 1, "memory": "512MiB"}},
@@ -109,7 +109,7 @@ def _merge_request(**overrides: Any) -> MergeMainRequest:
         "expected_head": HEAD,
         "image": DIGEST_IMAGE,
         "policy": {"resources": {"cpus": 1, "memory": "512MiB"}},
-        "workspace_path": f"k8s://crucible-workers/ws-{ATTEMPT.lower()}",
+        "workspace_path": f"k8s://hades-workers/ws-{ATTEMPT.lower()}",
     }
     base.update(overrides)
     return MergeMainRequest(**base)
@@ -282,9 +282,9 @@ async def test_a_bundle_that_no_longer_matches_its_seal_is_refused_before_any_re
     "bundle_path",
     [
         # Another attempt's claim, another namespace, another leaf, a local path.
-        "k8s://crucible-workers/ws-01otherattempt00000000000/output/work_branch.bundle",
+        "k8s://hades-workers/ws-01otherattempt00000000000/output/work_branch.bundle",
         f"k8s://elsewhere/ws-{ATTEMPT.lower()}/output/work_branch.bundle",
-        f"k8s://crucible-workers/ws-{ATTEMPT.lower()}/repo/.git/objects/pack/x.pack",
+        f"k8s://hades-workers/ws-{ATTEMPT.lower()}/repo/.git/objects/pack/x.pack",
         f"/var/lib/crucible/artifacts/workspaces/{ATTEMPT}/output/work_branch.bundle",
     ],
 )
@@ -415,7 +415,7 @@ def test_the_script_checks_the_seal_before_it_contacts_any_remote() -> None:
             work_branch="crucible/X",
             base_ref="main",
             expected_head=HEAD,
-            author_name="crucible-worker",
+            author_name="hades-worker",
             author_email="crucible-worker@users.noreply.github.com",
             token_source=source,
             bundle_sha256="b" * 64,
@@ -501,7 +501,7 @@ def test_the_script_asks_the_helper_for_the_token_before_any_remote() -> None:
             work_branch="crucible/X",
             base_ref="main",
             expected_head=HEAD,
-            author_name="crucible-worker",
+            author_name="hades-worker",
             author_email="crucible-worker@users.noreply.github.com",
             token_source=source,
             bundle_sha256="b" * 64,

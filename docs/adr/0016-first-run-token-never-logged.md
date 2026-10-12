@@ -19,7 +19,8 @@ to `docker compose logs migrate`, which is wrong on Kubernetes.
 1. **The token never reaches stdout, stderr or a log, on any provider.** The migration
    writes it to one private place and its stderr names only that place.
 2. **Kubernetes: a Secret in the service namespace.** `crucible-first-run-admin`, key
-   `token`, in the namespace the api runs in (`kubernetes.namespace`, `crucible`). The
+   `token`, in the namespace the api runs in (`kubernetes.namespace`, `crucible`). Since
+   hades #609 step 2 the defaults are `hades-first-run-admin`, `hades` and `hades-migrate`. The
    migrate Job runs under its own ServiceAccount, `crucible-migrate`, which may create
    Secrets there and patch that one (to replace a token a previous run left, when the
    database was reset). The api's account may delete that one Secret and nothing else.

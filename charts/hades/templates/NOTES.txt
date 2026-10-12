@@ -1,4 +1,4 @@
-Hades was installed into the {{ include "hades.namespace" . }} and {{ include "hades.workersNamespace" . }} namespaces{{ if .Values.buildkit.enabled }}, with its BuildKit in crucible-buildkit{{ end }}.
+Hades was installed into the {{ include "hades.namespace" . }} and {{ include "hades.workersNamespace" . }} namespaces{{ if .Values.buildkit.enabled }}, with its BuildKit in {{ .Values.buildkit.namespace }}{{ end }}.
 The chart never creates credential values. Provision the Secrets named in values.yaml.
 {{- if .Values.ingress.enabled }}
 Open https://{{ .Values.ingress.host }}/ui

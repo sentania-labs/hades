@@ -378,7 +378,7 @@ class PodRequest:
     volumes: Sequence[Mapping[str, Any]] = ()
     init_containers: Sequence[Mapping[str, Any]] = ()
     working_dir: str = "/tmp"
-    service_account: str = "crucible-worker"
+    service_account: str = "hades-worker"
     image_pull_secret: str | None = None
     host_aliases: Sequence[Mapping[str, Any]] = ()
     # hades #558, #85: the declared test services, each a native sidecar of this Pod.
