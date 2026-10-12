@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock
@@ -9,12 +10,16 @@ from unittest.mock import Mock
 import pytest
 
 from crucible.adapters.execution.scripts import commit_msg_hook
+from crucible.adapters.github import normalize
 from crucible.adapters.github.client import RestGitHubClient
 from crucible.adapters.github.transport import RestTransport
 from crucible.adapters.harness.claude_code import ClaudeCodeAdapter
 from crucible.adapters.harness.qwen_code import QwenCodeAdapter
+from crucible.domain.publication import body_sha256
 from crucible.ports.github import InstallationToken
 from crucible.ports.harness import LaunchContext
+from tests.unit.test_issue_337_auto_merge import BODY, TITLE
+from tests.unit.test_issue_337_auto_merge import setup as merge_setup
 
 
 def test_claude_settings_disable_commit_and_pr_attribution() -> None:
@@ -124,19 +129,20 @@ def test_hook_strips_coauthors_and_preserves_attempt(tmp_path: Path, coauthors: 
 
 
 @pytest.mark.parametrize(
-    "body",
+    "message",
     [
-        None,
         "",
         "Evidence\n\nCo-Authored-By: model <model@example.invalid>\n"
         "co-authored-by: worker <worker@example.invalid>\nCloses #602\n",
     ],
 )
-def test_squash_request_uses_explicit_pr_title_and_clean_body(body: str | None) -> None:
+def test_squash_request_carries_the_given_text_without_coauthors(message: str) -> None:
+    """The adapter sends the title and message it is given and never reads the live
+    pull request for them; a co-author line is dropped as a backstop."""
     transport = Mock(spec=RestTransport)
     transport.get.return_value = {
-        "title": "Fix behavior",
-        "body": body,
+        "title": "Edited on GitHub",
+        "body": "Edited on GitHub",
         "number": 7,
         "state": "closed",
         "merged": True,
@@ -148,7 +154,12 @@ def test_squash_request_uses_explicit_pr_title_and_clean_body(body: str | None) 
         "<installation-token>", expires_at=datetime.now(UTC), repository="o/r"
     )
     result = RestGitHubClient(Mock(), transport).merge_pull_request(
-        token, repository="o/r", number=7, expected_head_sha="certified-head"
+        token,
+        repository="o/r",
+        number=7,
+        expected_head_sha="certified-head",
+        commit_title="Fix behavior",
+        commit_message=message,
     )
     transport.request.assert_called_once_with(
         "PUT",
@@ -158,7 +169,73 @@ def test_squash_request_uses_explicit_pr_title_and_clean_body(body: str | None) 
             "merge_method": "squash",
             "sha": "certified-head",
             "commit_title": "Fix behavior",
-            "commit_message": "Evidence\n\nCloses #602\n" if body else "",
+            "commit_message": "Evidence\n\nCloses #602\n" if message else "",
         },
     )
+    # The only read is the post-merge one that supplies the merger and time.
+    transport.get.assert_called_once()
     assert result.merged_by == "hades[bot]"
+
+
+def test_normalized_pull_request_carries_the_body_with_lf_endings() -> None:
+    ref = normalize.pull_request({"number": 7, "body": "Summary\r\n\r\nDetail\r\n"})
+    assert ref.body == "Summary\n\nDetail\n"
+    assert normalize.pull_request({"number": 7, "body": None}).body == ""
+
+
+@pytest.mark.asyncio
+async def test_merge_sends_the_published_title_and_verified_body() -> None:
+    coordinator, github, uow, _task, plan = merge_setup()
+
+    assert await coordinator._merge_one(plan) is True
+
+    assert github.merge_texts == [(TITLE, BODY)]
+    assert plan.body_sha256 == body_sha256(BODY)
+    assert uow.pull_requests.get.return_value.merged_by == "hades[bot]"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "cause"),
+    [
+        ("title", "Edited title", "pull request title changed since Hades published it"),
+        ("body", BODY + "\nCloses #1\n", "pull request body changed since Hades published it"),
+        (
+            "body",
+            BODY + "Co-authored-by: someone <someone@example.invalid>\n",
+            "pull request body changed since Hades published it",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_edited_pull_request_text_is_refused_not_merged(
+    field: str, value: str, cause: str
+) -> None:
+    """A collaborator's edit after publication never reaches main: the live text must
+    match the stored title and body hash, else the merge is refused with a wake."""
+    coordinator, github, uow, _task, plan = merge_setup()
+    setattr(github, field, value)
+
+    assert await coordinator._merge_one(plan) is False
+
+    assert github.merge_calls == []
+    pull_request = uow.pull_requests.get.return_value
+    assert pull_request.merge_refusal_cause is not None
+    assert pull_request.merge_refusal_cause.startswith(cause)
+    wake = uow.wakes.add.call_args.args[0]
+    assert wake.reason == "ready_for_merge"
+    assert cause in wake.payload["summary"]
+
+
+@pytest.mark.asyncio
+async def test_pull_request_without_a_recorded_body_hash_is_not_merged() -> None:
+    """A row that never recorded what Hades published cannot be verified, so it waits
+    for a person rather than copying unverified text onto main."""
+    coordinator, github, uow, _task, plan = merge_setup()
+    plan = replace(plan, body_sha256="")
+
+    assert await coordinator._merge_one(plan) is False
+
+    assert github.merge_calls == []
+    assert "body changed since Hades published it" in (
+        uow.pull_requests.get.return_value.merge_refusal_cause or ""
+    )

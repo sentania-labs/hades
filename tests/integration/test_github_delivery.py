@@ -777,6 +777,11 @@ async def test_green_required_checks_reach_ready_for_merge_then_merged(
     record = pr(client, task_id)
     assert record["merged_by"] == "crucible-spike[bot]" and record["merge_sha"] == "f" * 40
     assert github.state.merge_calls == [(REPOSITORY, 1, "squash")]
+    # FDY-0630: the squash text is the published title and body, so GitHub adds no
+    # co-author from the branch commits and main carries one author.
+    pull = github.state.repositories[REPOSITORY].pulls[1]
+    assert github.state.merge_texts == [(pull.title, pull.body)]
+    assert pull.title and pull.body and "co-authored-by" not in pull.body.lower()
     reasons = [w["reason"] for w in client.get("/v1/wakes").json()["items"]]
     assert "merged" in reasons
 

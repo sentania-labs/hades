@@ -694,6 +694,15 @@ specifies squash and the certified head as GitHub's SHA precondition. GitHub has
 precondition on this endpoint, so the fresh base comparison cannot atomically prevent
 a retarget between the read and the merge call.
 
+The same live read supplies the pull request's title and body. Before the call, Hades
+compares the title with the one stored at publication and the body's SHA-256 with the
+stored `body_sha256`; a difference, or a row with no recorded hash, is a merge refusal
+(`pull request title and body changed since Hades published it`) with a wake, so a
+collaborator's edit after publication cannot put a changed completion record or an
+issue-closing keyword on main. The merge request then names the stored title as the
+squash commit's title and the verified body as its message, so GitHub builds no squash
+text from the branch commits and adds no co-author from them (ADR 0007).
+
 The merge result records the SHA from the merge response and the merger and time from
 an immediate PR read. An ambiguous failed response is checked for a completed merge
 before a refusal is recorded. A refusal wakes Foundry naming its cause. Persisted

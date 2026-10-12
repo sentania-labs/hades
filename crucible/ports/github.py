@@ -124,6 +124,9 @@ class PullRequestRef:
     mergeable: bool | None = None
     title: str = ""
     draft: bool = False
+    # The live body, CRLF folded to LF. The merge compares its hash with the stored
+    # `body_sha256` of the text Hades published before any of it reaches main (23).
+    body: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,8 +290,14 @@ class GitHubClient(Protocol):
         repository: str,
         number: int,
         expected_head_sha: str,
+        commit_title: str,
+        commit_message: str,
     ) -> MergeResult:
-        """Squash-merge only when the pull request still has the expected head."""
+        """Squash-merge only when the pull request still has the expected head.
+
+        The squash commit's title and message are the ones given, which the caller has
+        verified against the text Hades published; GitHub's default squash text, built
+        from the branch commits and their authors, is never used (23, ADR 0007)."""
         ...
 
     def observe(

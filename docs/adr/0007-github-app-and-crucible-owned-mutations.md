@@ -60,13 +60,20 @@ No other permission changes.
 
 ## Amendment: one author on main (FDY-0630, 2026-10-11)
 
-Hades requests each squash with an explicit `commit_title` from the PR title and
-`commit_message` from the PR body Hades composed. It removes case-insensitive
-`Co-Authored-By:` lines before sending the message, including when an older branch
-already contains them. An empty body is sent as an explicit empty message. GitHub
-must not generate the squash body from branch authors or their commit messages.
-The App installation remains the caller and the Hades App is main's sole author.
-The expected head SHA and merge-result verification remain in force.
+Hades requests each squash with an explicit `commit_title` and `commit_message`: the
+title and body it published, as the pull request row stores them (`title` and
+`body_sha256`). The merge tick's live read of the pull request, already made for the
+head and base checks, carries the body; the tick compares the live title with the
+stored one and the live body's SHA-256 with the stored hash, and refuses the merge
+with a wake (`pull request title and body changed since Hades published it`) when
+either differs, including a row with no recorded hash. A collaborator's edit after
+publication therefore never reaches main, neither a changed completion record nor an
+issue-closing keyword. The adapter never reads the pull request for the squash text;
+it drops any case-insensitive `Co-Authored-By:` line from the message it is given as
+a backstop, and an empty body is sent as an explicit empty message. GitHub must not
+generate the squash body from branch authors or their commit messages. The App
+installation remains the caller and the Hades App is main's sole author. The expected
+head SHA and merge-result verification remain in force.
 
 The worker `commit-msg` hook removes those lines before adding `Crucible-Attempt`.
 It preserves other trailers and remains idempotent on amend. This is a backstop

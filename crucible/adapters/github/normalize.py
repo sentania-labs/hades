@@ -77,6 +77,7 @@ def pull_request(payload: Any) -> PullRequestRef:
         mergeable=(bool(payload["mergeable"]) if payload.get("mergeable") is not None else None),
         title=title,
         draft=bool(payload.get("draft", False)),
+        body=str(payload.get("body") or "").replace("\r\n", "\n"),
     )
 
 

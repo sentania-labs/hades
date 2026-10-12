@@ -37,6 +37,11 @@ log = logging.getLogger("crucible.github")
 LOG_EXCERPT_BYTES = 64 * 1024
 
 
+def strip_coauthors(message: str) -> str:
+    """`message` without any `Co-Authored-By:` line, in any case or indentation."""
+    return re.sub(r"(?im)^[ \t]*co-authored-by[ \t]*:[^\n]*(?:\n|$)", "", message)
+
+
 def _refused(exc: GitHubError) -> bool:
     """A permission or not-found refusal that the caller may treat as unobservable.
 
@@ -139,18 +144,14 @@ class RestGitHubClient:
         repository: str,
         number: int,
         expected_head_sha: str,
+        commit_title: str,
+        commit_message: str,
     ) -> MergeResult:
-        # Use the PR title and Hades-composed body, never GitHub's default squash
-        # text, which derives co-authors from the branch commits.
-        pull_path = f"/repos/{repository}/pulls/{number}"
-        pull = self._http.get(pull_path, bearer=token.reveal())
-        title = pull.get("title") if isinstance(pull, dict) else None
-        if not isinstance(title, str) or not title.strip():
-            raise GitHubError(502, "pull request response has no title", path=pull_path)
-        body = pull.get("body") or ""
-        if not isinstance(body, str):
-            raise GitHubError(502, "pull request response has invalid body", path=pull_path)
-        commit_message = re.sub(r"(?im)^[ \t]*co-authored-by[ \t]*:[^\n]*(?:\n|$)", "", body)
+        # The squash text is the title and body Hades published, verified by the caller
+        # against its stored copy; never a live read of the pull request, which a
+        # collaborator may have edited, and never GitHub's default squash text, which
+        # derives co-authors from the branch commits. Any co-author line is dropped as a
+        # backstop so main carries one author (ADR 0007).
         path = f"/repos/{repository}/pulls/{number}/merge"
         status, payload, _ = self._http.request(
             "PUT",
@@ -159,8 +160,8 @@ class RestGitHubClient:
             body={
                 "merge_method": "squash",
                 "sha": expected_head_sha,
-                "commit_title": title,
-                "commit_message": commit_message,
+                "commit_title": commit_title,
+                "commit_message": strip_coauthors(commit_message),
             },
         )
         if status >= 400:
