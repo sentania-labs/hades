@@ -8,11 +8,12 @@ import subprocess
 import tarfile
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
 from crucible.adapters.execution import k8sspec, scripts
+from crucible.adapters.execution.k8sapi import KubernetesApiError
 from crucible.adapters.execution.kubernetes import (
     CHECKOUT_POLICY_PREFIX,
     COLLECT_MODE_FILE,
@@ -26,6 +27,7 @@ from crucible.ports.execution import (
     VERIFY_MOUNT,
     WORK_MOUNT,
     ObservationState,
+    ProviderError,
 )
 from crucible.ports.github import InstallationToken
 from crucible.ports.harness import MountMode
@@ -465,3 +467,78 @@ async def test_a_public_checkout_mounts_no_token(private: bool) -> None:
     await provider.launch(workspace, launch)
     prepare = _inits(pod_of(api, "worker-"))[k8sspec.WORKER_PREPARE_CONTAINER]
     assert ("CRUCIBLE_TOKEN_FILE" in prepare["command"][-1]) is private
+
+
+@pytest.mark.parametrize("mode", ["drain", "kill"])
+@pytest.mark.parametrize("phase", ["Pending", "Running"])
+@pytest.mark.parametrize("agent_state", [None, {"waiting": {"reason": "PodInitializing"}}])
+async def test_terminate_while_the_agent_container_has_not_started(
+    mode: Literal["drain", "kill"],
+    phase: str,
+    agent_state: dict[str, Any] | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api, provider, _launch, _workspace, handle = await _worker(behavior="hang")
+    name = f"{handle.ref}-abc12"
+    pod = api.objects[("pods", name)].body
+    pod["status"] = {
+        "phase": phase,
+        "initContainerStatuses": [
+            {"name": k8sspec.WORKER_PREPARE_CONTAINER, "state": {"running": {}}}
+        ],
+        "containerStatuses": [
+            {"name": k8sspec.ROLE_COLLECTOR, "state": {"running": {}}},
+            *(
+                [{"name": k8sspec.CONTAINER_NAME, "state": agent_state}]
+                if agent_state is not None
+                else []
+            ),
+        ],
+    }
+
+    def unexpected_exec(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("terminate must not exec into an agent that has not started")
+
+    monkeypatch.setattr(api, "pod_exec", unexpected_exec)
+    await provider.terminate(handle, mode)
+    assert ("pods", name) in api.deleted
+    observation = await provider.observe(handle)
+    assert observation.state is ObservationState.EXITED
+    assert observation.exit_code == (143 if mode == "drain" else 137)
+
+
+@pytest.mark.parametrize("mode", ["drain", "kill"])
+@pytest.mark.parametrize("status", [404, 500])
+async def test_terminate_deletes_a_not_started_agent_after_exec_refusal(
+    mode: Literal["drain", "kill"], status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, provider, _launch, _workspace, handle = await _worker(behavior="hang")
+    name = f"{handle.ref}-abc12"
+    pod = api.objects[("pods", name)].body
+
+    def refused_exec(*args: Any, **kwargs: Any) -> None:
+        pod["status"]["containerStatuses"] = [
+            {"name": k8sspec.CONTAINER_NAME, "state": {"waiting": {}}}
+        ]
+        raise KubernetesApiError(status, "agent container has not started")
+
+    monkeypatch.setattr(api, "pod_exec", refused_exec)
+    await provider.terminate(handle, mode)
+    assert ("pods", name) in api.deleted
+    observation = await provider.observe(handle)
+    assert observation.state is ObservationState.EXITED
+    assert observation.exit_code == (143 if mode == "drain" else 137)
+
+
+async def test_terminate_does_not_delete_a_running_agent_on_exec_server_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api, provider, _launch, _workspace, handle = await _worker(behavior="hang")
+
+    def refused_exec(*args: Any, **kwargs: Any) -> None:
+        raise KubernetesApiError(500, "exec unavailable")
+
+    monkeypatch.setattr(api, "pod_exec", refused_exec)
+    with pytest.raises(ProviderError, match="terminate failed"):
+        await provider.terminate(handle, "drain")
+    assert ("pods", f"{handle.ref}-abc12") not in api.deleted

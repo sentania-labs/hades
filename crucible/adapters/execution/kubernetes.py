@@ -3344,7 +3344,8 @@ class KubernetesProvider:
         """Signal the agent over exec, preserving the collector and its scratch.
 
         The supervisor requests kill after its drain grace expires. Both operations
-        address only the agent's process namespace; cleanup removes the Pod later."""
+        address only the agent's process namespace; cleanup removes the Pod later.
+        An agent that has not started cannot be signalled, so delete its Pod."""
         launched = self._launched.get(h.attempt_id)
         try:
             pod = await self._worker_pod_of(h.ref, launched)
@@ -3362,27 +3363,50 @@ class KubernetesProvider:
             launched.limits if launched else k8sspec.limits_from_policy({}),
         ).grace_seconds
         name = str((pod.get("metadata") or {}).get("name") or "")
+
+        def agent_running(current: Mapping[str, Any]) -> bool:
+            return any(
+                entry.get("name") == k8sspec.CONTAINER_NAME
+                and "running" in (entry.get("state") or {})
+                for entry in (current.get("status") or {}).get("containerStatuses") or []
+            )
+
         try:
-            if mode == "drain" or str((pod.get("status") or {}).get("phase")) == "Running":
+            if agent_running(pod):
                 # End only the agent container. The collector sidecar owns the same
                 # scratch and must remain alive long enough to package the final tree.
                 # PID 1 may be a shell that defers a signal while its child runs, so
                 # every process of the agent's container is signalled, then PID 1.
-                await self._call(
-                    self.client.pod_exec,
-                    name,
-                    ["sh", "-c", k8sspec.DRAIN_SCRIPT if mode == "drain" else k8sspec.KILL_SCRIPT],
-                    container=k8sspec.CONTAINER_NAME,
-                    timeout=max(1, grace),
-                    limit=1024,
-                )
-            else:
-                await self._call(
-                    self.client.delete,
-                    "pods",
-                    name,
-                    grace_period_seconds=0,
-                )
+                try:
+                    await self._call(
+                        self.client.pod_exec,
+                        name,
+                        [
+                            "sh",
+                            "-c",
+                            k8sspec.DRAIN_SCRIPT if mode == "drain" else k8sspec.KILL_SCRIPT,
+                        ],
+                        container=k8sspec.CONTAINER_NAME,
+                        timeout=max(1, grace),
+                        limit=1024,
+                    )
+                    return
+                except KubernetesApiError as exc:
+                    if exc.status not in (404, 500):
+                        raise
+                    # The container can become unavailable between the status read
+                    # and exec. Only a confirmed non-running agent permits deletion.
+                    current = await self._worker_pod_of(h.ref, launched)
+                    if current is None:
+                        return
+                    if agent_running(current):
+                        raise
+            await self._call(
+                self.client.delete,
+                "pods",
+                name,
+                grace_period_seconds=0,
+            )
         except KubernetesApiError as exc:
             if exc.status != 404:
                 raise ProviderError(f"terminate failed: {exc}") from exc
