@@ -279,6 +279,16 @@ REVIEW_DIFF_DIR = "crucible-review"
 # the output archive and streams them through the scanner on their own (26).
 CHANGED_BLOBS_DIR = "changed-blobs"
 
+# FDY-0618: what the repository declares about secret-shaped text, read from the merge
+# base and never from the worker's tree: its `.gitleaksignore` and `.gitleaks.toml`, and
+# each secret-shaped value the merge base holds (`base/<rule>`, `git grep -z -n -o`
+# records), so the service can tell a repository's declared fixture value from a new
+# one. Each file is bounded; what is cut is not read as declared (fail closed).
+SECRET_DECLARATIONS_DIR = "secret-declarations"
+SECRET_DECLARATION_CAP_BYTES = 1024 * 1024
+# Each local search has a deadline even when a large tree contains no matches.
+SECRET_DECLARATION_SECONDS = 10
+
 # Every diff the collector runs: no textconv, no external diff driver. Never `--text`
 # on the raw diff: a binary must stay "Binary files differ" there, or its bytes fill the
 # output. The secret scanner reads every changed blob itself (hades #398).
@@ -299,7 +309,7 @@ _COLLECTOR_OUTPUTS = (
     "commit-policy tree "
     "clone.log report copy-rejections.tsv collection-failed.txt checkpoint-refusal.txt "
     "leftover-committed.txt leftover-refusal.txt collector.ok attr-text.patch "
-    f"{CHANGED_BLOBS_DIR} changed-blob-ids.txt {REVIEW_DIFF_DIR}"
+    f"{CHANGED_BLOBS_DIR} changed-blob-ids.txt {REVIEW_DIFF_DIR} {SECRET_DECLARATIONS_DIR}"
 )
 
 
@@ -460,13 +470,13 @@ scan_added() {{
     MATCH=$({GIT} diff --no-ext-diff --no-textconv --unified=0 "$SECRET_BASE" HEAD \
       -- "$SECRET_PATH" | awk '/^diff --git / {{ hunk=0; next }} /^@@ / {{ hunk=1; next }}
         hunk && /^\\+/ {{ print substr($0, 2) }}' | grep -P -o -m1 -e "$SECRET_PATTERN" \
-      || true)
+      | head -n 1 || true)
     if [ -n "$MATCH" ]; then
-      FIRST=$(printf '%s' "$MATCH" | cut -c1-3)
+      FIRST=$(printf '%s' "$MATCH" | cut -c1-4)
       LAST=$(printf '%s' "$MATCH" | rev | cut -c1-3 | rev)
       printf '%s\n' \
         "previous attempt added secret pattern: path=$SECRET_PATH rule=$SECRET_RULE "\
-"excerpt=$FIRST...$LAST; correction required" \
+"excerpt=$FIRST...$LAST (${{#MATCH}} chars); correction required" \
         >&2
     fi
   done
@@ -700,6 +710,32 @@ def _changed_blobs_script() -> str:
   done < "$OUT/changed-blob-ids.txt"'''
 
 
+def _secret_declarations_script() -> str:
+    """Export the merge base's own secret declarations (FDY-0618).
+
+    `cat-file blob` reads each file as stored at the merge base, so nothing the worker
+    changed is read. `git grep -P` over the merge base's tree lists each secret-shaped
+    value it holds; a git without PCRE lists none, and every match then blocks."""
+    local_git = f"GIT_NO_LAZY_FETCH=1 timeout --signal=KILL {SECRET_DECLARATION_SECONDS} {GIT}"
+    rules = "\n".join(
+        f'  {local_git} -C "$REPO" grep --no-textconv -P -I -z -n -o \\\n'
+        f'    -e {_quote(pattern)} "$MB" 2>/dev/null \\\n'
+        f'    | head -c "$DECLARATION_CAP" > "$DECLARED/base/{name}" || true'
+        for name, pattern in named_secret_pattern_expressions()
+    )
+    return rf"""DECLARED="$OUT/{SECRET_DECLARATIONS_DIR}"
+  DECLARATION_CAP={SECRET_DECLARATION_CAP_BYTES}
+  mkdir -p "$DECLARED/base"
+  for declared in .gitleaksignore .gitleaks.toml; do
+    kind=$({local_git} -C "$REPO" cat-file -t "$MB:$declared" 2>/dev/null || true)
+    if [ "$kind" = "blob" ]; then
+      {local_git} -C "$REPO" cat-file blob "$MB:$declared" 2>/dev/null \
+        | head -c "$DECLARATION_CAP" > "$DECLARED/${{declared#.}}" || true
+    fi
+  done
+{rules}"""
+
+
 def collector_script(
     *,
     base_ref: str,
@@ -884,6 +920,7 @@ if [ -n "$BASE" ]; then
   # Unicode. Read blobs by object id, including those in earlier commits.
   {_injected_collection_script()}
   {_changed_blobs_script()}
+  {_secret_declarations_script()}
   # hades #490: a branch with no commit beyond the base is an empty range, which git
   # refuses to bundle, so a failed attempt that committed nothing (a gateway drop before
   # the model's first edit) left no bundle at all: the verifier said "no bundle was

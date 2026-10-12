@@ -2886,6 +2886,7 @@ class KubernetesProvider:
             diff_paths=outputs.diff_paths,
             diff_findings=outputs.diff_findings,
             diff_unscanned=outputs.diff_unscanned,
+            secret_declarations=outputs.secret_declarations,
             diff_changes=outputs.diff_changes,
             base_paths=outputs.base_paths,
             over_limit=outputs.over_limit,

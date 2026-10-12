@@ -80,6 +80,7 @@ def catalog_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         principal,
         csrf,
         active="/ui/catalog",
+        data_page="catalog",
         heading="Catalog",
         intro=(
             "Skills and tools that Hades knows. This page is read-only. "

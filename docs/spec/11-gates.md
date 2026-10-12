@@ -16,7 +16,7 @@ record names each advisory gate that failed and claims the worker self-review on
 | `commits_present` | blocking | The branch has at least one commit |
 | `scope_contained` | blocking (prohibited paths) / advisory | Worker commit paths are inside `allowed_paths` |
 | `no_injected_files` | blocking | No injected-name or harness paths appear on the branch; shim content is checked on every added or modified path (hades #377, #400) |
-| `no_secrets` | blocking | The scanner found no secrets in the diff or artifacts |
+| `no_secrets` | blocking | The scanner found no secrets in the diff or artifacts; each match names its input, line, rule and a redacted excerpt, and a match of a fixture value the repository declares is advisory (spec 11, FDY-0618) |
 | `editor_leftovers` | blocking | No editor or merge leftovers were added to the branch |
 | `verification_ran` | blocking | Crucible's own re-run of required commands passed |
 | `run_evidence_present` | blocking | A run-evidence artifact is present and valid |

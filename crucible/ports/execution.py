@@ -11,6 +11,7 @@ from typing import Any, Literal, Protocol
 from crucible.domain.endpoints import validate_endpoint
 from crucible.domain.gates import SHIM_IDENTITY_MOUNT
 from crucible.domain.infrastructure import Interruption
+from crucible.domain.secret_fixtures import SecretDeclarations
 from crucible.domain.secrets import SecretMatch
 from crucible.ports.github import InstallationToken
 from crucible.ports.harness import ReportMetrics
@@ -390,6 +391,10 @@ class CollectedOutputs:
     leftover_committed: bool = False
     leftover_note: str | None = None
     interruption: Interruption | None = None
+    # FDY-0618: what the merge base declares about secret-shaped text (its
+    # .gitleaksignore, .gitleaks.toml and fixture value digests), so a match in an
+    # artifact is judged as the diff's are. None when the collector exported none.
+    secret_declarations: SecretDeclarations | None = None
     # hades #604: what the harness's own usage report said, read by a provider whose
     # report directory exists only while it collects (Kubernetes reads it into a
     # scratch directory), so the supervisor has no local report directory to parse.

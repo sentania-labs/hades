@@ -114,6 +114,7 @@ def memory_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
     context.update(
         heading="Memory",
         intro=EXPLANATION,
+        data_page="memory",
         tab=tab,
         tabs=[
             {"key": key, "label": label, "href": f"{PATH}?tab={key}", "on": key == tab}

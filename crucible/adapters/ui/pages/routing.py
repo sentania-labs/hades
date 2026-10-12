@@ -585,6 +585,7 @@ async def routing_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         principal,
         csrf,
         active="/ui/routing",
+        data_page="routing",
         heading="Routing",
         intro="What routes and limits a task: the policies in force, the gateway, and pools.",
         sections=sections,

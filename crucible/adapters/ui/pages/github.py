@@ -194,6 +194,7 @@ def github_page(request: Request, ctx: Ctx, uow: UoW) -> Response:
         principal,
         csrf,
         active="/ui/github",
+        data_page="github",
         heading="GitHub",
         intro=(
             "Create the App and install it. Pick the repositories Crucible delivers to on "
@@ -399,7 +400,14 @@ async def _action_github_create_app(
         reason=reason,
     )
     uow.commit()
-    context = _base(request, principal, csrf, title="Continue on GitHub", active="/ui/github")
+    context = _base(
+        request,
+        principal,
+        csrf,
+        title="Continue on GitHub",
+        active="/ui/github",
+        data_page="github-continue",
+    )
     context.update(
         target_url=started["target_url"],
         manifest=json.dumps(started["manifest"], separators=(",", ":")),
