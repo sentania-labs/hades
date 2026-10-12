@@ -1,5 +1,7 @@
 # REPLACE: REPLACE_ME_CLUSTER_DNS_IP       `kubectl -n kube-system get svc kube-dns`
-# REPLACE: REPLACE_ME_STORAGE_CLASS_RWO    the class for each attempt workspace (26)
+# REPLACE: REPLACE_ME_STORAGE_CLASS_RWO    the class for each role Pod's generic ephemeral
+#                                            scratch (26, ADR 0033); blank it for a
+#                                            size-limited emptyDir instead
 # REPLACE: REPLACE_ME_IMAGE_PULL_SECRET    the private-registry pull Secret, or blank it
 # REPLACE: REPLACE_ME_RENDER_TIMEZONE       the operator's zone, an IANA name (01)
 # REPLACE: REPLACE_ME_LOCAL_ENDPOINT_NAMESPACE  the namespace of the pods that take the
@@ -31,7 +33,7 @@ metadata:
 data:
   CRUCIBLE_KUBERNETES__CLUSTER_DNS_IP: REPLACE_ME_CLUSTER_DNS_IP
   CRUCIBLE_SERVICE__RENDER_TIMEZONE: REPLACE_ME_RENDER_TIMEZONE
-  CRUCIBLE_KUBERNETES__STORAGE_CLASS: REPLACE_ME_STORAGE_CLASS_RWO
+  CRUCIBLE_KUBERNETES__WORKSPACE_EPHEMERAL_CLASS: REPLACE_ME_STORAGE_CLASS_RWO
   CRUCIBLE_KUBERNETES__IMAGE_PULL_SECRET: REPLACE_ME_IMAGE_PULL_SECRET
   CRUCIBLE_KUBERNETES__LOCAL_ENDPOINT_CIDRS: "[]"
   CRUCIBLE_KUBERNETES__LOCAL_ENDPOINT_NAMESPACE: REPLACE_ME_LOCAL_ENDPOINT_NAMESPACE

@@ -665,22 +665,6 @@ def bare_pod(
     }
 
 
-def workspace_claim(
-    *, name: str, namespace: str, object_labels: Mapping[str, str], size: str, storage_class: str
-) -> dict[str, Any]:
-    """`ws-<attempt>`: the workspace (26). ReadWriteOnce, because one Pod of the attempt
-    writes it at a time and the roles run one after another, never together."""
-    body: dict[str, Any] = {
-        "apiVersion": "v1",
-        "kind": "PersistentVolumeClaim",
-        "metadata": {"name": name, "namespace": namespace, "labels": dict(object_labels)},
-        "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": size}}},
-    }
-    if storage_class:
-        body["spec"]["storageClassName"] = storage_class
-    return body
-
-
 def config_map(
     *,
     name: str,
@@ -1082,5 +1066,4 @@ __all__ = [
     "service_sidecar",
     "service_volume_name",
     "service_volumes",
-    "workspace_claim",
 ]

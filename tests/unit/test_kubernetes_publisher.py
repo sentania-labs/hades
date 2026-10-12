@@ -28,7 +28,6 @@ from crucible.adapters.execution import k8sspec, scripts
 from crucible.adapters.execution.k8sapi import KubernetesApiError
 from crucible.adapters.execution.k8sfake import FakeKubernetesApi
 from crucible.adapters.execution.k8spublisher import (
-    BUNDLE_LEAF,
     ByWorkspacePublisher,
     KubernetesPublisher,
     KubernetesPublisherConfig,
@@ -75,7 +74,7 @@ class MemoryStore:
 
 
 def _setup(
-    *, bundle: bytes | None = BUNDLE, claim: bool = True, **api_kwargs: Any
+    *, bundle: bytes | None = BUNDLE, **api_kwargs: Any
 ) -> tuple[FakeKubernetesApi, KubernetesProvider, KubernetesPublisher]:
     api, _registry, provider = build(
         config=KubernetesConfig(
@@ -86,21 +85,6 @@ def _setup(
         ),
         **api_kwargs,
     )
-    name = k8sspec.object_name("ws", ATTEMPT)
-    if claim:
-        api.create(
-            "persistentvolumeclaims",
-            k8sspec.workspace_claim(
-                name=name,
-                namespace=provider.config.namespace,
-                object_labels={k8sspec.LABEL_ATTEMPT: ATTEMPT},
-                size="1Gi",
-                storage_class="lab-ssd",
-            ),
-        )
-        # Where the collector left it: a merge-main run's leaf check still reads it, and
-        # a push must not (ADR 0032).
-        api.claims[name][BUNDLE_LEAF] = b"the copy on the claim, never pushed"
     store = MemoryStore()
     if bundle is not None:
         store.blobs[BUNDLE_ARTIFACT] = bundle
@@ -241,8 +225,8 @@ async def test_the_secret_job_pod_and_policy_are_gone_when_the_push_is() -> None
     assert order.index(("secrets", token_secret_name(ATTEMPT))) > order.index(
         ("jobs", job_name(ATTEMPT))
     )
-    # The workspace claim is not the publisher's to remove.
-    assert k8sspec.object_name("ws", ATTEMPT) in api.object_names("persistentvolumeclaims")
+    # ADR 0033: the publisher created no claim either; nothing of the attempt is left.
+    assert api.object_names("persistentvolumeclaims") == []
 
 
 async def test_the_network_policy_selects_the_publisher_pod_and_opens_only_the_git_host() -> None:
@@ -343,8 +327,8 @@ async def test_an_unsealed_or_unstored_bundle_is_refused_before_a_token_is_place
 
 
 async def test_a_push_needs_no_workspace_claim() -> None:
-    """ADR 0032: the claim may be gone; the stored bundle is all a push reads."""
-    api, _provider, publisher = _setup(claim=False)
+    """ADR 0032 and 0033: there is no attempt claim; the stored bundle is all a push reads."""
+    api, _provider, publisher = _setup()
     outcome = await publisher.push(_request(), _token(installation_token_value()))
     assert outcome.pushed, outcome
     roles = [body["metadata"]["labels"][k8sspec.LABEL_ROLE] for body in _created(api, "jobs")]
@@ -724,7 +708,8 @@ async def test_a_conflicting_merge_main_reports_the_files_and_pushes_nothing() -
 
 
 async def test_a_merge_main_needs_no_workspace_claim() -> None:
-    api, _provider, publisher = _setup(claim=False)
+    """ADR 0033: a merge-main run has no attempt claim to read; it needs none."""
+    api, _provider, publisher = _setup()
 
     outcome = await publisher.merge_main(_merge_request(), _token(installation_token_value()))
 

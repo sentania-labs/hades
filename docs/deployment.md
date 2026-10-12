@@ -235,8 +235,8 @@ ServiceAccount with no permission at all, the ResourceQuota that is also the pro
 concurrency bound, the reference cache claim, PostgreSQL for the lab, the migration Job,
 the api and supervisor Deployments, the Service, and the Ingress route without a host.
 
-Everything an attempt becomes (Jobs, Pods, ConfigMaps, per-attempt Secrets,
-NetworkPolicies and workspace claims), every login Job and probe, and the harness
+Everything an attempt becomes (Jobs, Pods with their own ephemeral scratch, ConfigMaps,
+per-attempt Secrets and NetworkPolicies), every login Job and probe, and the harness
 credential Secrets are created by Crucible at runtime and are not part of the desired
 state. Argo tracks only what it applied, so it neither reports those as drift nor
 prunes them.
@@ -257,8 +257,11 @@ default policy the sizing rule is:
 
 ```
 count/jobs.batch    = 5N + 2      (5 Jobs per attempt + 2 publisher headroom)
-persistentvolumeclaims = 4N       (each attempt claims four PVCs: workspace, reference
-                                  cache, bundle output, artifact root)
+persistentvolumeclaims = 4N       (no attempt claim, ADR 0033: a named workspaceEphemeral
+                                  class makes one Pod-owned claim per running role Pod,
+                                  an empty class none; 4N covers every role Pod an
+                                  attempt may have alive at once beside the reference
+                                  cache claim)
 requests.cpu        = N           (2 CPU limit x 0.5 fraction = 1 CPU per attempt)
 limits.cpu          = 2N          (2 CPU limit per attempt)
 requests.memory     = 4N GiB      (4 GiB per attempt)

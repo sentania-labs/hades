@@ -1,10 +1,10 @@
 """The Kubernetes execution provider (08, 26).
 
-One Job per role per attempt in the workers namespace, a PersistentVolumeClaim as the
-workspace, the identity bundle as a ConfigMap, the harness credential as a per-attempt
-Secret seeded from the harness's own Secret, and a per-attempt NetworkPolicy in place of
-the egress proxy. No Docker socket anywhere, and no call outside the one namespace the
-supervisor's ServiceAccount is bound to.
+One Job per role per attempt in the workers namespace, a scratch volume that lives and
+dies with each role Pod as the workspace (ADR 0033), the identity bundle as a ConfigMap,
+the harness credential as a per-attempt Secret seeded from the harness's own Secret, and
+a per-attempt NetworkPolicy in place of the egress proxy. No Docker socket anywhere, and
+no call outside the one namespace the supervisor's ServiceAccount is bound to.
 
 Everything above the provider is the Docker provider's, unchanged: the same identity
 bundle, the same preparer, collector, bundle-verifier and verifier scripts, the same

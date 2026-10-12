@@ -133,8 +133,8 @@ metadata:
 spec:
   hard:
     count/jobs.batch: "17"
-    # The tier's earlier cases keep their claims (their cleanup policy keeps the diff),
-    # and the hades #189, #190 and #191 cases at the end of the file need five more.
+    # ADR 0033: no attempt claim; with a named WORKSPACE_EPHEMERAL_CLASS each running role
+    # Pod owns one claim that goes with it, and the manifests own the reference cache.
     persistentvolumeclaims: "24"
     requests.cpu: "6"
     requests.memory: 8Gi

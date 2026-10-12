@@ -36,7 +36,11 @@ data:
   # Service and Deployment and its Pods' `app.kubernetes.io/name` label (../buildkit).
   CRUCIBLE_KUBERNETES__BUILDKIT_NAMESPACE: hades-buildkit
   CRUCIBLE_KUBERNETES__USE_REFERENCE_CACHE: "true"
-  CRUCIBLE_KUBERNETES__WORKSPACE_SIZE: 20Gi
+  # ADR 0033: every role Pod's scratch is its own, removed with the Pod. The size bounds
+  # it: an `emptyDir` sizeLimit by default, or the claim template's request when the
+  # overlay names a class in CRUCIBLE_KUBERNETES__WORKSPACE_EPHEMERAL_CLASS (a generic
+  # ephemeral volume). No attempt creates a PersistentVolumeClaim of its own.
+  CRUCIBLE_KUBERNETES__WORKSPACE_EPHEMERAL_SIZE: 20Gi
   CRUCIBLE_KUBERNETES__MAX_CONCURRENCY: "3"
   CRUCIBLE_KUBERNETES__LAUNCH_TIMEOUT_SECONDS: "300"
   CRUCIBLE_KUBERNETES__PREPARE_TIMEOUT_SECONDS: "900"

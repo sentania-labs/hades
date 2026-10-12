@@ -23,7 +23,8 @@ flow "$tmp/lab.yaml" --name hades --namespace hades --workers-namespace hades-wo
   --buildkit off \
   --setting CRUCIBLE_KUBERNETES__CLUSTER_DNS_IP=10.43.0.10 \
   --setting CRUCIBLE_SERVICE__RENDER_TIMEZONE=America/Chicago \
-  --setting CRUCIBLE_KUBERNETES__STORAGE_CLASS=longhorn \
+  --setting CRUCIBLE_KUBERNETES__WORKSPACE_EPHEMERAL_CLASS=longhorn \
+  --setting CRUCIBLE_KUBERNETES__WORKSPACE_EPHEMERAL_SIZE=20Gi \
   --setting CRUCIBLE_KUBERNETES__LOCAL_ENDPOINT_NAMESPACE=litellm \
   --setting 'CRUCIBLE_KUBERNETES__LOCAL_ENDPOINT_POD_LABELS={"app.kubernetes.io/name":"litellm"}' \
   --setting CRUCIBLE_KUBERNETES__LOCAL_ENDPOINT_PORT=4000 \
