@@ -210,7 +210,7 @@ class ClaudeCodeAdapter:
             ),
             minimum_mode=MountMode(self.concurrency.minimum_mode),
             config_dir_env="CLAUDE_CONFIG_DIR",
-            templates={"settings.json": "{}\n"},
+            templates={"settings.json": '{"attribution":{"commit":"","pr":""}}\n'},
             login_hint=(
                 "CLAUDE_CONFIG_DIR=<dir> claude setup-token; the token is shown once and is "
                 "kept as <dir>/oauth-token, mode 600"

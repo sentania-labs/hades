@@ -226,6 +226,8 @@ class FakeGitHubClient(GitHubClient):
         repository: str,
         number: int,
         expected_head_sha: str,
+        commit_title: str,
+        commit_message: str,
     ) -> MergeResult:
         return MergeResult(sha="newsha", merged_at=NOW, merged_by="fake-user")
 

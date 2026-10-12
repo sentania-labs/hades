@@ -59,6 +59,7 @@ from crucible.domain.lifecycle import (
     ExecutionState,
     TaskState,
 )
+from crucible.domain.publication import body_sha256
 from crucible.ports.execution import CollectedOutputs
 from crucible.ports.github import (
     CommentRecord,
@@ -79,6 +80,9 @@ OLD_HEAD = "a" * 40
 NEW_HEAD = "b" * 40
 MERGE_SHA = "c" * 40
 PR_NUMBER = 363
+# The text Hades published; the squash merge verifies the live pull request against it.
+PR_TITLE = "Return 409 on duplicate import ID"
+PR_BODY = "## Summary\n\nDuplicate import IDs now answer 409.\n"
 TRIGGER = "@codex review"
 APP_LOGIN = "crucible-app[bot]"
 
@@ -683,6 +687,8 @@ def _ready_for_merge() -> _Store:
             state=PullRequestState.OPEN,
             head_sha=OLD_HEAD,
             opened_at=NOW,
+            title=PR_TITLE,
+            body_sha256=body_sha256(PR_BODY),
         )
     )
     store.pull_request_heads = _CrucibleHeads()  # type: ignore[assignment]

@@ -94,6 +94,8 @@ class FakeGitHub:
         self.mint_failure_once = False
         self.mint_calls = 0
         self.merge_calls: list[tuple[str, int, str]] = []
+        # The explicit squash text of each merge request: (commit_title, commit_message).
+        self.merge_texts: list[tuple[Any, Any]] = []
         self.merge_refusal: tuple[int, str] | None = None
         self.merge_response_failure_once = False
         self.workflow_log = b"fake workflow log: the required check failed\n"
@@ -558,6 +560,7 @@ class _Handler(BaseHTTPRequestHandler):
                 expected_sha = str(body.get("sha", ""))
                 merge_method = str(body.get("merge_method", ""))
                 state.merge_calls.append((full_name, number, merge_method))
+                state.merge_texts.append((body.get("commit_title"), body.get("commit_message")))
                 if expected_sha != pull.head_sha:
                     self._send(409, {"message": "Head branch was modified"})
                     return

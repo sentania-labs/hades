@@ -26,6 +26,7 @@ from crucible.application.delivery_tick import DeliveryCoordinator, MergePlan
 from crucible.application.errors import ContractValidationError
 from crucible.domain.entities import Principal, PullRequestState, PushedBy, Role
 from crucible.domain.lifecycle import TaskState
+from crucible.domain.publication import body_sha256
 from crucible.ports.github import (
     GitHubClient,
     GitHubError,
@@ -38,6 +39,8 @@ from tests.fixtures import FakeClock
 HEAD = "a" * 40
 MOVED = "b" * 40
 MERGE = "c" * 40
+TITLE = "Fix behavior"
+BODY = "## Summary\n\nVerified evidence.\n"
 NOW = datetime(2026, 10, 1, 18, 0, tzinfo=UTC)
 
 
@@ -62,7 +65,10 @@ class FakeGitHub:
         self.merged = False
         self.before_read: Any = None
         self.refusal = refusal
+        self.title = TITLE
+        self.body = BODY
         self.merge_calls: list[str] = []
+        self.merge_texts: list[tuple[str, str]] = []
 
     def installation_token(self, **kwargs: Any) -> InstallationToken:
         return InstallationToken(
@@ -83,12 +89,21 @@ class FakeGitHub:
             merged_at=NOW if self.merged else None,
             merged_by="person" if self.merged else None,
             merge_commit_sha=MERGE if self.merged else None,
+            title=self.title,
+            body=self.body,
         )
 
     def merge_pull_request(
-        self, token: InstallationToken, *, expected_head_sha: str, **kwargs: Any
+        self,
+        token: InstallationToken,
+        *,
+        expected_head_sha: str,
+        commit_title: str,
+        commit_message: str,
+        **kwargs: Any,
     ) -> MergeResult:
         self.merge_calls.append(expected_head_sha)
+        self.merge_texts.append((commit_title, commit_message))
         if self.refusal is not None:
             raise self.refusal
         return MergeResult(sha=MERGE, merged_at=NOW, merged_by="hades[bot]")
@@ -118,6 +133,8 @@ def setup() -> tuple[DeliveryCoordinator, FakeGitHub, MagicMock, Any, MergePlan]
         merged_at=None,
         merged_by=None,
         base_ref="main",
+        title=TITLE,
+        body_sha256=body_sha256(BODY),
         # hades #447: what the branch's migrations touch; none here.
         schema_tables=None,
         schema_columns=None,
@@ -157,6 +174,8 @@ def setup() -> tuple[DeliveryCoordinator, FakeGitHub, MagicMock, Any, MergePlan]
         installation_id=42,
         certified_head_sha=HEAD,
         base_ref="main",
+        title=TITLE,
+        body_sha256=body_sha256(BODY),
     )
     return coordinator, github, uow, task, plan
 
@@ -447,14 +466,24 @@ def test_github_adapter_sends_squash_and_expected_sha_with_the_app_token() -> No
     token = FakeGitHub().installation_token()
     client = RestGitHubClient(Mock(), transport)
     result = client.merge_pull_request(
-        token, repository="org/repo", number=7, expected_head_sha=HEAD
+        token,
+        repository="org/repo",
+        number=7,
+        expected_head_sha=HEAD,
+        commit_title="Fix behavior",
+        commit_message="Verified evidence",
     )
     assert result == MergeResult(sha=MERGE, merged_at=NOW, merged_by="hades[bot]")
     transport.request.assert_called_once_with(
         "PUT",
         "/repos/org/repo/pulls/7/merge",
         bearer=token.reveal(),
-        body={"merge_method": "squash", "sha": HEAD},
+        body={
+            "merge_method": "squash",
+            "sha": HEAD,
+            "commit_title": "Fix behavior",
+            "commit_message": "Verified evidence",
+        },
     )
 
 
@@ -473,5 +502,7 @@ def test_github_adapter_preserves_refusal_cause(status: int) -> None:
             repository="org/repo",
             number=7,
             expected_head_sha=HEAD,
+            commit_title="Fix behavior",
+            commit_message="Verified evidence",
         )
     transport.get.assert_not_called()

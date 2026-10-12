@@ -8,6 +8,7 @@ the configured external-review trigger under the App's identity.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -34,6 +35,11 @@ from crucible.ports.github import (
 log = logging.getLogger("crucible.github")
 
 LOG_EXCERPT_BYTES = 64 * 1024
+
+
+def strip_coauthors(message: str) -> str:
+    """`message` without any `Co-Authored-By:` line, in any case or indentation."""
+    return re.sub(r"(?im)^[ \t]*co-authored-by[ \t]*:[^\n]*(?:\n|$)", "", message)
 
 
 def _refused(exc: GitHubError) -> bool:
@@ -138,13 +144,25 @@ class RestGitHubClient:
         repository: str,
         number: int,
         expected_head_sha: str,
+        commit_title: str,
+        commit_message: str,
     ) -> MergeResult:
+        # The squash text is the title and body Hades published, verified by the caller
+        # against its stored copy; never a live read of the pull request, which a
+        # collaborator may have edited, and never GitHub's default squash text, which
+        # derives co-authors from the branch commits. Any co-author line is dropped as a
+        # backstop so main carries one author (ADR 0007).
         path = f"/repos/{repository}/pulls/{number}/merge"
         status, payload, _ = self._http.request(
             "PUT",
             path,
             bearer=token.reveal(),
-            body={"merge_method": "squash", "sha": expected_head_sha},
+            body={
+                "merge_method": "squash",
+                "sha": expected_head_sha,
+                "commit_title": commit_title,
+                "commit_message": strip_coauthors(commit_message),
+            },
         )
         if status >= 400:
             message = payload.get("message") if isinstance(payload, dict) else None

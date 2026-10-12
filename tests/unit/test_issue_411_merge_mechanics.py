@@ -58,8 +58,10 @@ from tests.integration.fake_publisher import FakePublisher
 from tests.unit.test_issue_360_ready_for_merge_correction import (
     NOW,
     OLD_HEAD,
+    PR_BODY,
     PR_ID,
     PR_NUMBER,
+    PR_TITLE,
     TASK_ID,
     _NoDecisions,
     _principal,
@@ -192,6 +194,8 @@ class _Client:
             merged_by=pull.merged_by,
             mergeable_state=pull.mergeable_state,
             mergeable=pull.mergeable,
+            title=pull.title,
+            body=pull.body,
         )
 
     def _checks(self, sha: str) -> tuple[CheckRecord, ...]:
@@ -260,6 +264,8 @@ def _open_pull(client: _Client, *, mergeable_state: str = "dirty") -> None:
         head_branch=WORK_BRANCH,
         base_ref="main",
         head_sha=OLD_HEAD,
+        title=PR_TITLE,
+        body=PR_BODY,
         mergeable_state=mergeable_state,
         mergeable=mergeable_state != "dirty",
     )

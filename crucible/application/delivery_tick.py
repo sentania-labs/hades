@@ -212,6 +212,10 @@ class MergePlan:
     certified_head_sha: str
     base_ref: str
     created_at: datetime | None = None
+    # The title and body hash Hades stored at publication. The squash commit carries
+    # that text and nothing a collaborator edited into the pull request since (23).
+    title: str = ""
+    body_sha256: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1606,6 +1610,8 @@ class DeliveryCoordinator:
                         certified_head_sha=task.head_sha,
                         base_ref=pull_request.base_ref,
                         created_at=getattr(task, "created_at", None),
+                        title=pull_request.title,
+                        body_sha256=pull_request.body_sha256,
                     )
                 )
             uow.commit()
@@ -1689,6 +1695,27 @@ class DeliveryCoordinator:
                     )
                 )
                 return False
+            # The squash commit's text is what Hades published. A title or body edited
+            # on GitHub since then is unverified and could carry a changed completion
+            # record or closing keywords onto main, so it refuses rather than merges.
+            changed = [
+                name
+                for name, same in (
+                    ("title", current.title == plan.title),
+                    ("body", body_sha256(current.body) == plan.body_sha256),
+                )
+                if not same
+            ]
+            if changed:
+                await self._host._db(
+                    lambda: self._record_merge_refusal(
+                        plan,
+                        f"pull request {' and '.join(changed)} changed since Hades published "
+                        "it; restore the published text or merge by hand",
+                        current,
+                    )
+                )
+                return False
             # Re-read the switch, accepted head and certification after GitHub I/O.
             # A correction or an administrator may have changed them during the read.
             if not await self._host._db(lambda: self._merge_still_allowed(plan)):
@@ -1700,6 +1727,8 @@ class DeliveryCoordinator:
                     repository=plan.repository_name,
                     number=plan.number,
                     expected_head_sha=plan.certified_head_sha,
+                    commit_title=plan.title,
+                    commit_message=current.body,
                 )
             except GitHubError as merge_error:
                 if merge_error.response_class == "rate_limited":

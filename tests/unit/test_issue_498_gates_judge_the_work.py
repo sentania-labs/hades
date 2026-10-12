@@ -783,7 +783,7 @@ def _run_wrapper(tmp_path: Path, repo: Path, binary: Path) -> subprocess.Complet
     }
     launch = QwenCodeAdapter().build_launch(_context())
     return subprocess.run(
-        [sys.executable, str(WRAPPER), *launch.argv[1:]],
+        [sys.executable, str(WRAPPER), *launch.argv[5:]],
         cwd=repo,
         env=env,
         capture_output=True,
@@ -886,7 +886,7 @@ def test_the_adapter_restricts_tools_and_sets_thinking_off_and_an_output_cap(
 ) -> None:
     """AC4: the launch and the settings the wrapper writes mirror the Hermes launch."""
     launch = QwenCodeAdapter().build_launch(_context())
-    assert launch.argv[1:3] == ("--yolo", "--auth-type")
+    assert launch.argv[5:7] == ("--yolo", "--auth-type")
     assert "--max-session-turns" in launch.argv
     assert launch.env["CRUCIBLE_QWEN_THINKING"] == "false"
     assert launch.env["CRUCIBLE_QWEN_MAX_OUTPUT_TOKENS"] == str(DEFAULT_QWEN_MAX_OUTPUT_TOKENS)

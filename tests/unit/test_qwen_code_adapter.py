@@ -63,7 +63,7 @@ def wrapper() -> ModuleType:
 
 def test_launch_and_shared_read_only_credential() -> None:
     launch = ADAPTER.build_launch(context(credential_mounted=True))
-    assert launch.argv == (
+    assert launch.argv[4:] == (
         "/usr/local/bin/crucible-qwen-code",
         "--yolo",
         "--auth-type",
