@@ -46,7 +46,11 @@ Foundry write a correction for work that was already right.
    `internal_review_recorded` or `no_secrets`, which always block, and never
    `commit_policy`, which is always advisory) and versioned with the rest of the
    policy. `no_secrets` is fixed because a secret, once pushed, cannot be taken back,
-   and never committing a secret outranks any policy. A version
+   and never committing a secret outranks any policy. The gate stays blocking; within
+   it, a match whose value is a fixture the repository itself declares (in its
+   `.gitleaksignore` or `.gitleaks.toml` allowlist, read from the merge base) is
+   listed for the reviewer instead of failing it, since that value is already in the
+   repository (FDY-0618, spec 11). A version
    without the field, including every version written before it existed, takes the
    default set when it is read. Nothing is rewritten on upgrade: the lab's
    `default-software` version 8 and `hades-self-hosting` version 1 carry no list and so

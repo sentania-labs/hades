@@ -147,7 +147,14 @@ def test_a_key_after_a_9_mb_text_file_is_found_and_names_its_file(tmp_path: Path
     assert scan_text(collected.text(output / "diff.patch")) is None
     findings = _findings(tmp_path, output)
     assert any(
-        f == {"where": "diff:z.txt", "pattern": "github_token", "excerpt": "ghp...AAA"}
+        f
+        == {
+            "where": "diff:z.txt",
+            "pattern": "github_token",
+            "excerpt": "ghp_...AAA (40 chars)",
+            "line": 1,
+            "context": 'TOKEN = "[ghp_...AAA (40 chars)]"',
+        }
         for f in findings
     )
     assert not any(f["where"] == "diff:a.txt" for f in findings)
