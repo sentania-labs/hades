@@ -24,14 +24,29 @@ def test_cpu_time_returns_a_positive_number() -> None:
 
 
 def test_cpu_time_is_cached() -> None:
-    """A second call returns the exact same value without re-calibrating."""
+    """A second call returns the exact same value without re-calibrating.
+
+    The calibration is stubbed: two real measurements differ on a loaded node, so
+    comparing them made this test fail under `make test-unit` load."""
+    calls: list[float] = []
+
+    def counting_calibrate() -> float:
+        calls.append(float(len(calls) + 2))
+        return calls[-1]
+
     conftest._clear_calibration()
-    first = cpu_time()
-    with patch.object(conftest._CAL, "_value", None):
-        # Force a re-calibration
-        second = cpu_time()
-    assert second >= 1.0
-    assert second == first
+    try:
+        with patch.object(conftest, "_calibrate", counting_calibrate):
+            first = cpu_time()
+            second = cpu_time()
+            assert calls == [2.0]
+            assert second == first == 2.0
+            conftest._clear_calibration()
+            # Clearing the cache is what forces a re-calibration.
+            assert cpu_time() == 3.0
+            assert calls == [2.0, 3.0]
+    finally:
+        conftest._clear_calibration()
 
 
 def test_cpu_time_scales_with_slow_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
