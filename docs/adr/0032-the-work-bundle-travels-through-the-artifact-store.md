@@ -58,11 +58,14 @@ and content-addressed, with an evidence row that names it.
    script (`delivered_publisher_script`) waits for the delivered bundle, runs the
    publisher script unchanged (which hashes the bundle against the seal again before any
    remote, exit 7), and then waits for the provider to read its outcome files back over
-   exec, which tells it to end. The outcome never travels through a Pod log (12), and a
-   Job that exited 0 whose outcome could not be read is still reported as pushed at the
-   expected head for Crucible's own remote-head check, as before. The claim check, the
-   Job that readied the claim's `publish/` leaf for a push, `k8spublisher.bundle_leaf`
-   and the `k8s://` bundle path form are gone. With both providers wired, the attempt's
+   exec, which tells it to end. That delivery and read run beside the role's deadline,
+   not in place of it: a Pod that hangs before it writes its outcome is a timeout on the
+   role's own schedule, and the exchange still in flight is abandoned. The outcome
+   never travels through a Pod log (12), and a Job that exited 0 whose outcome could
+   not be read is still reported as pushed at the expected head for Crucible's own
+   remote-head check, as before. The claim check, the Job that readied the claim's
+   `publish/` leaf for a push, `k8spublisher.bundle_leaf` and the `k8s://` bundle path
+   form are gone. With both providers wired, the attempt's
    workspace path (not the bundle path) picks the publisher.
 5. **A correction's preparer resumes from the stored bundle.** The supervisor still
    selects the last sealed bundle exactly as before, and adds its artifact's store path

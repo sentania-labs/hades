@@ -360,6 +360,10 @@ def _scanned_inputs(outputs: CollectedOutputs, claim: dict[str, Any] | None) -> 
     if outputs.bundle is not None:
         scanned.extend(f"commit[{i}].message" for i in range(len(outputs.bundle.commit_messages)))
     scanned.extend(f"artifact:{a.name}" for a in outputs.artifacts)
+    if outputs.bundle is not None and outputs.bundle.content and outputs.bundle.sha256:
+        # ADR 0032: the bundle is stored, and so scanned, as the `work_bundle` artifact
+        # (`_store_work_bundle`), though it is collected apart from `outputs.artifacts`.
+        scanned.append(f"artifact:{WORK_BUNDLE_NAME}")
     return scanned
 
 

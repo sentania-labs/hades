@@ -16,6 +16,8 @@ import logging
 import os
 import stat
 import subprocess
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -495,6 +497,30 @@ async def test_a_push_whose_outcome_cannot_be_read_back_still_reports_the_push()
         0,
     )
     assert "could not be read" in outcome.detail
+    assert not api.secret_exists(token_secret_name(ATTEMPT))
+
+
+async def test_a_publisher_that_never_finishes_times_out_on_the_role_deadline() -> None:
+    """A publisher Pod that hangs before it writes its outcome leaves the collect exec
+    waiting on it; the role's own deadline still ends the wait, not the exec's longer
+    bound or the Job's activeDeadlineSeconds."""
+    api, _provider, publisher = _setup()
+    release = threading.Event()
+
+    def hung(obj: Any) -> Any:
+        release.wait(30)
+        raise KubernetesApiError(503, "the exec stream ended")
+
+    api._collect = hung  # type: ignore[method-assign]
+    started = time.monotonic()
+    try:
+        outcome = await publisher.push(
+            _request(timeout_seconds=1), _token(installation_token_value())
+        )
+    finally:
+        release.set()
+    assert time.monotonic() - started < 10
+    assert (outcome.pushed, outcome.step, outcome.exit_code) == (False, "timeout", -2)
     assert not api.secret_exists(token_secret_name(ATTEMPT))
 
 

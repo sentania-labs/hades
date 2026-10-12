@@ -5614,7 +5614,12 @@ class KubernetesProvider:
                     deadline = time.monotonic() + timeout
                     progress_at = time.monotonic()
                     if on_running is not None:
-                        await on_running(str((pod.get("metadata") or {}).get("name") or ""))
+                        await self._run_hook(
+                            on_running(str((pod.get("metadata") or {}).get("name") or "")),
+                            deadline,
+                            cancelled,
+                            name,
+                        )
                         progress_at = time.monotonic()
                         continue
                 elif not running and time.monotonic() - started > start_wait:
@@ -5653,6 +5658,35 @@ class KubernetesProvider:
         if unanswered:
             self._job_unanswered.add(name)
         return None
+
+    async def _run_hook(
+        self,
+        hook: Awaitable[None],
+        deadline: float,
+        cancelled: CancelCheck | None,
+        name: str,
+    ) -> None:
+        """Run an `on_running` hook beside the role's deadline and a cancel, not in place
+        of them: a hook still running at the deadline (a publisher Pod that never wrote
+        its outcome, so the collect exec waits on it) is cancelled, and the wait it was
+        called from ends as the timeout it is, on the role's own schedule."""
+        task = asyncio.ensure_future(hook)
+        try:
+            while not task.done():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                await asyncio.wait(
+                    {task}, timeout=min(remaining, max(self.config.poll_interval_seconds, 0.1))
+                )
+                if not task.done():
+                    await _stop_if_cancelled(cancelled, f"while {name} ran")
+            task.result()
+        finally:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
 
     async def _last_log_line(self, pod: Mapping[str, Any]) -> bytes | None:
         """The last line of a Pod's log with the API server's timestamp, or None when it

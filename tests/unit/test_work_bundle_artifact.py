@@ -208,6 +208,16 @@ def test_a_collection_with_no_bundle_file_stores_nothing(tmp_path: Path) -> None
     assert not uow.artifacts.rows
     row = next(r for r in uow.evidence.rows if r.kind == EvidenceKind.BUNDLE_HEAD.value)
     assert row.artifact_id is None
+    scanner = next(r for r in uow.evidence.rows if r.kind == EvidenceKind.SCANNER_RESULT.value)
+    assert f"artifact:{WORK_BUNDLE_NAME}" not in scanner.payload["scanned"]
+
+
+def test_the_scanner_coverage_names_the_bundle_it_scanned(tmp_path: Path) -> None:
+    """The bundle is scanned when it is stored, though it is collected apart from the
+    other artifacts: the scanner row's coverage names it, as for any artifact."""
+    uow, _store = _collect(tmp_path, _bundle())
+    scanner = next(r for r in uow.evidence.rows if r.kind == EvidenceKind.SCANNER_RESULT.value)
+    assert f"artifact:{WORK_BUNDLE_NAME}" in scanner.payload["scanned"]
 
 
 def test_an_artifact_whose_digest_is_not_the_seal_is_never_the_bundle(tmp_path: Path) -> None:
