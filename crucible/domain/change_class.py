@@ -6,10 +6,15 @@ Decided once per run from the paths a change touches, never from what a job test
 `pyproject.toml`, `uv.lock`, `docs`) always runs. A path under `images/` or
 `tools/images/` adds the images class, which also pulls in the kind tier (the images
 and the e2e-kind job share the same worker image). A path under `tools/kind/`,
-`deploy/`, or `tests/e2e/test_kind.py` adds the kind class on its own. A path under
-`.github/` is the workflow override: everything runs, no exceptions. A path that
-matches none of the above is unclassified and also runs everything, the same as the
-workflow override, so an unrecognized path never narrows what CI proves.
+`deploy/`, or `tests/e2e/test_kind.py` adds the kind class on its own, and so does a
+Kubernetes provider or publisher module (`crucible/adapters/execution/kubernetes.py`
+and the `k8s*` modules beside it): the kind tier is the only test of those modules
+against a real cluster, so a change to them that ran core alone could pass CI and
+break publishing on kind unseen, which is how #637 broke shard 3 at 2e467bf
+(finding 01M4QFXTN0EDD6PX84FYYQ1623). A path under `.github/` is the workflow
+override: everything runs, no exceptions. A path that matches none of the above is
+unclassified and also runs everything, the same as the workflow override, so an
+unrecognized path never narrows what CI proves.
 
 This module is the single definition: `tools/ci/changes.py` imports it to gate
 `.github/workflows/ci.yml` through job outputs, and `crucible.domain.certification`
@@ -25,8 +30,14 @@ from dataclasses import dataclass
 CORE_PREFIXES: tuple[str, ...] = ("crucible/", "tests/unit/", "tests/integration/", "docs/")
 CORE_FILES: frozenset[str] = frozenset({"pyproject.toml", "uv.lock"})
 IMAGES_PREFIXES: tuple[str, ...] = ("images/", "tools/images/")
-KIND_PREFIXES: tuple[str, ...] = ("tools/kind/", "deploy/")
-KIND_FILES: frozenset[str] = frozenset({"tests/e2e/test_kind.py"})
+# `crucible/adapters/execution/k8s` is a filename prefix, not a directory: it names the
+# Kubernetes modules beside kubernetes.py (k8sapi, k8sfake, k8spublisher, k8sregistry,
+# k8sspec, and any sibling named the same way), the ones only the kind tier runs
+# against a real cluster. They are checked before `crucible/` would classify them core.
+KIND_PREFIXES: tuple[str, ...] = ("tools/kind/", "deploy/", "crucible/adapters/execution/k8s")
+KIND_FILES: frozenset[str] = frozenset(
+    {"tests/e2e/test_kind.py", "crucible/adapters/execution/kubernetes.py"}
+)
 WORKFLOW_PREFIX = ".github/"
 
 

@@ -9,7 +9,11 @@ touched `CONTRIBUTING.md`, an unclassified path that runs everything (hades #476
 
 These cases pin, without a cluster: the kind app gives its provider the store that
 collection writes to, every kind test that pushes uses such a provider, and a provider
-given that store publishes the bundle collection stored where one without it refuses."""
+given that store publishes the bundle collection stored where one without it refuses.
+
+Finding 01M4QFXTN0EDD6PX84FYYQ1623 closed the CI gap itself: a change to the Kubernetes
+provider or publisher modules now classifies as kind, so the tier runs on the change
+that touched them rather than on the next one to touch an unclassified path."""
 
 from __future__ import annotations
 
@@ -113,9 +117,15 @@ async def test_a_provider_given_the_collection_store_pushes_and_one_without_refu
     assert pushed.pushed, pushed
 
 
-def test_the_red_change_ran_the_kind_tier_and_the_one_before_it_did_not() -> None:
-    """Why #639 showed what #637 broke: only #639 touched a path that runs kind."""
+def test_the_red_change_ran_the_kind_tier_and_now_so_does_the_one_that_broke_it() -> None:
+    """Why #639 showed what #637 broke: only #639 touched a path that ran kind. #637's
+    own paths, the Kubernetes publisher and its unit tests, classified as core, so the
+    only real-cluster publishing test never ran on it. Finding 01M4QFXTN0EDD6PX84FYYQ1623:
+    those paths are kind-triggering now, so the same change would run the tier."""
     assert classify(["CONTRIBUTING.md", "crucible/adapters/github/client.py"]).run_kind
-    assert not classify(
+    broke_it = classify(
         ["crucible/adapters/execution/k8spublisher.py", "tests/unit/test_work_bundle_artifact.py"]
-    ).run_kind
+    )
+    assert broke_it.run_kind
+    assert broke_it.label == "kind"
+    assert not broke_it.run_images and not broke_it.run_everything

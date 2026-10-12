@@ -94,7 +94,12 @@ Docker and kind runs `make deploy-kind` when the change warrants it.
 A change under `deploy/` runs `make manifests`. When it touches the workers
 namespace or the provider, an author with Docker and kind runs
 `make deploy-kind` and the `e2e-kind` target; a worker leaves both to CI
-(see "When the author is a worker").
+(see "When the author is a worker"). CI runs the `e2e-kind` job on its own
+for a change under `deploy/` or `tools/kind/`, to the kind test file, or to
+the Kubernetes provider or publisher modules (`crucible/adapters/execution/
+kubernetes.py` and the `k8s*` modules beside it): the kind tier is the only
+test of those modules on a real cluster, so a change to them must not pass
+on core CI alone (`crucible.domain.change_class`, spec 23).
 Worker image changes: anything under `images/` changes the worker image, so
 the tag and harness lines of `images/manifest.env` must match it
 (`make lint` names the tag it expects; `make images` on a machine with Docker

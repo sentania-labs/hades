@@ -640,7 +640,11 @@ reviewer" above).
   `tests/unit`, `tests/integration`, `pyproject.toml`, `uv.lock`, `docs`) always runs
   lint, scan, test, e2e, manifests and compose-smoke; a path under `images/` or
   `tools/images/` adds images, registry and the kind tier; a path under `tools/kind/`,
-  `deploy/`, or the kind test file adds the kind tier on its own; a path under
+  `deploy/`, or the kind test file adds the kind tier on its own, and so does a
+  Kubernetes provider or publisher module (`crucible/adapters/execution/kubernetes.py`
+  and the `k8s*` modules beside it; finding 01M4QFXTN0EDD6PX84FYYQ1623 on FDY-0630,
+  after #637's publisher change passed core CI and broke the tier's publishing test
+  unseen until #639 touched an unclassified path); a path under
   `.github/`, or any path matching no class, runs every job, with no exceptions. A job
   the classifier's `if:` skipped reports conclusion `skipped` and is excluded from the
   counted set exactly as any other skipped run (above): **it is not a missing job**,

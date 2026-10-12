@@ -97,6 +97,42 @@ def test_a_deploy_or_kind_test_change_also_classifies_as_kind() -> None:
     assert classify(["tests/e2e/test_kind.py"]).label == "kind"
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "crucible/adapters/execution/kubernetes.py",
+        "crucible/adapters/execution/k8spublisher.py",
+        "crucible/adapters/execution/k8sapi.py",
+        "crucible/adapters/execution/k8sfake.py",
+        "crucible/adapters/execution/k8sregistry.py",
+        "crucible/adapters/execution/k8sspec.py",
+    ],
+)
+def test_a_kubernetes_provider_or_publisher_change_adds_kind(path: str) -> None:
+    """Finding 01M4QFXTN0EDD6PX84FYYQ1623 (FDY-0630): the kind tier is the only test of
+    these modules against a real cluster, so a change to one of them must run it. Before
+    this they were core, and #637's publisher change passed CI while breaking shard 3."""
+    result = classify([path, "tests/unit/test_kubernetes_publisher.py"])
+    assert result.label == "kind"
+    assert result.run_kind is True
+    assert result.run_images is False
+    assert result.run_everything is False
+
+
+def test_the_other_execution_adapters_stay_core() -> None:
+    """The kind class names the Kubernetes modules only: the Docker provider and the
+    shared collection code have their own tiers (`e2e`, unit, integration) in core."""
+    result = classify(
+        [
+            "crucible/adapters/execution/docker.py",
+            "crucible/adapters/execution/collected.py",
+            "crucible/adapters/execution/publisher.py",
+        ]
+    )
+    assert result.label == "core"
+    assert result.run_kind is False
+
+
 def test_a_github_change_runs_everything_with_no_exceptions() -> None:
     result = classify([".github/workflows/ci.yml", "crucible/domain/x.py"])
     assert result.label == "workflow"
